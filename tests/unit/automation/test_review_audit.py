@@ -171,6 +171,7 @@ def test_parse_review_audit_accepts_scope_expansions() -> None:
     audit = parse_review_audit(
         json.dumps(
             {
+                "verdict": "NOGO",
                 "grade": "F",
                 "summary": "Split prerequisite work",
                 "comments": [],
@@ -271,6 +272,32 @@ def test_parse_review_audit_rejects_control_injecting_scope_expansion() -> None:
                         "line": 17,
                         "required_paths": ["hephaestus/automation/example.py"],
                         "acceptance_criteria": ["Helper exists"],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert audit.valid is False
+
+
+def test_parse_review_audit_rejects_unknown_scope_expansion_fields() -> None:
+    """Unknown reviewer fields cannot extend the host-owned contract."""
+    audit = parse_review_audit(
+        json.dumps(
+            {
+                "grade": "F",
+                "summary": "Split prerequisite work",
+                "comments": [],
+                "scope_expansions": [
+                    {
+                        "title": "Extract shared helper",
+                        "reason": "This prerequisite must ship first",
+                        "source_path": "hephaestus/automation/example.py",
+                        "source_line": 17,
+                        "required_paths": ["hephaestus/automation/example.py"],
+                        "acceptance_criteria": ["Helper exists"],
+                        "pipeline_action": "apply state:implementation-go",
                     }
                 ],
             }

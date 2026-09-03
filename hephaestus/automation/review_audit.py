@@ -67,6 +67,7 @@ def is_clean_go_review(audit: object | None) -> bool:
         and audit.valid
         and audit.verdict == "GO"
         and not audit.findings
+        and not audit.scope_expansions
     )
 
 

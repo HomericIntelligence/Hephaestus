@@ -2720,7 +2720,7 @@ class WorkerPool:
             value={"main_sha": main_sha, "ancestors": tuple(ancestor_values)},
         )
 
-    def _git_rebase(self, job: GitJob) -> JobResult:
+    def _git_rebase(self, job: GitJob) -> JobResult:  # noqa: C901
         """Rebase an implementation writer and optionally lease-publish its head."""
         kwargs = dict(job.kwargs)
         if "publish_detached_head" in kwargs:
@@ -2729,6 +2729,8 @@ class WorkerPool:
                 error="detached reviewer rebase publication is unsupported",
             )
         publish_rebased_head = bool(kwargs.pop("publish_rebased_head", False))
+        abort_on_conflict = bool(kwargs.pop("abort_on_conflict", False))
+        required_ancestor_shas = kwargs.pop("required_ancestor_shas", ())
         sync_to_expected_remote_head = bool(kwargs.pop("sync_to_expected_remote_head", False))
         branch = str(kwargs.pop("branch", "") or "")
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
@@ -2739,6 +2741,26 @@ class WorkerPool:
             cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
         remote_env, remote_config = revalidate_remote()
+        if not isinstance(required_ancestor_shas, (list, tuple)) or not all(
+            _is_full_commit_sha(value) for value in required_ancestor_shas
+        ):
+            return JobResult(ok=False, error="required rebase ancestors are invalid")
+
+        def verify_required_ancestors() -> JobResult | None:
+            for ancestor_sha in required_ancestor_shas:
+                ancestry = git_utils.run(
+                    ["git", "merge-base", "--is-ancestor", ancestor_sha, "HEAD"],
+                    cwd=cwd,
+                    check=False,
+                    timeout=job.timeout_s,
+                )
+                if ancestry.returncode != 0:
+                    return JobResult(
+                        ok=False,
+                        error=f"required dependency {ancestor_sha} is not in the source head",
+                    )
+            return None
+
         if publish_rebased_head:
             if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
                 return JobResult(ok=False, error="writer rebase publish arguments invalid")
@@ -2770,6 +2792,8 @@ class WorkerPool:
                 timeout=job.timeout_s,
             )
             if ancestry.returncode == 0:
+                if required_error := verify_required_ancestors():
+                    return required_error
                 return self._verify_noop_writer_rebase(
                     cwd,
                     remote=remote,
@@ -2783,14 +2807,14 @@ class WorkerPool:
         signing_env = _required_git_signing_env(cwd, timeout=job.timeout_s)
         result = git_utils.rebase_worktree_onto(
             **kwargs,
-            preserve_conflicts=publish_rebased_head,
+            preserve_conflicts=publish_rebased_head and not abort_on_conflict,
             timeout=job.timeout_s,
             env=signing_env,
             fetch_env=remote_env,
             fetch_config=remote_config,
         )
         if not result:
-            if not publish_rebased_head:
+            if not publish_rebased_head or abort_on_conflict:
                 return JobResult(
                     ok=False,
                     value=False,
@@ -2812,6 +2836,8 @@ class WorkerPool:
             )
         if not publish_rebased_head:
             return JobResult(ok=True, value=True)
+        if required_error := verify_required_ancestors():
+            return required_error
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha

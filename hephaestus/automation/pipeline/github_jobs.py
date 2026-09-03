@@ -13,7 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, Self
 
-from hephaestus.automation.scope_expansion_domain import ScopeExpansion
+from hephaestus.automation.pipeline.scope_retraction import (
+    scope_retraction_paths_from_body,
+)
+from hephaestus.automation.scope_expansion_domain import (
+    ScopeExpansion,
+    normalize_scope_expansion,
+)
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _JOURNAL_MARKER_RE = re.compile(
@@ -70,9 +76,13 @@ def _full_sha(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a full lowercase commit SHA")
 
 
-def _json_root(value: FrozenJson, expected: type[object], field_name: str) -> None:
-    if not isinstance(value, FrozenJson) or not isinstance(value.thaw(), expected):
+def _json_root(value: FrozenJson, expected: type[object], field_name: str) -> object:
+    if not isinstance(value, FrozenJson):
         raise ValueError(f"{field_name} must contain a JSON {expected.__name__}")
+    root = value.thaw()
+    if not isinstance(root, expected):
+        raise ValueError(f"{field_name} must contain a JSON {expected.__name__}")
+    return root
 
 
 @dataclass(frozen=True)
@@ -207,6 +217,8 @@ class EnsureScopeExpansionChildrenRequest:
     pr_number: int
     reviewed_head_sha: str
     scope_expansions: tuple[ScopeExpansion, ...]
+    retraction_findings: FrozenJson = FrozenJson(encoded="[]")
+    review_diff: str = ""
 
     def __post_init__(self) -> None:
         """Validate the immutable child-issue ensure request."""
@@ -215,8 +227,40 @@ class EnsureScopeExpansionChildrenRequest:
         _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
         if not isinstance(self.scope_expansions, tuple) or not self.scope_expansions:
             raise ValueError("scope_expansions must be a non-empty tuple")
-        if not all(isinstance(expansion, ScopeExpansion) for expansion in self.scope_expansions):
+        if len(self.scope_expansions) > 8:
+            raise ValueError("scope_expansions must contain at most eight records")
+        if not all(
+            isinstance(expansion, ScopeExpansion)
+            and normalize_scope_expansion(expansion.as_dict()) == expansion
+            for expansion in self.scope_expansions
+        ):
             raise ValueError("scope_expansions must contain scope-expansion records")
+        retractions = _json_root(self.retraction_findings, list, "retraction_findings")
+        if not isinstance(retractions, list) or any(
+            not isinstance(finding, dict)
+            or not scope_retraction_paths_from_body(finding.get("body"))
+            for finding in retractions
+        ):
+            raise ValueError("retraction_findings must contain scope retractions")
+        if bool(retractions) != bool(self.review_diff):
+            raise ValueError("retraction findings and review_diff must be supplied together")
+        if len(self.retraction_findings.encoded.encode()) + len(self.review_diff.encode()) > 40_000:
+            raise ValueError("retraction projection is too large")
+
+
+@dataclass(frozen=True)
+class ReconcileScopeExpansionDependenciesRequest:
+    """Reconcile durable scope-expansion dependencies for one source head."""
+
+    issue_number: int
+    pr_number: int
+    source_head_sha: str
+
+    def __post_init__(self) -> None:
+        """Validate the immutable dependency request."""
+        _positive_identifier(self.issue_number, "issue_number")
+        _positive_identifier(self.pr_number, "pr_number")
+        _full_sha(self.source_head_sha, "source_head_sha")
 
 
 type GitHubRequest = (
@@ -226,6 +270,7 @@ type GitHubRequest = (
     | ReconcilePrReviewRequest
     | RunMergeWaitCycleRequest
     | EnsureScopeExpansionChildrenRequest
+    | ReconcileScopeExpansionDependenciesRequest
 )
 
 
@@ -253,6 +298,7 @@ class GitHubJob:
                 ReconcilePrReviewRequest,
                 RunMergeWaitCycleRequest,
                 EnsureScopeExpansionChildrenRequest,
+                ReconcileScopeExpansionDependenciesRequest,
             ),
         ):
             raise TypeError("request must be a supported GitHub request")
@@ -385,18 +431,78 @@ class ScopeExpansionChildrenEnsured:
     """Immutable result of idempotently ensuring scope-expansion children."""
 
     request: EnsureScopeExpansionChildrenRequest
-    status: Literal["blocked", "resolved", "operator_required", "dry_run"]
+    status: Literal["blocked", "operator_required", "dry_run"]
     child_issue_numbers: tuple[int, ...]
 
     def __post_init__(self) -> None:
         """Validate the closed child-issue result."""
-        if self.status not in {"blocked", "resolved", "operator_required", "dry_run"}:
+        if self.status not in {
+            "blocked",
+            "operator_required",
+            "dry_run",
+        }:
             raise ValueError("status must be a supported scope-expansion outcome")
         if not isinstance(self.child_issue_numbers, tuple) or not all(
             isinstance(issue_number, int) and issue_number > 0
             for issue_number in self.child_issue_numbers
         ):
             raise ValueError("child_issue_numbers must be a tuple of positive integers")
+
+
+@dataclass(frozen=True)
+class ScopeExpansionDependenciesReconciled:
+    """Immutable result of a source dependency lifecycle read."""
+
+    request: ReconcileScopeExpansionDependenciesRequest
+    status: Literal[
+        "none",
+        "retraction_required",
+        "parked",
+        "sync_required",
+        "fresh_review",
+        "operator_required",
+    ]
+    child_issue_numbers: tuple[int, ...]
+    merge_shas: tuple[str, ...] = ()
+    retraction_threads: FrozenJson = FrozenJson(encoded="[]")
+    retraction_snapshots: FrozenJson = FrozenJson(encoded="[]")
+
+    def __post_init__(self) -> None:
+        """Validate the closed dependency result."""
+        if self.status not in {
+            "none",
+            "retraction_required",
+            "parked",
+            "sync_required",
+            "fresh_review",
+            "operator_required",
+        }:
+            raise ValueError("status must be a supported dependency outcome")
+        if not isinstance(self.child_issue_numbers, tuple) or not all(
+            isinstance(issue_number, int) and issue_number > 0
+            for issue_number in self.child_issue_numbers
+        ):
+            raise ValueError("child_issue_numbers must be a tuple of positive integers")
+        if not isinstance(self.merge_shas, tuple) or not all(
+            isinstance(sha, str) and _FULL_SHA_RE.fullmatch(sha) is not None
+            for sha in self.merge_shas
+        ):
+            raise ValueError("merge_shas must be a tuple of full lowercase commit SHAs")
+        _json_root(self.retraction_threads, list, "retraction_threads")
+        _json_root(self.retraction_snapshots, list, "retraction_snapshots")
+        retractions = self.retraction_threads.thaw()
+        snapshots = self.retraction_snapshots.thaw()
+        if self.status == "retraction_required" and (
+            not isinstance(retractions, list)
+            or not retractions
+            or not isinstance(snapshots, list)
+            or len(retractions) != len(snapshots)
+        ):
+            raise ValueError("retraction_required must contain matching durable snapshots")
+        if self.status in {"sync_required", "fresh_review"} and (
+            not self.child_issue_numbers or not self.merge_shas
+        ):
+            raise ValueError("merged dependency outcomes require child issues and merge SHAs")
 
 
 type GitHubReceipt = (
@@ -406,6 +512,7 @@ type GitHubReceipt = (
     | PrReviewReconciled
     | MergeWaitCycleCompleted
     | ScopeExpansionChildrenEnsured
+    | ScopeExpansionDependenciesReconciled
 )
 
 

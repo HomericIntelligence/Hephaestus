@@ -22,7 +22,7 @@ _MAX_REQUIRED_PATHS = 32
 _MAX_ACCEPTANCE_CRITERIA = 16
 _MAX_ACCEPTANCE_CHARS = 4_000
 _MAX_CRITERION_CHARS = 500
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_MAX_CANONICAL_BYTES = 16 * 1024
 _RESERVED_CONTROL_RE = re.compile(
     r"(?i)"
     r"<!--|--!?>|"
@@ -40,6 +40,11 @@ _RESERVED_CONTROL_RE = re.compile(
     r"\bblocks\s+pr\s+#\d+\b|"
     r"\bblocks\s+#\d+\b",
 )
+
+
+def _has_unicode_control(value: str) -> bool:
+    """Return whether text contains a control or format code point."""
+    return any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +77,7 @@ def _normalize_text(value: object, *, field_name: str, max_chars: int) -> str | 
     text = unicodedata.normalize("NFC", value).strip()
     if not text or len(text) > max_chars:
         return None
-    if _CONTROL_RE.search(text) or _RESERVED_CONTROL_RE.search(text):
+    if _has_unicode_control(text) or _RESERVED_CONTROL_RE.search(text):
         return None
     return text
 
@@ -89,7 +94,7 @@ def _normalize_single_path(value: object) -> str | None:
         or path.startswith(("/", "./", ":"))
         or "\\" in path
         or "`" in path
-        or _CONTROL_RE.search(path) is not None
+        or _has_unicode_control(path)
         or _RESERVED_CONTROL_RE.search(path) is not None
     ):
         return None
@@ -145,6 +150,18 @@ def normalize_scope_expansion(value: object) -> ScopeExpansion | None:
     """Validate and normalize one expansion mapping."""
     if not isinstance(value, Mapping):
         return None
+    keys = set(value)
+    required_keys = {"title", "reason", "required_paths", "acceptance_criteria"}
+    path_keys = keys & {"source_path", "path"}
+    line_keys = keys & {"source_line", "line"}
+    if (
+        not all(isinstance(key, str) for key in keys)
+        or not required_keys.issubset(keys)
+        or len(path_keys) != 1
+        or len(line_keys) != 1
+        or keys != required_keys | path_keys | line_keys
+    ):
+        return None
     title = _normalize_text(value.get("title"), field_name="title", max_chars=_TITLE_MAX_CHARS)
     reason = _normalize_text(value.get("reason"), field_name="reason", max_chars=_REASON_MAX_CHARS)
     source_path = _normalize_single_path(
@@ -166,7 +183,7 @@ def normalize_scope_expansion(value: object) -> ScopeExpansion | None:
         or acceptance_criteria is None
     ):
         return None
-    return ScopeExpansion(
+    expansion = ScopeExpansion(
         title=title,
         reason=reason,
         source_path=source_path,
@@ -174,6 +191,14 @@ def normalize_scope_expansion(value: object) -> ScopeExpansion | None:
         required_paths=required_paths,
         acceptance_criteria=acceptance_criteria,
     )
+    canonical = json.dumps(
+        expansion.as_dict(),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return expansion if len(canonical.encode("utf-8")) <= _MAX_CANONICAL_BYTES else None
 
 
 def normalize_scope_expansions(value: object) -> tuple[ScopeExpansion, ...] | None:

@@ -196,7 +196,10 @@ OpenCode), build/test
 subprocesses, git operations, and the closed worker-owned GitHub operations.
 `StageContext.github` remains coordinator-thread-owned and never crosses this
 boundary. Each [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py)
-contains one frozen request from a closed five-operation algebra; the production
+contains one frozen request from a closed seven-operation algebra. The algebra
+contains reply-journal recovery and append, reply delivery, PR-review
+reconciliation, merge-wait admission, scope-expansion child creation, and
+scope-expansion dependency reconciliation. The production
 runner creates a fresh [`PipelineGitHub`](../hephaestus/automation/pipeline_github.py)
 accessor per job. Same-repository GitHub jobs serialize under `_repo_lock`, while
 different repositories may execute concurrently. No arbitrary callable, mutable
@@ -1540,10 +1543,11 @@ The exhaustive classification is maintained in the
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
  checks cleanliness again ([`_git_verify_pr_review_checkout`](../hephaestus/automation/pipeline/worker_pool.py)).
-- [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one of five
+- [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one of seven
  frozen typed requests: recover or append the version-one reply journal,
- deliver an exact reply handoff, reconcile one exact-head PR review, or run one
- complete merge-wait cycle. Nested service data uses canonical JSON snapshots;
+ deliver an exact reply handoff, reconcile one exact-head PR review, run one
+ complete merge-wait cycle, create scope-expansion children, or reconcile their
+ dependencies. Nested service data uses canonical JSON snapshots;
  each receipt contains its request and fresh decodes, so stage and worker never
  share mutable GitHub responses. These jobs and their wait-state names are
  process-local. The durable reply marker and `"format": 1` body are unchanged,
@@ -1955,5 +1959,23 @@ Exit-code priority is:
  severity marker, prevents a `pr_review` round from advancing. Severity
  (`critical|major|minor|nitpick`) is retained as annotation on newly posted
  findings, not as a waiver for an existing thread.
+
+- **Scope-expansion dependency gate** — `pr_review` starts with
+  `SCOPE_DEPENDENCY_WAIT`. This mini-state reconciles actor-owned lifecycle
+  comments before it creates a checkout or spends a review budget. An open
+  child parks the source PR. A closed child without a verified merged PR needs
+  operator action. A child merge must be on `main` and in the source head.
+  When it is missing from the source head, `implementation` performs a
+  host-only, lease-bound rebase. The rebase aborts on a conflict and verifies
+  the child merge SHA as an ancestor before it pushes. When all child merges
+  are in the source head, `pr_review` performs one fresh broad review. A stale
+  audit cannot write the GO label.
+- **Mixed scope-control gate** — before the review worker posts an inline
+  thread, it records the scope-expansion lifecycle, applies the NO-GO state,
+  and ensures the child issue and blocking review. The lifecycle comment keeps
+  a bounded projection of each validated retraction and its reviewed diff.
+  After a restart, the worker restores only these retraction threads. Ordinary
+  findings and scope-expansion records stay parked until the child dependency
+  is complete.
 
 ---

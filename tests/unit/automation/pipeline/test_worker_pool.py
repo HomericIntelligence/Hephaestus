@@ -5035,6 +5035,52 @@ class TestGitOps:
             timeout=60,
         )
 
+    def test_dependency_sync_aborts_conflict_without_a_resolution_receipt(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A child-dependency sync never leaves a rebase for an agent."""
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "publish_rebased_head": True,
+                "abort_on_conflict": True,
+                "required_ancestor_shas": ("b" * 40,),
+                "branch": "7-auto-impl",
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with (
+            patch(
+                "hephaestus.automation.git_utils.rebase_worktree_onto",
+                return_value=False,
+            ) as rebase,
+            patch(f"{_WP}.git_utils.run") as run,
+            patch.object(pool, "_conflict_receipt") as receipt,
+        ):
+            run.side_effect = [MagicMock(returncode=0), MagicMock(returncode=1)]
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        rebase.assert_called_once_with(
+            cwd=tmp_path,
+            base_branch="main",
+            preserve_conflicts=False,
+            timeout=60,
+            env=ANY,
+            fetch_env=ANY,
+            fetch_config=ANY,
+        )
+        receipt.assert_not_called()
+        assert result.ok is False
+        assert result.error == "mechanical rebase hit conflicts; aborted"
+
     def test_conflict_receipt_binds_index_head_base_and_remote_head(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:

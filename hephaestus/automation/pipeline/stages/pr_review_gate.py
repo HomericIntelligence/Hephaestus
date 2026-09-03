@@ -23,12 +23,8 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
 
-        if payload.pop("scope_retraction_failure", False):
-            logger.warning(
-                "pr_review:%d: refusing to publish incomplete scope retraction",
-                item.issue,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
+        if scope_failure := self._scope_retraction_failure(item):
+            return scope_failure
 
         if payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF) and not (
             payload.get(_REPLY_HANDOFF_RECEIPT) or payload.get(_REPLY_HANDOFF_RECEIPT_ERROR)
@@ -200,9 +196,8 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 ctx.budget("pr_review_hard"),
             )
 
-        scope_expansion_outcome = self._handle_scope_expansions(item, ctx, audit)
-        if scope_expansion_outcome is not None:
-            return scope_expansion_outcome
+        if scope_outcome := self._handle_scope_expansions(item, ctx, audit):
+            return scope_outcome
 
         # A fresh total open-thread count after the address/push leg is the
         # only thread fact that can downgrade a GO decision.

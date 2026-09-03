@@ -119,6 +119,8 @@ ROUTES: dict[StageName, Route] = {
             "agent_error": StageName.IMPLEMENTATION,
             "empty_pr_diff": StageName.IMPLEMENTATION,
             "implementation_remediation": StageName.IMPLEMENTATION,
+            "scope_dependency_sync_required": StageName.IMPLEMENTATION,
+            "scope_retraction_before_scope_block": StageName.IMPLEMENTATION,
             "exhaustion": StageName.FINISHED,
             "*": StageName.PR_REVIEW,
         },

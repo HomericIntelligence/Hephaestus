@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from base64 import b64decode, b64encode
 from dataclasses import dataclass
 from typing import Literal
 
 from hephaestus.automation.scope_expansion_domain import (
     ScopeExpansion,
+    normalize_scope_expansion,
     scope_expansion_digest,
     scope_expansion_marker,
 )
@@ -40,6 +42,8 @@ class ScopeExpansionLifecycleRecord:
     digest: str
     child_issue_number: int | None = None
     merge_sha: str | None = None
+    retraction_findings: tuple[dict[str, object], ...] = ()
+    review_diff: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +173,26 @@ def parse_scope_expansion_child_body(body: object) -> ScopeExpansionChildIssueRe
     data = _lines_to_mapping(tail)
     if data is None:
         return None
+    allowed_keys = {
+        "heading",
+        "version",
+        "repository",
+        "parent issue",
+        "source pr",
+        "reviewed head",
+        "child issue",
+        "title",
+        "reason",
+        "source path",
+        "source line",
+        "required paths",
+        "acceptance criteria",
+        "blocks pr",
+    }
+    if not set(data).issubset(allowed_keys):
+        return None
+    if data.get("heading") != "Scope expansion child" or data.get("version") != _VERSION:
+        return None
     repository = data.get("repository")
     parent_issue = data.get("parent issue")
     pr_number = data.get("source pr")
@@ -191,6 +215,7 @@ def parse_scope_expansion_child_body(body: object) -> ScopeExpansionChildIssueRe
         or not isinstance(reviewed_head_value, str)
         or not isinstance(required_paths, tuple)
         or not isinstance(acceptance_criteria, tuple)
+        or data.get("blocks pr") != pr_number
     ):
         return None
     reviewed_head_sha = reviewed_head_value
@@ -198,15 +223,17 @@ def parse_scope_expansion_child_body(body: object) -> ScopeExpansionChildIssueRe
         reviewed_head_sha = reviewed_head_sha[1:-1]
     if _FULL_SHA_RE.fullmatch(reviewed_head_sha) is None:
         return None
-    expansion = ScopeExpansion(
-        title=title,
-        reason=reason,
-        source_path=source_path.strip("`"),
-        source_line=source_line,
-        required_paths=required_paths,
-        acceptance_criteria=acceptance_criteria,
+    expansion = normalize_scope_expansion(
+        {
+            "title": title,
+            "reason": reason,
+            "source_path": source_path.strip("`"),
+            "source_line": source_line,
+            "required_paths": required_paths,
+            "acceptance_criteria": acceptance_criteria,
+        }
     )
-    if digest != scope_expansion_digest(repository, parent_issue, expansion):
+    if expansion is None or digest != scope_expansion_digest(repository, parent_issue, expansion):
         return None
     return ScopeExpansionChildIssueRecord(
         version=_VERSION,
@@ -230,6 +257,8 @@ def render_scope_expansion_lifecycle_comment(
     state: ScopeExpansionLifecycleState,
     child_issue_number: int | None = None,
     merge_sha: str | None = None,
+    retraction_findings: tuple[dict[str, object], ...] = (),
+    review_diff: str = "",
 ) -> str:
     """Render one durable source-PR lifecycle comment."""
     _positive_identifier(parent_issue, "parent_issue")
@@ -252,10 +281,28 @@ def render_scope_expansion_lifecycle_comment(
     if merge_sha is not None:
         _full_sha(merge_sha, "merge_sha")
         lines.append(f"Merge sha: `{merge_sha}`")
-    return "\n".join(lines)
+    if retraction_findings:
+        projection = json.dumps(
+            retraction_findings,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        if not review_diff or len(projection) + len(review_diff.encode()) > 40_000:
+            raise ValueError("retraction projection is invalid or too large")
+        lines.extend(
+            [
+                f"Retraction projection: {b64encode(projection, altchars=b'-_').decode()}",
+                f"Projection diff: {b64encode(review_diff.encode(), altchars=b'-_').decode()}",
+            ]
+        )
+    body = "\n".join(lines)
+    if len(body.encode()) > 60_000:
+        raise ValueError("scope-expansion lifecycle comment is too large")
+    return body
 
 
-def parse_scope_expansion_lifecycle_comment(
+def parse_scope_expansion_lifecycle_comment(  # noqa: C901
     body: object,
 ) -> ScopeExpansionLifecycleRecord | None:
     """Parse one lifecycle comment body back into a durable record."""
@@ -265,6 +312,23 @@ def parse_scope_expansion_lifecycle_comment(
     digest, tail = parsed
     data = _lines_to_mapping(tail)
     if data is None:
+        return None
+    allowed_keys = {
+        "heading",
+        "version",
+        "state",
+        "repository",
+        "parent issue",
+        "source pr",
+        "reviewed head",
+        "child issue",
+        "merge sha",
+        "retraction projection",
+        "projection diff",
+    }
+    if not set(data).issubset(allowed_keys):
+        return None
+    if data.get("heading") != "Scope expansion lifecycle" or data.get("version") != _VERSION:
         return None
     try:
         state = data["state"]
@@ -276,6 +340,8 @@ def parse_scope_expansion_lifecycle_comment(
         return None
     child_issue_number = data.get("child issue")
     merge_sha = data.get("merge sha")
+    projection_value = data.get("retraction projection")
+    projection_diff_value = data.get("projection diff")
     if (
         not isinstance(state, str)
         or state not in {"pending-child", "pending-review", "blocked"}
@@ -292,6 +358,36 @@ def parse_scope_expansion_lifecycle_comment(
         if not isinstance(merge_sha, str) or _FULL_SHA_RE.fullmatch(merge_sha.strip("`")) is None:
             return None
         merge_sha = merge_sha.strip("`")
+    retraction_findings: tuple[dict[str, object], ...] = ()
+    review_diff = ""
+    if (projection_value is None) != (projection_diff_value is None):
+        return None
+    if projection_value is not None:
+        if not isinstance(projection_value, str) or not isinstance(projection_diff_value, str):
+            return None
+        try:
+            decoded = b64decode(projection_value.encode(), altchars=b"-_", validate=True)
+            review_diff = b64decode(
+                projection_diff_value.encode(), altchars=b"-_", validate=True
+            ).decode()
+            raw_projection = json.loads(decoded)
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(raw_projection, list)
+            or not raw_projection
+            or not all(isinstance(finding, dict) for finding in raw_projection)
+            or not review_diff
+            or len(decoded) + len(review_diff.encode()) > 40_000
+        ):
+            return None
+        retraction_findings = tuple(dict(finding) for finding in raw_projection)
+    if (
+        (state == "pending-child" and (child_issue_number is not None or merge_sha is not None))
+        or (state == "pending-review" and child_issue_number is None)
+        or (state == "blocked" and (child_issue_number is None or merge_sha is not None))
+    ):
+        return None
     return ScopeExpansionLifecycleRecord(
         version=_VERSION,
         state=state,  # type: ignore[arg-type]
@@ -302,6 +398,8 @@ def parse_scope_expansion_lifecycle_comment(
         digest=digest,
         child_issue_number=child_issue_number,
         merge_sha=merge_sha,
+        retraction_findings=retraction_findings,
+        review_diff=review_diff,
     )
 
 
@@ -343,6 +441,21 @@ def parse_scope_expansion_blocking_review(
     data = _lines_to_mapping(tail)
     if data is None:
         return None
+    if set(data) != {
+        "intro",
+        "repository",
+        "parent issue",
+        "source pr",
+        "reviewed head",
+        "child issue",
+        "blocks pr",
+    }:
+        return None
+    if (
+        data.get("intro") != "Scope expansion child issue blocks this pull request."
+        or data.get("version") is not None
+    ):
+        return None
     try:
         repository = data["repository"]
         parent_issue = data["parent issue"]
@@ -358,6 +471,7 @@ def parse_scope_expansion_blocking_review(
         or not isinstance(reviewed_head_sha, str)
         or _FULL_SHA_RE.fullmatch(reviewed_head_sha.strip("`")) is None
         or not isinstance(child_issue_number, int)
+        or data.get("blocks pr") != pr_number
     ):
         return None
     return ScopeExpansionBlockingReviewRecord(
@@ -376,12 +490,31 @@ def render_pending_retraction_projection(paths: tuple[str, ...]) -> str:
     return "\n".join([f"{SCOPE_EXPANSION_RETRACTION_MARKER_PREFIX} {json.dumps(paths)} -->"])
 
 
-def _lines_to_mapping(lines: list[str]) -> dict[str, object] | None:
+def _lines_to_mapping(lines: list[str]) -> dict[str, object] | None:  # noqa: C901
     """Parse strict key-value lines and bullet sections into one mapping."""
     data: dict[str, object] = {}
     index = 0
     while index < len(lines):
         line = lines[index]
+        if line == "Scope expansion child issue blocks this pull request.":
+            if index != 0 or "intro" in data:
+                return None
+            data["intro"] = line
+            index += 1
+            continue
+        if line.startswith("## "):
+            if index != 0 or "heading" in data or len(line) == 3:
+                return None
+            data["heading"] = line[3:]
+            index += 1
+            continue
+        blocks_match = re.fullmatch(r"Blocks PR #([1-9][0-9]*)", line)
+        if blocks_match is not None:
+            if "blocks pr" in data:
+                return None
+            data["blocks pr"] = int(blocks_match.group(1))
+            index += 1
+            continue
         if ": " in line:
             key, value = line.split(": ", 1)
             key = key.casefold()

@@ -172,6 +172,7 @@ class FakeStageGitHub(FakeGitHub):
                 "state": "OPEN",
                 "headRefOid": "a" * 40,
                 "autoMergeRequest": None,
+                "baseRefName": "main",
             }
             if isinstance(pr_state, _DefaultPrState)
             else pr_state

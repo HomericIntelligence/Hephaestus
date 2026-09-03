@@ -595,6 +595,34 @@ def issue_comment_ids_query(
     return _query("issueCommentIds", document, validate)
 
 
+def scope_expansion_issue_owner_query(
+    owner: str, name: str, issue_number: int
+) -> GraphQLQuerySpec[dict[str, object]]:
+    """Build a strict ownership query for one marker-matched issue."""
+    document = (
+        "query ScopeExpansionIssueOwner($owner:String!,$name:String!,$number:Int!){"
+        "repository(owner:$owner,name:$name){owner{login} name "
+        "issue(number:$number){number body viewerDidAuthor}}}"
+    )
+
+    def validate(data: dict[str, Any]) -> dict[str, object]:
+        repository = _repo_identity(data, owner, name)
+        issue = repository.get("issue")
+        if (
+            not isinstance(issue, dict)
+            or issue.get("number") != issue_number
+            or not isinstance(issue.get("body"), str)
+            or not isinstance(issue.get("viewerDidAuthor"), bool)
+        ):
+            raise ValueError("issue marker ownership was malformed")
+        return {
+            "body": issue["body"],
+            "viewer_did_author": issue["viewerDidAuthor"],
+        }
+
+    return _query("ScopeExpansionIssueOwner", document, validate)
+
+
 def issue_body_editor_query(owner: str, name: str, issue_number: int) -> GraphQLQuerySpec[bool]:
     """Build the validated viewer-vs-latest-editor identity query."""
     document = (
@@ -1438,6 +1466,7 @@ __all__ = [
     "review_receipts_page_query",
     "review_thread_snapshot_page_query",
     "run_graphql",
+    "scope_expansion_issue_owner_query",
     "submit_review_mutation",
     "unresolved_review_threads_page_query",
     "update_review_comment_mutation",

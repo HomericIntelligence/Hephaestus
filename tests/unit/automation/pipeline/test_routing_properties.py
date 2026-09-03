@@ -58,6 +58,8 @@ _REASON_BUDGET: dict[str, str | None] = {
     "agent_error": None,
     "empty_pr_diff": None,
     "implementation_remediation": None,
+    "scope_dependency_sync_required": None,
+    "scope_retraction_before_scope_block": None,
     "exhaustion": None,
     "fix_exhausted": None,
     "not_implementation_go": None,

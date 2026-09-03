@@ -593,13 +593,23 @@ or lease independently authorizes it. `merge_wait` additionally requires one
 trusted, unedited marked `APPROVED` review bound to that exact head before the
 conditional merge; no queue stage mutates native auto-merge.
 
+A reviewer can report a required scope expansion in its structural audit. The
+host creates one deterministic child issue and keeps the source PR in the
+exclusive implementation-NO-GO state. The host reconciles that child before a
+later review checkout. An open child parks the source PR without review-budget
+cost. A closed child without merged implementation needs operator action. A
+merged child causes a host-only source-branch synchronization and then a fresh
+broad review. No agent receives the expansion as source-branch implementation
+work. In a mixed audit, only a validated scope retraction can go to the writer
+before the source PR parks.
+
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
 | repo | `hephaestus.automation.pipeline.stages.repo` | Clone/discover, classify issues/PRs, and seed entry queues |
 | planning | `hephaestus.automation.pipeline.stages.planning` | Advise and produce an implementation plan |
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
-| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Detached read-only snapshot review, validation, one batched inline review, and implementation labels |
+| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Scope-dependency reconciliation, detached read-only review, validation, one batched inline review, and implementation labels |
 | merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Conditionally merges the exact reviewed head and emits post-merge learning intent |
 | learning | `hephaestus.automation.pipeline.stages.learning` | Claims durable intents and submits host-owned learning work |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |

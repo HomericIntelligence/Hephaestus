@@ -28,7 +28,9 @@ from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
+    ReconcileScopeExpansionDependenciesRequest,
     ScopeExpansionChildrenEnsured,
+    ScopeExpansionDependenciesReconciled,
 )
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
@@ -282,6 +284,11 @@ def _complete_github_job(stage: PrReviewStage, item: Any, ctx: Any) -> Any:
                 request.job.request,
                 ctx.github,
             )
+        elif isinstance(request.job.request, ReconcileScopeExpansionDependenciesRequest):
+            receipt = PipelineGitHubJobRunner._reconcile_scope_expansion_dependencies(
+                request.job.request,
+                ctx.github,
+            )
         elif isinstance(request.job.request, DeliverReplyHandoffRequest):
             from hephaestus.automation.pipeline.reply_handoff import attempt_reply_handoff
 
@@ -311,6 +318,14 @@ def _dispatch_review(stage: Any, item: Any, ctx: Any) -> JobRequest:
     assert isinstance(review, JobRequest)
     assert isinstance(review.job, AgentJob)
     return review
+
+
+def _reconcile_then_enter(stage: Any, item: Any, ctx: Any) -> Any:
+    """Apply an empty dependency receipt and run the reconciled entry state."""
+    entry = _complete_github_job(stage, item, ctx)
+    assert entry == Continue(next_state="ENTER")
+    item.state = entry.next_state
+    return stage.step(item, ctx)
 
 
 class TestPrReviewStageOnEnter:
@@ -442,9 +457,14 @@ class TestPrReviewStageOnEnter:
         item.worktree = "/tmp/implementation-writer"
 
         assert stage.on_enter(item, ctx) is None
+        assert item.worktree == "/tmp/implementation-writer"
+
+        entry = _complete_github_job(stage, item, ctx)
+
+        assert entry == Continue(next_state="ENTER")
         assert item.worktree == ""
         assert item.payload["writer_worktree"] == "/tmp/implementation-writer"
-
+        item.state = entry.next_state
         request = stage.step(item, ctx)
 
         assert isinstance(request, JobRequest)
@@ -462,7 +482,10 @@ class TestPrReviewStageOnEnter:
         )
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
 
-        outcome = stage.on_enter(item, make_ctx(github=github))
+        ctx = make_ctx(github=github)
+        assert stage.on_enter(item, ctx) is None
+
+        outcome = _complete_github_job(stage, item, ctx)
 
         assert outcome == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.branch == "1-auto-impl-direct-" + "b" * 32
@@ -498,6 +521,9 @@ class TestPrReviewStageOnEnter:
         ctx = make_ctx(github=github)
 
         assert stage.on_enter(item, ctx) is None
+        outcome = _complete_github_job(stage, item, ctx)
+
+        assert outcome == Continue(next_state="ENTER")
         assert item.payload["existing_pr"] is True
         assert item.payload["reviewer_comment_validation_only"] is True
 
@@ -521,8 +547,10 @@ class TestPrReviewStageOnEnter:
 
         stage = PrReviewStage()
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        ctx = make_ctx(github=ThreadReadFailsGitHub())
 
-        assert stage.on_enter(item, make_ctx(github=ThreadReadFailsGitHub())) == StageOutcome(
+        assert stage.on_enter(item, ctx) is None
+        assert _complete_github_job(stage, item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL, "review_threads_unavailable"
         )
 
@@ -939,7 +967,7 @@ class TestPrReviewStageStep:
         assert item.worktree == ""
         assert item.payload["writer_worktree"] == "/tmp/implementation-writer"
 
-        fresh_snapshot = stage.step(item, ctx)
+        fresh_snapshot = _reconcile_then_enter(stage, item, ctx)
         assert isinstance(fresh_snapshot, JobRequest)
         assert fresh_snapshot.job.descr == "direct_pr_review_worktree"
 
@@ -1043,7 +1071,7 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
         assert item.worktree == ""
 
-        result = stage.step(item, ctx)
+        result = _reconcile_then_enter(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
@@ -1072,7 +1100,7 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.ISSUE, state="ENTER")
         item.payload["existing_pr"] = True
 
-        result = stage.step(item, ctx)
+        result = _reconcile_then_enter(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
@@ -1091,7 +1119,7 @@ class TestPrReviewStageStep:
             kind=ItemKind.PR,
             state="ENTER",
         )
-        request = stage.step(item, ctx)
+        request = _reconcile_then_enter(stage, item, ctx)
         assert isinstance(request, JobRequest)
 
         stage.on_job_done(
@@ -1115,16 +1143,124 @@ class TestPrReviewStageStep:
         assert item.payload["direct_pr_worktree"] == "/tmp/review-pr"
         assert "direct_pr_worktree_pending" not in item.payload
 
-    def test_enter_advances_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
-        """ENTER advances to REVIEW_WAIT."""
+    def test_enter_reconciles_dependencies_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """ENTER submits a closed dependency read before review."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="ENTER")
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "REVIEW_WAIT"
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitHubJob)
+        assert isinstance(result.job.request, ReconcileScopeExpansionDependenciesRequest)
+        assert result.on_done_state == "SCOPE_DEPENDENCY_WAIT"
+
+    def test_open_scope_dependency_parks_before_checkout_or_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An open child parks the source without checkout or review cost."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitHubJob)
+        dependency_request = request.job.request
+        assert isinstance(dependency_request, ReconcileScopeExpansionDependenciesRequest)
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionDependenciesReconciled(
+                    request=dependency_request,
+                    status="parked",
+                    child_issue_numbers=(901,),
+                ),
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.BLOCKED, "scope_expansion_blocked")
+        assert item.attempts.get("pr_review_iter", 0) == 0
+        assert item.attempts.get("pr_review_hard", 0) == 0
+        assert "direct_pr_worktree_pending" not in item.payload
+
+    def test_merged_scope_dependency_routes_exact_host_sync(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A missing child merge routes host synchronization with its exact SHA."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        dependency_request = request.job.request
+        assert isinstance(dependency_request, ReconcileScopeExpansionDependenciesRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionDependenciesReconciled(
+                    request=dependency_request,
+                    status="sync_required",
+                    child_issue_numbers=(901,),
+                    merge_shas=("b" * 40,),
+                ),
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "scope_dependency_sync_required"
+        )
+        assert item.payload["scope_dependency_merge_shas"] == ["b" * 40]
+        assert item.payload["post_review_rebase_required"] is True
+
+    def test_synchronized_dependency_adopts_detached_reviewer_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A fresh child merge never reviews from the shared control checkout."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="1001-auto"))
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item.worktree = "/tmp/writer"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        dependency_request = request.job.request
+        assert isinstance(dependency_request, ReconcileScopeExpansionDependenciesRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionDependenciesReconciled(
+                    request=dependency_request,
+                    status="fresh_review",
+                    child_issue_numbers=(901,),
+                    merge_shas=("b" * 40,),
+                ),
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+
+        assert stage.step(item, ctx) == Continue(next_state="ENTER")
+        assert item.worktree == ""
+        assert item.payload["writer_worktree"] == "/tmp/writer"
+        assert item.payload["scope_dependency_force_fresh_review"] is True
+        item.state = "ENTER"
+
+        checkout = stage.step(item, ctx)
+
+        assert isinstance(checkout, JobRequest)
+        assert isinstance(checkout.job, GitJob)
+        assert checkout.job.op == "create_worktree"
+        assert checkout.on_done_state == ADOPT_WORKTREE_WAIT
 
     def test_review_wait_requests_review_with_in_worker_parse(
         self, make_ctx: Any, make_work_item: Any
@@ -1696,6 +1832,7 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, state="ENTER")
 
         assert stage.on_enter(item, ctx) is None
+        assert _complete_github_job(stage, item, ctx) == Continue(next_state="ENTER")
         assert item.payload["reviewer_comment_validation_only"] is True
 
         item.state = REVIEW_CHECKOUT_WAIT
@@ -4871,6 +5008,7 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = ReviewAudit(
             grade="F",
+            verdict="NOGO",
             summary="Split prerequisite work",
             findings=(),
             raw_feedback="",
@@ -4906,10 +5044,169 @@ class TestEvalVerdicts:
         assert item.attempts.get("pr_review_iter", 0) == 0
         assert ("mark_pr_implementation_no_go", (1001,)) not in github.mutation_log
 
-    def test_resolved_scope_expansion_returns_to_the_normal_go_path(
+    def test_scope_preparation_receipt_is_separate_from_thread_reconciliation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A merged child issue lets the source PR re-enter the ordinary GO flow."""
+        """The child receipt is consumed before the thread reconciliation job."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        expansion = ScopeExpansion(
+            title="Extract helper",
+            reason="The helper must merge first",
+            source_path="hephaestus/example.py",
+            source_line=4,
+            required_paths=("hephaestus/example.py",),
+            acceptance_criteria=("The helper exists",),
+        )
+        audit = ReviewAudit(
+            grade="F",
+            verdict="NOGO",
+            summary="Split prerequisite work",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+            scope_expansions=(expansion,),
+        )
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "review_audit": audit,
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_threads": [],
+                "pr_diff": "",
+            }
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="SCOPE_EXPANSION_PREPARE_SUBMIT")
+        item.state = "SCOPE_EXPANSION_PREPARE_SUBMIT"
+        child_job = stage.step(item, ctx)
+        assert isinstance(child_job, JobRequest)
+        assert isinstance(child_job.job.request, EnsureScopeExpansionChildrenRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionChildrenEnsured(
+                    request=child_job.job.request,
+                    status="blocked",
+                    child_issue_numbers=(901,),
+                ),
+            ),
+            ctx,
+        )
+        item.state = child_job.on_done_state
+
+        reconciliation = stage.step(item, ctx)
+
+        assert isinstance(reconciliation, JobRequest)
+        assert isinstance(reconciliation.job.request, ReconcilePrReviewRequest)
+        assert reconciliation.on_done_state == "POST_APPLY"
+
+    def test_foreign_prepared_scope_receipt_fails_before_thread_publication(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale child receipt cannot authorize a different audit publication."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        current = ScopeExpansion(
+            title="Current helper",
+            reason="The current helper must merge first",
+            source_path="hephaestus/current.py",
+            source_line=4,
+            required_paths=("hephaestus/current.py",),
+            acceptance_criteria=("The current helper exists",),
+        )
+        stale = ScopeExpansion(
+            title="Stale helper",
+            reason="The stale helper must merge first",
+            source_path="hephaestus/stale.py",
+            source_line=5,
+            required_paths=("hephaestus/stale.py",),
+            acceptance_criteria=("The stale helper exists",),
+        )
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    verdict="NOGO",
+                    summary="Current audit",
+                    findings=(),
+                    raw_feedback="",
+                    valid=True,
+                    scope_expansions=(current,),
+                ),
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_threads": [],
+                "pr_diff": "",
+                "_scope_expansion_prepared_receipt": ScopeExpansionChildrenEnsured(
+                    request=EnsureScopeExpansionChildrenRequest(
+                        issue_number=1,
+                        pr_number=1001,
+                        reviewed_head_sha="a" * 40,
+                        scope_expansions=(stale,),
+                    ),
+                    status="blocked",
+                    child_issue_numbers=(901,),
+                ),
+            }
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.BLOCKED,
+            "scope_expansion_projection_operator_required",
+        )
+
+    def test_oversized_retraction_projection_blocks_deliberately(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A large mixed audit fails closed instead of raising from the stage."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        expansion = ScopeExpansion(
+            title="Extract helper",
+            reason="The helper must merge first",
+            source_path="hephaestus/example.py",
+            source_line=4,
+            required_paths=("hephaestus/example.py",),
+            acceptance_criteria=("The helper exists",),
+        )
+        retraction = {
+            "path": "extra.py",
+            "line": 1,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": (
+                '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
+                "Remove the out-of-scope file."
+            ),
+        }
+        item = make_work_item(issue=1, pr=1001, state="SCOPE_EXPANSION_PREPARE_SUBMIT")
+        item.payload.update(
+            {
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    verdict="NOGO",
+                    summary="Mixed audit",
+                    findings=(retraction,),
+                    raw_feedback="",
+                    valid=True,
+                    scope_expansions=(expansion,),
+                ),
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": "x" * 40_000,
+            }
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.BLOCKED,
+            "scope_expansion_projection_operator_required",
+        )
+
+    def test_created_scope_expansion_parks_before_a_later_reconciliation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Child creation cannot authorize the stale source audit."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -4927,6 +5224,7 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = ReviewAudit(
             grade="F",
+            verdict="NOGO",
             summary="Split prerequisite work",
             findings=(),
             raw_feedback="",
@@ -4943,7 +5241,7 @@ class TestEvalVerdicts:
                 ok=True,
                 value=ScopeExpansionChildrenEnsured(
                     request=request_result.job.request,
-                    status="resolved",
+                    status="blocked",
                     child_issue_numbers=(901,),
                 ),
             ),
@@ -4953,9 +5251,85 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
-        assert item.attempts["pr_review_iter"] == 1
-        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+        assert result == StageOutcome(Disposition.BLOCKED, "scope_expansion_blocked")
+        assert item.attempts.get("pr_review_iter", 0) == 0
+        assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
+
+    def test_mixed_scope_audit_sends_only_retraction_to_the_writer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A parked expansion cannot expose an ordinary finding to implementation."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        expansion = ScopeExpansion(
+            title="Extract shared helper",
+            reason="Prerequisite work must ship first",
+            source_path="hephaestus/automation/example.py",
+            source_line=17,
+            required_paths=("hephaestus/automation/example.py",),
+            acceptance_criteria=("Helper exists",),
+        )
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    verdict="NOGO",
+                    summary="Split and retract work",
+                    findings=(),
+                    raw_feedback="",
+                    valid=True,
+                    scope_expansions=(expansion,),
+                ),
+                "remediation_threads": [
+                    {
+                        "thread_id": "retract-1",
+                        "path": "extra.py",
+                        "line": 1,
+                        "body": (
+                            "<!-- hephaestus-severity: major -->\n"
+                            '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
+                            "Remove the out-of-scope file."
+                        ),
+                    },
+                    {
+                        "thread_id": "ordinary-1",
+                        "path": "keep.py",
+                        "line": 2,
+                        "body": "<!-- hephaestus-severity: major -->\nFix the defect.",
+                    },
+                ],
+                "remediation_thread_snapshots": [
+                    {"id": "retract-1"},
+                    {"id": "ordinary-1"},
+                ],
+            }
+        )
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job.request, EnsureScopeExpansionChildrenRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionChildrenEnsured(
+                    request=request.job.request,
+                    status="blocked",
+                    child_issue_numbers=(901,),
+                ),
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "scope_retraction_before_scope_block"
+        )
+        assert [thread["thread_id"] for thread in item.payload["remediation_threads"]] == [
+            "retract-1"
+        ]
+        assert item.payload["remediation_thread_snapshots"] == [{"id": "retract-1"}]
 
     def test_go_with_preexisting_thread_reenters_remediation_cycle(
         self, make_ctx: Any, make_work_item: Any
@@ -5182,7 +5556,7 @@ class TestEvalVerdicts:
         assert "address_error" not in item.payload
 
         item.state = "ENTER"
-        retry = stage.step(item, ctx)
+        retry = _reconcile_then_enter(stage, item, ctx)
 
         assert isinstance(retry, JobRequest)
         assert isinstance(retry.job, GitJob)

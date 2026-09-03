@@ -14,12 +14,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
+    ReconcileScopeExpansionDependenciesRequest,
+)
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
+from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -52,6 +57,16 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             item.state = result.next_state
             continue
         if isinstance(result, JobRequest):
+            if isinstance(result.job, GitHubJob) and isinstance(
+                result.job.request, ReconcileScopeExpansionDependenciesRequest
+            ):
+                receipt = PipelineGitHubJobRunner._reconcile_scope_expansion_dependencies(
+                    result.job.request,
+                    ctx.github,
+                )
+                stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+                item.state = result.on_done_state
+                continue
             if (
                 isinstance(result.job, GitJob)
                 and result.job.op == "create_worktree"
