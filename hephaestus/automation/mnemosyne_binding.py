@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
-from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.automation.remote_git import (
+    trusted_gh_executable,
+    trusted_remote_git_config,
+)
+from hephaestus.config.child_environments import build_gh_child_env, build_git_child_env
 from hephaestus.github.mnemosyne_repo import MnemosyneTarget, resolve_mnemosyne_target
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
@@ -18,13 +22,14 @@ from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 class MnemosyneBindingError(RuntimeError):
     """Raised when a checkout cannot be safely bound to a target revision."""
 
+    def __init__(self, message: str, *, failure_kind: str = "mnemosyne_binding") -> None:
+        """Initialize a safe message and a stable failure class."""
+        self.failure_kind = failure_kind
+        super().__init__(message)
+
 
 GitRunner = Callable[[Path, tuple[str, ...], int], subprocess.CompletedProcess[str]]
 Resolver = Callable[[], MnemosyneTarget]
-
-_UNSAFE_CONFIG_RE = (
-    r"^(alias\.|include\.|includeIf\.|core\.hooksPath|core\.fsmonitor|core\.sshCommand)"
-)
 
 
 @dataclass(frozen=True)
@@ -66,15 +71,70 @@ def _require_success(result: subprocess.CompletedProcess[str], action: str) -> s
     return (result.stdout or "").strip()
 
 
+def _require_remote_success(result: subprocess.CompletedProcess[str], action: str) -> str:
+    """Require remote Git success without copying child output into the error."""
+    if result.returncode != 0:
+        raise MnemosyneBindingError(
+            f"{action} failed: remote Git transport unavailable",
+            failure_kind="remote_git_transport",
+        )
+    return (result.stdout or "").strip()
+
+
 def _origin_matches(origin: str, slug: str) -> bool:
     normalized = origin.removesuffix(".git")
-    return bool(
-        normalized == slug
-        or normalized.endswith(f"/{slug}")
-        or normalized.endswith(f":{slug}")
-        or normalized == f"https://github.com/{slug}"
-        or normalized == f"git@github.com:{slug}"
-    )
+    return normalized in {
+        f"https://github.com/{slug}",
+        f"ssh://git@github.com/{slug}",
+        f"git@github.com:{slug}",
+    }
+
+
+def _unsafe_config_key(config: str) -> str | None:
+    """Return an unsafe effective Git configuration key."""
+    for entry in config.split("\0"):
+        key, separator, _value = entry.partition("\n")
+        if not separator:
+            continue
+        normalized = key.lower()
+        if normalized.startswith(("alias.", "include.", "includeif.", "http.", "url.")):
+            return key
+        if normalized in {
+            "core.askpass",
+            "core.fsmonitor",
+            "core.gitproxy",
+            "core.hookspath",
+            "core.sshcommand",
+        }:
+            return key
+        if normalized == "credential.helper" or (
+            normalized.startswith("credential.") and normalized.endswith(".helper")
+        ):
+            return key
+        if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
+            "proxy",
+            "proxyauthmethod",
+            "pushurl",
+            "receivepack",
+            "uploadpack",
+        }:
+            return key
+    return None
+
+
+def _gh_auth_status(command: str, timeout_s: int) -> bool:
+    """Return true when the trusted GitHub CLI has a login for GitHub.com."""
+    try:
+        result = run_subprocess(
+            [command, "auth", "status", "--hostname", "github.com"],
+            env=build_gh_child_env(),
+            check=False,
+            timeout=timeout_s,
+            track_process_group=True,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 class MnemosyneBindingService:
@@ -87,12 +147,16 @@ class MnemosyneBindingService:
         resolver: Resolver | None = None,
         git: GitRunner = _run_git,
         timeout_s: int = NETWORK_TIMEOUT,
+        gh_extra_path_root: Path | None = None,
+        remote_git_config: tuple[str, ...] | None = None,
     ) -> None:
         """Initialize the service with injectable resolver and Git runner."""
         self.root = root if root is not None else default_mnemosyne_root()
         self.resolver = resolver if resolver is not None else resolve_mnemosyne_target
         self.git = git
         self.timeout_s = timeout_s
+        self.gh_extra_path_root = gh_extra_path_root
+        self._remote_git_config = remote_git_config
 
     def bind(
         self, *, contract: AthenaContractReceipt, sync: bool = True
@@ -129,6 +193,33 @@ class MnemosyneBindingService:
     def _git(self, root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
         return self.git(root, tuple(argv), self.timeout_s)
 
+    def _remote_config(self) -> tuple[str, ...]:
+        """Return trusted remote configuration or fail closed in production."""
+        if self._remote_git_config is not None:
+            return self._remote_git_config
+        gh_command = trusted_gh_executable(self.gh_extra_path_root)
+        if gh_command is None:
+            raise MnemosyneBindingError(
+                "remote Git authentication unavailable: trusted GitHub executable missing",
+                failure_kind="remote_git_authentication",
+            )
+        if not _gh_auth_status(gh_command, self.timeout_s):
+            raise MnemosyneBindingError(
+                "remote Git authentication unavailable: GitHub login missing",
+                failure_kind="remote_git_authentication",
+            )
+        remote_config = trusted_remote_git_config(gh_command)
+        if remote_config is None:
+            raise MnemosyneBindingError(
+                "remote Git authentication unavailable: trusted SSH executable missing",
+                failure_kind="remote_git_authentication",
+            )
+        return remote_config
+
+    def _remote_git(self, root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+        """Run a remote Git command with command-scoped authentication."""
+        return self._git(root, *self._remote_config(), *argv)
+
     def _clone_missing_checkout(self, root: Path, target: MnemosyneTarget) -> None:
         """Create the canonical parent and clone the already-resolved target.
 
@@ -146,8 +237,8 @@ class MnemosyneBindingService:
             raise MnemosyneBindingError(
                 f"Mnemosyne checkout parent must not be a symlink: {parent}"
             )
-        _require_success(
-            self._git(
+        _require_remote_success(
+            self._remote_git(
                 parent,
                 "clone",
                 "--origin",
@@ -175,16 +266,16 @@ class MnemosyneBindingService:
         )
         if not _origin_matches(origin, target.slug):
             raise MnemosyneBindingError(
-                f"wrong origin: expected {target.slug}, found {origin or '<missing>'}"
+                f"wrong origin: expected {target.slug}",
+                failure_kind="remote_git_identity",
             )
 
     def _validate_safe_config(self, root: Path) -> None:
-        result = self._git(root, "config", "--local", "--get-regexp", _UNSAFE_CONFIG_RE)
-        if result.returncode == 0:
-            detail = (result.stdout or "").strip()
-            raise MnemosyneBindingError(f"unsafe Git config: {detail}")
-        if result.returncode != 1:
-            _require_success(result, "unsafe Git config scan")
+        result = self._git(root, "config", "--null", "--list")
+        if result.returncode != 0:
+            raise MnemosyneBindingError("Git configuration scan failed")
+        if _unsafe_config_key(result.stdout or "") is not None:
+            raise MnemosyneBindingError("unsafe Git configuration")
 
     def _validate_clean(self, root: Path) -> None:
         status = _require_success(self._git(root, "status", "--porcelain"), "status read")
@@ -192,7 +283,7 @@ class MnemosyneBindingService:
             raise MnemosyneBindingError("dirty Mnemosyne checkout")
 
     def _fast_forward(self, root: Path, target: MnemosyneTarget) -> None:
-        _require_success(self._git(root, "fetch", "origin"), "fetch")
+        _require_remote_success(self._remote_git(root, "fetch", "origin"), "fetch")
         _require_success(self._git(root, "checkout", target.default_branch), "checkout")
         _require_success(
             self._git(root, "merge", "--ff-only", f"origin/{target.default_branch}"),

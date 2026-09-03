@@ -11,6 +11,7 @@ import pytest
 
 from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
+    RemoteGitRefreshError,
     WorktreeDirtyError,
     WorktreeManager,
 )
@@ -1495,6 +1496,24 @@ class TestCreateWorktreeBranchCollision:
         argvs = [c[0][0] for c in worktree_mocks.run.call_args_list]
         assert ["git", "fetch", "origin"] in argvs, argvs
         assert result == "origin/main"
+
+    def test_refresh_base_branch_fails_closed_when_fetch_fails(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A failed remote refresh does not continue with a stale local ref."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        fetch_failure = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch", "origin"],
+            stderr="authentication failed",
+        )
+        worktree_mocks.run.side_effect = [fetch_failure, Mock(stdout="origin/main")]
+        manager = WorktreeManager()
+
+        with pytest.raises(RemoteGitRefreshError) as exc_info:
+            manager.refresh_base_branch()
+
+        assert exc_info.value.__cause__ is fetch_failure
 
     def test_refresh_base_branch_noop_when_pinned(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """A pinned base (explicit/HEPH_TRUNK_GITHASH) is never moved by refresh."""

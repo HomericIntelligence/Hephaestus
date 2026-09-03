@@ -106,6 +106,7 @@ __all__ = [
     "StepResult",
     "WorkItem",
     "agent_provider",
+    "athena_advise_failure_reason",
     "source_workspace_binding",
     "stage_model",
     "stage_timeout",
@@ -113,6 +114,26 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_ATHENA_ADVISE_FAILURE_KINDS = frozenset(
+    {
+        "mnemosyne_binding",
+        "remote_git_authentication",
+        "remote_git_identity",
+        "remote_git_transport",
+    }
+)
+
+
+def athena_advise_failure_reason(item: WorkItem) -> str:
+    """Return a terminal reason with an allowed host failure class."""
+    error = item.payload.get("athena_advise_error")
+    if isinstance(error, str):
+        failure_kind = error.partition(":")[0].strip()
+        if failure_kind in _ATHENA_ADVISE_FAILURE_KINDS:
+            return f"athena_advise_failed:{failure_kind}"
+    return "athena_advise_failed"
+
 
 #: Timeout for git worktree/commit/push jobs (mechanical, no agent). Shared
 #: by every stage that submits :class:`GitJob`s (single home — stages must

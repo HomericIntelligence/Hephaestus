@@ -308,7 +308,10 @@ def test_missing_delivery_request_and_trust_failure_fail_closed(tmp_path: Path) 
         missing_delivery.execute(_request("learn", tmp_path)).error
         == "learn delivery payload is required"
     )
-    assert trust_failure.execute(_request("advise", tmp_path)).error == "trust failure"
+    assert (
+        trust_failure.execute(_request("advise", tmp_path)).error
+        == "mnemosyne_binding: trust failure"
+    )
 
 
 def test_interrupted_or_drifted_recovery_path_fails_closed(tmp_path: Path) -> None:
