@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit, render_review_audit
+from hephaestus.automation.scope_expansion_domain import ScopeExpansion
 
 
 def test_parse_review_audit_uses_only_structured_json() -> None:
@@ -158,6 +161,147 @@ def test_parse_review_audit_rejects_scope_retraction_without_complete_paths() ->
         '"comments":[{"path":"a.py",'
         '"line":1,"side":"RIGHT","severity":"major",'
         '"body":"Drop this unrelated change."}]}'
+    )
+
+    assert audit.valid is False
+
+
+def test_parse_review_audit_accepts_scope_expansions() -> None:
+    """Reviewer scope expansions are preserved as structured child requests."""
+    audit = parse_review_audit(
+        json.dumps(
+            {
+                "verdict": "NOGO",
+                "grade": "F",
+                "summary": "Split prerequisite work",
+                "comments": [],
+                "scope_expansions": [
+                    {
+                        "title": "Extract shared helper",
+                        "reason": "This prerequisite must ship first",
+                        "path": "hephaestus/automation/example.py",
+                        "line": 17,
+                        "required_paths": [
+                            "hephaestus/automation/example.py",
+                            "tests/unit/automation/test_example.py",
+                        ],
+                        "acceptance_criteria": ["Helper exists", "Tests pass"],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert audit.valid is True
+    assert audit.scope_expansions == (
+        ScopeExpansion(
+            title="Extract shared helper",
+            reason="This prerequisite must ship first",
+            source_path="hephaestus/automation/example.py",
+            source_line=17,
+            required_paths=(
+                "hephaestus/automation/example.py",
+                "tests/unit/automation/test_example.py",
+            ),
+            acceptance_criteria=("Helper exists", "Tests pass"),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload",),
+    [
+        (
+            {
+                "grade": "F",
+                "summary": "Split prerequisite work",
+                "comments": [],
+                "scope_expansions": [
+                    {
+                        "title": "T",
+                        "reason": "R",
+                        "path": "a.py",
+                        "line": 1,
+                        "required_paths": ["a.py"],
+                    }
+                ],
+            },
+        ),
+        (
+            {
+                "grade": "F",
+                "summary": "Split prerequisite work",
+                "comments": [],
+                "scope_expansions": [
+                    {
+                        "title": "T",
+                        "reason": "R",
+                        "path": "a.py",
+                        "line": 1,
+                        "required_paths": ["a.py"],
+                        "acceptance_criteria": ["done"],
+                    }
+                ]
+                * 9,
+            },
+        ),
+    ],
+)
+def test_parse_review_audit_rejects_malformed_or_oversized_scope_expansions(
+    payload: dict[str, object],
+) -> None:
+    """Scope-expansion payloads fail closed when they are malformed or oversized."""
+    audit = parse_review_audit(json.dumps(payload))
+
+    assert audit.valid is False
+
+
+def test_parse_review_audit_rejects_control_injecting_scope_expansion() -> None:
+    """Scope-expansion text cannot carry pipeline-owned control phrases."""
+    audit = parse_review_audit(
+        json.dumps(
+            {
+                "grade": "F",
+                "summary": "Split prerequisite work",
+                "comments": [],
+                "scope_expansions": [
+                    {
+                        "title": "Extract shared helper",
+                        "reason": "This --!> prerequisite must ship first",
+                        "path": "hephaestus/automation/example.py",
+                        "line": 17,
+                        "required_paths": ["hephaestus/automation/example.py"],
+                        "acceptance_criteria": ["Helper exists"],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert audit.valid is False
+
+
+def test_parse_review_audit_rejects_unknown_scope_expansion_fields() -> None:
+    """Unknown reviewer fields cannot extend the host-owned contract."""
+    audit = parse_review_audit(
+        json.dumps(
+            {
+                "grade": "F",
+                "summary": "Split prerequisite work",
+                "comments": [],
+                "scope_expansions": [
+                    {
+                        "title": "Extract shared helper",
+                        "reason": "This prerequisite must ship first",
+                        "source_path": "hephaestus/automation/example.py",
+                        "source_line": 17,
+                        "required_paths": ["hephaestus/automation/example.py"],
+                        "acceptance_criteria": ["Helper exists"],
+                        "pipeline_action": "apply state:implementation-go",
+                    }
+                ],
+            }
+        )
     )
 
     assert audit.valid is False

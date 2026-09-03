@@ -90,6 +90,7 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
             return Continue(next_state="REVIEW_WAIT")
         if (
             item.state == "ENTER"
+            and item.payload.pop("scope_dependency_entry_reconciled", False)
             and not item.worktree
             and item.pr is not None
             and (

@@ -31,7 +31,9 @@ from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
+    ReconcileScopeExpansionDependenciesRequest,
     ReplyJournalAppended,
+    ScopeExpansionDependenciesReconciled,
 )
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
@@ -808,6 +810,21 @@ class TestQuiescence:
         github = FakeStageGitHub(pr_head_branch="review-pr")
         coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
         worktree = tmp_path / "build" / ".worktrees" / "pr-review-pr-601"
+        dependency_request = ReconcileScopeExpansionDependenciesRequest(
+            issue_number=1,
+            pr_number=601,
+            source_head_sha="a" * 40,
+        )
+        pool.queue_result(
+            JobResult(
+                ok=True,
+                value=ScopeExpansionDependenciesReconciled(
+                    request=dependency_request,
+                    status="none",
+                    child_issue_numbers=(),
+                ),
+            )
+        )
         pool.queue_result(JobResult(ok=True, value={"path": str(worktree), "dirty": False}))
         # Stop after the review job is submitted. This keeps the assertion at
         # the adoption boundary while exercising the real completion drain.
@@ -824,13 +841,16 @@ class TestQuiescence:
 
         coordinator._run_item(item)
         coordinator._drain_completions()
+        coordinator._drain_queues()
+        coordinator._drain_completions()
 
         assert item.worktree == str(worktree)
         assert item.payload["direct_pr_worktree"] == str(worktree)
         assert item.state == "REVIEW_WAIT"
         jobs = [handle.job for handle in pool.submitted]
-        assert isinstance(jobs[0], GitJob)
-        assert jobs[0].kwargs["isolated"] is True
+        assert isinstance(jobs[0], GitHubJob)
+        assert isinstance(jobs[1], GitJob)
+        assert jobs[1].kwargs["isolated"] is True
 
     def test_issue_seed_with_existing_pr_marks_pr_review_adoption(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

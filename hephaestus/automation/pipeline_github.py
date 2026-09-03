@@ -85,6 +85,7 @@ from .pipeline_github_authorization import PipelineGitHubAuthorization
 from .pipeline_github_mutations import PipelineGitHubMutations
 from .pipeline_github_queries import PipelineGitHubQueries
 from .pipeline_github_reviews import PipelineGitHubReviews
+from .pipeline_github_scope_expansion import PipelineGitHubScopeExpansion
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
@@ -239,6 +240,7 @@ class PipelineGitHub(
     PipelineGitHubReviews,
     PipelineGitHubAuditReceipts,
     PipelineGitHubMutations,
+    PipelineGitHubScopeExpansion,
 ):
     """Stable GitHub façade with explicit single-owner semantics.
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, assert_never
+from typing import Any, Literal, assert_never
 
 from hephaestus.automation.merge_authorization import (
     MergeAuthorization,
@@ -13,16 +13,20 @@ from hephaestus.automation.merge_authorization import (
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
+    EnsureScopeExpansionChildrenRequest,
     FrozenJson,
     GitHubJob,
     GitHubReceipt,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
+    ReconcileScopeExpansionDependenciesRequest,
     RecoverReplyJournalRequest,
     ReplyJournalAppended,
     ReplyJournalRecovered,
     RunMergeWaitCycleRequest,
+    ScopeExpansionChildrenEnsured,
+    ScopeExpansionDependenciesReconciled,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
@@ -76,9 +80,636 @@ class PipelineGitHubJobRunner:
                 return self._reconcile_pr_review(job.request, github)
             case RunMergeWaitCycleRequest():
                 return self._run_merge_wait_cycle(job.request, github)
+            case EnsureScopeExpansionChildrenRequest():
+                return self._ensure_scope_expansion_children(job.request, github)
+            case ReconcileScopeExpansionDependenciesRequest():
+                return self._reconcile_scope_expansion_dependencies(job.request, github)
             case unknown:
                 return assert_never(unknown)
         raise AssertionError("unreachable closed GitHub request dispatch")
+
+    @staticmethod
+    def _reconcile_scope_expansion_dependencies(  # noqa: C901
+        request: ReconcileScopeExpansionDependenciesRequest,
+        github: Any,
+    ) -> ScopeExpansionDependenciesReconciled:
+        """Classify all durable child dependencies for one exact source head."""
+        from hephaestus.automation.pipeline.scope_expansion_records import (
+            SCOPE_EXPANSION_LIFECYCLE_MARKER_PREFIX,
+            parse_scope_expansion_child_body,
+            parse_scope_expansion_lifecycle_comment,
+            render_scope_expansion_blocking_review,
+            render_scope_expansion_lifecycle_comment,
+            scope_expansion_blocking_review_marker,
+            scope_expansion_lifecycle_marker,
+        )
+        from hephaestus.automation.pipeline.stages.pr_review_threads import (
+            _durable_thread_id,
+            _normalize_remediation_threads,
+            _scope_retraction_paths,
+            _validation_receipt_fingerprints,
+            _validation_thread_snapshots,
+            _without_duplicate_live_findings,
+        )
+
+        state = github.gh_pr_state(request.pr_number)
+        if (
+            not isinstance(state, dict)
+            or state.get("state") != "OPEN"
+            or "autoMergeRequest" not in state
+            or state.get("autoMergeRequest") is not None
+            or state.get("headRefOid") != request.source_head_sha
+            or state.get("baseRefName") != "main"
+        ):
+            raise RuntimeError("source pull request state changed")
+        repo = getattr(github, "_repo_slug", None) or getattr(github, "repo", None)
+        if not isinstance(repo, str) or not repo:
+            raise RuntimeError("repository identity is unavailable")
+        records: dict[str, Any] = {}
+        malformed = False
+        for comment in github.issue_comments(request.pr_number):
+            if not getattr(comment, "viewer_did_author", False):
+                continue
+            body = getattr(comment, "body", "")
+            if not isinstance(body, str) or not body.startswith(
+                SCOPE_EXPANSION_LIFECYCLE_MARKER_PREFIX
+            ):
+                continue
+            record = parse_scope_expansion_lifecycle_comment(body)
+            if (
+                record is None
+                or record.repository != repo.lower()
+                or record.parent_issue != request.issue_number
+                or record.pr_number != request.pr_number
+            ):
+                malformed = True
+                continue
+            prior = records.get(record.digest)
+            if prior is not None:
+                malformed = True
+                continue
+            records[record.digest] = record
+
+        def receipt(
+            status: str,
+            child_numbers: list[int] | None = None,
+            merge_shas: list[str] | None = None,
+            retraction_threads: list[dict[str, Any]] | None = None,
+            retraction_snapshots: list[dict[str, Any]] | None = None,
+        ) -> ScopeExpansionDependenciesReconciled:
+            return ScopeExpansionDependenciesReconciled(
+                request=request,
+                status=status,  # type: ignore[arg-type]
+                child_issue_numbers=tuple(child_numbers or ()),
+                merge_shas=tuple(merge_shas or ()),
+                retraction_threads=FrozenJson.snapshot(retraction_threads or []),
+                retraction_snapshots=FrozenJson.snapshot(retraction_snapshots or []),
+            )
+
+        if malformed:
+            return receipt("operator_required")
+        if not records:
+            return receipt("none")
+        if not bool(getattr(github, "dry_run", False)):
+            github.mark_pr_implementation_no_go(request.pr_number)
+        has_go, has_no_go = github.pr_has_implementation_state_label(request.pr_number)
+        if has_go or not has_no_go:
+            return receipt("operator_required")
+        first_record = next(iter(records.values()))
+        if any(
+            record.retraction_findings != first_record.retraction_findings
+            or record.review_diff != first_record.review_diff
+            for record in records.values()
+        ):
+            return receipt("operator_required")
+        projection = [dict(finding) for finding in first_record.retraction_findings]
+        if projection and any(not _scope_retraction_paths([finding]) for finding in projection):
+            return receipt("operator_required")
+        child_numbers: list[int] = []
+        bound_children: list[tuple[Any, int, str, Any]] = []
+        for record in records.values():
+            child_number = record.child_issue_number
+            if child_number is None:
+                child_marker = f"<!-- hephaestus-scope-expansion-child:{record.digest} -->"
+                first = github.issues_with_marker(child_marker)
+                second = github.issues_with_marker(child_marker)
+                first_numbers = [issue.get("number") for issue in first if isinstance(issue, dict)]
+                second_numbers = [
+                    issue.get("number") for issue in second if isinstance(issue, dict)
+                ]
+                if (
+                    len(first_numbers) != 1
+                    or first_numbers != second_numbers
+                    or not isinstance(first_numbers[0], int)
+                    or first_numbers[0] <= 0
+                ):
+                    return receipt("operator_required", child_numbers)
+                child_number = first_numbers[0]
+            if child_number in child_numbers:
+                return receipt("operator_required", child_numbers)
+            child_numbers.append(child_number)
+            child = github.gh_issue_json(child_number)
+            child_state = str(child.get("state") or "").upper()
+            child_record = parse_scope_expansion_child_body(child.get("body"))
+            if (
+                child_record is None
+                or child_record.digest != record.digest
+                or child_record.repository != repo.lower()
+                or child_record.parent_issue != request.issue_number
+                or child_record.pr_number != request.pr_number
+                or (
+                    child_record.child_issue_number is not None
+                    and child_record.child_issue_number != child_number
+                )
+            ):
+                return receipt("operator_required", child_numbers)
+            lifecycle_marker = scope_expansion_lifecycle_marker(
+                repo, request.issue_number, child_record.expansion
+            )
+            current_record = record
+            if record.state == "pending-child" or (
+                record.state == "pending-review" and record.merge_sha is None
+            ):
+                if record.reviewed_head_sha != request.source_head_sha:
+                    return receipt("operator_required", child_numbers)
+                github.upsert_issue_comment(
+                    request.pr_number,
+                    lifecycle_marker,
+                    render_scope_expansion_lifecycle_comment(
+                        repository=repo,
+                        parent_issue=request.issue_number,
+                        pr_number=request.pr_number,
+                        reviewed_head_sha=record.reviewed_head_sha,
+                        expansion=child_record.expansion,
+                        state="pending-review",
+                        child_issue_number=child_number,
+                        retraction_findings=record.retraction_findings,
+                        review_diff=record.review_diff,
+                    ),
+                )
+                blocking_marker = scope_expansion_blocking_review_marker(
+                    repo, request.issue_number, child_record.expansion
+                )
+                github.post_scope_expansion_blocking_review(
+                    request.pr_number,
+                    body=render_scope_expansion_blocking_review(
+                        repository=repo,
+                        parent_issue=request.issue_number,
+                        pr_number=request.pr_number,
+                        reviewed_head_sha=record.reviewed_head_sha,
+                        child_issue_number=child_number,
+                        expansion=child_record.expansion,
+                    ),
+                    marker=blocking_marker,
+                )
+                github.upsert_issue_comment(
+                    request.pr_number,
+                    lifecycle_marker,
+                    render_scope_expansion_lifecycle_comment(
+                        repository=repo,
+                        parent_issue=request.issue_number,
+                        pr_number=request.pr_number,
+                        reviewed_head_sha=record.reviewed_head_sha,
+                        expansion=child_record.expansion,
+                        state="blocked",
+                        child_issue_number=child_number,
+                        retraction_findings=record.retraction_findings,
+                        review_diff=record.review_diff,
+                    ),
+                )
+                lifecycle_readback = [
+                    parse_scope_expansion_lifecycle_comment(getattr(comment, "body", ""))
+                    for comment in github.issue_comments(request.pr_number)
+                    if getattr(comment, "viewer_did_author", False)
+                    and str(getattr(comment, "body", "")).startswith(lifecycle_marker)
+                ]
+                if (
+                    len(lifecycle_readback) != 1
+                    or lifecycle_readback[0] is None
+                    or lifecycle_readback[0].state != "blocked"
+                    or lifecycle_readback[0].child_issue_number != child_number
+                    or lifecycle_readback[0].digest != record.digest
+                    or lifecycle_readback[0].retraction_findings != record.retraction_findings
+                    or lifecycle_readback[0].review_diff != record.review_diff
+                ):
+                    return receipt("operator_required", child_numbers)
+                current_record = lifecycle_readback[0]
+            bound_children.append((current_record, child_number, child_state, child_record))
+        live_threads = github.list_unresolved_review_threads(request.pr_number)
+        live_by_id = {
+            thread_id: thread
+            for thread in live_threads
+            if (thread_id := _durable_thread_id(thread)) is not None
+        }
+        missing_projection = _without_duplicate_live_findings(projection, live_by_id)
+        if missing_projection:
+            if first_record.reviewed_head_sha != request.source_head_sha:
+                return receipt("operator_required")
+            posted = github.post_review_threads(
+                request.pr_number,
+                missing_projection,
+                expected_head_sha=request.source_head_sha,
+                review_diff=first_record.review_diff,
+            )
+            if len(posted) != len(missing_projection):
+                return receipt("operator_required")
+            live_threads = github.list_unresolved_review_threads(request.pr_number)
+        validation_receipts = github.reviewer_validation_receipts(
+            request.pr_number,
+            reviewed_head_sha=request.source_head_sha,
+            threads=live_threads,
+        )
+        normalized_threads = _normalize_remediation_threads(live_threads)
+        snapshots = _validation_thread_snapshots(live_threads, validation_receipts)
+        if (
+            len(normalized_threads) != len(live_threads)
+            or snapshots is None
+            or _validation_receipt_fingerprints(validation_receipts) is None
+        ):
+            return receipt("operator_required")
+        pending_retractions: list[dict[str, Any]] = []
+        pending_snapshots: list[dict[str, Any]] = []
+        for thread, snapshot in zip(normalized_threads, snapshots, strict=True):
+            paths = _scope_retraction_paths([thread])
+            if paths is None:
+                return receipt("operator_required")
+            if paths and not snapshot.get("implementation_reply_submitted"):
+                pending_retractions.append(dict(thread))
+                pending_snapshots.append(dict(snapshot))
+        if pending_retractions:
+            return receipt(
+                "retraction_required",
+                child_numbers,
+                retraction_threads=pending_retractions,
+                retraction_snapshots=pending_snapshots,
+            )
+        clear_projection = bool(projection)
+        merge_shas: list[str] = []
+        parked = False
+        operator_required = False
+        sync_required = False
+        for record, child_number, child_state, child_record in bound_children:
+            lifecycle_marker = scope_expansion_lifecycle_marker(
+                repo, request.issue_number, child_record.expansion
+            )
+            record_retractions = () if clear_projection else record.retraction_findings
+            record_review_diff = "" if clear_projection else record.review_diff
+            if clear_projection:
+                github.upsert_issue_comment(
+                    request.pr_number,
+                    lifecycle_marker,
+                    render_scope_expansion_lifecycle_comment(
+                        repository=repo,
+                        parent_issue=request.issue_number,
+                        pr_number=request.pr_number,
+                        reviewed_head_sha=record.reviewed_head_sha,
+                        expansion=child_record.expansion,
+                        state="blocked",
+                        child_issue_number=child_number,
+                    ),
+                )
+            evidence = github.merged_scope_expansion_pr(
+                child_number, source_pr_number=request.pr_number
+            )
+            if evidence is None:
+                if child_state == "OPEN":
+                    parked = True
+                else:
+                    operator_required = True
+                continue
+            merge_sha = evidence.get("merge_sha")
+            if not isinstance(merge_sha, str) or not github.commit_is_ancestor(merge_sha, "main"):
+                operator_required = True
+                continue
+            merge_shas.append(merge_sha)
+            if not github.commit_is_ancestor(merge_sha, request.source_head_sha):
+                sync_required = True
+            if record.state != "pending-review" or record.merge_sha != merge_sha:
+                lifecycle_body = render_scope_expansion_lifecycle_comment(
+                    repository=repo,
+                    parent_issue=request.issue_number,
+                    pr_number=request.pr_number,
+                    reviewed_head_sha=request.source_head_sha,
+                    expansion=child_record.expansion,
+                    state="pending-review",
+                    child_issue_number=child_number,
+                    merge_sha=merge_sha,
+                    retraction_findings=record_retractions,
+                    review_diff=record_review_diff,
+                )
+                github.upsert_issue_comment(
+                    request.pr_number,
+                    scope_expansion_lifecycle_marker(
+                        repo, request.issue_number, child_record.expansion
+                    ),
+                    lifecycle_body,
+                )
+        if operator_required:
+            return receipt("operator_required", child_numbers, merge_shas)
+        final_state = github.gh_pr_state(request.pr_number)
+        final_has_go, final_has_no_go = github.pr_has_implementation_state_label(request.pr_number)
+        if (
+            not isinstance(final_state, dict)
+            or final_state.get("state") != "OPEN"
+            or "autoMergeRequest" not in final_state
+            or final_state.get("autoMergeRequest") is not None
+            or final_state.get("headRefOid") != request.source_head_sha
+            or final_has_go
+            or not final_has_no_go
+        ):
+            raise RuntimeError("source pull request state changed during reconciliation")
+        if parked:
+            return receipt("parked", child_numbers, merge_shas)
+        if sync_required:
+            return receipt("sync_required", child_numbers, merge_shas)
+        return receipt("fresh_review", child_numbers, merge_shas)
+
+    @staticmethod
+    def _ensure_scope_expansion_children(  # noqa: C901
+        request: EnsureScopeExpansionChildrenRequest,
+        github: Any,
+    ) -> ScopeExpansionChildrenEnsured:
+        """Ensure one durable child issue per expansion and record the source block."""
+        from hephaestus.automation.pipeline.scope_expansion_records import (
+            parse_scope_expansion_child_body,
+            parse_scope_expansion_lifecycle_comment,
+            render_scope_expansion_blocking_review,
+            render_scope_expansion_child_body,
+            render_scope_expansion_lifecycle_comment,
+            scope_expansion_blocking_review_marker,
+            scope_expansion_child_marker,
+            scope_expansion_lifecycle_marker,
+        )
+        from hephaestus.automation.scope_expansion_domain import (
+            ScopeExpansion,
+            scope_expansion_digest,
+        )
+
+        def repository() -> str:
+            value = getattr(github, "_repo_slug", None)
+            if isinstance(value, str) and value:
+                return value
+            value = getattr(github, "repo", None)
+            return value if isinstance(value, str) else ""
+
+        repo = repository()
+        if not isinstance(repo, str) or not repo:
+            raise RuntimeError("repository identity is unavailable")
+
+        def require_source_head() -> None:
+            state = github.gh_pr_state(request.pr_number)
+            if not isinstance(state, dict) or state.get("state") != "OPEN":
+                raise RuntimeError("source pull request is not open")
+            if "autoMergeRequest" not in state or state.get("autoMergeRequest") is not None:
+                raise RuntimeError("source pull request is armed or unverified")
+            if state.get("headRefOid") != request.reviewed_head_sha:
+                raise RuntimeError("source pull request reviewed head changed")
+
+        require_source_head()
+        dry_run = bool(getattr(github, "dry_run", False))
+        if not dry_run:
+            github.mark_pr_implementation_no_go(request.pr_number)
+            require_source_head()
+            has_go, has_no_go = github.pr_has_implementation_state_label(request.pr_number)
+            if has_go or not has_no_go:
+                raise RuntimeError("exclusive implementation-no-go state was not confirmed")
+        child_issue_numbers: list[int] = []
+        overall_status: Literal["blocked", "operator_required", "dry_run"] = "blocked"
+        raw_retractions = request.retraction_findings.thaw()
+        if not isinstance(raw_retractions, list):
+            raise RuntimeError("retraction projection is invalid")
+        retraction_projection = tuple(
+            dict(finding) for finding in raw_retractions if isinstance(finding, dict)
+        )
+        for expansion in request.scope_expansions:
+            if not isinstance(expansion, ScopeExpansion):
+                raise TypeError("scope_expansions must contain scope-expansion records")
+            child_marker = scope_expansion_child_marker(repo, request.issue_number, expansion)
+            digest = scope_expansion_digest(repo, request.issue_number, expansion)
+            lifecycle_marker = scope_expansion_lifecycle_marker(
+                repo, request.issue_number, expansion
+            )
+            blocking_marker = scope_expansion_blocking_review_marker(
+                repo,
+                request.issue_number,
+                expansion,
+            )
+            lifecycle_records = []
+            malformed_lifecycle = False
+            for comment in github.issue_comments(request.pr_number):
+                if not getattr(comment, "viewer_did_author", False):
+                    continue
+                body = getattr(comment, "body", "")
+                if not isinstance(body, str) or not body.startswith(lifecycle_marker):
+                    continue
+                record = parse_scope_expansion_lifecycle_comment(body)
+                if (
+                    record is None
+                    or record.repository != repo.lower()
+                    or record.parent_issue != request.issue_number
+                    or record.pr_number != request.pr_number
+                    or record.reviewed_head_sha != request.reviewed_head_sha
+                ):
+                    malformed_lifecycle = True
+                    continue
+                lifecycle_records.append(record)
+            if malformed_lifecycle or len(lifecycle_records) > 1:
+                overall_status = "operator_required"
+                continue
+            new_intent = not lifecycle_records
+            if new_intent:
+                if dry_run:
+                    overall_status = "dry_run"
+                    continue
+                pending_body = render_scope_expansion_lifecycle_comment(
+                    repository=repo,
+                    parent_issue=request.issue_number,
+                    pr_number=request.pr_number,
+                    reviewed_head_sha=request.reviewed_head_sha,
+                    expansion=expansion,
+                    state="pending-child",
+                    retraction_findings=retraction_projection,
+                    review_diff=request.review_diff,
+                )
+                github.upsert_issue_comment(request.pr_number, lifecycle_marker, pending_body)
+                require_source_head()
+                readback = [
+                    parse_scope_expansion_lifecycle_comment(getattr(comment, "body", ""))
+                    for comment in github.issue_comments(request.pr_number)
+                    if getattr(comment, "viewer_did_author", False)
+                    and str(getattr(comment, "body", "")).startswith(lifecycle_marker)
+                ]
+                if len(readback) != 1 or readback[0] is None:
+                    overall_status = "operator_required"
+                    continue
+
+            first_children = github.issues_with_marker(child_marker)
+            second_children = github.issues_with_marker(child_marker)
+            first_numbers = [
+                child.get("number") for child in first_children if isinstance(child, dict)
+            ]
+            second_numbers = [
+                child.get("number") for child in second_children if isinstance(child, dict)
+            ]
+            if first_numbers != second_numbers or len(first_numbers) > 1:
+                overall_status = "operator_required"
+                continue
+            if not first_numbers:
+                if not new_intent:
+                    overall_status = "operator_required"
+                    continue
+                child_body = render_scope_expansion_child_body(
+                    repository=repo,
+                    parent_issue=request.issue_number,
+                    pr_number=request.pr_number,
+                    reviewed_head_sha=request.reviewed_head_sha,
+                    expansion=expansion,
+                )
+                child_issue_number = github.create_issue(expansion.title, child_body)
+            else:
+                child_issue_number = first_numbers[0]
+            if not isinstance(child_issue_number, int) or child_issue_number <= 0:
+                overall_status = "dry_run"
+                continue
+            child_issue_numbers.append(child_issue_number)
+            child = github.gh_issue_json(child_issue_number)
+            child_record = parse_scope_expansion_child_body(child.get("body"))
+            if (
+                child_record is None
+                or child_record.digest != digest
+                or child_record.repository != repo.lower()
+                or child_record.parent_issue != request.issue_number
+                or child_record.pr_number != request.pr_number
+                or child_record.reviewed_head_sha != request.reviewed_head_sha
+                or child_record.expansion != expansion
+                or (
+                    child_record.child_issue_number is not None
+                    and child_record.child_issue_number != child_issue_number
+                )
+            ):
+                overall_status = "operator_required"
+                continue
+            prior_record = lifecycle_records[0] if lifecycle_records else None
+            blocking_complete = (
+                prior_record is not None
+                and prior_record.state == "blocked"
+                and prior_record.child_issue_number == child_issue_number
+            )
+            blocking_body = render_scope_expansion_blocking_review(
+                repository=repo,
+                parent_issue=request.issue_number,
+                pr_number=request.pr_number,
+                reviewed_head_sha=request.reviewed_head_sha,
+                child_issue_number=child_issue_number,
+                expansion=expansion,
+            )
+            if not blocking_complete:
+                pending_review_body = render_scope_expansion_lifecycle_comment(
+                    repository=repo,
+                    parent_issue=request.issue_number,
+                    pr_number=request.pr_number,
+                    reviewed_head_sha=request.reviewed_head_sha,
+                    expansion=expansion,
+                    state="pending-review",
+                    child_issue_number=child_issue_number,
+                    retraction_findings=retraction_projection,
+                    review_diff=request.review_diff,
+                )
+                github.upsert_issue_comment(
+                    request.pr_number, lifecycle_marker, pending_review_body
+                )
+                require_source_head()
+                github.post_scope_expansion_blocking_review(
+                    request.pr_number,
+                    body=blocking_body,
+                    marker=blocking_marker,
+                )
+                blocked_body = render_scope_expansion_lifecycle_comment(
+                    repository=repo,
+                    parent_issue=request.issue_number,
+                    pr_number=request.pr_number,
+                    reviewed_head_sha=request.reviewed_head_sha,
+                    expansion=expansion,
+                    state="blocked",
+                    child_issue_number=child_issue_number,
+                    retraction_findings=retraction_projection,
+                    review_diff=request.review_diff,
+                )
+                github.upsert_issue_comment(request.pr_number, lifecycle_marker, blocked_body)
+                readback = [
+                    parse_scope_expansion_lifecycle_comment(getattr(comment, "body", ""))
+                    for comment in github.issue_comments(request.pr_number)
+                    if getattr(comment, "viewer_did_author", False)
+                    and str(getattr(comment, "body", "")).startswith(lifecycle_marker)
+                ]
+                if (
+                    len(readback) != 1
+                    or readback[0] is None
+                    or readback[0].state != "blocked"
+                    or readback[0].child_issue_number != child_issue_number
+                ):
+                    overall_status = "operator_required"
+                    continue
+            elif prior_record is not None and (
+                prior_record.retraction_findings != retraction_projection
+                or prior_record.review_diff != request.review_diff
+            ):
+                require_source_head()
+                github.upsert_issue_comment(
+                    request.pr_number,
+                    lifecycle_marker,
+                    render_scope_expansion_lifecycle_comment(
+                        repository=repo,
+                        parent_issue=request.issue_number,
+                        pr_number=request.pr_number,
+                        reviewed_head_sha=request.reviewed_head_sha,
+                        expansion=expansion,
+                        state="blocked",
+                        child_issue_number=child_issue_number,
+                        retraction_findings=retraction_projection,
+                        review_diff=request.review_diff,
+                    ),
+                )
+                require_source_head()
+                projection_readback = [
+                    parse_scope_expansion_lifecycle_comment(getattr(comment, "body", ""))
+                    for comment in github.issue_comments(request.pr_number)
+                    if getattr(comment, "viewer_did_author", False)
+                    and str(getattr(comment, "body", "")).startswith(lifecycle_marker)
+                ]
+                if (
+                    len(projection_readback) != 1
+                    or projection_readback[0] is None
+                    or projection_readback[0].state != "blocked"
+                    or projection_readback[0].child_issue_number != child_issue_number
+                    or projection_readback[0].retraction_findings != retraction_projection
+                    or projection_readback[0].review_diff != request.review_diff
+                ):
+                    overall_status = "operator_required"
+                    continue
+            child_state = str(child.get("state") or "").upper()
+            evidence = github.merged_scope_expansion_pr(
+                child_issue_number, source_pr_number=request.pr_number
+            )
+            if evidence is None:
+                if child_state != "OPEN":
+                    overall_status = "operator_required"
+            else:
+                merge_sha = evidence.get("merge_sha")
+                if not isinstance(merge_sha, str) or not github.commit_is_ancestor(
+                    merge_sha, "main"
+                ):
+                    overall_status = "operator_required"
+        if not dry_run:
+            require_source_head()
+            has_go, has_no_go = github.pr_has_implementation_state_label(request.pr_number)
+            if has_go or not has_no_go:
+                raise RuntimeError("exclusive implementation-no-go state was not confirmed")
+        return ScopeExpansionChildrenEnsured(
+            request=request,
+            status=overall_status,
+            child_issue_numbers=tuple(child_issue_numbers),
+        )
 
     @staticmethod
     def _reconcile_pr_review(  # noqa: C901

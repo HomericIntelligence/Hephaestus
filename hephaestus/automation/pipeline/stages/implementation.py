@@ -780,13 +780,20 @@ class ImplementationStage(Stage):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if item.payload.pop(_REBASE_HEAD_DRIFT, None):
             item.payload.pop("post_review_rebase_required", None)
+            item.payload.pop("scope_dependency_sync_required", None)
+            item.payload.pop("scope_dependency_merge_shas", None)
             item.payload.pop("rebase_conflict", None)
             item.payload.pop(_SYNC_RESTORED_WRITER_BEFORE_REBASE, None)
             return Continue(next_state=ADOPTED)
         if item.payload.pop("rebase_error", None):
+            if item.payload.pop("scope_dependency_sync_required", None):
+                item.payload.pop("scope_dependency_merge_shas", None)
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_dependency_sync_failed")
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop("rebase_complete", None):
             item.payload.pop("post_review_rebase_required", None)
+            item.payload.pop("scope_dependency_sync_required", None)
+            item.payload.pop("scope_dependency_merge_shas", None)
             item.payload.pop("rebase_conflict", None)
             item.payload.pop(_SYNC_RESTORED_WRITER_BEFORE_REBASE, None)
             return Continue(
@@ -808,6 +815,11 @@ class ImplementationStage(Stage):
             "branch": item.branch,
             "expected_remote_sha": expected_head,
         }
+        if item.payload.get("scope_dependency_sync_required"):
+            kwargs["abort_on_conflict"] = True
+            kwargs["required_ancestor_shas"] = tuple(
+                item.payload.get("scope_dependency_merge_shas") or ()
+            )
         if item.payload.get(_SYNC_RESTORED_WRITER_BEFORE_REBASE):
             kwargs["sync_to_expected_remote_head"] = True
             kwargs["pr_number"] = item.pr
@@ -970,6 +982,17 @@ class ImplementationStage(Stage):
             scope_retraction_paths = scope_retraction_paths_for_threads(remediation_threads)
             if scope_retraction_paths is None:
                 return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+            if item.payload.get("scope_retraction_before_scope_block") and (
+                not scope_retraction_paths
+                or any(
+                    not scope_retraction_paths_for_threads([thread])
+                    for thread in remediation_threads
+                )
+            ):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "scope_retraction_projection_invalid",
+                )
             if scope_retraction_paths:
                 base_sha = item.payload.get("reviewed_pr_base_sha")
                 if not is_full_commit_sha(base_sha):

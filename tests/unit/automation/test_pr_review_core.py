@@ -350,6 +350,16 @@ class TestRunPrReviewAnalysis:
                     "verdict": "GO",
                     "comments": [],
                     "summary": "No inline findings.",
+                    "scope_expansions": [
+                        {
+                            "title": "Extract helper",
+                            "reason": "The helper must merge first",
+                            "source_path": "hephaestus/example.py",
+                            "source_line": 4,
+                            "required_paths": ["hephaestus/example.py"],
+                            "acceptance_criteria": ["The helper exists"],
+                        }
+                    ],
                 }
             )
             + "\n```"
@@ -377,6 +387,7 @@ class TestRunPrReviewAnalysis:
         assert out["audit"].valid is True
         assert "Verdict:" not in out["review_text"]
         assert out["audit"].grade == "A"
+        assert out["scope_expansions"][0]["title"] == "Extract helper"
 
     def test_codex_path_uses_structural_audit(self, tmp_path: Path) -> None:
         """Codex stdout uses the same structural audit contract."""
@@ -389,6 +400,16 @@ class TestRunPrReviewAnalysis:
                     "verdict": "NOGO",
                     "comments": [],
                     "summary": "Needs fixes.",
+                    "scope_expansions": [
+                        {
+                            "title": "Extract helper",
+                            "reason": "The helper must merge first",
+                            "source_path": "hephaestus/example.py",
+                            "source_line": 4,
+                            "required_paths": ["hephaestus/example.py"],
+                            "acceptance_criteria": ["The helper exists"],
+                        }
+                    ],
                 }
             )
             + "\n```"
@@ -412,6 +433,7 @@ class TestRunPrReviewAnalysis:
         assert out["audit"].valid is True
         assert "Verdict:" not in out["review_text"]
         assert out["audit"].grade == "D"
+        assert out["scope_expansions"][0]["title"] == "Extract helper"
 
     def test_uses_canonical_review_utils_parser_patch_target(self, tmp_path: Path) -> None:
         """PR-review parsing goes through the canonical patch target."""

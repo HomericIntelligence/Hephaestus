@@ -172,6 +172,7 @@ class FakeStageGitHub(FakeGitHub):
                 "state": "OPEN",
                 "headRefOid": "a" * 40,
                 "autoMergeRequest": None,
+                "baseRefName": "main",
             }
             if isinstance(pr_state, _DefaultPrState)
             else pr_state
@@ -230,6 +231,17 @@ class FakeStageGitHub(FakeGitHub):
     # -- read surface used by the stages -----------------------------------
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Mirror github_api.issues.gh_issue_json (issue context plus labels)."""
+        stored = self.issues.get(issue_number)
+        if isinstance(stored, dict):
+            body = str(stored.get("body") or self._issue_body)
+            return {
+                "number": issue_number,
+                "title": str(stored.get("title") or self._issue_title),
+                "body": body,
+                "bodyDigest": issue_body_digest(body),
+                "state": str(stored.get("state") or self._issue_state),
+                "labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))],
+            }
         return {
             "number": issue_number,
             "title": self._issue_title,

@@ -436,6 +436,41 @@ class TestGate:
         item.payload["worktree_dirty"] = False
         assert stage.step(item, ctx) == Continue(next_state="REBASE_WAIT")
 
+    def test_scope_dependency_sync_requires_exact_ancestor_and_aborts_conflict(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Child synchronization is host-only and proves the child merge SHA."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.worktree = "/tmp/writer"
+        item.branch = "1-auto-impl"
+        item.payload.update(
+            {
+                "post_review_rebase_required": True,
+                "scope_dependency_sync_required": True,
+                "scope_dependency_merge_shas": ["b" * 40],
+            }
+        )
+
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.kwargs["abort_on_conflict"] is True
+        assert request.job.kwargs["required_ancestor_shas"] == ("b" * 40,)
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="mechanical rebase hit conflicts; aborted"),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "scope_dependency_sync_failed"
+        )
+        assert item.payload.get("rebase_conflict") is not True
+
     def test_gate_existing_fork_with_impl_go_routes_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

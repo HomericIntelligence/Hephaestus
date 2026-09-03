@@ -30,6 +30,7 @@ from .pr_review_recovery import (
     empty_diff_outcome,
     restart_direct_pr_review,
 )
+from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -43,7 +44,7 @@ _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 
 
-class PrReviewJobs(_PrReviewHost):
+class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
     """Own review worktrees, validation jobs, and result handoffs."""
 
     @staticmethod
@@ -69,14 +70,6 @@ class PrReviewJobs(_PrReviewHost):
             arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
             if arm_outcome is not None:
                 return arm_outcome
-            if item.state == ENTER:
-                thread_outcome = self._route_existing_threads_before_audit(item, ctx)
-                if thread_outcome is not None:
-                    return thread_outcome
-            if item.worktree and not item.payload.get("direct_pr_worktree"):
-                item.payload["writer_worktree"] = item.worktree
-                item.payload["reviewer_checkout_needed"] = True
-                item.worktree = ""
         cycle = item.attempts.get("implement", 0)
         if item.payload.get("pr_review_cycle") != cycle:
             item.payload["pr_review_cycle"] = cycle
@@ -196,10 +189,6 @@ class PrReviewJobs(_PrReviewHost):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_invalid")
         return (live_threads, remediation_threads, snapshots)
-
-    def _enter(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """ENTER advances to REVIEW_WAIT."""
-        return Continue(next_state=REVIEW_WAIT)
 
     def _adopt_direct_pr_worktree(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Create an isolated checkout for the checkout-bound PR review barrier."""
@@ -333,10 +322,9 @@ class PrReviewJobs(_PrReviewHost):
         item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
     ) -> JobRequest:
         """Submit one fixed host command from the immutable review plan."""
-        # Completion callbacks run before the coordinator installs
-        # ``on_done_state``.  Keep an explicit ownership marker instead of
-        # inferring this job's type from the current mini-state, which can
-        # also be the state that submits the primary review job.
+        # Callbacks run before the coordinator installs ``on_done_state``.
+        # Keep an ownership marker because the current mini-state can also
+        # submit the primary review job.
         item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
         return JobRequest(
             BuildTestJob(
@@ -445,6 +433,12 @@ class PrReviewJobs(_PrReviewHost):
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"),
             )
+        if item.payload.pop("scope_dependency_force_fresh_review", False):
+            empty_diff = empty_diff_outcome(item)
+            if empty_diff:
+                return self._cleanup_review_worktree_then(item, empty_diff)
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            return self._submit_review_job(item, ctx)
         if not live_threads:
             if item.payload.get(_COMMENT_VALIDATION_ONLY):
                 # A reply may resolve the last thread while the immutable
@@ -850,6 +844,8 @@ class PrReviewJobs(_PrReviewHost):
             ctx: Stage context.
 
         """
+        if self._consume_scope_expansion_result(item, result):
+            return
         if item.state == POST:
             self._on_reconciliation_done(item, result)
             return
@@ -865,7 +861,8 @@ class PrReviewJobs(_PrReviewHost):
         if self._consume_host_verification_result(item, result):
             self._store_host_verification_result(item, result)
             return
-
+        if self._consume_scope_dependency_result(item, result):
+            return
         review_job_pending = bool(item.payload.pop("review_job_pending", None))
         is_review_result = review_job_pending or item.state == REVIEW_WAIT
         if self._consume_failed_job(item, result, is_review_result):
@@ -1208,6 +1205,9 @@ class PrReviewJobs(_PrReviewHost):
             # the reviewer-owned decision required to authorize GO.
             item.payload.pop("review_audit", None)
             return Continue(next_state=REVIEW_WAIT)
+        audit = item.payload.get("review_audit")
+        if isinstance(audit, ReviewAudit) and audit.scope_expansions:
+            return Continue(next_state=EVAL)
         return Continue(next_state=ADDRESS_WAIT if remediation else EVAL)
 
     def _post(  # noqa: C901
@@ -1225,7 +1225,10 @@ class PrReviewJobs(_PrReviewHost):
         if not is_full_commit_sha(reviewed_head):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-
+        if isinstance(audit, ReviewAudit):
+            scope_preparation = self._prepare_scope_expansion_before_post(item, ctx, audit)
+            if scope_preparation is not None:
+                return scope_preparation
         findings = (
             [] if validation_only else [dict(t) for t in item.payload.get("review_threads") or []]
         )

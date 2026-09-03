@@ -197,6 +197,7 @@ def _invoke_and_parse_review_session(
         return {
             "audit": audit,
             "comments": [dict(comment) for comment in audit.findings],
+            "scope_expansions": [expansion.as_dict() for expansion in audit.scope_expansions],
             "summary": audit.summary,
             "review_text": audit.raw_feedback,
         }
@@ -242,6 +243,7 @@ def _invoke_and_parse_review_session(
     return {
         "audit": audit,
         "comments": [dict(comment) for comment in audit.findings],
+        "scope_expansions": [expansion.as_dict() for expansion in audit.scope_expansions],
         "summary": audit.summary,
         "review_text": audit.raw_feedback,
     }
@@ -282,8 +284,9 @@ def run_pr_review_analysis(
         dry_run: When True, skip the agent call and return a placeholder dict.
 
     Returns:
-        Parsed analysis dict with ``"audit"``, ``"comments"``, ``"summary"``,
-        and ``"review_text"`` (bounded supplemental feedback) keys.
+        Parsed analysis dict with ``"audit"``, ``"comments"``,
+        ``"scope_expansions"``, ``"summary"``, and ``"review_text"``
+        (bounded supplemental feedback) keys.
 
     """
     if dry_run:
@@ -298,6 +301,7 @@ def run_pr_review_analysis(
         return {
             "audit": audit,
             "comments": [],
+            "scope_expansions": [],
             "summary": audit.summary,
             "review_text": audit.raw_feedback,
         }

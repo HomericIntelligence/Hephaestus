@@ -230,12 +230,14 @@ def _parse_review_response(response: str) -> _ParsedReviewResponse:
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
+SCOPE_DEPENDENCY_WAIT = "SCOPE_DEPENDENCY_WAIT"
 ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
 HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
+SCOPE_EXPANSION_PREPARE_SUBMIT = "SCOPE_EXPANSION_PREPARE_SUBMIT"
 POST_APPLY = "POST_APPLY"
 RECOVERY_REPLY_WAIT = "RECOVERY_REPLY_WAIT"
 ADDRESS_WAIT = "ADDRESS_WAIT"
@@ -265,12 +267,14 @@ IMPLEMENTATION_GO_AUDIT_RETRY_CAP = 3
 
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
+    SCOPE_DEPENDENCY_WAIT: "_scope_dependency_wait",
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
     HOST_VERIFICATION_WAIT: "_host_verification_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
+    SCOPE_EXPANSION_PREPARE_SUBMIT: "_scope_expansion_prepare_submit",
     POST_APPLY: "_post_apply",
     RECOVERY_REPLY_WAIT: "_recovery_reply_wait",
     ADDRESS_WAIT: "_address",
@@ -338,6 +342,10 @@ _ROUND_PAYLOAD_KEYS = (
     "validation_receipt_fingerprints",
     "validation_pr_metadata_fingerprint",
     "scope_retraction_paths",
+    "_scope_expansion_pending_request",
+    "_scope_expansion_receipt",
+    "_scope_expansion_receipt_error",
+    "_scope_expansion_prepared_receipt",
     "reviewed_pr_base_sha",
     "host_verification_receipts",
     "host_verification_repository_profile",
@@ -808,9 +816,9 @@ __all__ = [
     'IMPLEMENTATION_GO_AUDIT_RETRY_CAP', 'IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP', 'POST',
     'PUSH_WAIT', 'RECOVERY_REPLY_WAIT',
     'REVIEW_CHECKOUT_RETRY_CAP',
-    'REVIEW_CHECKOUT_WAIT', 'REVIEW_ERROR_RETRY_CAP', 'REVIEW_WAIT', 'STATE_SKIP',
-    'UNSUPPORTED_HOST_VERIFICATION_ERROR', 'VALIDATE_WAIT',
-    'VALID_SEVERITIES', '_COMMENT_VALIDATION_ONLY', '_HOST_VERIFICATION_PENDING',
+    'REVIEW_CHECKOUT_WAIT', 'REVIEW_ERROR_RETRY_CAP', 'REVIEW_WAIT', 'SCOPE_DEPENDENCY_WAIT',
+    'SCOPE_EXPANSION_PREPARE_SUBMIT', 'STATE_SKIP', 'UNSUPPORTED_HOST_VERIFICATION_ERROR',
+    'VALIDATE_WAIT', 'VALID_SEVERITIES', '_COMMENT_VALIDATION_ONLY', '_HOST_VERIFICATION_PENDING',
     '_JSON_RESPONSE_BLOCK_RE', '_PENDING_IMPLEMENTATION_REPLY_HANDOFF',
     '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES',
     '_REPLY_HANDOFF_RECEIPT', '_REPLY_HANDOFF_RECEIPT_ERROR', '_REPLY_VISIBILITY_RETRIES',

@@ -2,10 +2,11 @@
 # ruff: noqa: F403, F405
 from hephaestus.automation.review_audit import is_clean_go_review
 
+from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
 
-class PrReviewGate(_PrReviewHost):
+class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
     """Own bounded review iteration, label proofs, and GO/NO-GO routing."""
 
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
@@ -22,12 +23,8 @@ class PrReviewGate(_PrReviewHost):
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
 
-        if payload.pop("scope_retraction_failure", False):
-            logger.warning(
-                "pr_review:%d: refusing to publish incomplete scope retraction",
-                item.issue,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
+        if scope_failure := self._scope_retraction_failure(item):
+            return scope_failure
 
         if payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF) and not (
             payload.get(_REPLY_HANDOFF_RECEIPT) or payload.get(_REPLY_HANDOFF_RECEIPT_ERROR)
@@ -198,6 +195,9 @@ class PrReviewGate(_PrReviewHost):
                 ctx.budget("pr_review_iter"),
                 ctx.budget("pr_review_hard"),
             )
+
+        if scope_outcome := self._handle_scope_expansions(item, ctx, audit):
+            return scope_outcome
 
         # A fresh total open-thread count after the address/push leg is the
         # only thread fact that can downgrade a GO decision.

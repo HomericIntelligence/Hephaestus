@@ -166,6 +166,20 @@ def test_worker_side_modules_never_import_github_api_or_pr_manager() -> None:
     )
 
 
+def test_scope_expansion_adapter_does_not_mix_github_api_module_and_star_import() -> None:
+    """Keep direct GitHub imports distinct from the transport star namespace."""
+    path = _AUTOMATION / "pipeline_github_scope_expansion.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    module_imports = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "hephaestus.automation.github_api" not in module_imports
+
+
 def test_github_worker_boundary_is_closed_frozen_and_non_callable() -> None:
     """Requests cannot smuggle coordinator state, callables, or mutable kwargs."""
     request_types = (
