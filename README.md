@@ -56,8 +56,10 @@ pytest, ruff, and mypy):
   automation dependency groups for contributors.
 - `uv sync --all-groups --all-extras --locked` — installs the complete locked
   dependency surface used by CI dependency and license checks.
-- Individual extras (e.g. `[github]`, `[schema]`) are available for users who
-  only need one integration.
+- The `[github]` extra is an empty compatibility extra. GitHub commands use the
+  external `gh` command and this extra installs no Python dependency.
+- Individual dependency-bearing extras (e.g. `[nats]`, `[schema]`) are available
+  for users who only need one integration.
 
 ### Development setup
 
