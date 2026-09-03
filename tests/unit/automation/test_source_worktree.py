@@ -126,6 +126,86 @@ def test_implementation_rebinds_when_physical_branch_is_wrong(tmp_path: Path) ->
     assert _git(rebound.cwd, "symbolic-ref", "HEAD") == "refs/heads/expected-implementation-branch"
 
 
+def test_implementation_rebinds_clean_stale_branch_to_exact_revision(
+    tmp_path: Path,
+) -> None:
+    """A clean implementation lane moves its branch to the requested revision."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    original = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="expected-implementation-branch",
+    )
+
+    rebound = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="expected-implementation-branch",
+    )
+
+    physical_revision = _git(rebound.cwd, "rev-parse", "HEAD")
+    assert rebound.cwd == original.cwd
+    assert rebound.generation == original.generation + 1
+    assert physical_revision == second
+    assert rebound.revision == physical_revision
+    assert _git(rebound.cwd, "symbolic-ref", "HEAD") == "refs/heads/expected-implementation-branch"
+
+
+def test_implementation_preserves_branch_held_by_another_worktree(
+    tmp_path: Path,
+) -> None:
+    """A branch that another worktree holds causes a safe typed failure."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    original = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="expected-implementation-branch",
+    )
+    _git(repo, "worktree", "remove", str(original.cwd))
+    holder = tmp_path / "branch-holder"
+    _git(repo, "worktree", "add", str(holder), "expected-implementation-branch")
+
+    with pytest.raises(
+        SourceWorkspaceError,
+        match="source workspace branch could not be synchronized safely",
+    ):
+        manager.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="expected-implementation-branch",
+        )
+
+    assert _git(holder, "rev-parse", "HEAD") == first
+    assert not original.cwd.exists()
+
+
+def test_implementation_preserves_inactive_unowned_branch(tmp_path: Path) -> None:
+    """A branch without a lane receipt cannot be reset during preparation."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    _git(repo, "branch", "unowned-implementation-branch", first)
+
+    with pytest.raises(
+        SourceWorkspaceError,
+        match="source workspace branch is not owned by this lane",
+    ):
+        manager.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="unowned-implementation-branch",
+        )
+
+    assert _git(repo, "rev-parse", "unowned-implementation-branch") == first
+    assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+
+
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:
     """A review lane created with the current deterministic name is removable."""
     repo, _, second = _repository(tmp_path)

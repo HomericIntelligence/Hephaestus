@@ -203,7 +203,33 @@ class SourceWorkspaceManager:
                 and physical_checkout_matches
             )
             if not can_reuse and not path_already_at_target:
-                self._replace_worktree(path, target, branch=None if desired_detached else branch)
+                owns_branch = (
+                    old is not None
+                    and old.path.resolve() == path.resolve()
+                    and not old.detached
+                    and old.branch == branch
+                )
+                self._replace_worktree(
+                    path,
+                    target,
+                    branch=None if desired_detached else branch,
+                    owns_branch=owns_branch,
+                )
+            verified_revision = self._head_revision(path)
+            verified_branch = self._head_branch(path)
+            verified_checkout_matches = (
+                verified_branch is None
+                if desired_detached
+                else verified_branch == f"refs/heads/{branch}"
+            )
+            if verified_revision != target:
+                raise SourceWorkspaceError(
+                    "source workspace could not reach the requested revision"
+                )
+            if not verified_checkout_matches:
+                raise SourceWorkspaceError(
+                    "source workspace checkout does not match the requested lane"
+                )
             receipt = SourceWorkspaceReceipt(
                 repository=self.repository,
                 repository_identity=self.repository_identity,
@@ -211,18 +237,18 @@ class SourceWorkspaceManager:
                 item_number=item_number,
                 lane=lane,
                 path=path.resolve(),
-                revision=target,
+                revision=verified_revision,
                 generation=generation,
                 detached=desired_detached,
                 branch=None if desired_detached else branch,
                 obligations=old.obligations if old is not None else (),
             )
-            self._write_receipt(receipt)
             binding = self._binding(receipt)
             try:
                 validate_workspace_binding(binding)
             except WorkspaceBindingError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
+            self._write_receipt(receipt)
             return binding
 
     @contextmanager
@@ -296,8 +322,28 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError("guard branch compare-and-swap failed")
         return new
 
-    def _replace_worktree(self, path: Path, revision: str, branch: str | None) -> None:
+    def _replace_worktree(
+        self,
+        path: Path,
+        revision: str,
+        branch: str | None,
+        *,
+        owns_branch: bool,
+    ) -> None:
         with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+            exists = branch is not None and (
+                _git(
+                    self.repo_root,
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{branch}",
+                    check=False,
+                ).returncode
+                == 0
+            )
+            if exists and not owns_branch:
+                raise SourceWorkspaceError("source workspace branch is not owned by this lane")
             if path.exists():
                 removed = _git(self.repo_root, "worktree", "remove", str(path), check=False)
                 if removed.returncode:
@@ -306,23 +352,16 @@ class SourceWorkspaceManager:
             if branch is None:
                 args.extend(["--detach", str(path), revision])
             else:
-                exists = (
-                    _git(
-                        self.repo_root,
-                        "show-ref",
-                        "--verify",
-                        "--quiet",
-                        f"refs/heads/{branch}",
-                        check=False,
-                    ).returncode
-                    == 0
-                )
                 if exists:
-                    args.extend([str(path), branch])
+                    args.extend(["-B", branch, str(path), revision])
                 else:
                     args.extend(["-b", branch, str(path), revision])
             added = _git(self.repo_root, *args, check=False)
             if added.returncode:
+                if branch is not None and exists:
+                    raise SourceWorkspaceError(
+                        "source workspace branch could not be synchronized safely"
+                    )
                 raise SourceWorkspaceError(added.stderr.strip() or "worktree creation failed")
 
     @staticmethod
