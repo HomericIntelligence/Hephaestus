@@ -741,9 +741,9 @@ Several plugin-provided skills define workflow safety checks for agent actions.
 These are workflow safety controls, not GitHub required approvals or merge
 gates:
 
-- `/athena:myrmidon-swarm`: present the plan and ask for approval when the host
-  or task requires it. After required approvals are in place, begin safe
-  in-scope work.
+- `/athena:myrmidon-swarm`: If host policy or task scope requires approval,
+  present the plan and ask for approval. Start safe work that is in scope only
+  after you obtain all required approvals.
 - `/athena:skill-advisor` — invoked at the start of any substantive task
   with `allowed-tools: []`, so it can route but never act autonomously.
 - `/athena:finish-branch` and `/athena:code-review` — explicit confirm
