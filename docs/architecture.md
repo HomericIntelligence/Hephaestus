@@ -1026,12 +1026,14 @@ Architectural contract:
 - Implementation never writes `state:implementation-go`.
 - Missing approval returns to plan review; unsafe or exhausted work terminates
   without approval.
-- A reused dirty writer carries its registered path, branch, head, status, and
-  diff to `DIRTY_DECISION_WAIT`. Only an exact final nonempty `COMMIT` or
-  `STASH` line can request recovery. The host confirms the open unarmed
-  writable PR and branch ownership. The Git worker then checks the registered
-  identity, local and remote heads, and dirty snapshot before it changes the
-  worktree. `COMMIT` creates one
+- A reused dirty writer carries its registered path, branch, head, status,
+  diff, index identity, tracked-content identity, and untracked-content
+  identity to `DIRTY_DECISION_WAIT`. The content identities use NUL-delimited
+  Git path lists and length-delimited file bytes. Only an exact final nonempty
+  `COMMIT` or `STASH` line can request recovery. The host confirms the open
+  unarmed writable PR and branch ownership. The Git worker then checks the
+  registered identity, local and remote heads, and dirty snapshot before it
+  changes the worktree. `COMMIT` creates one
   signed DCO commit with the captured head as its direct parent and publishes
   it with an exact lease. `STASH` includes untracked files and does not change
   either branch head. A clean-tree and head postflight must succeed before the

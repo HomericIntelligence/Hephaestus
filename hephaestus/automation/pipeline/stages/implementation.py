@@ -227,6 +227,23 @@ _REPLY_JOURNAL_APPEND_RESULT = "_reply_journal_append_result"
 _REPLY_HANDOFF_RESULT = "_reply_handoff_result"
 _SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
 _REBASE_HEAD_DRIFT = "rebase_head_drift"
+_DIRTY_CONTENT_SNAPSHOT_KEYS = {
+    "index_sha256",
+    "worktree_sha256",
+    "untracked_sha256",
+}
+
+
+def _is_valid_dirty_content_snapshot(value: object) -> bool:
+    """Return whether a dirty content snapshot has the closed digest schema."""
+    return (
+        isinstance(value, dict)
+        and set(value) == _DIRTY_CONTENT_SNAPSHOT_KEYS
+        and all(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            for digest in value.values()
+        )
+    )
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -615,9 +632,11 @@ class ImplementationStage(Stage):
             )
             captured_branch = item.payload.get("worktree_branch")
             captured_head = item.payload.get("worktree_head_sha")
+            captured_content = item.payload.get("worktree_content_snapshot")
             if (
                 captured_branch != item.branch
                 or not is_full_commit_sha(captured_head)
+                or not _is_valid_dirty_content_snapshot(captured_content)
                 or expected_remote_head != captured_head
                 or not item.worktree
             ):
@@ -641,6 +660,7 @@ class ImplementationStage(Stage):
                         "expected_remote_head": expected_remote_head,
                         "status": item.payload.get("worktree_status", ""),
                         "diff": item.payload.get("worktree_diff", ""),
+                        "content_snapshot": captured_content,
                         "agent": agent_provider(ctx),
                         "agent_model": stage_model(ctx, "implementer", implementer_model),
                         "git_message_timeout": stage_timeout(
@@ -740,6 +760,7 @@ class ImplementationStage(Stage):
         item.payload["_impl_source_revision"] = current_head
         item.payload["rebase_expected_remote_sha"] = current_head
         item.payload["worktree_dirty"] = False
+        item.payload.pop("worktree_content_snapshot", None)
         next_state = item.payload.pop("dirty_recovery_next_state", None)
         if not isinstance(next_state, str) or next_state not in _STEP_HANDLER_NAMES:
             return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_continuation_invalid")
@@ -1903,6 +1924,7 @@ class ImplementationStage(Stage):
                 "worktree_dirty",
                 "worktree_status",
                 "worktree_diff",
+                "worktree_content_snapshot",
                 "worktree_branch",
                 "worktree_head_sha",
             ):
@@ -1916,6 +1938,7 @@ class ImplementationStage(Stage):
             "worktree_dirty",
             "worktree_status",
             "worktree_diff",
+            "worktree_content_snapshot",
             "worktree_branch",
             "worktree_head_sha",
         ):
@@ -1929,6 +1952,7 @@ class ImplementationStage(Stage):
             if item.payload["worktree_dirty"]:
                 item.payload["worktree_branch"] = value.get("branch")
                 item.payload["worktree_head_sha"] = value.get("head_sha")
+                item.payload["worktree_content_snapshot"] = value.get("content_snapshot")
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             requires_fresh_direct_reservation = (
                 not bool(item.payload.get("existing_pr")) and direct_base_sha is not None

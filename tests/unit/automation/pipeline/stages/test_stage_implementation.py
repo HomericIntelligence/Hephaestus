@@ -60,6 +60,12 @@ from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
+_DIRTY_CONTENT_SNAPSHOT = {
+    "index_sha256": "1" * 64,
+    "worktree_sha256": "2" * 64,
+    "untracked_sha256": "3" * 64,
+}
+
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
     """Drive a stage through the canonical FakeWorkerPool until an outcome."""
@@ -1620,7 +1626,14 @@ class TestWorktreeAndAdvise:
         ctx = make_ctx()
         item = make_work_item(issue=1, state="WORKTREE_WAIT")
         result = JobResult(
-            ok=True, value={"path": "/tmp/wt", "dirty": True, "status": "M x.py", "diff": "+x"}
+            ok=True,
+            value={
+                "path": "/tmp/wt",
+                "dirty": True,
+                "status": "M x.py",
+                "diff": "+x",
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            },
         )
 
         stage.on_job_done(item, result, ctx)
@@ -1629,6 +1642,7 @@ class TestWorktreeAndAdvise:
         assert item.payload["worktree_dirty"] is True
         assert item.payload["worktree_status"] == "M x.py"
         assert item.payload["worktree_diff"] == "+x"
+        assert item.payload["worktree_content_snapshot"] == _DIRTY_CONTENT_SNAPSHOT
 
     def test_failed_worktree_result_clears_all_stale_dirty_identity_metadata(
         self, make_ctx: Any, make_work_item: Any
@@ -1641,6 +1655,7 @@ class TestWorktreeAndAdvise:
                 "worktree_dirty": True,
                 "worktree_status": "M old.py",
                 "worktree_diff": "+old",
+                "worktree_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                 "worktree_branch": "old-branch",
                 "worktree_head_sha": "a" * 40,
             }
@@ -1652,6 +1667,7 @@ class TestWorktreeAndAdvise:
             "worktree_dirty",
             "worktree_status",
             "worktree_diff",
+            "worktree_content_snapshot",
             "worktree_branch",
             "worktree_head_sha",
         ):
@@ -1754,6 +1770,7 @@ class TestWorktreeAndAdvise:
                 "worktree_dirty": True,
                 "worktree_status": " M changed.py",
                 "worktree_diff": "+changed",
+                "worktree_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                 "worktree_branch": "1-auto-impl",
                 "worktree_head_sha": "a" * 40,
             }
@@ -1765,6 +1782,7 @@ class TestWorktreeAndAdvise:
         assert "worktree_dirty" not in item.payload
         assert "worktree_status" not in item.payload
         assert "worktree_diff" not in item.payload
+        assert "worktree_content_snapshot" not in item.payload
         assert "worktree_branch" not in item.payload
         assert "worktree_head_sha" not in item.payload
 
@@ -1912,6 +1930,7 @@ class TestWorktreeAndAdvise:
                 "worktree_head_sha": "a" * 40,
                 "worktree_status": " M x.py",
                 "worktree_diff": "+x",
+                "worktree_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
             }
         )
 
@@ -1929,6 +1948,7 @@ class TestWorktreeAndAdvise:
         assert recovery.on_done_state == "DIRTY_RECOVERY_WAIT"
         assert recovery.job.kwargs["pre_action_head"] == "a" * 40
         assert recovery.job.kwargs["expected_remote_head"] == "a" * 40
+        assert recovery.job.kwargs["content_snapshot"] == _DIRTY_CONTENT_SNAPSHOT
 
     @pytest.mark.parametrize("output", ["commit", "COMMIT now", "STASH\nextra", ""])
     def test_dirty_decision_rejects_any_nonexact_final_action(

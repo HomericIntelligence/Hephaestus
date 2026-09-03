@@ -18,6 +18,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -102,6 +103,92 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
+_DIRTY_CONTENT_SNAPSHOT_KEYS = frozenset({"index_sha256", "worktree_sha256", "untracked_sha256"})
+
+
+def _path_content_identity(root: Path, paths_output: str, *, seed: str = "") -> str:
+    """Hash NUL-delimited paths and their current file-system content."""
+    digest = hashlib.sha256()
+    encoded_seed = seed.encode("utf-8", errors="surrogateescape")
+    digest.update(b"S")
+    digest.update(len(encoded_seed).to_bytes(8, "big"))
+    digest.update(encoded_seed)
+    for relative in (value for value in paths_output.split("\0") if value):
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError("dirty snapshot contains an unsafe path")
+        encoded_path = os.fsencode(relative)
+        digest.update(len(encoded_path).to_bytes(8, "big"))
+        digest.update(encoded_path)
+        path = root / relative_path
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            digest.update(b"M")
+            continue
+        digest.update(f"{stat.S_IFMT(metadata.st_mode):o}\0".encode())
+        if stat.S_ISLNK(metadata.st_mode):
+            digest.update(b"L")
+            target = os.fsencode(os.readlink(path))
+            digest.update(len(target).to_bytes(8, "big"))
+            digest.update(target)
+        elif stat.S_ISREG(metadata.st_mode):
+            digest.update(b"F")
+            digest.update(metadata.st_size.to_bytes(8, "big"))
+            with path.open("rb") as stream:
+                while block := stream.read(1024 * 1024):
+                    digest.update(block)
+        else:
+            digest.update(b"O")
+            digest.update(f"{metadata.st_size}:{metadata.st_rdev}".encode())
+    return digest.hexdigest()
+
+
+def _dirty_worktree_content_snapshot(worktree: Path, *, timeout: int) -> dict[str, str]:
+    """Return NUL-safe identities for index, tracked, and untracked content."""
+    index = git_utils.run(
+        ["git", "ls-files", "--stage", "-z"], cwd=worktree, timeout=timeout
+    ).stdout
+    tracked_paths = git_utils.run(
+        ["git", "diff", "--no-ext-diff", "--name-only", "-z"],
+        cwd=worktree,
+        timeout=timeout,
+    ).stdout
+    tracked_diff = git_utils.run(
+        ["git", "diff", "--no-ext-diff", "--binary", "--full-index"],
+        cwd=worktree,
+        timeout=timeout,
+    ).stdout
+    untracked_paths = git_utils.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=worktree,
+        timeout=timeout,
+    ).stdout
+    if not all(
+        isinstance(value, str) for value in (index, tracked_paths, tracked_diff, untracked_paths)
+    ):
+        raise RuntimeError("dirty worktree content snapshot is unavailable")
+    return {
+        "index_sha256": hashlib.sha256(index.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        "worktree_sha256": _path_content_identity(
+            worktree,
+            tracked_paths,
+            seed=tracked_diff,
+        ),
+        "untracked_sha256": _path_content_identity(worktree, untracked_paths),
+    }
+
+
+def _valid_dirty_content_snapshot(value: object) -> TypeGuard[dict[str, str]]:
+    """Return whether a dirty snapshot has the closed digest schema."""
+    return (
+        isinstance(value, dict)
+        and set(value) == _DIRTY_CONTENT_SNAPSHOT_KEYS
+        and all(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            for digest in value.values()
+        )
+    )
 
 
 @contextmanager
@@ -3841,6 +3928,10 @@ class WorkerPool:
                 )
                 status = status_result.stdout or ""
                 diff = diff_result.stdout or ""
+                content_snapshot = _dirty_worktree_content_snapshot(
+                    worktree_path,
+                    timeout=timeout_s,
+                )
             elif sync_to_remote and branch_name:
                 self._sync_worktree_to_remote_branch(
                     worktree_path,
@@ -3877,7 +3968,11 @@ class WorkerPool:
                     error="dirty worktree identity does not match its requested branch",
                     value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
                 )
-            value.update(branch=observed_branch, head_sha=observed_head)
+            value.update(
+                branch=observed_branch,
+                head_sha=observed_head,
+                content_snapshot=content_snapshot,
+            )
         if base_sha is not None:
             value["direct_scope_reservation"] = {
                 "branch": branch_name,
@@ -4044,6 +4139,7 @@ class WorkerPool:
         expected_remote_head = str(job.kwargs.get("expected_remote_head") or "")
         expected_status = str(job.kwargs.get("status") or "")
         expected_diff = str(job.kwargs.get("diff") or "")
+        expected_content_snapshot = job.kwargs.get("content_snapshot")
         issue_number = job.kwargs.get("issue_number")
         receipt: dict[str, object] = {
             "outcome": "failed",
@@ -4071,6 +4167,7 @@ class WorkerPool:
             or not branch
             or not _is_full_commit_sha(pre_action_head)
             or not _is_full_commit_sha(expected_remote_head)
+            or not _valid_dirty_content_snapshot(expected_content_snapshot)
             or isinstance(issue_number, bool)
             or not isinstance(issue_number, int)
         ):
@@ -4124,6 +4221,12 @@ class WorkerPool:
                 return fail("worktree_clean", "captured dirty worktree is now clean")
             if status != expected_status or diff != expected_diff:
                 return fail("worktree_content_drift", "dirty snapshot changed before recovery")
+            content_snapshot = _dirty_worktree_content_snapshot(
+                worktree,
+                timeout=job.timeout_s,
+            )
+            if content_snapshot != expected_content_snapshot:
+                return fail("worktree_content_drift", "dirty content changed before recovery")
             remote_head = self._read_remote_branch_head(
                 worktree,
                 remote="origin",
@@ -4138,6 +4241,14 @@ class WorkerPool:
                 return fail("remote_head_drift", "remote head does not match captured local head")
 
             if action == "COMMIT":
+                if (
+                    _dirty_worktree_content_snapshot(worktree, timeout=job.timeout_s)
+                    != expected_content_snapshot
+                ):
+                    return fail(
+                        "worktree_content_drift",
+                        "dirty content changed at the commit boundary",
+                    )
                 changed = self._commit_if_changes_with_controlled_signing(
                     job,
                     (issue_number, worktree, str(job.kwargs.get("agent") or "claude")),
@@ -4200,6 +4311,14 @@ class WorkerPool:
                     log_errors=False,
                     timeout=job.timeout_s,
                 ).stdout.strip()
+                if (
+                    _dirty_worktree_content_snapshot(worktree, timeout=job.timeout_s)
+                    != expected_content_snapshot
+                ):
+                    return fail(
+                        "worktree_content_drift",
+                        "dirty content changed at the stash boundary",
+                    )
                 message = f"hephaestus dirty recovery issue #{issue_number}"[:120]
                 git_utils.run(
                     ["git", "stash", "push", "--include-untracked", "-m", message],
