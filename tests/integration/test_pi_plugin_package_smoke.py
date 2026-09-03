@@ -20,7 +20,6 @@ from hephaestus.agents.pi_plugins import (
 @pytest.mark.nightly
 def test_catalog_pinned_packages_install_and_preflight(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     require_pi_package_smoke: bool,
 ) -> None:
     """A compatible Pi preflight loads packages without ambient extensions."""
@@ -31,8 +30,9 @@ def test_catalog_pinned_packages_install_and_preflight(
     assert shutil.which("pi") is not None, "catalog-pinned Pi CLI is required"
     cwd = tmp_path / "repo"
     cwd.mkdir()
+    pi_dir = tmp_path / "pi-agent"
     env = dict(os.environ)
-    env["PI_CODING_AGENT_DIR"] = str(tmp_path / "pi-agent")
+    env["PI_CODING_AGENT_DIR"] = str(tmp_path / "poisoned-ambient-profile")
 
     result = subprocess.run(
         [
@@ -42,6 +42,8 @@ def test_catalog_pinned_packages_install_and_preflight(
             "--no-approve",
             "--timeout",
             "180",
+            "--pi-dir",
+            str(pi_dir),
             "--json",
         ],
         cwd=cwd,
@@ -61,7 +63,6 @@ def test_catalog_pinned_packages_install_and_preflight(
     # scope root (pi_dir/npm/node_modules/<identity>), not `npm root -g`.
     # Verify the exact roots the runtime preflight will rely on, using the
     # same inventory contract as preflight_pi_environment itself.
-    pi_dir = Path(env["PI_CODING_AGENT_DIR"])
     inventory = inspect_pi_package_inventory(
         cwd,
         load_pi_package_catalog(),
@@ -80,8 +81,6 @@ def test_catalog_pinned_packages_install_and_preflight(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
-
     preflight = preflight_pi_environment(cwd, pi_dir=pi_dir, timeout=180)
 
     assert preflight.ready is True, preflight.remediation_message()
@@ -131,11 +130,19 @@ def test_incompatible_real_pi_fails_before_loading_extensions(
     cwd = tmp_path / "repo"
     cwd.mkdir()
     env = dict(os.environ)
-    env["PI_CODING_AGENT_DIR"] = str(pi_dir)
+    env["PI_CODING_AGENT_DIR"] = str(tmp_path / "poisoned-ambient-profile")
     env["PATH"] = str(prefix / "bin") + os.pathsep + env.get("PATH", "")
 
     result = subprocess.run(
-        [command, "--global", "--yes", "--no-approve", "--json"],
+        [
+            command,
+            "--global",
+            "--yes",
+            "--no-approve",
+            "--pi-dir",
+            str(pi_dir),
+            "--json",
+        ],
         cwd=cwd,
         env=env,
         text=True,

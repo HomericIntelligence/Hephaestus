@@ -265,6 +265,12 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         "literal-true",
     ),
     _child(
+        "NPM_CONFIG_PACKAGE_LOCK",
+        "Disable package-lock generation in pinned Git packages",
+        "hephaestus.agents.pi_plugins._package_install_env",
+        "literal-false",
+    ),
+    _child(
         "PI_TELEMETRY",
         "Disable Pi telemetry",
         "hephaestus.config.child_environments.build_pi_child_env",
@@ -371,6 +377,8 @@ def validate_environment_value(spec: EnvVarSpec, value: str) -> bool:
         return value == "1"
     if rule == "literal-true":
         return value == "true"
+    if rule == "literal-false":
+        return value == "false"
     if rule == "cat-or-empty":
         return value in {"", "cat"}
     raise ValueError(f"unknown environment validation rule: {rule}")

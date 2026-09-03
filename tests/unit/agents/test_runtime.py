@@ -1925,6 +1925,7 @@ def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
     monkeypatch.setenv("PI_TELEMETRY", "1")
     monkeypatch.setenv("PI_SKIP_VERSION_CHECK", "0")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", "/operator/pi-agent")
+    monkeypatch.setenv("NPM_CONFIG_PACKAGE_LOCK", "true")
     monkeypatch.setenv("TMPDIR", "/untrusted-temp")
     monkeypatch.setenv("TMP", "/untrusted-temp")
     monkeypatch.setenv("TEMP", "/untrusted-temp")
@@ -1934,6 +1935,7 @@ def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
     assert env["PI_TELEMETRY"] == "0"
     assert env["PI_SKIP_VERSION_CHECK"] == "1"
     assert "PI_CODING_AGENT_DIR" not in env
+    assert "NPM_CONFIG_PACKAGE_LOCK" not in env
     for name in (
         "GH_TOKEN",
         "GITHUB_TOKEN",

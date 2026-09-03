@@ -77,6 +77,12 @@ def test_reader_and_writer_authorization_is_exact() -> None:
         "GH_TRACE_ID", "hephaestus.config.child_environments.with_correlation_id"
     )
     assert not writer_is_authorized("GH_TRACE_ID", "with_correlation_id")
+    assert writer_is_authorized(
+        "NPM_CONFIG_PACKAGE_LOCK", "hephaestus.agents.pi_plugins._package_install_env"
+    )
+    assert not writer_is_authorized(
+        "NPM_CONFIG_PACKAGE_LOCK", "hephaestus.config.child_environments.build_pi_child_env"
+    )
     assert not reader_is_authorized("HEPH_GH_TIMEOUT", "anything")
 
 
@@ -90,6 +96,7 @@ def test_reader_and_writer_authorization_is_exact() -> None:
         ("GIT_CONFIG_NOSYSTEM", "1", "true"),
         ("GIT_TERMINAL_PROMPT", "0", "1"),
         ("NPM_CONFIG_IGNORE_SCRIPTS", "true", "1"),
+        ("NPM_CONFIG_PACKAGE_LOCK", "false", "true"),
     ],
 )
 def test_registry_validation_rules_are_executable(name: str, valid: str, invalid: str) -> None:
