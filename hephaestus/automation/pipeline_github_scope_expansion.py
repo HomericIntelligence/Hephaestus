@@ -8,7 +8,12 @@ import subprocess
 from typing import Any
 from urllib.parse import urlsplit
 
-import hephaestus.automation.github_api as github_api
+from hephaestus.automation.github_api import (
+    _body_file as github_body_file,
+    gh_call as direct_gh_call,
+    scope_expansion_issue_owner_query,
+    strip_null_bytes,
+)
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *  # noqa: F403
@@ -28,7 +33,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         owner, name = self._owner_name()
         issues: list[dict[str, Any]] = []
         for page_number in range(1, 101):
-            result = github_api.gh_call(
+            result = direct_gh_call(
                 [
                     "api",
                     "--method",
@@ -70,7 +75,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
             ):
                 raise RuntimeError("marker-matched issue identity is malformed")
             proof = self._graphql(
-                github_api.scope_expansion_issue_owner_query(owner, name, issue_number),
+                scope_expansion_issue_owner_query(owner, name, issue_number),
                 number=issue_number,
             )
             if proof.get("body") != body:
@@ -99,12 +104,12 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
                     self._create_label(label)
                     existing.add(label)
         try:
-            with github_api._body_file(body) as body_path:
+            with github_body_file(body) as body_path:
                 cmd = [
                     "issue",
                     "create",
                     "--title",
-                    github_api.strip_null_bytes(title),
+                    strip_null_bytes(title),
                     "--body-file",
                     body_path,
                 ]
@@ -135,7 +140,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         expected_repository_path = f"/repos/{owner}/{name}".casefold()
         associations: set[int] = set()
         for page_number in range(1, 101):
-            result = github_api.gh_call(
+            result = direct_gh_call(
                 [
                     "api",
                     "--method",
@@ -207,7 +212,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         branch = issue_auto_impl_branch_name(issue_number)
         associations: set[int] = set()
         for page_number in range(1, 101):
-            result = github_api.gh_call(
+            result = direct_gh_call(
                 [
                     "api",
                     "--method",
@@ -306,7 +311,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         if descendant_sha != "main" and re.fullmatch(r"[0-9a-f]{40}", descendant_sha) is None:
             raise ValueError("commit comparison requires main or a full lowercase descendant SHA")
         owner, name = self._owner_name()
-        result = github_api.gh_call(
+        result = direct_gh_call(
             [
                 "api",
                 "--method",
@@ -349,8 +354,8 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
                 raise RuntimeError("blocking review id is unavailable")
             return review_id
         request_body = json.dumps({"event": "COMMENT", "body": body})
-        with github_api._body_file(request_body) as input_path:
-            result = github_api.gh_call(
+        with github_body_file(request_body) as input_path:
+            result = direct_gh_call(
                 [
                     "api",
                     "-X",
