@@ -6,6 +6,7 @@ patching the ``pr_review_core`` seams the cores actually bind.
 """
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,12 @@ from hephaestus.automation.pr_review_core import (
     budget_diff_for_prompt,
     gather_impl_review_context,
     run_pr_review_analysis,
+)
+from hephaestus.automation.prompts.pr_review import (
+    MAX_PR_REVIEW_RENDERED_CHARS,
+    _compact_host_verifications_json,
+    build_bounded_pr_review_analysis_prompt,
+    build_bounded_review_validation_prompt,
 )
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.github.client import PromptTooLongError
@@ -310,7 +317,7 @@ class TestRunPrReviewAnalysis:
 
         with (
             patch(
-                "hephaestus.automation.pr_review_core.get_pr_review_analysis_prompt",
+                "hephaestus.automation.pr_review_core.build_bounded_pr_review_analysis_prompt",
                 side_effect=_fake_prompt,
             ),
             patch("hephaestus.automation.pr_review_core.run_agent_text") as mock_agent,
@@ -546,6 +553,207 @@ class TestRunPrReviewAnalysis:
     def test_prompt_too_long_not_confused_with_usage_cap(self) -> None:
         """PromptTooLongError is a distinct type from ClaudeUsageCapError."""
         assert issubclass(PromptTooLongError, RuntimeError)
+
+
+def test_bounded_review_prompt_preserves_receipts_without_exceeding_agent_limit() -> None:
+    """Large diffs and many host receipts cannot overflow a direct reviewer request."""
+    host_receipts = json.dumps(
+        [
+            {
+                "argv": ["uv", "run", "pytest", f"tests/unit/test_{index}.py"],
+                "head_sha": "a" * 40,
+                "immutable_source": True,
+                "ok": True,
+                "status": "passed",
+                "stdout_tail": "s" * 4_000,
+                "stderr_tail": "e" * 4_000,
+            }
+            for index in range(35)
+        ]
+    )
+
+    prompt = build_bounded_pr_review_analysis_prompt(
+        pr_number=2755,
+        issue_number=2705,
+        pr_diff=_make_diff_file("large.py", 20_000),
+        issue_body="issue context",
+        host_verifications_json=host_receipts,
+    )
+
+    assert len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS
+    assert "[... host verification output truncated ...]" in prompt
+    assert "tests/unit/test_0.py" in prompt
+    assert "tests/unit/test_34.py" in prompt
+    assert "[... PR diff truncated ...]" in prompt
+
+
+def test_host_receipt_overflow_keeps_valid_identity_records() -> None:
+    """The overflow summary keeps one identity record for each receipt."""
+    receipts = [
+        {
+            "argv": [
+                "uv",
+                "run",
+                "pytest",
+                "-o",
+                "addopts=",
+                f"tests/unit/test_{index}_{'x' * 220}.py",
+                "-q",
+            ],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "failure_kind": "none",
+            "ok": True,
+            "platform": "darwin",
+            "status": "passed",
+            "stdout_tail": "s" * 4_000,
+            "stderr_tail": "e" * 4_000,
+        }
+        for index in range(240)
+    ]
+
+    compacted_json = _compact_host_verifications_json(json.dumps(receipts))
+    compacted = json.loads(compacted_json)
+
+    assert compacted["summary_policy"] == "host-receipt-digests-v1"
+    assert compacted["receipt_count"] == len(receipts)
+    identity_fields = [
+        "argv",
+        "head_sha",
+        "immutable_source",
+        "ok",
+        "status",
+        "platform",
+        "failure_kind",
+    ]
+    assert compacted["identity_fields"] == identity_fields
+    assert len(compacted["receipt_digests"]) == len(receipts)
+    assert all(isinstance(digest, str) and digest for digest in compacted["receipt_digests"])
+
+
+def test_bounded_review_prompt_caps_extreme_receipt_count() -> None:
+    """The digest summary keeps an extreme receipt stream under the prompt cap."""
+    receipts = [
+        {
+            "argv": ["uv", "run", "pytest", f"tests/unit/test_{index}_{'x' * 220}.py"],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "failure_kind": "none",
+            "ok": True,
+            "platform": "darwin",
+            "status": "passed",
+            "stdout_tail": "s" * 4_000,
+            "stderr_tail": "e" * 4_000,
+        }
+        for index in range(1_000)
+    ]
+    host_verifications_json = json.dumps(receipts)
+
+    compacted = json.loads(_compact_host_verifications_json(host_verifications_json))
+    prompt = build_bounded_pr_review_analysis_prompt(
+        pr_number=2755,
+        issue_number=2705,
+        host_verifications_json=host_verifications_json,
+    )
+
+    assert compacted["summary_policy"] == "host-receipt-digests-v1"
+    assert compacted["receipt_count"] == len(receipts)
+    assert len(compacted["receipt_digests"]) == len(receipts)
+    assert len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS
+
+
+def test_host_receipt_aggregate_summary_is_bounded_and_valid() -> None:
+    """The aggregate policy records count and identity for a very large stream."""
+    receipts = [
+        {
+            "argv": ["pytest", f"tests/unit/test_{index}.py"],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "ok": True,
+            "status": "passed",
+        }
+        for index in range(2_000)
+    ]
+
+    compacted = json.loads(_compact_host_verifications_json(json.dumps(receipts)))
+
+    assert compacted["summary_policy"] == "host-receipt-aggregate-v1"
+    assert compacted["receipt_count"] == len(receipts)
+    assert len(compacted["identity_sha256"]) == 64
+    assert len(json.dumps(compacted, separators=(",", ":"))) <= 64_000
+
+
+def test_host_receipt_summary_has_an_explicit_truncation_marker() -> None:
+    """A receipt summary tells the reviewer that detail is not complete."""
+    receipts = [
+        {
+            "argv": ["pytest", f"tests/unit/test_{index}_{'x' * 220}.py"],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "ok": True,
+            "status": "passed",
+        }
+        for index in range(1_000)
+    ]
+
+    compacted = json.loads(_compact_host_verifications_json(json.dumps(receipts)))
+
+    assert compacted["truncated"] is True
+    assert compacted["truncation_marker"] == "[... host verification receipts truncated ...]"
+
+
+def test_bounded_analysis_prompt_rejects_oversized_fixed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Required template content cannot bypass the final rendered limit."""
+    monkeypatch.setattr(
+        "hephaestus.automation.prompts.pr_review._render_pr_review_analysis_prompt",
+        lambda **_kwargs: "x" * (MAX_PR_REVIEW_RENDERED_CHARS + 1),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(
+            "pr_review_prompt_limit_exceeded: required prompt content exceeds 350000 characters"
+        ),
+    ):
+        build_bounded_pr_review_analysis_prompt(pr_number=1, issue_number=2)
+
+
+def test_bounded_validation_prompt_keeps_prior_comment_json_valid() -> None:
+    """A bounded validation prompt keeps every prior thread record parseable."""
+    prior_comments = json.dumps(
+        [
+            {
+                "thread_id": f"T{index}",
+                "path": "module.py",
+                "line": index + 1,
+                "body": "b" * 4_000,
+            }
+            for index in range(100)
+        ]
+    )
+
+    prompt = build_bounded_review_validation_prompt(
+        pr_number=1,
+        issue_number=2,
+        prior_comments_json=prior_comments,
+    )
+    match = re.search(
+        r"BEGIN_(?P<nonce>[0-9A-F]+)_PRIOR_COMMENTS\n(?P<body>.*?)\n"
+        r"END_(?P=nonce)_PRIOR_COMMENTS",
+        prompt,
+        re.DOTALL,
+    )
+
+    assert match is not None
+    try:
+        compacted = json.loads(match.group("body"))
+    except json.JSONDecodeError as error:
+        pytest.fail(f"prior comment context is not valid JSON: {error}")
+    assert len(compacted) == 100
+    assert compacted[0]["thread_id"] == "T0"
+    assert compacted[-1]["thread_id"] == "T99"
 
 
 class TestStructuralAuditNotProse:

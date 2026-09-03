@@ -46,7 +46,10 @@ from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
-from .prompts import get_pr_review_analysis_prompt
+from .prompts.pr_review import (
+    _budget_review_diff,
+    build_bounded_pr_review_analysis_prompt,
+)
 from .review_audit import ReviewAudit, parse_review_audit
 from .session_naming import AGENT_PR_REVIEWER
 
@@ -304,7 +307,7 @@ def run_pr_review_analysis(
 
     def _build_prompt(diff_override: str | None = None) -> str:
         diff_text = diff_override if diff_override is not None else context.get("pr_diff", "")
-        return get_pr_review_analysis_prompt(
+        return build_bounded_pr_review_analysis_prompt(
             pr_number=pr_number,
             issue_number=issue_number,
             pr_diff=diff_text,
@@ -335,11 +338,9 @@ def run_pr_review_analysis(
         try:
             parsed = _invoke_and_parse(prompt)
         except PromptTooLongError:
-            aggressive_diff = budget_diff_for_prompt(
+            aggressive_diff = _budget_review_diff(
                 context.get("pr_diff", ""),
-                max_chars=AGGRESSIVE_DIFF_BUDGET_CHARS,
-                composed_body_chars=len(context.get("issue_body", ""))
-                + len(context.get("advise_findings", "")),
+                max_chars=AGGRESSIVE_DIFF_BUDGET_CHARS - _PROMPT_FIXED_OVERHEAD_CHARS,
             )
             retry_prompt = _build_prompt(aggressive_diff)
             logger.warning(

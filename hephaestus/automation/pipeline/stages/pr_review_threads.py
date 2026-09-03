@@ -80,8 +80,8 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   ``implement`` budget on re-adoption. ``review_error_retries`` is reset by
   ``on_enter`` on each fresh implementation cycle.
 - Prompt functions (imported, never re-authored):
-  ``prompts/pr_review.py get_pr_review_analysis_prompt`` /
-  ``get_review_validation_prompt``.
+  ``prompts/pr_review.py build_bounded_pr_review_analysis_prompt`` /
+  ``build_bounded_review_validation_prompt``.
 - The structural audit is parsed IN-WORKER (carried as the review job's
   ``parse`` callable; symbol-scoped zero-I/O exemption mirrors plan_review's).
   REVIEW_WAIT clears all stale round-scoped payload at submission so a failed
