@@ -80,6 +80,10 @@ _LABEL_RANK = {
 _ISSUE_PLAN_STATE_LABELS = frozenset({STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO})
 
 
+class IssueClassificationError(ValueError):
+    """A permanent issue snapshot or state classification failure."""
+
+
 def read_pending_implementation_go_audit(
     github: Any, pr_number: int
 ) -> PendingImplementationGoAudit | None:
@@ -89,7 +93,7 @@ def read_pending_implementation_go_audit(
         return None
     receipt = reader(github, pr_number)
     if receipt is not None and not isinstance(receipt, PendingImplementationGoAudit):
-        raise TypeError("pending implementation-go audit receipt has invalid type")
+        raise IssueClassificationError("pending implementation-go audit receipt has invalid type")
     return receipt
 
 
@@ -245,7 +249,7 @@ def _get_state_label(labels: set[str]) -> str | None:
         return None
 
     if len(known_state_labels) > 1:
-        raise ValueError(f"contradictory state labels: {known_state_labels}")
+        raise IssueClassificationError(f"contradictory state labels: {known_state_labels}")
     return known_state_labels[0]
 
 
@@ -499,23 +503,23 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     """
     issue_data = github.gh_issue_json(issue_number)
     if not isinstance(issue_data, dict):
-        raise TypeError("issue snapshot must be a JSON object")
+        raise IssueClassificationError("issue snapshot must be a JSON object")
     if issue_data.get("number") != issue_number:
-        raise ValueError("issue snapshot number does not match the requested issue")
+        raise IssueClassificationError("issue snapshot number does not match the requested issue")
     state = issue_data.get("state")
     if not isinstance(state, str) or state.upper() not in {
         IssueState.OPEN.value,
         IssueState.CLOSED.value,
     }:
-        raise ValueError("issue snapshot state must be exactly OPEN or CLOSED")
+        raise IssueClassificationError("issue snapshot state must be exactly OPEN or CLOSED")
     raw_labels = issue_data.get("labels")
     if not isinstance(raw_labels, list):
-        raise ValueError("issue snapshot labels must be a list")
+        raise IssueClassificationError("issue snapshot labels must be a list")
     if any(
         not isinstance(label, dict) or not isinstance(label.get("name"), str)
         for label in raw_labels
     ):
-        raise ValueError("issue snapshot labels must contain string names")
+        raise IssueClassificationError("issue snapshot labels must contain string names")
     labels = {label["name"] for label in raw_labels if label["name"]}
     title = str(issue_data.get("title") or "")
     body = str(issue_data.get("body") or "")

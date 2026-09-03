@@ -34,6 +34,7 @@ from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
 from .coordinator_dispatch import ImplementationDispatcher
 from .coordinator_execution import ExecutionCoordinator
+from .coordinator_issue_classification import IssueClassificationCoordinator
 from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
@@ -79,6 +80,7 @@ _COORDINATOR_METRIC_NAMES = (
 
 class Coordinator(
     CoordinatorRuntime,
+    IssueClassificationCoordinator,
     SourceCoordinator,
     ImplementationDispatcher,
     ExecutionCoordinator,

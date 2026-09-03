@@ -20,6 +20,7 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/coordinator.py": 1_100,
     "hephaestus/automation/pipeline/coordinator_contract.py": 225,
     "hephaestus/automation/pipeline/coordinator_types.py": 500,
+    "hephaestus/automation/pipeline/coordinator_issue_classification.py": 125,
     "hephaestus/automation/pipeline/coordinator_runtime.py": 1_400,
     "hephaestus/automation/pipeline/coordinator_sources.py": 950,
     "hephaestus/automation/pipeline/coordinator_dispatch.py": 500,
@@ -46,6 +47,7 @@ _COLLABORATOR_MODULES = frozenset(
     {
         "coordinator_runtime",
         "coordinator_contract",
+        "coordinator_issue_classification",
         "coordinator_sources",
         "coordinator_dispatch",
         "pipeline_github_transport",
@@ -75,6 +77,7 @@ _COORDINATOR_COLLABORATORS = (
     "hephaestus/automation/pipeline/coordinator_runtime.py",
     "hephaestus/automation/pipeline/coordinator_execution.py",
     "hephaestus/automation/pipeline/coordinator_dispatch.py",
+    "hephaestus/automation/pipeline/coordinator_issue_classification.py",
     "hephaestus/automation/pipeline/coordinator_sources.py",
     "hephaestus/automation/pipeline/coordinator_learning.py",
 )

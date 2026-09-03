@@ -5,14 +5,13 @@ import uuid
 from collections import deque
 from collections.abc import Iterable
 from contextlib import suppress
-from dataclasses import replace
 from pathlib import Path
 
 import hephaestus.automation.issue_waves as issue_waves_mod
 import hephaestus.automation.pipeline.admission as _admission
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 from .coordinator_contract import _CoordinatorHost
 from .stages import StageGitHub
@@ -119,71 +118,55 @@ class SourceCoordinator(_CoordinatorHost):
                 return True
             github = self._ctx_for_repo(repo).github
             try:
-                facts = _seeding.seed_issue_from_github(number, github)
-                if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
-                    github.ensure_blocked_audit(number)
-                entry = _seeding.seed_entry_from_facts(facts)
-                if source.wave_lease is not None:
-                    entry = issue_waves_mod.wave_entry_from_facts(
-                        source.wave_lease,
-                        facts,
-                        entry,
-                        repo_root=Path(str(self._ctx_for_repo(repo).paths.repo_root)),
-                        org=self.config.org,
-                        repo=repo,
-                    )
-                scope_stages = self.config.scope.stages if self.config.scope is not None else None
-                if source.wave_lease is None or entry.stage is not ct.StageName.FINISHED:
-                    stage, reason, passed = self._scope_seed_decision(
-                        number, entry.stage, entry.reason, scope_stages
-                    )
-                    entry = replace(entry, stage=stage, reason=reason, passed=passed)
-                if entry.stage is None:
-                    logger.info("[%s] excluded: %s", repo, entry.reason)
-                    source.pending = None
-                    self._progress = True
-                    return True
-                new_item = self._entry_to_item(entry, repo)
-                if new_item.stage is ct.StageName.FINISHED and new_item.result is None:
-                    new_item.result = ct.ItemResult(
-                        passed=entry.passed,
-                        reason=entry.reason,
-                        final_stage=ct.StageName.FINISHED,
-                    )
-                self._restore_learning_intents(new_item, entry.stage, entry.reason)
-                if new_item.stage not in {
-                    ct.StageName.REPO,
-                    ct.StageName.FINISHED,
-                    ct.StageName.LEARNING,
-                }:
-                    self._pass_work_count += 1
-                if source.wave_lease is not None:
-                    new_item.payload[issue_waves_mod.WAVE_LEASE_PAYLOAD] = source.wave_lease
-                    if entry.non_code:
-                        if entry.stage is ct.StageName.FINISHED:
-                            new_item.payload[issue_waves_mod.WAVE_NON_CODE_PAYLOAD] = True
-                        else:
-                            new_item.payload[issue_waves_mod.WAVE_NON_CODE_INTENT_PAYLOAD] = {
-                                "reason": entry.reason,
-                                "extra_labels": list(entry.non_code_labels),
-                                "evidence_digest": entry.non_code_evidence_digest,
-                                "repository_revision": entry.non_code_repository_revision,
-                                "explanation": entry.non_code_explanation,
-                                "retired": entry.non_code_retired,
-                            }
-                if source.base_main_sha is not None:
-                    new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
-                if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
-                    source.pending = None
-                    source.seeded_count += 1
-                    self._progress = True
-                    return True
-                source.pending = metadata
-                return True
+                entry = self._classify_repo_issue_entry(repo, source, number, github)
             except Exception as exc:
-                logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
+                logger.warning("repo:%s: discovery source failed: %s", repo, exc)
                 self._record_repo_source_failure(repo, f"discovery failed: {exc}")
                 return False
+            if entry is None:
+                return True
+            if entry.stage is None:
+                logger.info("[%s] excluded: %s", repo, entry.reason)
+                source.pending = None
+                self._progress = True
+                return True
+            new_item = self._entry_to_item(entry, repo)
+            if new_item.stage is ct.StageName.FINISHED and new_item.result is None:
+                new_item.result = ct.ItemResult(
+                    passed=entry.passed,
+                    reason=entry.reason,
+                    final_stage=ct.StageName.FINISHED,
+                )
+            self._restore_learning_intents(new_item, entry.stage, entry.reason)
+            if new_item.stage not in {
+                ct.StageName.REPO,
+                ct.StageName.FINISHED,
+                ct.StageName.LEARNING,
+            }:
+                self._pass_work_count += 1
+            if source.wave_lease is not None:
+                new_item.payload[issue_waves_mod.WAVE_LEASE_PAYLOAD] = source.wave_lease
+                if entry.non_code:
+                    if entry.stage is ct.StageName.FINISHED:
+                        new_item.payload[issue_waves_mod.WAVE_NON_CODE_PAYLOAD] = True
+                    else:
+                        new_item.payload[issue_waves_mod.WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                            "reason": entry.reason,
+                            "extra_labels": list(entry.non_code_labels),
+                            "evidence_digest": entry.non_code_evidence_digest,
+                            "repository_revision": entry.non_code_repository_revision,
+                            "explanation": entry.non_code_explanation,
+                            "retired": entry.non_code_retired,
+                        }
+            if source.base_main_sha is not None:
+                new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
+            if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
+                source.pending = None
+                source.seeded_count += 1
+                self._progress = True
+                return True
+            source.pending = metadata
+            return True
 
     def _record_repo_source_failure(self, repo: str, reason: str) -> None:
         """Retain a bounded terminal failure after a detached cursor aborts."""
