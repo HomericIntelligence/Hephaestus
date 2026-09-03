@@ -6,6 +6,7 @@ patching the ``pr_review_core`` seams the cores actually bind.
 """
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,12 +15,15 @@ import pytest
 from hephaestus.automation.pr_review_core import (
     AGGRESSIVE_DIFF_BUDGET_CHARS,
     DEFAULT_DIFF_BUDGET_CHARS,
-    MAX_PR_REVIEW_RENDERED_CHARS,
-    _compact_host_verifications_json,
     budget_diff_for_prompt,
-    build_bounded_pr_review_analysis_prompt,
     gather_impl_review_context,
     run_pr_review_analysis,
+)
+from hephaestus.automation.prompts.pr_review import (
+    MAX_PR_REVIEW_RENDERED_CHARS,
+    _compact_host_verifications_json,
+    build_bounded_pr_review_analysis_prompt,
+    build_bounded_review_validation_prompt,
 )
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.github.client import PromptTooLongError
@@ -313,7 +317,7 @@ class TestRunPrReviewAnalysis:
 
         with (
             patch(
-                "hephaestus.automation.pr_review_core.get_pr_review_analysis_prompt",
+                "hephaestus.automation.pr_review_core.build_bounded_pr_review_analysis_prompt",
                 side_effect=_fake_prompt,
             ),
             patch("hephaestus.automation.pr_review_core.run_agent_text") as mock_agent,
@@ -677,6 +681,79 @@ def test_host_receipt_aggregate_summary_is_bounded_and_valid() -> None:
     assert compacted["receipt_count"] == len(receipts)
     assert len(compacted["identity_sha256"]) == 64
     assert len(json.dumps(compacted, separators=(",", ":"))) <= 64_000
+
+
+def test_host_receipt_summary_has_an_explicit_truncation_marker() -> None:
+    """A receipt summary tells the reviewer that detail is not complete."""
+    receipts = [
+        {
+            "argv": ["pytest", f"tests/unit/test_{index}_{'x' * 220}.py"],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "ok": True,
+            "status": "passed",
+        }
+        for index in range(1_000)
+    ]
+
+    compacted = json.loads(_compact_host_verifications_json(json.dumps(receipts)))
+
+    assert compacted["truncated"] is True
+    assert compacted["truncation_marker"] == "[... host verification receipts truncated ...]"
+
+
+def test_bounded_analysis_prompt_rejects_oversized_fixed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Required template content cannot bypass the final rendered limit."""
+    monkeypatch.setattr(
+        "hephaestus.automation.prompts.pr_review._render_pr_review_analysis_prompt",
+        lambda **_kwargs: "x" * (MAX_PR_REVIEW_RENDERED_CHARS + 1),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(
+            "pr_review_prompt_limit_exceeded: required prompt content exceeds 350000 characters"
+        ),
+    ):
+        build_bounded_pr_review_analysis_prompt(pr_number=1, issue_number=2)
+
+
+def test_bounded_validation_prompt_keeps_prior_comment_json_valid() -> None:
+    """A bounded validation prompt keeps every prior thread record parseable."""
+    prior_comments = json.dumps(
+        [
+            {
+                "thread_id": f"T{index}",
+                "path": "module.py",
+                "line": index + 1,
+                "body": "b" * 4_000,
+            }
+            for index in range(100)
+        ]
+    )
+
+    prompt = build_bounded_review_validation_prompt(
+        pr_number=1,
+        issue_number=2,
+        prior_comments_json=prior_comments,
+    )
+    match = re.search(
+        r"BEGIN_(?P<nonce>[0-9A-F]+)_PRIOR_COMMENTS\n(?P<body>.*?)\n"
+        r"END_(?P=nonce)_PRIOR_COMMENTS",
+        prompt,
+        re.DOTALL,
+    )
+
+    assert match is not None
+    try:
+        compacted = json.loads(match.group("body"))
+    except json.JSONDecodeError as error:
+        pytest.fail(f"prior comment context is not valid JSON: {error}")
+    assert len(compacted) == 100
+    assert compacted[0]["thread_id"] == "T0"
+    assert compacted[-1]["thread_id"] == "T99"
 
 
 class TestStructuralAuditNotProse:

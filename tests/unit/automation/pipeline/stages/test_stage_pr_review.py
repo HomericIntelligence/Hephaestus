@@ -73,7 +73,7 @@ from hephaestus.automation.pipeline.stages.pr_review_verification import (
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
-from hephaestus.automation.pr_review_core import MAX_PR_REVIEW_RENDERED_CHARS
+from hephaestus.automation.prompts.pr_review import MAX_PR_REVIEW_RENDERED_CHARS
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import STATE_SKIP

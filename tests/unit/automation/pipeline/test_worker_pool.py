@@ -71,6 +71,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _validated_signing_key,
     _verifier_owned_runtime_environment,
 )
+from hephaestus.automation.prompts.pr_review import PrReviewPromptSizeError
 from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
@@ -1891,6 +1892,29 @@ class TestAgentErrorHandling:
         assert result.error is not None
         assert result.error.startswith("agent_error: codex_nested_sandbox_unsupported")
         assert "outside the enclosing API sandbox" in result.error
+
+    def test_pr_review_prompt_limit_stops_before_provider_call(self, pool: WorkerPool) -> None:
+        """A deterministic prompt limit error cannot reach the provider."""
+
+        def oversized_prompt() -> str:
+            raise PrReviewPromptSizeError(
+                "pr_review_prompt_limit_exceeded: required prompt content exceeds 350000 characters"
+            )
+
+        job = _agent_job(agent="codex", prompt_builder=oversized_prompt)
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(f"{_WP}.run_agent_session") as mock_agent,
+        ):
+            result = pool._run_agent(job)
+
+        assert result.ok is False
+        assert result.error == (
+            "PrReviewPromptSizeError: pr_review_prompt_limit_exceeded: required prompt content "
+            "exceeds 350000 characters"
+        )
+        mock_agent.assert_not_called()
 
     def test_codex_skills_budget_notice_does_not_open_agent_breaker(
         self,

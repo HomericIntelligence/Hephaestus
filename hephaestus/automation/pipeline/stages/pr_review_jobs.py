@@ -9,7 +9,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.pr_review_core import (
+from hephaestus.automation.prompts.pr_review import (
     build_bounded_pr_review_analysis_prompt,
     build_bounded_review_validation_prompt,
 )
