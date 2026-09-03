@@ -17,6 +17,7 @@ from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillR
 from ..job_results import JobResult
 from ..routing import Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
+from ..summary import record_summary_action
 from ..work_item import LearningIntent, WorkItem
 from .base import source_workspace_binding, stage_timeout
 
@@ -73,9 +74,21 @@ class LearningStage:
             return Continue(next_state=CLAIM)
         item.payload["_learning_claimed_intent_key"] = intent.key
 
+        try:
+            delivery_payload = intent.to_payload(owner=ctx.org)
+        except ValueError:
+            error = "learning_repository_identity_rejected"
+            journal.finish(intent.key, succeeded=False, error=error)
+            item.payload.pop("_learning_claimed_intent_key", None)
+            item.payload.setdefault("learning_failures", []).append(
+                {"key": intent.key, "error": error}
+            )
+            record_summary_action(item, error)
+            return Continue(next_state=CLAIM)
+
         payload: dict[str, object] = {
             "issue_number": intent.issue,
-            "learning_intent": intent.to_payload(),
+            "learning_intent": delivery_payload,
         }
         revision = str(
             item.payload.get("_worktree_cleanup_head_sha")
