@@ -6,11 +6,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.git_utils import (
     delete_local_branch_if_unchanged,
     delete_reserved_branch_if_unchanged,
     run,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.helpers import get_repo_root
@@ -80,6 +82,96 @@ def _ownership_changed(
     return branch_changed or head_changed or detached_changed
 
 
+def _run_source_lane_cleanup(
+    job: GitJob,
+    *,
+    worktree_path: Path,
+    repo_root: Path,
+    issue_number: int,
+    expected_head: object,
+    expected_detached: bool,
+    worktree_manager_type: Any,
+    remote_env: dict[str, str] | None,
+    remote_config: tuple[str, ...],
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None,
+) -> JobResult:
+    """Clean one receipt-owned source lane through its state owner."""
+    try:
+        source_lane = SourceLane(job.kwargs["source_lane"])
+    except (KeyError, TypeError, ValueError):
+        return JobResult(ok=False, error="source worktree cleanup lane is invalid")
+    if issue_number < 1 or not _is_full_commit_sha(expected_head) or not expected_detached:
+        return JobResult(ok=False, error="source worktree cleanup proof is invalid")
+    manager = SourceWorkspaceManager(repo_root, repository=job.repo)
+    if worktree_path.resolve() != manager.path_for(issue_number, source_lane).resolve():
+        return JobResult(ok=False, error="source worktree cleanup identity is invalid")
+
+    def physical_cleanup() -> None:
+        generic_kwargs = dict(job.kwargs)
+        generic_kwargs.pop("source_lane", None)
+        result = run_cleanup_job(
+            GitJob(
+                repo=job.repo,
+                op=job.op,
+                timeout_s=job.timeout_s,
+                kwargs=generic_kwargs,
+                descr=job.descr,
+            ),
+            worktree_manager_type=worktree_manager_type,
+            remote_env=remote_env,
+            remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
+        )
+        if not result.ok:
+            raise SourceWorkspaceError(result.error or "worktree cleanup failed")
+
+    try:
+        manager.cleanup(
+            issue_number,
+            source_lane,
+            expected_revision=str(expected_head),
+            expected_detached=expected_detached,
+            physical_cleanup=physical_cleanup,
+        )
+    except SourceWorkspaceError as exc:
+        return JobResult(ok=False, error=str(exc))
+    return JobResult(ok=True)
+
+
+def _release_branch_reservation(
+    job: GitJob,
+    *,
+    remote_env: dict[str, str] | None,
+    remote_config: tuple[str, ...],
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None,
+) -> JobResult:
+    """Release one reserved branch after validating its immutable base."""
+    branch_name = str(job.kwargs.get("branch") or "")
+    base_sha = str(job.kwargs.get("base_sha") or "")
+    repo_root_value = job.kwargs.get("repo_root")
+    repo_root = Path(str(repo_root_value)) if repo_root_value else None
+    if (
+        not branch_name
+        or not _is_full_commit_sha(base_sha)
+        or repo_root is None
+        or not repo_root.is_dir()
+    ):
+        return JobResult(
+            ok=False,
+            error="release_branch_reservation requires branch, base_sha, and repo_root",
+        )
+    released = delete_reserved_branch_if_unchanged(
+        branch_name,
+        base_sha,
+        repo_root,
+        timeout=job.timeout_s,
+        env=remote_env,
+        remote_config=remote_config,
+        revalidate_remote=revalidate_remote,
+    )
+    return JobResult(ok=True, value=released)
+
+
 def run_cleanup_job(
     job: GitJob,
     *,
@@ -90,30 +182,12 @@ def run_cleanup_job(
 ) -> JobResult:
     """Run one validated worktree or reservation cleanup operation."""
     if job.op == "release_branch_reservation":
-        branch_name = str(job.kwargs.get("branch") or "")
-        base_sha = str(job.kwargs.get("base_sha") or "")
-        repo_root_value = job.kwargs.get("repo_root")
-        repo_root = Path(str(repo_root_value)) if repo_root_value else None
-        if (
-            not branch_name
-            or not _is_full_commit_sha(base_sha)
-            or repo_root is None
-            or not repo_root.is_dir()
-        ):
-            return JobResult(
-                ok=False,
-                error="release_branch_reservation requires branch, base_sha, and repo_root",
-            )
-        released = delete_reserved_branch_if_unchanged(
-            branch_name,
-            base_sha,
-            repo_root,
-            timeout=job.timeout_s,
-            env=remote_env,
+        return _release_branch_reservation(
+            job,
+            remote_env=remote_env,
             remote_config=remote_config,
             revalidate_remote=revalidate_remote,
         )
-        return JobResult(ok=True, value=released)
 
     if job.op != "remove_worktree":
         raise TypeError(f"unsupported cleanup Git operation: {job.op}")
@@ -136,6 +210,19 @@ def run_cleanup_job(
             or not isinstance(expected_detached, bool)
         ):
             return JobResult(ok=False, error="worktree cleanup identity is invalid")
+        if job.kwargs.get("source_lane") is not None:
+            return _run_source_lane_cleanup(
+                job,
+                worktree_path=worktree_path,
+                repo_root=repo_root,
+                issue_number=issue_number,
+                expected_head=expected_head,
+                expected_detached=expected_detached,
+                worktree_manager_type=worktree_manager_type,
+                remote_env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
+            )
         with file_lock(worktree_manager_type.git_metadata_lock_path(repo_root)):
             record = _worktree_record(
                 worktree_path,
@@ -143,6 +230,8 @@ def run_cleanup_job(
                 timeout=job.timeout_s,
                 worktree_manager_type=worktree_manager_type,
             )
+            if record is None and not worktree_path.exists():
+                return JobResult(ok=True)
             if _ownership_changed(
                 record,
                 expected_branch=expected_branch,

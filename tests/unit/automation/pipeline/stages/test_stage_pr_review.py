@@ -923,12 +923,58 @@ class TestPrReviewStageStep:
         assert removal.job.op == "remove_worktree"
         assert removal.job.kwargs["expected_head"] == "a" * 40
         assert removal.job.kwargs["expected_detached"] is True
+        assert removal.job.kwargs["source_lane"] == "review"
         stage.on_job_done(item, JobResult(ok=True), ctx)
 
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FAIL_BACK, "implementation_remediation"
         )
         assert item.worktree == ""
+
+    def test_review_cleanup_failure_keeps_redacted_bounded_diagnostic(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A receipt-removal error remains actionable without disclosing a token."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            kind=ItemKind.PR,
+            state=CLEANUP_REVIEW_WORKTREE_WAIT,
+        )
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_worktree": item.worktree,
+                "review_worktree_expected_head": "a" * 40,
+                "review_worktree_cleanup_done": "pending",
+                "review_worktree_cleanup_outcome": Disposition.FAIL_BACK.value,
+                "review_worktree_cleanup_note": "implementation_remediation",
+            }
+        )
+
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=(
+                    "source workspace receipt removal failed at /tmp/7-review.json: ghp_" + "x" * 36
+                ),
+            ),
+            ctx,
+        )
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note.startswith("review_worktree_cleanup_failed: ")
+        assert "/tmp/7-review.json" in outcome.note
+        assert "<redacted>" in outcome.note
+        assert "ghp_" not in outcome.note
+        assert len(outcome.note) <= 500 + len("review_worktree_cleanup_failed: ")
 
     def test_review_cleanup_retry_restarts_from_a_fresh_snapshot(
         self, make_ctx: Any, make_work_item: Any
