@@ -104,6 +104,8 @@ Beyond the universal checklist, a release-blocker is done only when:
 When you add or remove a CI gate, edit the matching row in this file in the same PR.
 When you adjust the coverage gate's threshold, update row 10's value here. When you
 change the PR template's checklist, reconcile the corresponding universal rows here.
+When you change a required job or supported event, update the aggregate graph,
+runtime census, skip policy, tests, and CI documentation in the same PR.
 
 If you find yourself describing a "DoD requirement" in a comment, code review, or
 Slack message that isn't already in this document, add it here.

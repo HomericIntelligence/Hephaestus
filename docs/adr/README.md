@@ -16,7 +16,7 @@ numbered, and listed here.
 | [0001](0001-automation-library-boundary.md) | hephaestus.automation is an opt-in product layer | Accepted |
 | [0002](0002-pep562-lazy-imports.md) | PEP 562 lazy imports back the library/product boundary | Accepted |
 | [0003](0003-dependabot-renovate-split.md) | Dependabot owns pip+actions; Renovate owns pixi/conda | Accepted (historical; superseded by 0008) |
-| [0004](0004-single-aggregator-required-checks.md) | Single aggregated required-checks gate | Accepted |
+| [0004](0004-single-aggregator-required-checks.md) | Single aggregated required-checks gate | Accepted (historical; superseded in part by 0007 and 0034) |
 | [0005](0005-multi-agent-runtime-abstraction.md) | Multi-agent (Claude/Codex/Pi) runtime abstraction | Accepted (direct-import prohibition superseded by 0017) |
 | [0006](0006-queue-based-in-process-automation-pipeline.md) | Queue-based in-process automation pipeline | Accepted |
 | [0007](0007-dual-surface-required-checks.md) | Dual-surface required checks | Accepted |
@@ -46,3 +46,4 @@ numbered, and listed here.
 | [0031](0031-bounded-recovery-artifact-roles.md) | Bounded recovery artifact roles on issue timelines | Accepted |
 | [0032](0032-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |
 | [0033](0033-graphql-response-error-contract.md) | GraphQL response-error and mutation-proof contract | Accepted |
+| [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |

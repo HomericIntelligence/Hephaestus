@@ -118,11 +118,14 @@ only `pr-policy` can skip because no pull request exists. A failed, cancelled,
 missing, unknown, or other skipped dependency fails the aggregate. The gate
 also rejects a result census that differs from its complete expected-job list.
 
-The unit guard requires exact equality between the workflow jobs, the
-aggregate `needs` list, and the runtime expected-job list. It also binds the
-single push-only skip to the `pr-policy` condition. When you add a job, update
-the aggregate dependency and expected-job lists together. Add a skip exception
-only when the job has an exact event condition and the unit guard enforces it.
+The unit guard requires exact equality between the top-level workflow jobs,
+the aggregate `needs` list, and the runtime expected-job list. It also binds
+the single push-only skip to the `pr-policy` condition. When you change the job
+graph, update the top-level job, aggregate `needs`, runtime census, applicable
+heavy-job set, runtime fixtures, structural tests, and hosted event evidence in
+one reviewed change. When you change a supported event, also update the skip
+policy and documentation. Add a skip exception only when the job has an exact
+event condition and the unit guard enforces it.
 
 The workflow handles code events only. It must not gain label, review, or
 auto-merge event triggers. The automation loop handles review labels and

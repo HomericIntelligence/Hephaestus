@@ -57,10 +57,11 @@ def _green_required_needs() -> dict[str, dict[str, Any]]:
 
 
 def _run_required_gate(
-    needs: dict[str, dict[str, Any]],
+    needs: object,
     *,
     event_name: str,
     allowed_skips: dict[str, list[str]] | None = None,
+    serialized_results: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the aggregate's real verdict step with controlled job results."""
     gate = _load_workflow(REQUIRED_WORKFLOW)["jobs"]["required-checks-gate"]
@@ -69,7 +70,7 @@ def _run_required_gate(
         step["env"]["ALLOWED_SKIPS"] = json.dumps(allowed_skips)
     env = os.environ | {
         "GITHUB_EVENT_NAME": event_name,
-        "RESULTS": json.dumps(needs),
+        "RESULTS": json.dumps(needs) if serialized_results is None else serialized_results,
     }
     env.update(
         {name: str(value) for name, value in step.get("env", {}).items() if "${{" not in str(value)}
@@ -100,13 +101,20 @@ def _assert_required_gate_contract(workflow: dict[str, Any]) -> None:
     assert set().union(*map(set, allowed_skips.values())) <= set(needs)
 
     code_event_condition = "needs.changes-gate.outputs.code_event == 'true'"
-    assert jobs["changes-gate"].get("if") is None
-    assert 'echo "code_event=true"' in jobs["changes-gate"]["steps"][0]["run"]
+    changes_gate = jobs["changes-gate"]
+    assert changes_gate.get("if") is None
+    assert changes_gate["outputs"] == {"code_event": "${{ steps.decide.outputs.code_event }}"}
+    assert changes_gate["steps"][0]["id"] == "decide"
+    assert 'echo "code_event=true"' in changes_gate["steps"][0]["run"]
+    assert "needs" not in jobs["pr-policy"]
     assert jobs["pr-policy"]["if"] == (
         "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
     )
     for job_id in set(needs) - {"changes-gate", "pr-policy"}:
-        assert jobs[job_id]["if"] == code_event_condition
+        job = jobs[job_id]
+        job_needs = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
+        assert "changes-gate" in job_needs
+        assert job["if"] == code_event_condition
 
 
 def test_every_required_context_workflow_runs_for_merge_groups() -> None:
@@ -141,6 +149,14 @@ def test_required_context_names_and_aggregate_membership_are_exact() -> None:
 def test_required_gate_policy_matches_the_complete_job_graph() -> None:
     """The runtime census, skip policy, and conditional graph must stay aligned."""
     _assert_required_gate_contract(_load_workflow(REQUIRED_WORKFLOW))
+
+
+@pytest.mark.parametrize("event_name", ["pull_request", "push", "merge_group"])
+def test_required_gate_accepts_all_success_for_supported_events(event_name: str) -> None:
+    """Every supported event must accept the complete successful result set."""
+    result = _run_required_gate(_green_required_needs(), event_name=event_name)
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("event_name", ["pull_request", "push", "merge_group"])
@@ -240,6 +256,51 @@ def test_required_gate_rejects_missing_result_field() -> None:
     assert "missing-or-invalid" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("dependency", "expected_message"),
+    [
+        ([], "missing-or-invalid"),
+        ({"result": None}, "missing-or-invalid"),
+        ({"result": 1}, "missing-or-invalid"),
+    ],
+)
+def test_required_gate_rejects_malformed_dependency_record(
+    dependency: object,
+    expected_message: str,
+) -> None:
+    """A malformed dependency record or result type must fail closed."""
+    needs: dict[str, Any] = _green_required_needs()
+    needs["lint"] = dependency
+
+    result = _run_required_gate(needs, event_name="pull_request")
+
+    assert result.returncode != 0
+    assert expected_message in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("serialized_results", "expected_message"),
+    [
+        ("{not-json", "invalid gate input"),
+        ("[]", "needs must be an object"),
+        ("null", "needs must be an object"),
+    ],
+)
+def test_required_gate_rejects_malformed_results_input(
+    serialized_results: str,
+    expected_message: str,
+) -> None:
+    """Malformed JSON and non-object result values must fail closed."""
+    result = _run_required_gate(
+        _green_required_needs(),
+        event_name="pull_request",
+        serialized_results=serialized_results,
+    )
+
+    assert result.returncode != 0
+    assert expected_message in result.stdout
+
+
 def test_required_gate_rejects_dependency_skip_cascade() -> None:
     """A failed condition source cannot make dependent skips acceptable."""
     needs = _green_required_needs()
@@ -287,6 +348,33 @@ def test_required_gate_guard_detects_condition_bypass() -> None:
     """A new conditional bypass must fail the structural contract."""
     workflow = copy.deepcopy(_load_workflow(REQUIRED_WORKFLOW))
     workflow["jobs"]["lint"]["if"] = "false"
+
+    with pytest.raises(AssertionError):
+        _assert_required_gate_contract(workflow)
+
+
+def test_required_gate_guard_detects_missing_condition_dependency() -> None:
+    """A heavy job must declare the dependency that supplies its condition."""
+    workflow = copy.deepcopy(_load_workflow(REQUIRED_WORKFLOW))
+    workflow["jobs"]["lint"]["needs"] = []
+
+    with pytest.raises(AssertionError):
+        _assert_required_gate_contract(workflow)
+
+
+def test_required_gate_guard_detects_pr_policy_dependency() -> None:
+    """The explicit event-only policy job must remain independent."""
+    workflow = copy.deepcopy(_load_workflow(REQUIRED_WORKFLOW))
+    workflow["jobs"]["pr-policy"]["needs"] = "changes-gate"
+
+    with pytest.raises(AssertionError):
+        _assert_required_gate_contract(workflow)
+
+
+def test_required_gate_guard_detects_code_event_output_drift() -> None:
+    """The condition source must keep its exact output binding."""
+    workflow = copy.deepcopy(_load_workflow(REQUIRED_WORKFLOW))
+    workflow["jobs"]["changes-gate"]["outputs"]["code_event"] = "false"
 
     with pytest.raises(AssertionError):
         _assert_required_gate_contract(workflow)
