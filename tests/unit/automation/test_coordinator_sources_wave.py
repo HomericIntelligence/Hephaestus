@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from hephaestus.automation import loop_repo_manager
+from hephaestus.automation.comment_identity import CommentAliasConflictError
 from hephaestus.automation.issue_waves import (
     WAVE_NON_CODE_INTENT_PAYLOAD,
     IssueWaveStore,
@@ -22,6 +23,7 @@ from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.requirements_recovery import evidence_digest
+from hephaestus.automation.review_journal import CommentJournalReadError
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -76,7 +78,7 @@ def test_repo_source_isolates_issue_classification_failure_and_continues(
         del github
         events.append(("classify", issue))
         if issue == 471:
-            raise ValueError("ambiguous actor-owned comment aliases")
+            raise CommentAliasConflictError("ambiguous actor-owned comment aliases")
         return _planning_facts(issue)
 
     monkeypatch.setattr(
@@ -108,7 +110,8 @@ def test_repo_source_isolates_issue_classification_failure_and_continues(
     assert failed.result.passed is False
     assert failed.result.final_stage is StageName.REPO
     assert failed.result.reason == (
-        "classification failed (ValueError): ambiguous actor-owned comment aliases; "
+        "classification failed (CommentAliasConflictError): "
+        "ambiguous actor-owned comment aliases; "
         "manual recovery required"
     )
     assert issues[472].result is not None and issues[472].result.passed is True
@@ -154,6 +157,67 @@ def test_repo_source_iterator_failure_still_terminates_repository(
     assert len(failures) == 1
     assert failures[0].result is not None
     assert failures[0].result.reason == "discovery failed: page fetch failed"
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [
+        pytest.param(
+            CommentJournalReadError("comment journal transport failed"),
+            id="journal-read",
+        ),
+        pytest.param(ValueError("PR response was malformed"), id="transport-value-error"),
+    ],
+)
+def test_repo_source_github_read_failure_terminates_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_error: Exception,
+) -> None:
+    """A GitHub read failure stops the repository instead of one issue row."""
+    metadata = [
+        {"number": 471, "labels": ["state:needs-plan"], "title": "first"},
+        {"number": 472, "labels": ["state:needs-plan"], "title": "second"},
+    ]
+    classified: list[int] = []
+
+    def fail_read(issue: int, _github: Any) -> IssueFacts:
+        classified.append(issue)
+        raise read_error
+
+    monkeypatch.setattr(
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+    )
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", fail_read)
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            max_workers=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+
+    assert coordinator.run() == 1
+
+    assert classified == [471]
+    issue_failures = [
+        item
+        for item in coordinator.items
+        if item.kind is ItemKind.ISSUE and item.result is not None
+    ]
+    assert issue_failures == []
+    repo_failures = [
+        item for item in coordinator.items if item.kind is ItemKind.REPO and item.result is not None
+    ]
+    assert len(repo_failures) == 1
+    assert repo_failures[0].result is not None
+    assert repo_failures[0].result.reason == f"discovery failed: {read_error}"
 
 
 def test_explicit_issue_classification_failure_stays_fail_closed(

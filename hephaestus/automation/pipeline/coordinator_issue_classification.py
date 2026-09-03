@@ -9,6 +9,7 @@ from pathlib import Path
 import hephaestus.automation.issue_waves as issue_waves_mod
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.comment_identity import CommentAliasConflictError
 from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
 from .coordinator_contract import _CoordinatorHost
@@ -17,6 +18,11 @@ from .stages import StageGitHub
 from .work_item import ItemKind
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
+
+_PERMANENT_ROW_CLASSIFICATION_ERRORS = (
+    CommentAliasConflictError,
+    _seeding.IssueClassificationError,
+)
 
 
 class IssueClassificationCoordinator(_CoordinatorHost):
@@ -51,7 +57,7 @@ class IssueClassificationCoordinator(_CoordinatorHost):
                 )
                 entry = replace(entry, stage=stage, reason=reason, passed=passed)
             return entry
-        except Exception as exc:
+        except _PERMANENT_ROW_CLASSIFICATION_ERRORS as exc:
             detail = " ".join(redact_diagnostic_text(str(exc)).split())[:300]
             logger.warning(
                 "repo:%s: issue #%d classification failed (%s): %s",

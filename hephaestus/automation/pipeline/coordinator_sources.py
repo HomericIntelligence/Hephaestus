@@ -117,7 +117,12 @@ class SourceCoordinator(_CoordinatorHost):
                 source.pending = metadata
                 return True
             github = self._ctx_for_repo(repo).github
-            entry = self._classify_repo_issue_entry(repo, source, number, github)
+            try:
+                entry = self._classify_repo_issue_entry(repo, source, number, github)
+            except Exception as exc:
+                logger.warning("repo:%s: discovery source failed: %s", repo, exc)
+                self._record_repo_source_failure(repo, f"discovery failed: {exc}")
+                return False
             if entry is None:
                 return True
             if entry.stage is None:
