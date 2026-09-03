@@ -1341,9 +1341,8 @@ jobs:
   # ruleset context. See docs/ci/required-checks.md.
   #
   # `if: always()` is mandatory so an upstream job failure becomes one durable
-  # aggregate result. The step below accepts a skipped dependency only for a
-  # legitimately conditional job; this workflow's trigger never creates
-  # skipped heavy-job contexts from a label or auto-merge event.
+  # aggregate result. Each dependency must succeed. Only `pr-policy` can skip,
+  # and only on a push event because that event has no pull request.
   required-checks-gate:
     name: required-checks-gate
     runs-on: ubuntu-24.04
@@ -1371,26 +1370,87 @@ jobs:
       - deps-version-sync
       - license-scan
     steps:
-      - name: Verify no required job failed or was cancelled
+      - name: Enforce required job result policy
         env:
           # `needs` is a GitHub-controlled object; passed via env and parsed by
           # the stdlib json module — never interpolated into the shell, so this
           # is injection-safe.
           RESULTS: ${{ toJSON(needs) }}
+          EXPECTED_JOBS: >-
+            ["changes-gate", "forbid-suppressions", "lint", "uv-lock-check",
+            "justfile-check", "symlink-check", "shellcheck", "pr-policy",
+            "unit-tests", "integration-tests", "installed-cli-tests",
+            "shell-tests", "build", "security-dependency-scan",
+            "security-secrets-scan", "security-sast-scan",
+            "security-workflow-scan", "schema-validation", "deps-version-sync",
+            "license-scan"]
+          ALLOWED_SKIPS: >-
+            {"pull_request": [], "push": ["pr-policy"], "merge_group": []}
         run: |
           set -euo pipefail
           echo "$RESULTS" | python3 -c '
           import json
+          import os
           import sys
 
-          needs = json.load(sys.stdin)
-          bad = {
-              name: outcome["result"]
-              for name, outcome in needs.items()
-              if outcome["result"] not in ("success", "skipped")
-          }
+          def reject(message):
+              print("Required jobs not green:", message)
+              sys.exit(1)
+
+          try:
+              needs = json.load(sys.stdin)
+              expected = json.loads(os.environ["EXPECTED_JOBS"])
+              allowed_skips = json.loads(os.environ["ALLOWED_SKIPS"])
+              event_name = os.environ["GITHUB_EVENT_NAME"]
+          except (KeyError, json.JSONDecodeError) as error:
+              reject(f"invalid gate input: {error}")
+
+          if not isinstance(needs, dict):
+              reject("needs must be an object")
+          if (
+              not isinstance(expected, list)
+              or any(not isinstance(name, str) or not name for name in expected)
+              or len(expected) != len(set(expected))
+          ):
+              reject("expected jobs must be unique non-empty strings")
+
+          supported_events = {"pull_request", "push", "merge_group"}
+          if not isinstance(allowed_skips, dict) or set(allowed_skips) != supported_events:
+              reject("skip policy must define every supported event")
+          if any(
+              not isinstance(names, list)
+              or any(not isinstance(name, str) or not name for name in names)
+              or len(names) != len(set(names))
+              for names in allowed_skips.values()
+          ):
+              reject("skip policy entries must be unique non-empty strings")
+          if event_name not in supported_events:
+              reject(f"unsupported event: {event_name}")
+
+          expected_set = set(expected)
+          actual_set = set(needs)
+          if actual_set != expected_set:
+              reject(json.dumps({
+                  "missing": sorted(expected_set - actual_set),
+                  "unexpected": sorted(actual_set - expected_set),
+              }, sort_keys=True))
+
+          stale_skips = set().union(*map(set, allowed_skips.values())) - expected_set
+          if stale_skips:
+              reject(f"skip policy references unknown jobs: {sorted(stale_skips)}")
+
+          allowed_for_event = set(allowed_skips[event_name])
+          bad = {}
+          for name in expected:
+              outcome = needs[name]
+              result = outcome.get("result") if isinstance(outcome, dict) else None
+              if result == "success":
+                  continue
+              if result == "skipped" and name in allowed_for_event:
+                  continue
+              bad[name] = result if isinstance(result, str) else "<missing-or-invalid>"
           if bad:
               print("Required jobs not green:", json.dumps(bad, sort_keys=True))
               sys.exit(1)
-          print("All required jobs green or legitimately skipped.")
+          print("All required jobs satisfy the event-aware result policy.")
           '

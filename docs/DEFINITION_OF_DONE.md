@@ -34,6 +34,7 @@ A piece of work is **done** when every item below is true.
 | 21 | Pre-commit hooks pass on the diff | CI job `lint` (pre-commit suite folded into `lint` per #1173) |
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 | 23 | New or revised English technical prose follows the [ASD-STE100 writing standard](asd-ste100.md); principle declarations and specialized principle statements do not change only to satisfy the standard | Author and PR reviewer |
+| 24 | Each `required-checks-gate` dependency succeeds on pull-request and merge-group events; only `pr-policy` can skip on a push event | CI gate `required-checks-gate` + structural unit guard |
 
 ### Conventional Commit history boundary
 
@@ -103,6 +104,8 @@ Beyond the universal checklist, a release-blocker is done only when:
 When you add or remove a CI gate, edit the matching row in this file in the same PR.
 When you adjust the coverage gate's threshold, update row 10's value here. When you
 change the PR template's checklist, reconcile the corresponding universal rows here.
+When you change a required job or supported event, update the aggregate graph,
+runtime census, skip policy, tests, and CI documentation in the same PR.
 
 If you find yourself describing a "DoD requirement" in a comment, code review, or
 Slack message that isn't already in this document, add it here.
