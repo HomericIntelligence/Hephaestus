@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import logging
+from contextlib import ExitStack
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
+
+
+class _StopAfterLoggingError(RuntimeError):
+    """Stop a command after its logging setup boundary."""
 
 
 @pytest.mark.parametrize(
@@ -35,11 +41,7 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
             {"verbose": True},
             logging.DEBUG,
         ),
-        ("hephaestus.automation.ci_driver", "_setup_logging", {"verbose": True}, logging.DEBUG),
         ("hephaestus.automation.loop_runner", "_setup_logging", {"verbose": False}, logging.INFO),
-        ("hephaestus.automation.planner", "_setup_logging", {"verbose": False}, logging.INFO),
-        ("hephaestus.automation.pr_reviewer", "_setup_logging", {"verbose": False}, logging.INFO),
-        ("hephaestus.automation.plan_reviewer", "_setup_logging", {"verbose": True}, logging.DEBUG),
     ],
 )
 def test_cli_logging_helpers_delegate_to_shared_helper(
@@ -107,4 +109,44 @@ def test_fleet_sync_main_delegates_logging_to_shared_helper() -> None:
 
     assert rc == 0
     throttle.assert_called_once()
+    configure.assert_called_once_with(verbose=True, log_format="json")
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "hephaestus.automation.ci_driver",
+        "hephaestus.automation.planner",
+        "hephaestus.automation.pr_reviewer",
+        "hephaestus.automation.plan_reviewer",
+    ],
+)
+def test_affected_cli_mains_forward_logging_arguments(module_name: str) -> None:
+    """Affected commands send parsed logging options to the canonical helper."""
+    module = import_module(module_name)
+    args = SimpleNamespace(
+        verbose=True,
+        log_format="json",
+        agent=None,
+        disable_pi_automation=False,
+        auth_status_timeout=1,
+        pi_isolation_adapter=None,
+        pi_dir=None,
+        model=None,
+        planner_model=None,
+        reviewer_model=None,
+    )
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(module, "_parse_args", return_value=args))
+        stack.enter_context(
+            patch.object(module, "resolve_agent", side_effect=_StopAfterLoggingError())
+        )
+        configure = stack.enter_context(patch.object(module, "configure_cli_logging", Mock()))
+        if hasattr(module, "configure_github_throttle_from_args"):
+            stack.enter_context(patch.object(module, "configure_github_throttle_from_args"))
+
+        with pytest.raises(_StopAfterLoggingError):
+            module.main()
+
     configure.assert_called_once_with(verbose=True, log_format="json")
