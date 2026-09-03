@@ -1,11 +1,15 @@
 # Tech-Debt Tracking Convention
 
-Tech debt in Hephaestus is tracked exclusively as GitHub issues
-labelled `tech-debt`. We do not use undocumented "fix later" markers:
-every `# TODO`, `# FIXME`, or `# HACK` comment in the source MUST reference
-a tracking issue using the `# TODO(#N): explanation` form (for example,
+Tech debt in Hephaestus is tracked as GitHub issues labeled `tech-debt`.
+The repo also uses `wontfix` for debt items that meet the close criteria
+below. We do not use undocumented "fix later" markers: every `# TODO`,
+`# FIXME`, or `# HACK` comment in the source MUST reference a tracking issue
+using the `# TODO(#N): explanation` form (for example,
 `# TODO(#710): replace this dynamic test-seam with constructor injection.`).
 Bare, unlinked markers are not allowed.
+
+Provisioning note: if `tech-debt` or `wontfix` is missing in this repo, run
+`hephaestus-ensure-state-labels --repo HomericIntelligence/Hephaestus`.
 
 > Enforcement note: the `check-no-unlinked-todo` pre-commit hook
 > (`hephaestus-check-unlinked-todo`, added in #1492) gates bare markers
