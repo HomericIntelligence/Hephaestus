@@ -18,6 +18,11 @@ LEGACY_PLUGIN_PATHS = (
     REPO_ROOT / "plugins" / "hephaestus",
     REPO_ROOT / ".codex-plugin",
 )
+REPO_LOCAL_SKILL_SURFACES = (
+    REPO_ROOT / ".agents" / "skills",
+    REPO_ROOT / ".claude" / "skills",
+    REPO_ROOT / "skills-lock.json",
+)
 RETIRED_PLUGIN_SCANNER_INPUTS = (
     REPO_ROOT / ".github" / "workflows" / "hol-plugin-scanner.yml",
     REPO_ROOT / ".plugin-scanner.toml",
@@ -52,6 +57,13 @@ def test_repository_has_no_local_plugin_distribution() -> None:
     present = _present_path_names(LEGACY_PLUGIN_PATHS, REPO_ROOT)
 
     assert present == [], "repository-local plugin content must not reappear: " + ", ".join(present)
+
+
+def test_repository_has_no_repo_local_skill_surface() -> None:
+    """Repo-local skill copies, symlinks, and the lockfile must stay absent."""
+    present = _present_path_names(REPO_LOCAL_SKILL_SURFACES, REPO_ROOT)
+
+    assert present == [], "repo-local skill surfaces must not reappear: " + ", ".join(present)
 
 
 def test_repository_has_no_retired_plugin_scanner_inputs() -> None:
