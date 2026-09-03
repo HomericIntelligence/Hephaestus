@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 from .git_utils import get_repo_root, is_clean_working_tree, rebase_worktree_onto, run
@@ -67,11 +68,6 @@ def _normalize_trunk_githash(trunk_githash: str | None) -> str | None:
 def _looks_like_sha(ref: str) -> bool:
     """Return True when ``ref`` looks like a raw hex commit-ish."""
     return len(ref) >= 7 and all(ch in "0123456789abcdefABCDEF" for ch in ref)
-
-
-def _is_full_commit_sha(ref: str) -> bool:
-    """Return whether ``ref`` is a full SHA-1 or SHA-256 commit id."""
-    return len(ref) in (40, 64) and all(ch in "0123456789abcdef" for ch in ref)
 
 
 def _is_direct_worktree_nonce(value: str) -> bool:

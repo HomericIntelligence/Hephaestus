@@ -16,7 +16,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeGuard, cast
 
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
@@ -32,12 +32,12 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.git import _is_full_commit_sha
 
 WAVE_LIMITS: tuple[int | None, ...] = (1, 2, 4, 8, None)
 _SCHEMA = "hephaestus.issue-wave-checkpoint.v1"
 _CHECKPOINT_NAME = "issue-wave-checkpoint.json"
 _LOCK_NAME = "issue-wave-checkpoint.lock"
-_SHA_LENGTHS = (40, 64)
 
 WAVE_LEASE_PAYLOAD = "_issue_wave_lease"
 WAVE_NON_CODE_PAYLOAD = "_issue_wave_non_code"
@@ -64,13 +64,9 @@ class IssueWaveRepositoryError(IssueWaveError):
     """Raised when checkpoint paths are not confined to a repository."""
 
 
-def is_full_commit_sha(value: object) -> bool:
+def is_full_commit_sha(value: object) -> TypeGuard[str]:
     """Return whether *value* is a lowercase full Git commit identifier."""
-    return bool(
-        isinstance(value, str)
-        and len(value) in _SHA_LENGTHS
-        and all(character in "0123456789abcdef" for character in value)
-    )
+    return _is_full_commit_sha(value)
 
 
 def _positive_issue_numbers(values: Any, field_name: str) -> tuple[int, ...]:

@@ -16,6 +16,7 @@ from typing import Any
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.git import _is_full_commit_sha
 
 _RECEIPT_DIR = "direct-review-recovery"
 _RECEIPT_VERSION = 3
@@ -32,15 +33,6 @@ _INSPECTION_ONLY_FAILURES = frozenset(
         "retry_checkout_unconfirmed",
     }
 )
-
-
-def _is_full_sha(value: object) -> bool:
-    """Return whether *value* is a full SHA-1 or SHA-256 commit identifier."""
-    return (
-        isinstance(value, str)
-        and len(value) in (40, 64)
-        and all(char in "0123456789abcdef" for char in value)
-    )
 
 
 def is_inspection_only_detached_push_failure(value: object) -> bool:
@@ -571,7 +563,7 @@ def record_direct_review_recovery(
         raise ValueError("direct review recovery PR is invalid")
     if not isinstance(branch, str) or not branch:
         raise ValueError("direct review recovery branch is invalid")
-    if not _is_full_sha(expected_remote_sha) or not _is_full_sha(source_sha):
+    if not _is_full_commit_sha(expected_remote_sha) or not _is_full_commit_sha(source_sha):
         raise ValueError("direct review recovery commit receipt is invalid")
     if not _DIR_FD_SUPPORTED:
         raise ValueError("direct review recovery requires no-follow directory descriptors")
@@ -651,8 +643,8 @@ def list_direct_review_recovery_paths(*, repo_root: Path, issue: int, pr: int) -
                             or payload.get("issue") != issue
                             or payload.get("pr") != pr
                             or not isinstance(payload.get("branch"), str)
-                            or not _is_full_sha(payload.get("expected_remote_sha"))
-                            or not _is_full_sha(payload.get("source_sha"))
+                            or not _is_full_commit_sha(payload.get("expected_remote_sha"))
+                            or not _is_full_commit_sha(payload.get("source_sha"))
                             or not worktree.is_dir()
                             or isinstance(payload.get("worktree_device"), bool)
                             or not isinstance(payload.get("worktree_device"), int)

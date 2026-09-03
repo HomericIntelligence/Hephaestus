@@ -8,10 +8,30 @@ from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import ANY, patch
 
+import pytest
+
 import hephaestus.utils as utils_pkg
 import hephaestus.utils.git as shared_git
 from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("a" * 40, True),
+        ("b" * 64, True),
+        ("A" * 40, False),
+        ("a" * 39, False),
+        ("a" * 41, False),
+        ("g" * 40, False),
+        (None, False),
+        (42, False),
+    ],
+)
+def test_full_commit_sha_requires_lowercase_full_hash(value: object, expected: bool) -> None:
+    """Full commit identifiers are 40 or 64 lowercase hexadecimal characters."""
+    assert shared_git._is_full_commit_sha(value) is expected
 
 
 def test_bounded_git_diagnostic_redacts_credentials_before_truncation() -> None:
