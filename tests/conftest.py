@@ -76,6 +76,19 @@ def _git_supports_path_format() -> bool:
     return len(lines) == 1 and Path(lines[0]).resolve() == repo_root.resolve()
 
 
+def _git_supports_worktree_list_z() -> bool:
+    """Return True when host git supports NUL-delimited worktree inventory."""
+    repo_root = Path(__file__).resolve().parents[1]
+    probe = subprocess.run(
+        ["git", "worktree", "list", "--porcelain", "-z"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo_root,
+    )
+    return probe.returncode == 0
+
+
 @pytest.fixture(scope="session")
 def require_git_path_format() -> None:
     """Skip when host git lacks ``--path-format=absolute`` (git >= 2.31).
@@ -87,6 +100,13 @@ def require_git_path_format() -> None:
     """
     if not _git_supports_path_format():
         pytest.skip("host git lacks --path-format=absolute (needs git >= 2.31)")
+
+
+@pytest.fixture(scope="session")
+def require_git_worktree_list_z() -> None:
+    """Skip when host git lacks NUL-delimited worktree inventory."""
+    if not _git_supports_worktree_list_z():
+        pytest.skip("host git lacks worktree list --porcelain -z (needs git >= 2.36)")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
