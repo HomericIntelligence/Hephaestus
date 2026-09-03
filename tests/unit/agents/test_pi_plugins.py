@@ -303,6 +303,7 @@ def test_inventory_rejects_dirty_git_package_at_pinned_head(tmp_path: Path) -> N
 
     assert result.ready is False
     assert result.status == "package_content_mismatch"
+    assert result.detail == "athena: ?? skills/injected/SKILL.md"
 
 
 def test_probe_requires_verified_source_info_provenance(tmp_path: Path) -> None:

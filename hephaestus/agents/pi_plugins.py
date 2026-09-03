@@ -1003,8 +1003,15 @@ def inspect_pi_package_inventory(
             return InventoryResult(False, "package_identity_mismatch", roots, scopes, package.key)
         if package.kind == "git" and git_head(root) != package.pin:
             return InventoryResult(False, "package_identity_mismatch", roots, scopes, package.key)
-        if package.kind == "git" and git_status(root):
-            return InventoryResult(False, "package_content_mismatch", roots, scopes, package.key)
+        status = git_status(root) if package.kind == "git" else ""
+        if status:
+            return InventoryResult(
+                False,
+                "package_content_mismatch",
+                roots,
+                scopes,
+                f"{package.key}: {status[:1000]}",
+            )
         try:
             content_sha256[package.key] = package_tree_digest(root)
         except (OSError, ValueError) as exc:
