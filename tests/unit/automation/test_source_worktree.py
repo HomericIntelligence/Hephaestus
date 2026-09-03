@@ -185,6 +185,27 @@ def test_implementation_preserves_branch_held_by_another_worktree(
     assert not original.cwd.exists()
 
 
+def test_implementation_preserves_inactive_unowned_branch(tmp_path: Path) -> None:
+    """A branch without a lane receipt cannot be reset during preparation."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    _git(repo, "branch", "unowned-implementation-branch", first)
+
+    with pytest.raises(
+        SourceWorkspaceError,
+        match="source workspace branch is not owned by this lane",
+    ):
+        manager.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="unowned-implementation-branch",
+        )
+
+    assert _git(repo, "rev-parse", "unowned-implementation-branch") == first
+    assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+
+
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:
     """A review lane created with the current deterministic name is removable."""
     repo, _, second = _repository(tmp_path)
