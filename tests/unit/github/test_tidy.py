@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import importlib
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -38,6 +40,7 @@ WORKTREE_PORCELAIN = "\0".join(
         "HEAD deadbeef",
         "detached",
         "",
+        "worktree /repo/bare",
         "bare",
         "",
     )
@@ -66,6 +69,19 @@ LOCKED_SPACED_WORKTREE_PORCELAIN = "\0".join(
         "HEAD 123456",
         "branch refs/heads/123-finished",
         "locked",
+        "",
+    )
+)
+
+NEWLINE_WORKTREE_PORCELAIN = "\0".join(
+    (
+        "worktree /repo",
+        "HEAD abcdef",
+        "branch refs/heads/main",
+        "",
+        "worktree /repo/.worktrees/123\nfinished",
+        "HEAD 123456",
+        "branch refs/heads/123-finished",
         "",
     )
 )
@@ -238,7 +254,11 @@ def test_worktree_porcelain_requests_nul_terminated_output(
     monkeypatch.setattr(tidy_module, "run_git", run_git)
 
     assert tidy_module._worktree_porcelain() == "inventory"
-    run_git.assert_called_once_with(["worktree", "list", "--porcelain", "-z"])
+    run_git.assert_called_once_with(
+        ["worktree", "list", "--porcelain", "-z"],
+        check=False,
+        log_on_error=False,
+    )
 
 
 def test_parse_worktree_porcelain_preserves_space_in_path() -> None:
@@ -247,6 +267,34 @@ def test_parse_worktree_porcelain_preserves_space_in_path() -> None:
         SPACED_WORKTREE_PORCELAIN,
         Path("/repo"),
     ) == [(Path("/repo/.worktrees/123 finished"), "123-finished")]
+
+
+def test_parse_worktree_porcelain_preserves_newline_in_nul_path() -> None:
+    """NUL output preserves a newline-containing worktree path."""
+    assert tidy_module._parse_worktree_porcelain(
+        NEWLINE_WORKTREE_PORCELAIN,
+        Path("/repo"),
+    ) == [(Path("/repo/.worktrees/123\nfinished"), "123-finished")]
+
+
+def test_cleanup_rejects_malformed_inventory_without_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed inventory stops cleanup before state classification."""
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_porcelain",
+        lambda: "worktree /repo\0HEAD abcdef\0\0unexpected\0",
+    )
+    branch_is_merged = MagicMock()
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", branch_is_merged)
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    with pytest.raises(tidy_module.WorktreeInventoryError, match="malformed"):
+        tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=False)
+    branch_is_merged.assert_not_called()
+    remove.assert_not_called()
 
 
 def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
@@ -293,6 +341,32 @@ def test_cleanup_stale_worktree_with_space_path(
     assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=True) == 0
     is_dirty.assert_called_once_with(spaced_path)
     assert str(spaced_path) in caplog.text
+    assert "123-finished" in caplog.text
+    remove.assert_not_called()
+
+
+def test_cleanup_stale_worktree_with_newline_path(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dry-run evaluates the complete newline-containing path."""
+    newline_path = Path("/repo/.worktrees/123\nfinished")
+    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_porcelain",
+        lambda: NEWLINE_WORKTREE_PORCELAIN,
+    )
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    is_dirty = MagicMock(return_value=False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=True) == 0
+    is_dirty.assert_called_once_with(newline_path)
+    assert str(newline_path) in caplog.text
     assert "123-finished" in caplog.text
     remove.assert_not_called()
 
@@ -422,7 +496,7 @@ class TestTidyHandlers:
 class TestMain:
     """Smoke tests for hephaestus.github.tidy.main() covering --json branches."""
 
-    @pytest.mark.usefixtures("require_git_path_format")
+    @pytest.mark.usefixtures("require_git_path_format", "require_git_worktree_list_z")
     def test_cleanup_from_linked_worktree_never_targets_primary(
         self,
         tmp_path: Path,
@@ -472,6 +546,153 @@ class TestMain:
 
         assert tidy_module.main() == 0
         assert [call.args[0] for call in branch_is_merged.call_args_list] == ["123-finished"]
+
+    @pytest.mark.parametrize(
+        ("failure", "message"),
+        [
+            pytest.param(
+                subprocess.CompletedProcess([], 129, stdout="", stderr="unknown switch `z`"),
+                "requires Git 2.36 or later",
+                id="unsupported-known-diagnostic",
+            ),
+            pytest.param(
+                subprocess.CompletedProcess([], 129, stdout="", stderr="different diagnostic"),
+                "requires Git 2.36 or later",
+                id="unsupported-alternate-diagnostic",
+            ),
+            pytest.param(
+                subprocess.CompletedProcess([], 129, stdout="", stderr=""),
+                "requires Git 2.36 or later",
+                id="unsupported-empty-diagnostic",
+            ),
+            pytest.param(
+                subprocess.CompletedProcess([], 2, stdout="", stderr="failure"),
+                "exit status 2",
+                id="inventory-failure",
+            ),
+            pytest.param(
+                subprocess.TimeoutExpired(["git", "worktree", "list"], 30),
+                "inventory timed out",
+                id="inventory-timeout",
+            ),
+        ],
+    )
+    def test_inventory_failure_matrix_exits_cleanly_without_mutation(
+        self,
+        failure: subprocess.CompletedProcess[str] | subprocess.TimeoutExpired,
+        message: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Inventory failures stop cleanup with one actionable error."""
+        caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+        run_git = MagicMock(
+            side_effect=failure if isinstance(failure, subprocess.TimeoutExpired) else None,
+            return_value=failure if isinstance(failure, subprocess.CompletedProcess) else None,
+        )
+        remove = MagicMock()
+        monkeypatch.setattr(tidy_module, "run_git", run_git)
+        monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+        monkeypatch.setattr(tidy_module, "_configure_logging", lambda *_args: None)
+        monkeypatch.setattr(
+            tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
+        )
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _branch: "main")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-tidy", "--cleanup-stale-worktrees", "--agent", "claude"],
+        )
+
+        assert tidy_module.main() == 1
+        output = caplog.text + capsys.readouterr().out
+        assert message in output
+        assert "No cleanup change occurred" in output
+        assert "Traceback" not in output
+        remove.assert_not_called()
+        run_git.assert_called_once_with(
+            ["worktree", "list", "--porcelain", "-z"],
+            check=False,
+            log_on_error=False,
+        )
+
+    def test_inventory_compatibility_failure_json(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Unsupported inventory emits the standard JSON error envelope."""
+        log_error = MagicMock()
+        monkeypatch.setattr(
+            tidy_module,
+            "run_git",
+            MagicMock(return_value=subprocess.CompletedProcess([], 129, stdout="", stderr="usage")),
+        )
+        monkeypatch.setattr(tidy_module, "_configure_logging", lambda *_args: None)
+        monkeypatch.setattr(tidy_module.logger, "info", MagicMock())
+        monkeypatch.setattr(tidy_module.logger, "error", log_error)
+        monkeypatch.setattr(
+            tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
+        )
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _branch: "main")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-tidy",
+                "--cleanup-stale-worktrees",
+                "--json",
+                "--agent",
+                "claude",
+            ],
+        )
+
+        assert tidy_module.main() == 1
+        captured = capsys.readouterr()
+        assert captured.out
+        payload = json.loads(captured.out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 1
+        assert "requires Git 2.36 or later" in payload["message"]
+        assert "No cleanup change occurred" in payload["message"]
+        assert "Traceback" not in captured.out + captured.err
+        log_error.assert_called_once()
+
+    def test_git_executable_exit_129_is_actionable_and_non_mutating(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A legacy Git executable stops before a cleanup command."""
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        argument_log = tmp_path / "git-arguments"
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(argument_log))}\nexit 129\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr(tidy_module, "_configure_logging", lambda *_args: None)
+        monkeypatch.setattr(
+            tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
+        )
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _branch: "main")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-tidy", "--cleanup-stale-worktrees", "--agent", "claude"],
+        )
+        caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+
+        assert tidy_module.main() == 1
+        assert "requires Git 2.36 or later" in caplog.text
+        assert "Traceback" not in caplog.text
+        arguments = argument_log.read_text(encoding="utf-8").splitlines()
+        assert arguments == ["worktree list --porcelain -z"]
+        assert not any("worktree remove" in item or "branch -d" in item for item in arguments)
 
     def test_env_validation_failure_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
