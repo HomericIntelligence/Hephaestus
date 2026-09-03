@@ -9,8 +9,8 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   replied threads create a detached checkout for comment validation only.
   A thread-free entry creates a detached review checkout, REVIEW_WAIT binds it
   once to PR head ``H``, then REVIEW_WAIT -> VALIDATE_WAIT -> POST -> EVAL.
-  A clean audit writes GO and removes the checkout before advancing to
-  ``merge_wait``.
+  A valid audit with a typed ``GO`` verdict and no blocking finding writes GO
+  and removes the checkout before it advances to ``merge_wait``.
   Recovery-only mini-states for interrupted older items preserve their
   original routing but cannot grant the review stage writer capability.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
@@ -46,9 +46,10 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   prior review, implementation reply, and every open thread. The reviewer is
   the sole actor that can resolve a valid
   thread or post precise rejection feedback while leaving it open. Any open
-  thread -> no-go label, review-checkout cleanup, and implementation handoff. A clean audit ->
-  ``_write_go`` performs one final complete-thread live-read, requires a
-  confirmed-unarmed live PR, and applies ``state:implementation-go``.
+  thread -> no-go label, review-checkout cleanup, and implementation handoff. A
+  valid ``GO`` audit without a blocking finding -> ``_write_go`` performs one final
+  complete-thread live-read, requires a confirmed-unarmed live PR, and applies
+  ``state:implementation-go``.
   The checkout GitJob-proven reviewed head accompanies that label;
   ``merge_wait`` verifies it before each bounded SHA-conditional normal merge
   attempt. Every
@@ -85,8 +86,9 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
 - The structural audit is parsed IN-WORKER (carried as the review job's
   ``parse`` callable; symbol-scoped zero-I/O exemption mirrors plan_review's).
   REVIEW_WAIT clears all stale round-scoped payload at submission so a failed
-  later round can never replay an earlier audit or threads. Grades, summaries,
-  and supplemental feedback are informational; only confirmed GitHub
+  later round can never replay an earlier audit or threads. The typed ``GO``
+  verdict is a required input to the host gate. Grades, summaries, and
+  supplemental feedback are informational. Only confirmed GitHub
   implementation-state label transitions control downstream admission.
 """
 

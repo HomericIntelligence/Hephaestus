@@ -512,11 +512,11 @@ class StageGitHub(Protocol):
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-go`` to the PR.
 
-        The PR review stage requests this only after complete structural audit
-        facts, live thread facts, and an exact reviewed open/unarmed head pass
-        its mutation guard. A post-write readback must still prove the same
-        head and exclusive label. Audit prose, grades, CI, and secondary
-        artifacts are informational rather than label authority.
+        The PR review stage requests this only after a valid ``GO`` verdict
+        without blocking findings, complete live thread facts, and an exact
+        reviewed open and unarmed head pass its mutation guard. A post-write
+        readback must still prove the same head and exclusive label. Audit
+        prose, grades, CI, and secondary artifacts do not authorize the label.
         """
         ...
 

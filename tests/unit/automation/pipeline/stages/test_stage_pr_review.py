@@ -4233,6 +4233,76 @@ class TestEvalVerdicts:
         assert "mark_pr_implementation_go" in names
         assert "publish_implementation_go_audit" in names
 
+    @pytest.mark.parametrize("severity", ["minor", "nitpick"])
+    def test_go_with_advisory_finding_can_create_implementation_go_artifacts(
+        self, make_ctx: Any, make_work_item: Any, severity: str
+    ) -> None:
+        """An advisory finding does not become blocking pipeline work."""
+        audit = parse_review_audit(
+            json.dumps(
+                {
+                    "grade": "A",
+                    "verdict": "GO",
+                    "summary": "Ready with advisory feedback",
+                    "comments": [
+                        {
+                            "path": "a.py",
+                            "line": 1,
+                            "side": "RIGHT",
+                            "severity": severity,
+                            "body": "Optional polish.",
+                        }
+                    ],
+                }
+            )
+        )
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = audit
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
+        names = [name for name, _args in github.mutation_log]
+        assert "persist_pending_implementation_go_audit" in names
+        assert "mark_pr_implementation_go" in names
+        assert "publish_implementation_go_audit" in names
+
+    @pytest.mark.parametrize("severity", ["critical", "major"])
+    def test_go_with_blocking_finding_cannot_create_implementation_go_artifacts(
+        self, make_ctx: Any, make_work_item: Any, severity: str
+    ) -> None:
+        """A contradictory GO cannot bypass a blocking structured finding."""
+        audit = parse_review_audit(
+            json.dumps(
+                {
+                    "grade": "A",
+                    "verdict": "GO",
+                    "summary": "Contradictory review",
+                    "comments": [
+                        {
+                            "path": "a.py",
+                            "line": 1,
+                            "side": "RIGHT",
+                            "severity": severity,
+                            "body": "A required correction remains.",
+                        }
+                    ],
+                }
+            )
+        )
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = audit
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        names = [name for name, _args in github.mutation_log]
+        assert "persist_pending_implementation_go_audit" not in names
+        assert "mark_pr_implementation_go" not in names
+        assert "publish_implementation_go_audit" not in names
+
     @pytest.mark.parametrize(
         "response",
         [

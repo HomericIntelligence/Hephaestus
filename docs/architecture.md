@@ -73,10 +73,11 @@ neither writes `state:skip` during seeding.
  [`_finalize_resumable`](../hephaestus/automation/pipeline/coordinator.py)).
 - **Reviewed-head proof, conditional queue merge.** `state:implementation-go`
  is applied only by `pr_review._eval`, which is the sole stage authorized to
- write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
- review inputs and its head SHA, then requires a clean local checkout at that
- exact SHA. The resulting in-memory proof is rechecked against a confirmed,
- unarmed live PR before the label is written. `merge_wait` uses that same
+ write the label. It requires a valid typed `GO` verdict without blocking
+ findings. Before the reviewer runs, `pr_review` snapshots the GitHub review
+ inputs and its head SHA, then requires a clean local checkout at that exact SHA. The resulting
+ in-memory proof is rechecked against a confirmed, unarmed live PR before the
+ label is written. `merge_wait` uses that same
  active-run proof before every request in a bounded sequence (default: five)
  of SHA-conditional ordinary REST squash merges. Each request also requires
  exactly one trusted, unedited marked `APPROVED` GitHub review bound to the

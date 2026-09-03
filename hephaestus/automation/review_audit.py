@@ -27,6 +27,7 @@ _JSON_BLOCK_RE = re.compile(
 _VALID_GRADES = frozenset("ABCDEF")
 _VALID_VERDICTS = frozenset({"GO", "NOGO", "BLOCKED"})
 _VALID_SEVERITIES = frozenset({"critical", "major", "minor", "nitpick"})
+_BLOCKING_SEVERITIES = frozenset({"critical", "major"})
 _RESERVED_AUTHORITY_CLAIM_RE = re.compile(
     r"\b(?:verdict|decision|approval|rejection)\s*:\s*[^\r\n]*"
     r"|\bimplementation[\s_-]+(?:approval|rejection)\b[^\r\n]*"
@@ -61,7 +62,7 @@ def is_clean_go_review(audit: object | None) -> bool:
         isinstance(audit, ReviewAudit)
         and audit.valid
         and audit.verdict == "GO"
-        and not audit.findings
+        and not any(finding.get("severity") in _BLOCKING_SEVERITIES for finding in audit.findings)
     )
 
 
