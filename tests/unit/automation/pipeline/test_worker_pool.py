@@ -5061,6 +5061,7 @@ class TestGitOps:
                 "hephaestus.automation.git_utils.rebase_worktree_onto",
                 return_value=False,
             ) as rebase,
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_conflict_receipt") as receipt,
         ):
