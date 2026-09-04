@@ -3589,6 +3589,81 @@ class TestGitOps:
             },
         }
 
+    def test_direct_pinned_impl_writer_reserves_creates_and_claims(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A direct writer claims its source lane after its remote reservation."""
+        pinned_sha = "a" * 40
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        authority = MagicMock(spec=ImplementationWriterAuthority)
+        binding = MagicMock(revision=pinned_sha)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+                "source_lane": "impl",
+            },
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = writer_path
+        manager.implementation_writer_authority.return_value = authority
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.return_value = binding
+
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent") as reserve,
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        reserve.assert_called_once_with(
+            "7-auto",
+            pinned_sha,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
+        manager.create_worktree.assert_called_once_with(
+            issue_number=7,
+            branch_name="7-auto",
+            refresh_base=False,
+            base_sha=pinned_sha,
+            source_lane="impl",
+            remote_branch_reserved=True,
+            timeout=60,
+        )
+        manager.implementation_writer_authority.assert_called_once_with(writer_path)
+        source_manager.claim_implementation_writer.assert_called_once_with(
+            7,
+            branch="7-auto",
+            path=writer_path,
+            authority=authority,
+        )
+        assert result.ok is True
+        assert result.value == {
+            "path": str(writer_path),
+            "impl_source_revision": pinned_sha,
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
+        }
+
     def test_direct_pinned_worktree_releases_reservation_when_no_worktree_is_created(
         self,
         pool: WorkerPool,

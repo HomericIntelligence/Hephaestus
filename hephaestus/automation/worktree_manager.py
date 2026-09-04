@@ -568,7 +568,9 @@ class WorktreeManager:
                             issue_number=issue_number,
                             branch_name=branch_name,
                             worktree_path=worktree_path,
-                            base_sha=base_sha,
+                            reserved_remote_branch_sha=(
+                                base_sha if remote_branch_reserved else None
+                            ),
                             timeout=timeout,
                         )
                     if (
@@ -837,7 +839,7 @@ class WorktreeManager:
         issue_number: int,
         branch_name: str,
         worktree_path: Path,
-        base_sha: str | None,
+        reserved_remote_branch_sha: str | None,
         timeout: int | None,
     ) -> None:
         """Reject every pre-existing fresh-writer path or branch before cleanup."""
@@ -854,15 +856,23 @@ class WorktreeManager:
             raise WorktreeCreationReceiptError(
                 "implementation writer branch is held by an unowned worktree"
             )
-        if self._implementation_writer_branch_exists(branch_name, timeout=timeout):
+        if self._implementation_writer_branch_exists(
+            branch_name,
+            reserved_remote_branch_sha=reserved_remote_branch_sha,
+            timeout=timeout,
+        ):
             raise WorktreeCreationReceiptError(
                 "implementation writer branch is an unowned existing branch"
             )
 
     def _implementation_writer_branch_exists(
-        self, branch_name: str, *, timeout: int | None
+        self,
+        branch_name: str,
+        *,
+        reserved_remote_branch_sha: str | None = None,
+        timeout: int | None,
     ) -> bool:
-        """Return branch presence only when local and remote reads are conclusive."""
+        """Return foreign branch presence only when local and remote reads are conclusive."""
         try:
             local = run(
                 ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
@@ -908,7 +918,21 @@ class WorktreeManager:
             raise WorktreeCreationReceiptError(
                 "cannot safely verify remote implementation writer branch ownership"
             )
-        return f"refs/heads/{branch_name}" in (remote.stdout or "")
+        remote_branch = f"refs/heads/{branch_name}"
+        remote_heads = [
+            fields[0]
+            for line in (remote.stdout or "").splitlines()
+            if len(fields := line.split()) == 2 and fields[1] == remote_branch
+        ]
+        if not remote_heads:
+            return False
+        if reserved_remote_branch_sha is not None:
+            if remote_heads != [reserved_remote_branch_sha]:
+                raise WorktreeCreationReceiptError(
+                    "implementation writer direct reservation changed"
+                )
+            return False
+        return True
 
     def _validate_direct_scope_worktree_request(
         self,

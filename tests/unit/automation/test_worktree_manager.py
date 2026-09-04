@@ -557,6 +557,77 @@ class TestWorktreeManager:
 
         add.assert_not_called()
 
+    def test_impl_writer_accepts_its_reserved_direct_remote_branch(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A direct reservation does not look like a foreign writer branch."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        pin = "a" * 40
+
+        def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(returncode=0, stdout=f"{pin}\trefs/heads/33-auto\n")
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch.object(manager, "_add_worktree_for_branch") as add,
+            patch.object(manager, "_mint_writer_authority"),
+        ):
+            result = manager.create_worktree(
+                33,
+                "33-auto",
+                base_sha=pin,
+                remote_branch_reserved=True,
+                source_lane="impl",
+            )
+
+        assert result == manager.base_dir / "auto-33-impl"
+        add.assert_called_once_with(
+            result,
+            "33-auto",
+            base_sha=pin,
+            refresh_base=False,
+            timeout=None,
+        )
+
+    def test_impl_writer_rejects_a_changed_direct_remote_reservation(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A remote writer ref must still match the direct reservation pin."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        pin = "a" * 40
+
+        def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(returncode=0, stdout=f"{'b' * 40}\trefs/heads/33-auto\n")
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch.object(manager, "_add_worktree_for_branch") as add,
+            pytest.raises(WorktreeCreationReceiptError, match="reservation changed"),
+        ):
+            manager.create_worktree(
+                33,
+                "33-auto",
+                base_sha=pin,
+                remote_branch_reserved=True,
+                source_lane="impl",
+            )
+
+        add.assert_not_called()
+
     def test_impl_writer_authority_is_process_local_and_has_no_sidecar(
         self, worktree_mocks: Any, tmp_path: Path
     ) -> None:
