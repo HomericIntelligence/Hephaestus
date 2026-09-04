@@ -927,13 +927,16 @@ class WorktreeManager:
                     capture_output=True,
                     **_timeout_kw(timeout),
                 ).stdout.strip()
-                detached = run(
-                    ["git", "symbolic-ref", "--quiet", "HEAD"],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    check=False,
-                    **_timeout_kw(timeout),
-                ).returncode == 1
+                detached = (
+                    run(
+                        ["git", "symbolic-ref", "--quiet", "HEAD"],
+                        cwd=worktree_path,
+                        capture_output=True,
+                        check=False,
+                        **_timeout_kw(timeout),
+                    ).returncode
+                    == 1
+                )
                 if detached and is_clean_working_tree(worktree_path, timeout=timeout):
                     try:
                         implementation_writer_handoff._validate_direct_transition(
