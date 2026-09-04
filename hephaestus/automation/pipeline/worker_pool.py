@@ -45,6 +45,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
+from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -3726,6 +3727,41 @@ class WorkerPool:
         return JobResult(ok=True, value=synced_head)
 
     def _git_create_worktree(self, job: GitJob) -> JobResult:
+        """Create a worktree, holding one implementation-writer handoff."""
+        kwargs = dict(job.kwargs)
+        if kwargs.get("source_lane") != "impl":
+            return self._git_create_worktree_with_handoff(job, None, None)
+        repo_root_kwarg = kwargs.get("repo_root")
+        repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
+        item_number = kwargs.get("issue_number")
+        if isinstance(item_number, bool) or not isinstance(item_number, int):
+            return JobResult(
+                ok=False,
+                error=(
+                    "source_workspace_ownership_unavailable: "
+                    "implementation writer item number is invalid"
+                ),
+            )
+        source_manager = SourceWorkspaceManager(
+            repo_root,
+            repository=job.repo or job.transport_repository,
+            base_dir=repo_root / "build" / ".worktrees",
+        )
+        try:
+            with source_manager.implementation_writer_handoff(item_number) as handoff:
+                return self._git_create_worktree_with_handoff(job, source_manager, handoff)
+        except SourceWorkspaceError as exc:
+            return JobResult(
+                ok=False,
+                error=f"source_workspace_ownership_unavailable: {exc}",
+            )
+
+    def _git_create_worktree_with_handoff(
+        self,
+        job: GitJob,
+        source_manager: SourceWorkspaceManager | None,
+        implementation_writer_handoff: ImplementationWriterHandoff | None,
+    ) -> JobResult:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
@@ -3801,6 +3837,8 @@ class WorkerPool:
         if base_sha is not None:
             kwargs["base_sha"] = base_sha
             kwargs["remote_branch_reserved"] = True
+        if implementation_writer_handoff is not None:
+            kwargs["implementation_writer_handoff"] = implementation_writer_handoff
         created_or_failure = self._create_managed_worktree(
             manager=manager,
             kwargs=kwargs,
@@ -3844,6 +3882,8 @@ class WorkerPool:
             writer_authority=writer_authority,
             worktree_manager=manager,
             implementation_adoption_head=kwargs.get("implementation_adoption_head"),
+            source_manager=source_manager,
+            implementation_writer_handoff=implementation_writer_handoff,
             timeout_s=job.timeout_s,
         )
 
@@ -3995,6 +4035,8 @@ class WorkerPool:
         writer_authority: ImplementationWriterAuthority | None = None,
         worktree_manager: WorktreeManager | None = None,
         implementation_adoption_head: object = None,
+        source_manager: SourceWorkspaceManager | None = None,
+        implementation_writer_handoff: ImplementationWriterHandoff | None = None,
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
         if created is None:
@@ -4111,16 +4153,14 @@ class WorkerPool:
             if source_lane == "impl" and not dirty:
                 if writer_authority is None:
                     raise SourceWorkspaceError("implementation writer authority is missing")
-                source_manager = SourceWorkspaceManager(
-                    repo_root,
-                    repository=source_repository or repo,
-                    base_dir=worktree_path.parent,
-                )
+                if source_manager is None or implementation_writer_handoff is None:
+                    raise SourceWorkspaceError("implementation writer handoff is missing")
                 binding = source_manager.claim_implementation_writer(
                     implementation_item_number,
                     branch=branch_name,
                     path=worktree_path,
                     authority=writer_authority,
+                    handoff=implementation_writer_handoff,
                 )
         except Exception as exc:
             if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)):

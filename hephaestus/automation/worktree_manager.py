@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.worktree_identity import source_worktree_name
 
@@ -273,6 +274,12 @@ class WorktreeManager:
         """Return the cross-process lock guarding shared git worktree metadata."""
         return self.git_metadata_lock_path(self.repo_root)
 
+    @classmethod
+    def source_lane_lock_path(cls, repo_root: Path, issue_number: int, lane: str) -> Path:
+        """Return the shared lock path for one deterministic source lane."""
+        common_dir = cls.git_metadata_lock_path(repo_root).parent
+        return common_dir / "hephaestus-source-workspaces" / f"{issue_number}-{lane}.lock"
+
     @property
     def base_branch(self) -> str:
         """The base branch, auto-detected on first access."""
@@ -449,6 +456,7 @@ class WorktreeManager:
         direct_worktree_nonce: str | None = None,
         source_lane: str | None = None,
         implementation_adoption_head: str | None = None,
+        implementation_writer_handoff: object = None,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -509,6 +517,21 @@ class WorktreeManager:
                 raise RuntimeError("source lane must be 'impl' or 'review'")
             if source_lane == "impl" and isolated:
                 raise RuntimeError("implementation source lane cannot be isolated")
+            if source_lane == "impl":
+                try:
+                    if not isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
+                        raise RuntimeError("implementation writer handoff is missing")
+                    implementation_writer_handoff._validate(
+                        self.repo_root,
+                        issue_number,
+                        self.source_lane_lock_path(self.repo_root, issue_number, "impl"),
+                    )
+                except RuntimeError as exc:
+                    raise WorktreeCreationReceiptError(str(exc)) from exc
+            elif implementation_writer_handoff is not None:
+                raise WorktreeCreationReceiptError(
+                    "implementation writer handoff requires the implementation source lane"
+                )
             adopting_implementation_writer = implementation_adoption_head is not None
             if adopting_implementation_writer and (
                 source_lane != "impl"
@@ -575,6 +598,9 @@ class WorktreeManager:
                     timeout=timeout,
                 )
             try:
+                # The worker owns the source-lane lock for the complete
+                # handoff. Do not acquire it here: nested flock calls can
+                # release the worker's lock when this scope exits.
                 with file_lock(self._git_metadata_lock_path()):
                     if source_lane == "impl" and not adopting_implementation_writer:
                         self._assert_implementation_writer_is_controlled(

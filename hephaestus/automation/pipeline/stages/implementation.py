@@ -1903,6 +1903,9 @@ class ImplementationStage(Stage):
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
             if (result.error or "").startswith("source_workspace_ownership_unavailable:"):
                 item.payload["source_workspace_ownership_unavailable"] = True
+                item.payload["source_workspace_ownership_error"] = redact_diagnostic_text(
+                    result.error or "source workspace ownership unavailable"
+                )[:500]
                 direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
                 reservation = (
                     result.value.get("direct_scope_reservation")
@@ -1919,6 +1922,8 @@ class ImplementationStage(Stage):
                         "branch": item.branch,
                         "base_sha": direct_base_sha,
                     }
+                else:
+                    item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
                 materialized_path = (
                     result.value.get("path")
                     if isinstance(result.value, dict)
@@ -1930,6 +1935,17 @@ class ImplementationStage(Stage):
                     item.payload[WORKTREE_MATERIALIZED_KEY] = True
                 else:
                     item.worktree = ""
+                    item.payload.pop(WORKTREE_MATERIALIZED_KEY, None)
+                for key in (
+                    "worktree_dirty",
+                    "worktree_status",
+                    "worktree_diff",
+                    "worktree_content_snapshot",
+                    "worktree_branch",
+                    "worktree_head_sha",
+                    "_impl_source_revision",
+                ):
+                    item.payload.pop(key, None)
                 return
             if result.error == BRANCH_WORKTREE_OWNED:
                 ownership = result.value if isinstance(result.value, dict) else {}

@@ -2,24 +2,33 @@
 
 from __future__ import annotations
 
+import queue
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation import implementation_writer
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.queues import CompletionQueue
+from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
 )
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
+    WorktreeCreationReceiptError,
     WorktreeManager,
 )
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 
 def _git(path: Path, *args: str) -> str:
@@ -223,19 +232,22 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
         base_dir=manager.base_dir,
         base_branch=second,
     )
-    writer = worktree_manager.create_worktree(
-        9,
-        "writer-branch",
-        source_lane=SourceLane.IMPLEMENTATION.value,
-    )
-    authority = worktree_manager.implementation_writer_authority(writer)
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+        authority = worktree_manager.implementation_writer_authority(writer)
 
-    binding = manager.claim_implementation_writer(
-        9,
-        branch="writer-branch",
-        path=writer,
-        authority=authority,
-    )
+        binding = manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=authority,
+            handoff=handoff,
+        )
 
     rebound = manager.prepare(
         9,
@@ -246,6 +258,374 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
     assert binding.cwd == writer
     assert binding.revision == second
     assert rebound == binding
+
+
+def test_implementation_writer_handoff_cannot_be_forged_outside_manager(
+    tmp_path: Path,
+) -> None:
+    """The handoff capability requires the issuer context manager."""
+    assert not hasattr(implementation_writer, "_CONSTRUCTION_TOKEN")
+    assert not hasattr(implementation_writer, "_new_implementation_writer_handoff")
+    assert not hasattr(implementation_writer, "_set_implementation_writer_handoff_active")
+    handoff_type: Any = implementation_writer.ImplementationWriterHandoff
+    with pytest.raises(TypeError, match="issuer context manager"):
+        handoff_type(tmp_path, 9, token=object())
+    assert not hasattr(implementation_writer.ImplementationWriterHandoff, "_activate")
+
+    repo, _, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        base_branch=second,
+    )
+    forged = object.__new__(implementation_writer.ImplementationWriterHandoff)
+    object.__setattr__(forged, "_active", True)
+    object.__setattr__(forged, "_construction_token", object())
+    object.__setattr__(forged, "_item_number", 9)
+    object.__setattr__(
+        forged,
+        "_lock_path",
+        worktree_manager.source_lane_lock_path(repo, 9, "impl"),
+    )
+    object.__setattr__(forged, "_repo_root", repo.resolve())
+    with pytest.raises(WorktreeCreationReceiptError, match="inactive"):
+        worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=forged,
+        )
+
+
+def test_implementation_writer_handoff_rejects_a_noncanonical_lock_path(
+    tmp_path: Path,
+) -> None:
+    """A handoff issued on another lock cannot authorize writer creation."""
+    repo, _, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        base_branch=second,
+    )
+    wrong_lock = tmp_path / "not-the-source-lane.lock"
+
+    with implementation_writer.implementation_writer_handoff(repo, 9, wrong_lock) as handoff:
+        with pytest.raises(WorktreeCreationReceiptError, match="inactive"):
+            worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+
+
+def test_implementation_writer_creation_requires_an_active_handoff(tmp_path: Path) -> None:
+    """An implementation writer cannot allocate without its lane handoff."""
+    repo, _, second = _repository(tmp_path)
+    manager = WorktreeManager(repo_root=repo, base_branch=second)
+
+    with pytest.raises(WorktreeCreationReceiptError, match="handoff"):
+        manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+        )
+
+
+def test_fresh_writer_claim_blocks_concurrent_adoption_until_claim_finishes(
+    tmp_path: Path,
+) -> None:
+    """A fresh writer stays intact while a competing adoption waits for its claim."""
+    repo, _, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        base_branch=second,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+    adopted_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+    adoption_errors: list[Exception] = []
+    contention_observed = threading.Event()
+    adoption_mutation_started = threading.Event()
+    adoption_finished = threading.Event()
+
+    adopted_source = SourceWorkspaceManager(repo, repository="example/project")
+
+    def adopt() -> None:
+        try:
+            with file_lock(
+                adopted_source._lane_lock_path(9, SourceLane.IMPLEMENTATION),
+                blocking=False,
+                require_exclusive=True,
+            ):
+                raise AssertionError("source lease was not held")
+        except LockUnavailableError:
+            contention_observed.set()
+        try:
+            with adopted_source.implementation_writer_handoff(9) as adopted_handoff:
+                adopted_manager.create_worktree(
+                    9,
+                    "writer-branch",
+                    source_lane=SourceLane.IMPLEMENTATION.value,
+                    implementation_adoption_head=second,
+                    implementation_writer_handoff=adopted_handoff,
+                )
+        except Exception as exc:  # pragma: no cover - assertion below reports failures
+            adoption_errors.append(exc)
+        finally:
+            adoption_finished.set()
+
+    real_adoption = adopted_manager._add_authenticated_adopted_implementation_writer
+
+    def observe_adoption(*args: Any, **kwargs: Any) -> None:
+        adoption_mutation_started.set()
+        real_adoption(*args, **kwargs)
+
+    worker = threading.Thread(target=adopt)
+    with patch.object(
+        adopted_manager,
+        "_add_authenticated_adopted_implementation_writer",
+        side_effect=observe_adoption,
+    ):
+        with source_manager.implementation_writer_handoff(9) as handoff:
+            writer = worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+            authority = worktree_manager.implementation_writer_authority(writer)
+            _git(repo, "push", "origin", "writer-branch")
+            worker.start()
+            assert contention_observed.wait(timeout=5)
+            assert not adoption_mutation_started.is_set()
+            assert writer.exists()
+            assert _git(writer, "rev-parse", "HEAD") == second
+
+            source_manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                authority=authority,
+                handoff=handoff,
+            )
+
+        assert adoption_mutation_started.wait(timeout=5)
+
+    assert adoption_finished.wait(timeout=5)
+    assert not adoption_errors
+
+
+def test_worker_pool_adoption_waits_for_active_source_lease(
+    tmp_path: Path,
+) -> None:
+    """WorkerPool adoption preserves a leased writer until the lease releases."""
+    repo, _, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        base_branch=second,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+        binding = source_manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=worktree_manager.implementation_writer_authority(writer),
+            handoff=handoff,
+        )
+    _git(repo, "push", "origin", "writer-branch")
+
+    completion_q: CompletionQueue = queue.Queue()
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+    )
+    contention_observed = threading.Event()
+    adoption_mutation_started = threading.Event()
+    sync_completed = threading.Event()
+    real_handoff = SourceWorkspaceManager.implementation_writer_handoff
+
+    @contextmanager
+    def observed_handoff(manager: SourceWorkspaceManager, item_number: int):
+        try:
+            with file_lock(
+                manager._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
+                blocking=False,
+                require_exclusive=True,
+            ):
+                raise AssertionError("source lease was not held")
+        except LockUnavailableError:
+            contention_observed.set()
+        with real_handoff(manager, item_number) as handoff:
+            yield handoff
+
+    real_sync = pool._sync_worktree_to_remote_branch
+
+    def observed_sync(*args: Any, **kwargs: Any) -> None:
+        real_sync(*args, **kwargs)
+        sync_completed.set()
+
+    real_adoption = WorktreeManager._add_authenticated_adopted_implementation_writer
+
+    def observed_adoption(manager: WorktreeManager, *args: Any, **kwargs: Any) -> None:
+        adoption_mutation_started.set()
+        real_adoption(manager, *args, **kwargs)
+
+    job = GitJob(
+        repo="example/project",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 9,
+            "branch_name": "writer-branch",
+            "repo_root": str(repo),
+            "source_lane": SourceLane.IMPLEMENTATION.value,
+            "sync_to_remote": True,
+            "pr_number": 90,
+            "implementation_adoption_head": second,
+        },
+    )
+    try:
+        with (
+            patch.object(
+                SourceWorkspaceManager,
+                "implementation_writer_handoff",
+                observed_handoff,
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
+            ) as remote_configuration,
+            patch.object(pool, "_sync_worktree_to_remote_branch", observed_sync),
+            patch.object(
+                WorktreeManager,
+                "_add_authenticated_adopted_implementation_writer",
+                observed_adoption,
+            ),
+        ):
+            with source_manager.acquire(binding):
+                pool.submit(job, StageName.REPO)
+                assert contention_observed.wait(timeout=5)
+                assert not adoption_mutation_started.is_set()
+                assert writer.exists()
+                assert _git(writer, "rev-parse", "HEAD") == second
+                assert _git(writer, "branch", "--show-current") == "writer-branch"
+
+            _, result = completion_q.get(timeout=10)
+            assert adoption_mutation_started.is_set()
+            assert result.ok is True, (result.error, remote_configuration.call_args_list)
+            assert sync_completed.is_set()
+            assert result.value == {
+                "path": str(writer),
+                "impl_source_revision": second,
+                "dirty": False,
+                "status": "",
+                "diff": "",
+            }
+        rebound = source_manager.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="writer-branch",
+        )
+        assert rebound.cwd == binding.cwd
+        assert rebound.revision == binding.revision
+        assert rebound.generation == binding.generation + 1
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+
+def test_claim_does_not_reacquire_the_active_lane_lock(tmp_path: Path) -> None:
+    """Claim uses the caller's active handoff without nesting its file lock."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    lock_paths: list[Path] = []
+
+    @contextmanager
+    def tracked_lock(path: Path, **kwargs: Any):
+        lock_paths.append(path)
+        with file_lock(path, **kwargs):
+            yield
+
+    with patch("hephaestus.automation.implementation_writer.file_lock", side_effect=tracked_lock):
+        with manager.implementation_writer_handoff(9) as handoff:
+            writer = worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                authority=worktree_manager.implementation_writer_authority(writer),
+                handoff=handoff,
+            )
+
+    assert lock_paths == [manager._lane_lock_path(9, SourceLane.IMPLEMENTATION)]
+
+
+def test_implementation_writer_rejects_wrong_or_inactive_handoff(tmp_path: Path) -> None:
+    """A handoff for another item or an ended handoff cannot allocate a writer."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(WorktreeCreationReceiptError, match="handoff"):
+            worktree_manager.create_worktree(
+                10,
+                "writer-branch",
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+    with pytest.raises(WorktreeCreationReceiptError, match="inactive"):
+        worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
 
 
 def test_claim_implementation_writer_converts_receipt_write_error(
@@ -259,23 +639,28 @@ def test_claim_implementation_writer_converts_receipt_write_error(
         base_dir=manager.base_dir,
         base_branch=second,
     )
-    writer = worktree_manager.create_worktree(
-        9,
-        "writer-branch",
-        source_lane=SourceLane.IMPLEMENTATION.value,
-    )
-    authority = worktree_manager.implementation_writer_authority(writer)
-
-    with (
-        patch.object(manager, "_write_receipt", side_effect=OSError("disk full")),
-        pytest.raises(SourceWorkspaceError, match="cannot record implementation writer receipt"),
-    ):
-        manager.claim_implementation_writer(
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
             9,
-            branch="writer-branch",
-            path=writer,
-            authority=authority,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
         )
+        authority = worktree_manager.implementation_writer_authority(writer)
+
+        with (
+            patch.object(manager, "_write_receipt", side_effect=OSError("disk full")),
+            pytest.raises(
+                SourceWorkspaceError, match="cannot record implementation writer receipt"
+            ),
+        ):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                authority=authority,
+                handoff=handoff,
+            )
 
     assert not (manager.state_dir / "9-impl.json").exists()
 
@@ -291,27 +676,31 @@ def test_claim_implementation_writer_authority_failure_preserves_existing_receip
         base_dir=manager.base_dir,
         base_branch=second,
     )
-    writer = worktree_manager.create_worktree(
-        9,
-        "writer-branch",
-        source_lane=SourceLane.IMPLEMENTATION.value,
-    )
-    manager.claim_implementation_writer(
-        9,
-        branch="writer-branch",
-        path=writer,
-        authority=worktree_manager.implementation_writer_authority(writer),
-    )
-
-    with (
-        patch.object(manager, "_write_receipt") as write_receipt,
-        pytest.raises(SourceWorkspaceError, match="authority is invalid"),
-    ):
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
         manager.claim_implementation_writer(
             9,
             branch="writer-branch",
             path=writer,
+            authority=worktree_manager.implementation_writer_authority(writer),
+            handoff=handoff,
         )
+
+        with (
+            patch.object(manager, "_write_receipt") as write_receipt,
+            pytest.raises(SourceWorkspaceError, match="authority is invalid"),
+        ):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                handoff=handoff,
+            )
 
     write_receipt.assert_not_called()
     assert (
@@ -336,26 +725,29 @@ def test_claim_implementation_writer_restart_cannot_adopt_unconsumed_authority(
         base_dir=manager.base_dir,
         base_branch=second,
     )
-    writer = worktree_manager.create_worktree(
-        9,
-        "writer-branch",
-        source_lane=SourceLane.IMPLEMENTATION.value,
-    )
-    authority = worktree_manager.implementation_writer_authority(writer)
-
-    with (
-        patch(
-            "hephaestus.automation.source_worktree.consume_implementation_writer_authority",
-            side_effect=RuntimeError("worker stopped"),
-        ),
-        pytest.raises(SourceWorkspaceError, match="authority is invalid"),
-    ):
-        manager.claim_implementation_writer(
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
             9,
-            branch="writer-branch",
-            path=writer,
-            authority=authority,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
         )
+        authority = worktree_manager.implementation_writer_authority(writer)
+
+        with (
+            patch(
+                "hephaestus.automation.source_worktree.consume_implementation_writer_authority",
+                side_effect=RuntimeError("worker stopped"),
+            ),
+            pytest.raises(SourceWorkspaceError, match="authority is invalid"),
+        ):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                authority=authority,
+                handoff=handoff,
+            )
 
     restarted = SourceWorkspaceManager(repo, repository="example/project")
     assert not (restarted.state_dir / "9-impl.json").exists()
@@ -377,12 +769,14 @@ def test_claim_implementation_writer_rejects_clean_unauthorized_worktree(
     writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
     _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
 
-    with pytest.raises(SourceWorkspaceError, match="authority"):
-        manager.claim_implementation_writer(
-            9,
-            branch="writer-branch",
-            path=writer,
-        )
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="authority"):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                handoff=handoff,
+            )
 
     assert not (manager.state_dir / "9-impl.json").exists()
 
@@ -397,13 +791,15 @@ def test_claim_implementation_writer_rejects_a_constructed_authority(
     _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
     constructed = cast(ImplementationWriterAuthority, object())
 
-    with pytest.raises(SourceWorkspaceError, match="authority"):
-        manager.claim_implementation_writer(
-            9,
-            branch="writer-branch",
-            path=writer,
-            authority=constructed,
-        )
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="authority"):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                authority=constructed,
+                handoff=handoff,
+            )
 
     assert not (manager.state_dir / "9-impl.json").exists()
 
@@ -419,21 +815,24 @@ def test_claim_implementation_writer_rejects_a_stale_authority(
         base_dir=manager.base_dir,
         base_branch=second,
     )
-    writer = worktree_manager.create_worktree(
-        9,
-        "writer-branch",
-        source_lane=SourceLane.IMPLEMENTATION.value,
-    )
-    authority = worktree_manager.implementation_writer_authority(writer)
-    _git(writer, "reset", "--hard", first)
-
-    with pytest.raises(SourceWorkspaceError, match="authority"):
-        manager.claim_implementation_writer(
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
             9,
-            branch="writer-branch",
-            path=writer,
-            authority=authority,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
         )
+        authority = worktree_manager.implementation_writer_authority(writer)
+        _git(writer, "reset", "--hard", first)
+
+        with pytest.raises(SourceWorkspaceError, match="authority"):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                authority=authority,
+                handoff=handoff,
+            )
 
     assert not (manager.state_dir / "9-impl.json").exists()
 
@@ -445,12 +844,14 @@ def test_claim_implementation_writer_rejects_a_non_lane_path(tmp_path: Path) -> 
     foreign_writer = tmp_path / "foreign-writer"
     _git(repo, "worktree", "add", "-b", "writer-branch", str(foreign_writer), second)
 
-    with pytest.raises(SourceWorkspaceError, match="does not match the deterministic lane"):
-        manager.claim_implementation_writer(
-            9,
-            branch="writer-branch",
-            path=foreign_writer,
-        )
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="does not match the deterministic lane"):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=foreign_writer,
+                handoff=handoff,
+            )
 
     assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
 
@@ -469,12 +870,14 @@ def test_claim_implementation_writer_rejects_an_incompatible_receipt(
     ).cwd
     _git(writer, "switch", "-c", "writer-branch")
 
-    with pytest.raises(SourceWorkspaceError, match="incompatible source workspace receipt"):
-        manager.claim_implementation_writer(
-            9,
-            branch="writer-branch",
-            path=writer,
-        )
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="incompatible source workspace receipt"):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                handoff=handoff,
+            )
 
     assert _git(writer, "branch", "--show-current") == "writer-branch"
 
@@ -488,12 +891,14 @@ def test_claim_implementation_writer_rejects_a_wrong_attached_branch(
     writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
     _git(repo, "worktree", "add", "-b", "other-writer-branch", str(writer), second)
 
-    with pytest.raises(SourceWorkspaceError, match="does not match the requested branch"):
-        manager.claim_implementation_writer(
-            9,
-            branch="writer-branch",
-            path=writer,
-        )
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="does not match the requested branch"):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                handoff=handoff,
+            )
 
     assert _git(writer, "branch", "--show-current") == "other-writer-branch"
     assert not (manager.state_dir / "9-impl.json").exists()
@@ -508,12 +913,14 @@ def test_claim_implementation_writer_preserves_a_dirty_writer(tmp_path: Path) ->
     dirty_file = writer / "recover-me.txt"
     dirty_file.write_text("preserve this\n", encoding="utf-8")
 
-    with pytest.raises(SourceWorkspaceError, match="dirty and preserved"):
-        manager.claim_implementation_writer(
-            9,
-            branch="writer-branch",
-            path=writer,
-        )
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="dirty and preserved"):
+            manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                handoff=handoff,
+            )
 
     assert dirty_file.read_text(encoding="utf-8") == "preserve this\n"
     assert not (manager.state_dir / "9-impl.json").exists()
@@ -528,25 +935,30 @@ def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -
         base_dir=first.base_dir,
         base_branch=second,
     )
-    writer = worktree_manager.create_worktree(
-        9,
-        "writer-branch",
-        source_lane=SourceLane.IMPLEMENTATION.value,
-    )
-    first.claim_implementation_writer(
-        9,
-        branch="writer-branch",
-        path=writer,
-        authority=worktree_manager.implementation_writer_authority(writer),
-    )
-    second_manager = SourceWorkspaceManager(repo, repository="two/project")
-
-    with pytest.raises(SourceWorkspaceError, match="owned by another repository"):
-        second_manager.claim_implementation_writer(
+    with first.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+        first.claim_implementation_writer(
             9,
             branch="writer-branch",
             path=writer,
+            authority=worktree_manager.implementation_writer_authority(writer),
+            handoff=handoff,
         )
+    second_manager = SourceWorkspaceManager(repo, repository="two/project")
+
+    with second_manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="owned by another repository"):
+            second_manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                handoff=handoff,
+            )
 
     assert _git(writer, "branch", "--show-current") == "writer-branch"
 

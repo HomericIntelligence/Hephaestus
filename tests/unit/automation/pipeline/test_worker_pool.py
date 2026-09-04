@@ -3648,6 +3648,7 @@ class TestGitOps:
             base_sha=pinned_sha,
             source_lane="impl",
             remote_branch_reserved=True,
+            implementation_writer_handoff=ANY,
             timeout=60,
         )
         manager.implementation_writer_authority.assert_called_once_with(writer_path)
@@ -3656,6 +3657,7 @@ class TestGitOps:
             branch="7-auto",
             path=writer_path,
             authority=authority,
+            handoff=ANY,
         )
         assert result.ok is True
         assert result.value == {
@@ -3692,6 +3694,7 @@ class TestGitOps:
                 return_value=({}, ()),
             ),
             patch(f"{_WP}.WorktreeManager", return_value=manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=MagicMock()),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -4078,6 +4081,7 @@ class TestGitOps:
             branch="7-auto",
             path=writer_path,
             authority=authority,
+            handoff=ANY,
         )
         worktree_manager.implementation_writer_authority.assert_called_once_with(writer_path)
         assert result.ok is True
@@ -4336,7 +4340,10 @@ class TestGitOps:
         worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError(
             "deterministic implementation worktree has no creation receipt"
         )
-        with patch(f"{_WP}.WorktreeManager", return_value=worktree_manager):
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=MagicMock()),
+        ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -4372,7 +4379,10 @@ class TestGitOps:
         )
         worktree_manager = MagicMock()
         worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError("disk full")
-        with patch(f"{_WP}.WorktreeManager", return_value=worktree_manager):
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=MagicMock()),
+        ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -4408,6 +4418,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_prepare_direct_scope_worktree", return_value=(pin, "7-auto")),
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=MagicMock()),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
