@@ -6,7 +6,7 @@ import hashlib
 import json
 import subprocess
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Self
@@ -17,7 +17,11 @@ from hephaestus.agents.workspace import (
     WorkspaceBindingError,
     validate_workspace_binding,
 )
-from hephaestus.automation.worktree_manager import WorktreeCreationReceipt, WorktreeManager
+from hephaestus.automation.worktree_manager import (
+    ImplementationWriterAuthority,
+    WorktreeManager,
+    consume_implementation_writer_authority,
+)
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
@@ -257,7 +261,7 @@ class SourceWorkspaceManager:
         *,
         branch: str,
         path: Path,
-        creation_receipt: WorktreeCreationReceipt | None = None,
+        authority: ImplementationWriterAuthority | None = None,
     ) -> WorkspaceBinding:
         """Record ownership of one verified implementation writer checkout.
 
@@ -302,35 +306,28 @@ class SourceWorkspaceManager:
                 branch=branch,
                 obligations=old.obligations if old is not None else (),
             )
-            try:
-                recorded_creation_receipt = WorktreeManager.read_creation_receipt(expected_path)
-            except RuntimeError as exc:
-                raise SourceWorkspaceError(
-                    f"implementation writer creation receipt is invalid: {exc}"
-                ) from exc
-            if (
-                creation_receipt is None
-                or recorded_creation_receipt is None
-                or not isinstance(creation_receipt, WorktreeCreationReceipt)
-                or recorded_creation_receipt != creation_receipt
-            ):
-                raise SourceWorkspaceError("implementation writer creation receipt is missing")
-            if (
-                recorded_creation_receipt.issue_number != item_number
-                or recorded_creation_receipt.branch != branch
-                or recorded_creation_receipt.path.resolve() != expected_path
-                or recorded_creation_receipt.revision != revision
-                or recorded_creation_receipt.source_lane != SourceLane.IMPLEMENTATION.value
-            ):
-                raise SourceWorkspaceError(
-                    "implementation writer creation receipt revision is invalid"
-                )
             binding = self._binding(receipt)
             try:
                 validate_workspace_binding(binding)
             except WorkspaceBindingError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
             self._write_receipt(receipt)
+            try:
+                consume_implementation_writer_authority(
+                    authority,
+                    issue_number=item_number,
+                    branch=branch,
+                    path=expected_path,
+                    revision=revision,
+                )
+            except RuntimeError as exc:
+                if old is None:
+                    self._receipt_path(item_number, lane).unlink(missing_ok=True)
+                else:
+                    self._write_receipt(old)
+                raise SourceWorkspaceError(
+                    f"implementation writer authority is invalid: {exc}"
+                ) from exc
             return binding
 
     @contextmanager
@@ -390,8 +387,6 @@ class SourceWorkspaceManager:
                 if result.returncode and receipt.path.exists():
                     raise SourceWorkspaceError(result.stderr.strip() or "worktree cleanup failed")
             self._receipt_path(item_number, lane).unlink(missing_ok=True)
-            with suppress(OSError):
-                WorktreeManager.creation_receipt_path(receipt.path).unlink(missing_ok=True)
 
     def compare_and_swap_guard(
         self, item_number: int, *, expected: str | None, revision: str

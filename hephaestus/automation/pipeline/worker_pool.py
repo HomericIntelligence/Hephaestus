@@ -83,8 +83,8 @@ from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWo
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
+    ImplementationWriterAuthority,
     RemoteGitRefreshError,
-    WorktreeCreationReceipt,
     WorktreeCreationReceiptError,
     WorktreeManager,
 )
@@ -3754,6 +3754,14 @@ class WorkerPool:
             return direct_setup
         base_sha, branch_name = direct_setup
         base_dir = repo_root / "build" / ".worktrees"
+        implementation_adoption_head = kwargs.get("implementation_adoption_head")
+        adopting_implementation_writer = implementation_adoption_head is not None
+        if adopting_implementation_writer and (
+            kwargs.get("source_lane") != "impl"
+            or not sync_to_remote
+            or not _is_full_commit_sha(implementation_adoption_head)
+        ):
+            return JobResult(ok=False, error="implementation writer adoption head is invalid")
 
         if isinstance(base_sha, str):
             manager = WorktreeManager(
@@ -3761,7 +3769,7 @@ class WorkerPool:
                 base_branch=base_sha,
                 repo_root=repo_root,
             )
-        elif bool(kwargs.get("refresh_base", False)):
+        elif bool(kwargs.get("refresh_base", False)) or adopting_implementation_writer:
             remote_env, remote_config = self._authenticated_remote_git_configuration(
                 cwd=repo_root,
                 expected_repo=job.transport_repository,
@@ -3792,9 +3800,10 @@ class WorkerPool:
             return created_or_failure
         created = created_or_failure
         try:
-            creation_receipt = (
-                manager.read_creation_receipt(Path(created))
+            writer_authority = (
+                manager.implementation_writer_authority(Path(created))
                 if kwargs.get("source_lane") == "impl"
+                and kwargs.get("implementation_adoption_head") is None
                 else None
             )
         except WorktreeCreationReceiptError as exc:
@@ -3816,8 +3825,9 @@ class WorkerPool:
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
             item_number=kwargs.get("issue_number"),
-            creation_receipt=creation_receipt,
+            writer_authority=writer_authority,
             worktree_manager=manager,
+            implementation_adoption_head=kwargs.get("implementation_adoption_head"),
             timeout_s=job.timeout_s,
         )
 
@@ -3966,8 +3976,9 @@ class WorkerPool:
         timeout_s: int,
         source_lane: object = None,
         item_number: object = None,
-        creation_receipt: WorktreeCreationReceipt | None = None,
+        writer_authority: ImplementationWriterAuthority | None = None,
         worktree_manager: WorktreeManager | None = None,
+        implementation_adoption_head: object = None,
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
         if created is None:
@@ -4010,6 +4021,11 @@ class WorkerPool:
             return JobResult(ok=True, value=str(worktree_path))
 
         try:
+            if source_lane == "impl" and (
+                isinstance(item_number, bool) or not isinstance(item_number, int)
+            ):
+                raise SourceWorkspaceError("implementation writer item number is invalid")
+            implementation_item_number = cast(int, item_number)
             dirty = not git_utils.is_clean_working_tree(worktree_path, timeout=timeout_s)
             status = ""
             diff = ""
@@ -4042,25 +4058,37 @@ class WorkerPool:
                     pr_number=int(pr_number) if isinstance(pr_number, (int, str)) else None,
                     timeout=timeout_s,
                 )
+                if source_lane == "impl" and implementation_adoption_head is not None:
+                    if not isinstance(implementation_adoption_head, str) or not _is_full_commit_sha(
+                        implementation_adoption_head
+                    ):
+                        raise SourceWorkspaceError("implementation writer adoption head is invalid")
+                    if worktree_manager is None:
+                        raise SourceWorkspaceError(
+                            "implementation writer authority manager is missing"
+                        )
+                    writer_authority = (
+                        worktree_manager.mint_adopted_implementation_writer_authority(
+                            issue_number=implementation_item_number,
+                            branch_name=branch_name,
+                            worktree_path=worktree_path,
+                            expected_head=implementation_adoption_head,
+                            timeout=timeout_s,
+                        )
+                    )
             if source_lane == "impl" and not dirty:
-                if isinstance(item_number, bool) or not isinstance(item_number, int):
-                    raise SourceWorkspaceError("implementation writer item number is invalid")
-                if creation_receipt is None or worktree_manager is None:
-                    raise SourceWorkspaceError("implementation writer creation receipt is missing")
-                creation_receipt = worktree_manager.refresh_creation_receipt(
-                    creation_receipt,
-                    timeout=timeout_s,
-                )
+                if writer_authority is None:
+                    raise SourceWorkspaceError("implementation writer authority is missing")
                 source_manager = SourceWorkspaceManager(
                     repo_root,
                     repository=source_repository or repo,
                     base_dir=worktree_path.parent,
                 )
-                source_manager.claim_implementation_writer(
-                    item_number,
+                binding = source_manager.claim_implementation_writer(
+                    implementation_item_number,
                     branch=branch_name,
                     path=worktree_path,
-                    creation_receipt=creation_receipt,
+                    authority=writer_authority,
                 )
         except Exception as exc:
             if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)):
@@ -4077,18 +4105,18 @@ class WorkerPool:
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
         if not dirty and not sync_to_remote and base_sha is None:
-            if source_lane == "impl" and creation_receipt is not None:
+            if source_lane == "impl":
                 return JobResult(
                     ok=True,
                     value={
                         "path": str(worktree_path),
-                        "impl_source_revision": creation_receipt.revision,
+                        "impl_source_revision": binding.revision,
                     },
                 )
             return JobResult(ok=True, value=str(worktree_path))
         value: dict[str, object] = {"path": str(worktree_path)}
-        if source_lane == "impl" and creation_receipt is not None:
-            value["impl_source_revision"] = creation_receipt.revision
+        if source_lane == "impl" and not dirty:
+            value["impl_source_revision"] = binding.revision
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
         if dirty:

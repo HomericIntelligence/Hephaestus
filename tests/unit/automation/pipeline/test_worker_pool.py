@@ -81,7 +81,7 @@ from hephaestus.automation.source_worktree import SourceWorkspaceError
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
-    WorktreeCreationReceipt,
+    ImplementationWriterAuthority,
     WorktreeCreationReceiptError,
 )
 from hephaestus.prompts import PromptCatalog
@@ -3909,21 +3909,10 @@ class TestGitOps:
         )
         worktree_manager = MagicMock()
         worktree_manager.create_worktree.return_value = writer_path
-        creation_receipt = WorktreeCreationReceipt(
-            issue_number=7,
-            branch="7-auto",
-            path=writer_path,
-            revision="a" * 40,
-        )
-        worktree_manager.read_creation_receipt.return_value = creation_receipt
-        final_receipt = WorktreeCreationReceipt(
-            issue_number=7,
-            branch="7-auto",
-            path=writer_path,
-            revision="b" * 40,
-        )
-        worktree_manager.refresh_creation_receipt.return_value = final_receipt
+        authority = ImplementationWriterAuthority("authority-token")
+        worktree_manager.implementation_writer_authority.return_value = authority
         source_manager = MagicMock()
+        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
@@ -3941,12 +3930,9 @@ class TestGitOps:
             7,
             branch="7-auto",
             path=writer_path,
-            creation_receipt=final_receipt,
+            authority=authority,
         )
-        worktree_manager.refresh_creation_receipt.assert_called_once_with(
-            creation_receipt,
-            timeout=60,
-        )
+        worktree_manager.implementation_writer_authority.assert_called_once_with(writer_path)
         assert result.ok is True
         assert result.value == {
             "path": str(writer_path),
@@ -4030,6 +4016,96 @@ class TestGitOps:
             "path": str(writer_path),
             WORKTREE_MATERIALIZED_KEY: True,
         }
+
+    def test_adopted_writer_head_drift_prevents_authority_mint_and_claim(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A post-sync head move preserves the writer and does not claim its lane."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        manager = MagicMock()
+        manager.mint_adopted_implementation_writer_authority.side_effect = (
+            WorktreeCreationReceiptError("implementation writer adoption head changed")
+        )
+        source_manager = MagicMock()
+
+        with (
+            patch.object(pool, "_sync_worktree_to_remote_branch") as sync,
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            result = pool._finalize_created_worktree(
+                created=writer_path,
+                base_sha=None,
+                branch_name="7-adopted",
+                repo_root=tmp_path,
+                repo="test/repo",
+                source_repository="test/repo",
+                sync_to_remote=True,
+                pr_number=700,
+                timeout_s=60,
+                source_lane="impl",
+                item_number=7,
+                worktree_manager=manager,
+                implementation_adoption_head="a" * 40,
+            )
+
+        sync.assert_called_once()
+        manager.mint_adopted_implementation_writer_authority.assert_called_once_with(
+            issue_number=7,
+            branch_name="7-adopted",
+            worktree_path=writer_path,
+            expected_head="a" * 40,
+            timeout=60,
+        )
+        source_class.assert_not_called()
+        source_manager.claim_implementation_writer.assert_not_called()
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: implementation writer adoption head changed"
+        )
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
+    @pytest.mark.parametrize("source_lane", [None, "review"])
+    def test_nonimplementation_sync_never_requires_writer_authority(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        source_lane: str | None,
+    ) -> None:
+        """A review or normal checkout can synchronize without writer authority."""
+        checkout = tmp_path / "build" / ".worktrees" / "review-7"
+        checkout.mkdir(parents=True)
+        manager = MagicMock()
+
+        with (
+            patch.object(pool, "_sync_worktree_to_remote_branch") as sync,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.SourceWorkspaceManager") as source_manager,
+        ):
+            result = pool._finalize_created_worktree(
+                created=checkout,
+                base_sha=None,
+                branch_name="7-review",
+                repo_root=tmp_path,
+                repo="test/repo",
+                sync_to_remote=True,
+                pr_number=700,
+                source_lane=source_lane,
+                item_number=7,
+                worktree_manager=manager,
+                timeout_s=60,
+            )
+
+        assert result.ok is True
+        sync.assert_called_once()
+        manager.mint_adopted_implementation_writer_authority.assert_not_called()
+        source_manager.assert_not_called()
 
     def test_create_implementation_source_lane_returns_typed_receipt_failure(
         self,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -14,7 +15,10 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
 )
-from hephaestus.automation.worktree_manager import WorktreeCreationReceipt, WorktreeManager
+from hephaestus.automation.worktree_manager import (
+    ImplementationWriterAuthority,
+    WorktreeManager,
+)
 
 
 def _git(path: Path, *args: str) -> str:
@@ -223,13 +227,13 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
         "writer-branch",
         source_lane=SourceLane.IMPLEMENTATION.value,
     )
-    creation_receipt = worktree_manager.read_creation_receipt(writer)
+    authority = worktree_manager.implementation_writer_authority(writer)
 
     binding = manager.claim_implementation_writer(
         9,
         branch="writer-branch",
         path=writer,
-        creation_receipt=creation_receipt,
+        authority=authority,
     )
 
     rebound = manager.prepare(
@@ -243,16 +247,16 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
     assert rebound == binding
 
 
-def test_claim_implementation_writer_rejects_clean_unreceipted_worktree(
+def test_claim_implementation_writer_rejects_clean_unauthorized_worktree(
     tmp_path: Path,
 ) -> None:
-    """A clean deterministic path is not writer evidence without a creation receipt."""
+    """A clean deterministic path is not writer evidence without an authority."""
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
     _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
 
-    with pytest.raises(SourceWorkspaceError, match="creation receipt"):
+    with pytest.raises(SourceWorkspaceError, match="authority"):
         manager.claim_implementation_writer(
             9,
             branch="writer-branch",
@@ -262,36 +266,31 @@ def test_claim_implementation_writer_rejects_clean_unreceipted_worktree(
     assert not (manager.state_dir / "9-impl.json").exists()
 
 
-def test_claim_implementation_writer_rejects_a_constructed_receipt(
+def test_claim_implementation_writer_rejects_a_constructed_authority(
     tmp_path: Path,
 ) -> None:
-    """An in-memory receipt cannot authorize an unrecorded writer checkout."""
+    """An opaque authority that the manager did not mint cannot claim a writer."""
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
     _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
-    constructed = WorktreeCreationReceipt(
-        issue_number=9,
-        branch="writer-branch",
-        path=writer,
-        revision=second,
-    )
+    constructed = cast(ImplementationWriterAuthority, object())
 
-    with pytest.raises(SourceWorkspaceError, match="creation receipt"):
+    with pytest.raises(SourceWorkspaceError, match="authority"):
         manager.claim_implementation_writer(
             9,
             branch="writer-branch",
             path=writer,
-            creation_receipt=constructed,
+            authority=constructed,
         )
 
     assert not (manager.state_dir / "9-impl.json").exists()
 
 
-def test_claim_implementation_writer_rejects_a_stale_creation_receipt(
+def test_claim_implementation_writer_rejects_a_stale_authority(
     tmp_path: Path,
 ) -> None:
-    """A receipt from before a clean writer move cannot authorize the lane."""
+    """An authority from before a clean writer move cannot authorize the lane."""
     repo, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     worktree_manager = WorktreeManager(
@@ -304,15 +303,15 @@ def test_claim_implementation_writer_rejects_a_stale_creation_receipt(
         "writer-branch",
         source_lane=SourceLane.IMPLEMENTATION.value,
     )
-    creation_receipt = worktree_manager.read_creation_receipt(writer)
+    authority = worktree_manager.implementation_writer_authority(writer)
     _git(writer, "reset", "--hard", first)
 
-    with pytest.raises(SourceWorkspaceError, match="creation receipt revision"):
+    with pytest.raises(SourceWorkspaceError, match="authority"):
         manager.claim_implementation_writer(
             9,
             branch="writer-branch",
             path=writer,
-            creation_receipt=creation_receipt,
+            authority=authority,
         )
 
     assert not (manager.state_dir / "9-impl.json").exists()
@@ -417,7 +416,7 @@ def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -
         9,
         branch="writer-branch",
         path=writer,
-        creation_receipt=worktree_manager.read_creation_receipt(writer),
+        authority=worktree_manager.implementation_writer_authority(writer),
     )
     second_manager = SourceWorkspaceManager(repo, repository="two/project")
 

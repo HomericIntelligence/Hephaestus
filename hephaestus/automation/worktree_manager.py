@@ -25,17 +25,16 @@ that runs the automation. Recovery procedure for a force-killed loop:
 """
 
 import contextlib
-import json
 import logging
+import secrets
 import shutil
 import subprocess
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.worktree_identity import source_worktree_name
 
@@ -97,7 +96,7 @@ class RemoteGitRefreshError(RuntimeError):
 
 
 class WorktreeCreationReceiptError(RuntimeError):
-    """Raised when a writer checkout has no manager-owned creation proof."""
+    """Raised when a writer checkout has no valid process-owned authority."""
 
 
 BRANCH_WORKTREE_OWNED = "branch_worktree_owned"
@@ -114,60 +113,68 @@ class BranchWorktreeOwnedError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class WorktreeCreationReceipt:
-    """Atomic proof that the worktree manager created one writer checkout."""
+class ImplementationWriterAuthority:
+    """Opaque, single-use authority for one process-created writer checkout."""
+
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ImplementationWriterAuthorityRecord:
+    """Private process-local facts bound to an implementation writer authority."""
 
     issue_number: int
     branch: str
     path: Path
     revision: str
-    source_lane: str = "impl"
-    schema_version: int = 1
 
-    def to_dict(self) -> dict[str, object]:
-        """Return the closed JSON representation of this receipt."""
-        return {
-            "schema_version": self.schema_version,
-            "issue_number": self.issue_number,
-            "branch": self.branch,
-            "path": str(self.path),
-            "revision": self.revision,
-            "source_lane": self.source_lane,
-        }
 
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "WorktreeCreationReceipt":
-        """Parse a creation receipt and reject unknown or malformed fields."""
-        fields = {
-            "schema_version",
-            "issue_number",
-            "branch",
-            "path",
-            "revision",
-            "source_lane",
-        }
-        if set(payload) != fields:
-            raise RuntimeError("worktree creation receipt schema mismatch")
-        try:
-            receipt = cls(
-                schema_version=int(payload["schema_version"]),
-                issue_number=int(payload["issue_number"]),
-                branch=str(payload["branch"]),
-                path=Path(str(payload["path"])),
-                revision=str(payload["revision"]),
-                source_lane=str(payload["source_lane"]),
+_IMPLEMENTATION_WRITER_AUTHORITIES: dict[str, _ImplementationWriterAuthorityRecord] = {}
+_IMPLEMENTATION_WRITER_AUTHORITIES_LOCK = threading.Lock()
+
+
+def _mint_implementation_writer_authority(
+    *, issue_number: int, branch: str, path: Path, revision: str
+) -> ImplementationWriterAuthority:
+    """Mint one opaque process-local authority after a verified writer create."""
+    if not _is_full_commit_sha(revision):
+        raise WorktreeCreationReceiptError("implementation writer revision is invalid")
+    authority = ImplementationWriterAuthority(secrets.token_urlsafe(32))
+    record = _ImplementationWriterAuthorityRecord(
+        issue_number=issue_number,
+        branch=branch,
+        path=path.resolve(),
+        revision=revision,
+    )
+    with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+        _IMPLEMENTATION_WRITER_AUTHORITIES[authority.token] = record
+    return authority
+
+
+def consume_implementation_writer_authority(
+    authority: object,
+    *,
+    issue_number: int,
+    branch: str,
+    path: Path,
+    revision: str,
+) -> None:
+    """Validate and consume a writer authority exactly once."""
+    if not isinstance(authority, ImplementationWriterAuthority):
+        raise WorktreeCreationReceiptError("implementation writer authority is missing")
+    expected = _ImplementationWriterAuthorityRecord(
+        issue_number=issue_number,
+        branch=branch,
+        path=path.resolve(),
+        revision=revision,
+    )
+    with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+        record = _IMPLEMENTATION_WRITER_AUTHORITIES.get(authority.token)
+        if record != expected:
+            raise WorktreeCreationReceiptError(
+                "implementation writer authority is invalid or stale"
             )
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"invalid worktree creation receipt: {exc}") from exc
-        if (
-            receipt.schema_version != 1
-            or receipt.issue_number <= 0
-            or not receipt.branch
-            or receipt.source_lane != "impl"
-            or not _is_full_commit_sha(receipt.revision)
-        ):
-            raise RuntimeError("unsupported worktree creation receipt")
-        return receipt
+        del _IMPLEMENTATION_WRITER_AUTHORITIES[authority.token]
 
 
 class WorktreeManager:
@@ -219,6 +226,9 @@ class WorktreeManager:
         self._base_branch_resolved: str | None = None
         self._remote_git_env = dict(remote_git_env) if remote_git_env is not None else None
         self._remote_git_config = remote_git_config
+        self._pending_implementation_adoptions: dict[
+            Path, _ImplementationWriterAuthorityRecord
+        ] = {}
         self.worktrees: dict[int | str, Path] = {}
         self.preserved: list[tuple[int | str, Path]] = []
         self.lock = threading.Lock()
@@ -264,114 +274,79 @@ class WorktreeManager:
         """The base branch, auto-detected on first access."""
         return self._resolve_base_branch()
 
-    @staticmethod
-    def creation_receipt_path(worktree_path: Path) -> Path:
-        """Return the atomic writer-creation receipt path for a worktree."""
-        return worktree_path.with_name(f".{worktree_path.name}.creation.json")
-
-    @classmethod
-    def read_creation_receipt(cls, worktree_path: Path) -> WorktreeCreationReceipt | None:
-        """Read a writer-creation receipt, or return ``None`` when absent."""
-        path = cls.creation_receipt_path(worktree_path)
-        if not path.exists():
-            return None
-        if path.is_symlink():
-            raise WorktreeCreationReceiptError(
-                f"refusing symlinked worktree creation receipt: {path}"
-            )
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise WorktreeCreationReceiptError(
-                f"cannot read worktree creation receipt: {path}"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise WorktreeCreationReceiptError("worktree creation receipt must be an object")
-        try:
-            receipt = WorktreeCreationReceipt.from_dict(payload)
-        except RuntimeError as exc:
-            raise WorktreeCreationReceiptError(str(exc)) from exc
-        if receipt.path.resolve() != worktree_path.resolve():
-            raise WorktreeCreationReceiptError("worktree creation receipt path mismatch")
-        return receipt
-
-    def _write_creation_receipt(
+    def _mint_writer_authority(
         self,
         *,
         issue_number: int,
         branch_name: str,
         worktree_path: Path,
         timeout: int | None,
-    ) -> None:
-        """Atomically record a newly materialized deterministic writer."""
-        revision = run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=worktree_path,
-            capture_output=True,
-            **_timeout_kw(timeout),
-        ).stdout.strip()
-        if not _is_full_commit_sha(revision):
-            raise RuntimeError("worktree creation returned a malformed writer revision")
-        receipt = WorktreeCreationReceipt(
-            issue_number=issue_number,
-            branch=branch_name,
-            path=worktree_path.resolve(),
-            revision=revision,
-        )
-        try:
-            write_secure(
-                self.creation_receipt_path(worktree_path),
-                json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
-            )
-        except OSError as exc:
-            raise WorktreeCreationReceiptError(
-                f"cannot write worktree creation receipt: {worktree_path}"
-            ) from exc
-
-    def refresh_creation_receipt(
-        self,
-        receipt: WorktreeCreationReceipt,
-        *,
-        timeout: int | None,
-    ) -> WorktreeCreationReceipt:
-        """Bind a verified writer-creation receipt to its final clean revision."""
-        worktree_path = receipt.path.resolve()
-        recorded = self.read_creation_receipt(worktree_path)
-        if recorded != receipt:
-            raise WorktreeCreationReceiptError(
-                "worktree creation receipt changed before finalization"
-            )
+    ) -> ImplementationWriterAuthority:
+        """Mint authority only after Git proves the attached writer identity."""
         branch = run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
             cwd=worktree_path,
             capture_output=True,
             **_timeout_kw(timeout),
         ).stdout.strip()
-        if branch != receipt.branch:
-            raise WorktreeCreationReceiptError(
-                "worktree creation receipt branch no longer matches checkout"
-            )
         revision = run(
             ["git", "rev-parse", "HEAD"],
             cwd=worktree_path,
             capture_output=True,
             **_timeout_kw(timeout),
         ).stdout.strip()
-        if not _is_full_commit_sha(revision):
+        if branch != branch_name or not _is_full_commit_sha(revision):
+            raise WorktreeCreationReceiptError("implementation writer identity is invalid")
+        return _mint_implementation_writer_authority(
+            issue_number=issue_number,
+            branch=branch_name,
+            path=worktree_path,
+            revision=revision,
+        )
+
+    def implementation_writer_authority(self, worktree_path: Path) -> ImplementationWriterAuthority:
+        """Return the fresh authority minted for a controlled writer path."""
+        path = worktree_path.resolve()
+        with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+            for token, record in _IMPLEMENTATION_WRITER_AUTHORITIES.items():
+                if record.path == path:
+                    return ImplementationWriterAuthority(token)
+        raise WorktreeCreationReceiptError("implementation writer authority is unavailable")
+
+    def mint_adopted_implementation_writer_authority(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        expected_head: str,
+        timeout: int | None,
+    ) -> ImplementationWriterAuthority:
+        """Mint authority after a pending authenticated PR adoption stays exact."""
+        path = worktree_path.resolve()
+        pending = self._pending_implementation_adoptions.get(path)
+        expected = _ImplementationWriterAuthorityRecord(
+            issue_number=issue_number,
+            branch=branch_name,
+            path=path,
+            revision=expected_head,
+        )
+        if pending != expected:
             raise WorktreeCreationReceiptError(
-                "worktree finalization returned a malformed writer revision"
+                "implementation writer adoption is not authenticated"
             )
-        refreshed = replace(receipt, path=worktree_path, revision=revision)
-        try:
-            write_secure(
-                self.creation_receipt_path(worktree_path),
-                json.dumps(refreshed.to_dict(), sort_keys=True, indent=2) + "\n",
-            )
-        except OSError as exc:
-            raise WorktreeCreationReceiptError(
-                f"cannot write worktree creation receipt: {worktree_path}"
-            ) from exc
-        return refreshed
+        authority = self._mint_writer_authority(
+            issue_number=issue_number,
+            branch_name=branch_name,
+            worktree_path=path,
+            timeout=timeout,
+        )
+        with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+            record = _IMPLEMENTATION_WRITER_AUTHORITIES.get(authority.token)
+        if record != expected:
+            raise WorktreeCreationReceiptError("implementation writer adoption head changed")
+        del self._pending_implementation_adoptions[path]
+        return authority
 
     def _resolve_base_branch(self, *, timeout: int | None = None) -> str:
         """Return the base branch, using ``timeout`` for lazy git detection."""
@@ -460,6 +435,7 @@ class WorktreeManager:
         isolated_generation: int = 0,
         direct_worktree_nonce: str | None = None,
         source_lane: str | None = None,
+        implementation_adoption_head: str | None = None,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -492,6 +468,8 @@ class WorktreeManager:
                 preserving an interrupted predecessor's checkout.
             source_lane: Opt in to the deterministic ``impl`` or ``review``
                 source-reading lane. Legacy callers omit this during migration.
+            implementation_adoption_head: Authenticated, exact PR head used
+                only to adopt an existing implementation writer branch.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -518,6 +496,19 @@ class WorktreeManager:
                 raise RuntimeError("source lane must be 'impl' or 'review'")
             if source_lane == "impl" and isolated:
                 raise RuntimeError("implementation source lane cannot be isolated")
+            adopting_implementation_writer = implementation_adoption_head is not None
+            if adopting_implementation_writer and (
+                source_lane != "impl"
+                or base_sha is not None
+                or refresh_base
+                or not isinstance(implementation_adoption_head, str)
+                or not _is_full_commit_sha(implementation_adoption_head)
+                or not self._remote_git_config
+                or self._remote_git_env is None
+            ):
+                raise WorktreeCreationReceiptError(
+                    "implementation writer adoption requires an authenticated exact head"
+                )
             if source_lane == "review" and not isolated:
                 raise RuntimeError("review source lane must be isolated")
             isolated_key = (
@@ -572,7 +563,7 @@ class WorktreeManager:
                 )
             try:
                 with file_lock(self._git_metadata_lock_path()):
-                    if source_lane == "impl":
+                    if source_lane == "impl" and not adopting_implementation_writer:
                         self._assert_implementation_writer_is_controlled(
                             issue_number=issue_number,
                             branch_name=branch_name,
@@ -580,21 +571,21 @@ class WorktreeManager:
                             base_sha=base_sha,
                             timeout=timeout,
                         )
-                    if base_sha is None and (
-                        existing := self._reuse_or_clear_normal_worktree(
-                            issue_number=issue_number,
-                            worktree_key=worktree_key,
-                            worktree_path=worktree_path,
-                            branch_name=branch_name,
-                            refresh_base=refresh_base,
-                            require_exact_registered_branch=direct_worktree_nonce is not None,
-                            timeout=timeout,
+                    if (
+                        base_sha is None
+                        and not adopting_implementation_writer
+                        and (
+                            existing := self._reuse_or_clear_normal_worktree(
+                                issue_number=issue_number,
+                                worktree_key=worktree_key,
+                                worktree_path=worktree_path,
+                                branch_name=branch_name,
+                                refresh_base=refresh_base,
+                                require_exact_registered_branch=direct_worktree_nonce is not None,
+                                timeout=timeout,
+                            )
                         )
                     ):
-                        if source_lane == "impl" and self.read_creation_receipt(existing) is None:
-                            raise WorktreeCreationReceiptError(
-                                "deterministic implementation worktree has no creation receipt"
-                            )
                         return existing
                     if source_lane == "impl" and base_sha is not None and worktree_path.exists():
                         if not is_clean_working_tree(worktree_path, timeout=timeout):
@@ -613,25 +604,34 @@ class WorktreeManager:
                         timeout=timeout,
                     )
                     try:
-                        self._add_worktree_for_branch(
-                            worktree_path,
-                            branch_name,
-                            base_sha=base_sha,
-                            refresh_base=refresh_base,
-                            timeout=timeout,
-                        )
-                        if source_lane == "impl":
-                            self._write_creation_receipt(
+                        if adopting_implementation_writer:
+                            self._add_authenticated_adopted_implementation_writer(
                                 issue_number=issue_number,
                                 branch_name=branch_name,
                                 worktree_path=worktree_path,
+                                expected_head=implementation_adoption_head or "",
                                 timeout=timeout,
                             )
+                        else:
+                            self._add_worktree_for_branch(
+                                worktree_path,
+                                branch_name,
+                                base_sha=base_sha,
+                                refresh_base=refresh_base,
+                                timeout=timeout,
+                            )
+                            if source_lane == "impl":
+                                self._mint_writer_authority(
+                                    issue_number=issue_number,
+                                    branch_name=branch_name,
+                                    worktree_path=worktree_path,
+                                    timeout=timeout,
+                                )
                     except Exception:
                         self.worktrees.pop(worktree_key, None)
-                        if base_sha is None:
+                        if base_sha is None and source_lane != "impl":
                             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
-                        else:
+                        elif base_sha is not None and source_lane != "impl":
                             self._release_failed_direct_scope_local_branch(
                                 branch_name,
                                 base_sha,
@@ -840,30 +840,16 @@ class WorktreeManager:
         base_sha: str | None,
         timeout: int | None,
     ) -> None:
-        """Reject an unowned writer path or branch before cleanup or reuse."""
+        """Reject every pre-existing fresh-writer path or branch before cleanup."""
         registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
         if registered is not None:
-            if registered.get("branch") != f"refs/heads/{branch_name}":
-                raise WorktreeCreationReceiptError(
-                    "deterministic implementation worktree has a foreign registered branch"
-                )
-            receipt = self.read_creation_receipt(worktree_path)
-            if (
-                receipt is None
-                or receipt.issue_number != issue_number
-                or receipt.branch != branch_name
-                or receipt.path.resolve() != worktree_path.resolve()
-            ):
-                raise WorktreeCreationReceiptError(
-                    "deterministic implementation worktree has no controlled creation receipt"
-                )
-            return
+            raise WorktreeCreationReceiptError(
+                "deterministic implementation writer is already registered and preserved"
+            )
         if worktree_path.exists():
             raise WorktreeCreationReceiptError(
-                "deterministic implementation worktree is an unowned path"
+                "deterministic implementation writer is an existing path and preserved"
             )
-        if base_sha is not None:
-            return
         if self._worktree_holding_branch(branch_name, timeout=timeout) is not None:
             raise WorktreeCreationReceiptError(
                 "implementation writer branch is held by an unowned worktree"
@@ -1067,8 +1053,6 @@ class WorktreeManager:
                         e,
                     )
         finally:
-            with contextlib.suppress(OSError):
-                self.creation_receipt_path(worktree_path).unlink(missing_ok=True)
             try:
                 run(
                     ["git", "worktree", "prune"],
@@ -1078,6 +1062,86 @@ class WorktreeManager:
                 )
             except Exception as e:
                 logger.debug("git worktree prune failed: %s", e)
+
+    def _add_authenticated_adopted_implementation_writer(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        expected_head: str,
+        timeout: int | None,
+    ) -> None:
+        """Create one writer from the authenticated, exact adopted PR head.
+
+        This is the only exception to the normal implementation-lane rule
+        that rejects an existing branch. The worker supplies trusted Git
+        transport configuration and an exact head it obtained before create.
+        Check all remote facts before replacing a clean deterministic path.
+        """
+        if self._remote_git_env is None or not self._remote_git_config:
+            raise WorktreeCreationReceiptError("implementation writer adoption transport is absent")
+        remote_ref = f"refs/remotes/origin/{branch_name}"
+        run(
+            [
+                "git",
+                *self._remote_git_config,
+                "fetch",
+                "--no-tags",
+                "origin",
+                f"+refs/heads/{branch_name}:{remote_ref}",
+            ],
+            cwd=self.repo_root,
+            env=self._remote_git_env,
+            **_timeout_kw(timeout),
+        )
+        fetched_head = run(
+            ["git", "rev-parse", remote_ref],
+            cwd=self.repo_root,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        if fetched_head != expected_head:
+            raise WorktreeCreationReceiptError("implementation writer adoption head changed")
+        holder = self._worktree_holding_branch(branch_name, timeout=timeout)
+        if holder is not None and holder.resolve() != worktree_path.resolve():
+            raise BranchWorktreeOwnedError(branch_name, holder)
+        registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
+        if registered is not None and registered.get("branch") != f"refs/heads/{branch_name}":
+            raise BranchWorktreeOwnedError(branch_name, worktree_path)
+        if worktree_path.exists():
+            if not is_clean_working_tree(worktree_path, timeout=timeout):
+                raise WorktreeCreationReceiptError(
+                    f"authenticated implementation writer is dirty and preserved: {worktree_path}"
+                )
+            self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+        run(
+            ["git", "worktree", "add", "-B", branch_name, str(worktree_path), expected_head],
+            cwd=self.repo_root,
+            **_timeout_kw(timeout),
+        )
+        verified_branch = run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        verified_head = run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        if verified_branch != branch_name or verified_head != expected_head:
+            raise WorktreeCreationReceiptError("implementation writer adoption identity is invalid")
+        self._pending_implementation_adoptions[worktree_path.resolve()] = (
+            _ImplementationWriterAuthorityRecord(
+                issue_number=issue_number,
+                branch=branch_name,
+                path=worktree_path.resolve(),
+                revision=expected_head,
+            )
+        )
 
     def _add_worktree_for_branch(
         self,
@@ -1494,8 +1558,6 @@ class WorktreeManager:
                 with file_lock(self._git_metadata_lock_path()):
                     run(cmd, cwd=self.repo_root, **_timeout_kw(timeout))
 
-                with contextlib.suppress(OSError):
-                    self.creation_receipt_path(worktree_path).unlink(missing_ok=True)
                 del self.worktrees[issue_number]
                 logger.info("Removed worktree for issue #%s", issue_number)
 

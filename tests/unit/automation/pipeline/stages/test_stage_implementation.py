@@ -665,6 +665,7 @@ class TestGate:
             "source_lane": "impl",
             "sync_to_remote": True,
             "pr_number": 1001,
+            "implementation_adoption_head": "a" * 40,
         }
 
     def test_adopted_clean_worktree_advances_to_pr_review(
@@ -1675,6 +1676,7 @@ class TestWorktreeAndAdvise:
             "direct_worktree_nonce": run_nonce,
             "sync_to_remote": True,
             "pr_number": 1001,
+            "implementation_adoption_head": "a" * 40,
         }
 
     def test_adopted_direct_pr_rejects_a_malformed_writer_identity(

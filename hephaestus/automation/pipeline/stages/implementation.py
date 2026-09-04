@@ -536,8 +536,13 @@ class ImplementationStage(Stage):
                     "direct_scope_worktree_nonce_invalid",
                 )
         if adopted:
+            adopted_head = self._fresh_adopted_pr_head(item, ctx)
+            if adopted_head is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "pr_head_revision_unavailable")
+            item.payload["adopted_pr_head_sha"] = adopted_head
             kwargs["sync_to_remote"] = True
             kwargs["pr_number"] = item.pr
+            kwargs["implementation_adoption_head"] = adopted_head
         worktree_job = GitJob(
             repo=item.repo,
             op="create_worktree",
@@ -2231,6 +2236,10 @@ class ImplementationStage(Stage):
                 return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
         # Adopt the PR's REAL head branch — never assume {issue}-auto-impl.
         item.payload["existing_pr"] = True
+        adopted_head = self._fresh_adopted_pr_head(item, ctx)
+        if adopted_head is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_revision_unavailable")
+        item.payload["adopted_pr_head_sha"] = adopted_head
         logger.info(
             "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
             item.issue,
@@ -2238,6 +2247,15 @@ class ImplementationStage(Stage):
             item.branch,
         )
         return Continue(next_state=WORKTREE_WAIT)
+
+    @staticmethod
+    def _fresh_adopted_pr_head(item: WorkItem, ctx: StageContext) -> str | None:
+        """Return the current exact head for an adopted PR, or ``None``."""
+        if item.pr is None:
+            return None
+        state = ctx.github.gh_pr_state(item.pr)
+        head = state.get("headRefOid") if isinstance(state, dict) else None
+        return head if is_full_commit_sha(head) else None
 
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
