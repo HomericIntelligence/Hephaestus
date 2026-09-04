@@ -102,11 +102,9 @@ SONNET_46 = "claude-sonnet-4-6"
 HAIKU_45 = "claude-haiku-4-5"
 CODEX_ADVISE = "gpt-5.4-mini"
 
-# OpenCode provider — Muse Spark 1.2 (opencode.ai/zen). Supports reasoning
-# variants minimal/low/medium/high/xhigh via provider model options; Hephaestus
-# pins the variant through opencode.json model aliases
-# (muse-spark-1.2-{high,medium,low}) so the loop can enforce tiered thinking
-# without a --variant flag. Reviewer must be medium or higher.
+# OpenCode provider — Muse Spark 1.2 (opencode.ai/zen). It supports reasoning
+# variants through provider model options. Hephaestus passes a selected role
+# effort through ``--variant``. Reviewer effort must be medium or higher.
 MUSE_SPARK_12 = "opencode/muse-spark-1.2-contributor-free"
 MUSE_SPARK_12_HIGH = "opencode/muse-spark-1.2-high"
 MUSE_SPARK_12_MEDIUM = "opencode/muse-spark-1.2-medium"

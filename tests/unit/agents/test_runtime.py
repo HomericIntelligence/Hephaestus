@@ -1253,6 +1253,20 @@ def test_opencode_base_cmd_applies_variant_to_configured_default(tmp_path: Path)
     assert command[-2:] == ["--variant", "high"]
 
 
+def test_opencode_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
+    """A role option must not change an unrelated provider model identifier."""
+    selected = agent_runtime.apply_agent_model_reasoning_effort(
+        "opencode", "private/provider:model", "high"
+    )
+
+    assert agent_runtime._opencode_base_cmd(cwd=tmp_path, model=selected)[-4:] == [
+        "--model",
+        "private/provider:model",
+        "--variant",
+        "high",
+    ]
+
+
 def test_parse_opencode_json_events_extracts_session_id_and_final_text() -> None:
     """Every event carries sessionID; the last text part is the final message."""
     text = "\n".join(
@@ -2009,7 +2023,7 @@ def test_run_pi_smoke_session_rejects_incomplete_event_stdout(
 def _assert_pi_exception_chain_is_redacted(exc: BaseException) -> None:
     """Structured exception chains must not retain unredacted Pi diagnostics."""
     assert exc.__cause__ is None
-    for chained in (exc.__cause__, exc.__context__):
+    for chained in (exc, exc.__cause__, exc.__context__):
         if chained is None:
             continue
         diagnostics = " ".join(
@@ -2280,6 +2294,41 @@ def test_pi_command_keeps_a_native_configured_thinking_level_separate(tmp_path: 
     ]
 
 
+def test_pi_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
+    """A Pi role option must not change an unrelated provider model identifier."""
+    selected = agent_runtime.apply_agent_model_reasoning_effort(
+        "pi", "private/provider:model", "high"
+    )
+
+    assert agent_runtime._pi_automation_cmd(
+        tmp_path / "pi",
+        model=selected,
+        lifecycle=SessionLifecycle.ONE_SHOT,
+    )[-4:] == [
+        "--model",
+        "private/provider:model",
+        "--thinking",
+        "high",
+    ]
+
+
+def test_pi_default_role_effort_uses_config_for_an_unknown_model(tmp_path: Path) -> None:
+    """The default role value must select the global Pi thinking level."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"configured","defaultModel":"other","defaultThinkingLevel":"high"}',
+        encoding="utf-8",
+    )
+    selected = agent_runtime.apply_agent_model_reasoning_effort(
+        "pi", "private/provider:model", "default"
+    )
+
+    assert agent_runtime.resolve_pi_model_reference(selected, pi_dir=pi_dir) == (
+        "private/provider:model:high"
+    )
+
+
 def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> None:
     """An omitted Pi model becomes an explicit operator-global selection."""
     pi_dir = tmp_path / "pi-agent"
@@ -2355,6 +2404,111 @@ def test_pi_default_model_rejects_an_oversized_settings_file(tmp_path: Path) -> 
 
     with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
         agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_rejects_a_non_regular_settings_file(tmp_path: Path) -> None:
+    """Pi must reject a directory in place of the global settings file."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").mkdir()
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+@pytest.mark.parametrize(
+    "raw_settings",
+    [
+        "{",
+        "[]",
+        '{"defaultProvider":1,"defaultModel":"model"}',
+        '{"defaultProvider":"provider","defaultModel":1}',
+        '{"defaultProvider":"","defaultModel":"model"}',
+        '{"defaultProvider":"provider","defaultModel":""}',
+        '{"defaultProvider":" provider","defaultModel":"model"}',
+        '{"defaultProvider":"provider","defaultModel":"model "}',
+    ],
+)
+def test_pi_default_model_rejects_malformed_or_non_string_settings(
+    tmp_path: Path,
+    raw_settings: str,
+) -> None:
+    """Pi must reject malformed, non-string, blank, or padded default values."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(raw_settings, encoding="utf-8")
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_does_not_read_project_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi must use only the operator-global settings file."""
+    home_dir = tmp_path / "home"
+    pi_dir = home_dir / ".pi" / "agent"
+    pi_dir.mkdir(parents=True)
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"global","defaultModel":"model"}', encoding="utf-8"
+    )
+    project_dir = tmp_path / "project"
+    (project_dir / ".pi").mkdir(parents=True)
+    (project_dir / ".pi" / "settings.json").write_text(
+        '{"defaultProvider":"project","defaultModel":"poison"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(Path, "home", lambda: home_dir)
+    monkeypatch.chdir(project_dir)
+
+    assert agent_runtime.resolve_pi_model_reference("") == "global/model"
+
+
+def test_pi_adapter_failure_redacts_default_provider_and_model_components(
+    tmp_path: Path,
+) -> None:
+    """An adapter failure must not expose either part of the Pi default."""
+    from hephaestus.agents.execution_policy import (
+        AgentOperation,
+        AgentRole,
+        ExecutionRequest,
+        resolve_policy,
+    )
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    class FailingAdapter:
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            raise RuntimeError("private-provider-alias private-test-alias")
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    )
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", FailingAdapter()),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+        pytest.raises(agent_runtime.AgentExecutionError) as exc_info,
+    ):
+        agent_runtime._run_pi_with_policy(
+            prompt="review",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-provider-alias/private-test-alias",
+            policy=resolve_policy(request),
+            preflight=PiPreflightResult.ready_result(executable=executable),
+            lifecycle=SessionLifecycle.ONE_SHOT,
+        )
+
+    _assert_pi_exception_chain_is_redacted(exc_info.value)
 
 
 @pytest.mark.parametrize(

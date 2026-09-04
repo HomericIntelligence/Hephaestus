@@ -128,6 +128,8 @@ command for the 0.9B model is:
 
 ```bash
 vllm serve IFM/K2-Horizon-0.9B \
+  --revision 9b9ec1f7e17f62ed218df542687a144116219d84 \
+  --code-revision 9b9ec1f7e17f62ed218df542687a144116219d84 \
   --trust-remote-code \
   --dtype bfloat16 \
   --max-model-len 131072 \
@@ -135,6 +137,10 @@ vllm serve IFM/K2-Horizon-0.9B \
   --enable-auto-tool-choice \
   --tool-call-parser k2_horizon
 ```
+
+The revision options pin the model files and remote code to one reviewed
+commit. Review a new commit before you change both pins. Do not use a branch
+name for these options.
 
 The 0.9B checkpoint has a 128K context limit. Configure other limits from the
 applicable model card and the available server resources.

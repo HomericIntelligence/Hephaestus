@@ -9,6 +9,7 @@ end with ``run_pipeline`` mocked so no live agent or GitHub call is made.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -24,7 +25,9 @@ def _silence_logging(caplog: Any) -> None:
     caplog.set_level("CRITICAL")
 
 
-def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> dict[str, Any]:
+def _run_main_capturing_config(
+    argv: list[str], *, rc: int = 0, resolved_agent: str = "claude"
+) -> dict[str, Any]:
     """Run ``main()`` with ``argv``, capturing the PipelineConfig passed to run_pipeline.
 
     Returns a dict with the captured ``config`` and the returned ``rc``.
@@ -44,7 +47,7 @@ def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> dict[str, Any
             "hephaestus.automation.pipeline.coordinator.run_pipeline",
             side_effect=_fake_run_pipeline,
         ),
-        patch.object(pr_reviewer_mod, "resolve_agent", return_value="claude"),
+        patch.object(pr_reviewer_mod, "resolve_agent", return_value=resolved_agent),
     ):
         captured["rc"] = pr_reviewer_mod.main()
     return captured
@@ -68,6 +71,27 @@ def test_agent_timeout_threads_into_pipeline_config() -> None:
     """Standalone reviewer timeout configures the review agent operation."""
     captured = _run_main_capturing_config(["--issues", "123", "--agent-timeout", "11"])
     assert captured["config"].reviewer_timeout == 11
+
+
+def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:
+    """The review workers must use the Pi directory that admission used."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", "pi", "--pi-dir", str(tmp_path)],
+        resolved_agent="pi",
+    )
+
+    assert captured["config"].pi_dir == tmp_path
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_provider_owned_defaults_remain_empty(agent: str) -> None:
+    """The review wrapper must not inject Claude defaults into direct providers."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", agent], resolved_agent=agent
+    )
+
+    config = captured["config"]
+    assert (config.reviewer_model, config.fallback_model) == ("", "")
 
 
 def test_main_maps_max_workers_to_worker_pool() -> None:

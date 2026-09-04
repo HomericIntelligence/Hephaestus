@@ -18,6 +18,7 @@ import pytest
 
 import hephaestus.automation.loop_runner as loop_runner
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
+from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_COUNT,
     DEFAULT_EVENT_LOG_RETENTION_DAYS,
@@ -379,9 +380,10 @@ def test_stage_model_uses_the_explicit_pi_alias() -> None:
 
     context = cast(StageContext, SimpleNamespace(config=config))
 
-    assert stage_model(context, "reviewer", lambda: "claude-sonnet-4-6") == (
-        "operator-local-pi-alias"
-    )
+    selection = parse_model_selection(stage_model(context, "reviewer", lambda: "claude-sonnet-4-6"))
+
+    assert selection.model == "operator-local-pi-alias"
+    assert selection.reasoning_effort == "default"
 
 
 @pytest.mark.parametrize("agent", ["opencode", "pi"])

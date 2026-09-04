@@ -707,6 +707,12 @@ def _resolve_pi_model_selection(
     if selection.model and selection.reasoning_effort not in {"", "default"}:
         return selection
     if selection.model and selection.model not in IFM_MODELS:
+        if selection.reasoning_effort == "default":
+            configured = _load_pi_default_model_selection(pi_dir, required=False)
+            return AgentModelSelection(
+                selection.model,
+                configured.reasoning_effort if configured is not None else "",
+            )
         return selection
 
     configured = _load_pi_default_model_selection(pi_dir, required=not selection.model)
@@ -878,9 +884,7 @@ def apply_agent_model_reasoning_effort(agent: str, model: str, effort: str) -> s
             model = base_model
         return f"{model}:{effort}"
     selection = parse_model_selection(model)
-    if not selection.model or selection.model in IFM_MODELS:
-        return AgentModelSelection(selection.model, effort).reference
-    return model
+    return AgentModelSelection(selection.model, effort)
 
 
 def uses_direct_agent_runner(agent: str) -> bool:
@@ -2674,9 +2678,19 @@ def _run_pi_with_policy(
         raise AgentExecutionError("Pi preflight-proven executable identity drifted")
     command_model = model.removesuffix(f":{thinking}") if thinking else model
     selection = parse_model_selection(command_model)
+    model_components = selection.model.split("/", 1)
     tokens = tuple(
-        dict.fromkeys((*pi_private_redaction_tokens(cwd, model), selection.model, command_model))
+        dict.fromkeys(
+            (
+                *pi_private_redaction_tokens(cwd, model),
+                selection.model,
+                command_model,
+                *model_components,
+            )
+        )
     )
+    failure: BaseException | None = None
+    result: AgentRunResult | None = None
     try:
         with _pi_automation_profile(preflight, pi_dir=pi_dir) as (profile_dir, package_roots):
             command = _pi_automation_cmd(
@@ -2699,22 +2713,26 @@ def _run_pi_with_policy(
                 process_tracker=process_tracker,
             )
     except subprocess.CalledProcessError as exc:
-        raise subprocess.CalledProcessError(
+        failure = subprocess.CalledProcessError(
             exc.returncode,
             _redact_pi_command_args(exc.cmd, tokens),
             output=_redact_pi_exception_output(exc.stdout, tokens),
             stderr=_redact_pi_exception_output(exc.stderr, tokens),
-        ) from None
+        )
     except subprocess.TimeoutExpired as exc:
-        raise subprocess.TimeoutExpired(
+        failure = subprocess.TimeoutExpired(
             _redact_pi_command_args(exc.cmd, tokens),
             exc.timeout,
             output=_redact_pi_exception_output(exc.stdout, tokens),
             stderr=_redact_pi_exception_output(exc.stderr, tokens),
-        ) from None
+        )
     except Exception as exc:
         detail = redact_pi_private_values(str(exc), tokens)
-        raise AgentExecutionError(f"Pi isolation adapter invocation failed: {detail}") from None
+        failure = AgentExecutionError(f"Pi isolation adapter invocation failed: {detail}")
+    if failure is not None:
+        raise failure
+    if result is None:
+        raise AssertionError("Pi isolation adapter returned no result")
     allowed_skills = set(policy.skills)
     observed = tuple(dict.fromkeys(result.observed_skill_invocations))
     if any(skill not in allowed_skills for skill in observed):

@@ -4703,7 +4703,7 @@ class WorkerPool:
             "signing_env_factory": signing_env_factory,
         }
         if agent_model is not None:
-            commit_kwargs["agent_model"] = str(agent_model)
+            commit_kwargs["agent_model"] = agent_model
         try:
             return git_utils.commit_if_changes(*commit_args, **commit_kwargs)
         except git_utils.SigningEnvironmentUnavailableError as exc:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 K2_HORIZON_09B = "IFM/K2-Horizon-0.9B"
 K2_HORIZON_37B = "IFM/K2-Horizon-3.7B"
 K2_HORIZON_7B = "IFM/K2-Horizon-7B"
@@ -60,19 +58,24 @@ _IFM_ALIASES: dict[str, str] = {
 }
 
 
-@dataclass(frozen=True)
-class AgentModelSelection:
+class AgentModelSelection(str):
     """A canonical model identifier and its optional reasoning effort."""
 
     model: str
-    reasoning_effort: str = ""
+    reasoning_effort: str
+
+    def __new__(cls, model: str, reasoning_effort: str = "") -> AgentModelSelection:
+        """Create a string-compatible selection with separate model metadata."""
+        reference = f"{model}:{reasoning_effort}" if reasoning_effort else model
+        selection = super().__new__(cls, reference)
+        selection.model = model
+        selection.reasoning_effort = reasoning_effort
+        return selection
 
     @property
     def reference(self) -> str:
         """Return the compact model reference used between agent layers."""
-        if self.reasoning_effort:
-            return f"{self.model}:{self.reasoning_effort}"
-        return self.model
+        return str(self)
 
 
 def _normalize_model_id(model: str) -> str:
@@ -82,6 +85,8 @@ def _normalize_model_id(model: str) -> str:
 
 def parse_model_selection(reference: str) -> AgentModelSelection:
     """Parse a known IFM reasoning suffix and preserve other model IDs."""
+    if isinstance(reference, AgentModelSelection):
+        return reference
     value = reference.strip()
     if not value:
         return AgentModelSelection("")

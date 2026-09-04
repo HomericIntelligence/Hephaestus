@@ -552,6 +552,7 @@ class PlanReviewer:
                     model_value=self.options.reviewer_model or reviewer_model(agent=agent),
                 ),
                 sandbox="read-only",
+                pi_dir=self.options.pi_dir,
             )
             output = (result.stdout or "").strip()
             if not output:
@@ -788,6 +789,7 @@ def main() -> int:
                 fallback_model=fallback_model(
                     args.fallback_model or args.model or None, agent=agent
                 ),
+                pi_dir=args.pi_dir,
             )
 
             reviewer = PlanReviewer(options)

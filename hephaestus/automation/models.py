@@ -246,6 +246,7 @@ class PlanReviewerOptions(VerboseParallelWorkerOptionsBase):
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
     reviewer_model: str = ""
     fallback_model: str = ""
+    pi_dir: Path | None = None
 
 
 class CIDriverOptions(VerboseParallelWorkerOptionsBase):

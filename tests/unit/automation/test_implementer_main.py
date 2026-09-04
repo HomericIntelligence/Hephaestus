@@ -28,7 +28,13 @@ def _silence_logging(caplog: Any) -> None:
     caplog.set_level("CRITICAL")
 
 
-def _run_main_capturing_config(argv: list[str], tmp_path: Path, *, rc: int = 0) -> dict[str, Any]:
+def _run_main_capturing_config(
+    argv: list[str],
+    tmp_path: Path,
+    *,
+    rc: int = 0,
+    resolved_agent: str = "claude",
+) -> dict[str, Any]:
     """Run ``main()`` with ``argv``, capturing the PipelineConfig passed to run_pipeline.
 
     ``run_pipeline`` is stubbed to return ``rc``; ``_resolve_repo`` and
@@ -44,7 +50,7 @@ def _run_main_capturing_config(argv: list[str], tmp_path: Path, *, rc: int = 0) 
         patch.object(sys, "argv", ["hephaestus-implement-issues", *argv]),
         patch.object(implementer_mod, "_resolve_repo", return_value=("acme", "widget")),
         patch.object(implementer_mod, "get_repo_root", return_value=tmp_path),
-        patch.object(implementer_mod, "resolve_agent", return_value="claude"),
+        patch.object(implementer_mod, "resolve_agent", return_value=resolved_agent),
         patch(
             "hephaestus.automation.pipeline.coordinator.run_pipeline",
             side_effect=_fake_run_pipeline,
@@ -96,6 +102,28 @@ def test_timeout_flags_thread_into_pipeline_config(tmp_path: Path) -> None:
     assert (config.git_message_timeout, config.poll_max_wait) == (13, 14)
     assert (config.pre_pr_test_timeout, config.run_pre_pr_tests) == (15, True)
     assert config.reviewer_model == "review-model"
+
+
+def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:
+    """The implementation workers must use the Pi directory that admission used."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", "pi", "--pi-dir", str(tmp_path)],
+        tmp_path,
+        resolved_agent="pi",
+    )
+
+    assert captured["config"].pi_dir == tmp_path
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_provider_owned_defaults_remain_empty(tmp_path: Path, agent: str) -> None:
+    """The implementer wrapper must not inject Claude defaults into direct providers."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", agent], tmp_path, resolved_agent=agent
+    )
+
+    config = captured["config"]
+    assert (config.implementer_model, config.reviewer_model, config.fallback_model) == ("", "", "")
 
 
 def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None:

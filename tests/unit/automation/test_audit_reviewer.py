@@ -509,6 +509,17 @@ class TestParser:
             main(["--codex", "--dry-run"])
             assert mock_cls.call_args[1]["agent"] == "codex"
 
+    def test_main_threads_the_pi_directory_to_the_direct_reviewer(self, tmp_path: Path) -> None:
+        """The audit call must use the Pi directory that admission used."""
+        with mock.patch("hephaestus.automation.audit_reviewer.resolve_agent", return_value="pi"):
+            with mock.patch("hephaestus.automation.audit_reviewer.AuditReviewer") as mock_cls:
+                mock_cls.return_value.run.return_value = (0, [])
+
+                main(["--agent", "pi", "--pi-dir", str(tmp_path)])
+
+        assert mock_cls.call_args.kwargs["pi_dir"] == tmp_path
+        assert mock_cls.call_args.kwargs["model"] == ""
+
     def test_codex_flag_resolves_codex_for_live_run(self) -> None:
         with mock.patch(
             "hephaestus.automation.audit_reviewer.resolve_agent",

@@ -283,6 +283,7 @@ def main() -> int:
         agent=agent,
         disable_pi_automation=args.disable_pi_automation,
         auth_status_timeout=args.auth_status_timeout,
+        pi_dir=args.pi_dir,
         model=args.model,
         planner_model=planner_model(args.planner_model or args.model or None, agent=agent),
         reviewer_model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),

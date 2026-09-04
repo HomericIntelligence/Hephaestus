@@ -669,10 +669,12 @@ on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,
 `session_naming` modules remain compatibility shims over `agent_config`.
 
 The automation loop also accepts `--planner-reasoning-effort`,
-`--implementer-reasoning-effort`, and `--reviewer-reasoning-effort` for Codex
-roles. Values are `default`, `low`, `medium`, `high`, or `xhigh`; `default`
-omits Codex's `model_reasoning_effort` setting. An omitted flag preserves the
-selected model alias's established reasoning default.
+`--implementer-reasoning-effort`, and `--reviewer-reasoning-effort` for Codex,
+OpenCode, and Pi roles. Values are `default`, `low`, `medium`, `high`, or
+`xhigh`. A role value has priority over an inline IFM value. The runtime maps
+the value to Codex `model_reasoning_effort`, OpenCode `--variant`, or Pi
+`--thinking`. The `default` value selects the applicable agent configuration.
+Claude does not use these flags.
 
 ## Design Philosophy
 
