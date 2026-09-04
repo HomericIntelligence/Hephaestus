@@ -280,10 +280,10 @@ def test_claim_implementation_writer_converts_receipt_write_error(
     assert not (manager.state_dir / "9-impl.json").exists()
 
 
-def test_claim_implementation_writer_converts_receipt_rollback_error(
+def test_claim_implementation_writer_authority_failure_preserves_existing_receipt(
     tmp_path: Path,
 ) -> None:
-    """A receipt rollback failure remains an ownership error."""
+    """An authority failure does not alter an existing durable receipt."""
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     worktree_manager = WorktreeManager(
@@ -304,13 +304,67 @@ def test_claim_implementation_writer_converts_receipt_rollback_error(
     )
 
     with (
-        patch.object(manager, "_write_receipt", side_effect=[None, OSError("disk full")]),
-        pytest.raises(SourceWorkspaceError, match="cannot roll back implementation writer receipt"),
+        patch.object(manager, "_write_receipt") as write_receipt,
+        pytest.raises(SourceWorkspaceError, match="authority is invalid"),
     ):
         manager.claim_implementation_writer(
             9,
             branch="writer-branch",
             path=writer,
+        )
+
+    write_receipt.assert_not_called()
+    assert (
+        manager.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="writer-branch",
+        ).cwd
+        == writer
+    )
+
+
+def test_claim_implementation_writer_restart_cannot_adopt_unconsumed_authority(
+    tmp_path: Path,
+) -> None:
+    """A stopped authority handoff leaves no durable writer ownership record."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    authority = worktree_manager.implementation_writer_authority(writer)
+
+    with (
+        patch(
+            "hephaestus.automation.source_worktree.consume_implementation_writer_authority",
+            side_effect=RuntimeError("worker stopped"),
+        ),
+        pytest.raises(SourceWorkspaceError, match="authority is invalid"),
+    ):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=authority,
+        )
+
+    restarted = SourceWorkspaceManager(repo, repository="example/project")
+    assert not (restarted.state_dir / "9-impl.json").exists()
+    with pytest.raises(SourceWorkspaceError, match="not owned by this lane"):
+        restarted.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="writer-branch",
         )
 
 
