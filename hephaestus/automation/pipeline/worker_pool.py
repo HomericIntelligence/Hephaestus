@@ -103,6 +103,7 @@ from hephaestus.resilience import (
     resilient_call,
 )
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import source_worktree_name
 
@@ -1271,15 +1272,6 @@ def _run_bounded_host_command(
             error=f"host_verification_failed: {exc!s}"[:_ERR_MAX],
             value={"failure_kind": "runner"},
         )
-
-
-def _is_full_commit_sha(value: object) -> TypeGuard[str]:
-    """Return whether ``value`` is a full SHA-1 or SHA-256 commit id."""
-    return bool(
-        isinstance(value, str)
-        and len(value) in (40, 64)
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 def _controlled_git_env() -> dict[str, str]:

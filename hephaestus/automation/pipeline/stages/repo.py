@@ -95,14 +95,10 @@ WAVE_PLAN_KEY = "_issue_wave_admission_plan"
 WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
 WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
 
-
-def is_full_commit_sha(value: object) -> TypeGuard[str]:
-    """Return whether ``value`` is a full SHA-1 or SHA-256 commit id."""
-    return bool(
-        isinstance(value, str)
-        and len(value) in (40, 64)
-        and all(character in "0123456789abcdef" for character in value)
-    )
+# Stage consumers retain this public compatibility name. The issue-wave wrapper
+# delegates validation to the shared Git utility without adding a direct I/O
+# dependency to this pipeline stage.
+is_full_commit_sha = is_wave_commit_sha
 
 
 def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
