@@ -645,6 +645,66 @@ def test_pi_session_start_dispatches_without_resume_binding(
     assert result.session_binding.session_id == "pi-session-new"
 
 
+def test_pi_session_and_resume_keep_a_colon_in_the_base_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pi public session paths keep model and effort metadata separate."""
+    received: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd, **_kwargs: None,
+    )
+
+    def run_pi(**kwargs: object) -> agent_runtime.AgentRunResult:
+        received.append(kwargs)
+        return agent_runtime.AgentRunResult("done", "", session_id="pi-session-colon")
+
+    monkeypatch.setattr(agent_runtime, "_run_pi_with_policy", run_pi)
+    start_request = ExecutionRequest(
+        AgentRole.PLANNER,
+        AgentOperation.PLAN,
+        SessionLifecycle.START_NEW,
+    )
+    started = agent_runtime.run_agent_session(
+        "pi",
+        "plan",
+        cwd=tmp_path,
+        timeout=30,
+        model="private/provider:model:future-effort",
+        execution_request=start_request,
+    )
+    assert started.session_binding is not None
+
+    resume_request = ExecutionRequest(
+        AgentRole.PLANNER,
+        AgentOperation.AMEND,
+        SessionLifecycle.RESUME_REQUIRED,
+    )
+    agent_runtime.resume_agent_session(
+        "pi",
+        "pi-session-colon",
+        "amend",
+        cwd=tmp_path,
+        timeout=30,
+        model="private/provider:model:future-effort",
+        execution_request=resume_request,
+        resume_binding=started.session_binding,
+    )
+
+    model_selections = [cast(AgentModelSelection, call["model"]) for call in received]
+    assert all(isinstance(selection, AgentModelSelection) for selection in model_selections)
+    assert [selection.model for selection in model_selections] == [
+        "private/provider:model",
+        "private/provider:model",
+    ]
+    assert [call["thinking"] for call in received] == [
+        "future-effort",
+        "future-effort",
+    ]
+
+
 def test_pi_session_start_binds_the_operator_default_and_thinking_level(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

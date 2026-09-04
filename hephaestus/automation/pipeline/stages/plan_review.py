@@ -323,8 +323,7 @@ def _restore_review_conversation(
                 issue=item.issue,
                 provider=provider,
                 model=stored_model,
-                reviewer_config=selection_config
-                or {"reasoning_effort": getattr(ctx.config, "reviewer_reasoning_effort", "")},
+                reviewer_config=selection_config,
                 cwd=ctx.paths.worktree,
                 plan_revision=revision,
                 plan_fingerprint=plan_fingerprint(plan_text),

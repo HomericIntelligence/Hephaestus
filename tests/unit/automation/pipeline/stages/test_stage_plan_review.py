@@ -485,8 +485,7 @@ class TestPlanReviewStageStep:
             plan_review_sessions=store,
             config_overrides={
                 "agent": provider,
-                "reviewer_model": "private/provider:model",
-                "reviewer_reasoning_effort": "high",
+                "reviewer_model": "private/provider:model:future-effort",
             },
         )
         item = make_work_item(issue=641, state="ENTER")
@@ -500,7 +499,7 @@ class TestPlanReviewStageStep:
         assert isinstance(request.job, AgentJob)
         assert isinstance(request.job.model, AgentModelSelection)
         assert request.job.model.model == "private/provider:model"
-        assert request.job.model.reasoning_effort == "high"
+        assert request.job.model.reasoning_effort == "future-effort"
 
     def test_multi_round_cycle_resumes_one_durable_reviewer_session(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path

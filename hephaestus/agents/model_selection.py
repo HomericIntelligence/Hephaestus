@@ -45,9 +45,6 @@ IFM_MODELS: frozenset[str] = frozenset(
     }
 )
 
-MODEL_REASONING_EFFORTS: frozenset[str] = frozenset({"default", "low", "medium", "high", "xhigh"})
-PI_THINKING_LEVELS: frozenset[str] = frozenset({"off", "minimal", "low", "medium", "high", "xhigh"})
-
 _IFM_ALIASES: dict[str, str] = {
     "k2-horizon-0.9": K2_HORIZON_09B,
     "k2-horizon-3.7": K2_HORIZON_37B,
@@ -84,15 +81,14 @@ def _normalize_model_id(model: str) -> str:
 
 
 def parse_model_selection(reference: str) -> AgentModelSelection:
-    """Parse a known IFM reasoning suffix and preserve other model IDs."""
+    """Split an optional free-form effort from the final colon segment."""
     if isinstance(reference, AgentModelSelection):
         return reference
     value = reference.strip()
     if not value:
         return AgentModelSelection("")
     base, separator, effort = value.rpartition(":")
-    recognized_base = not base or base.lower() in _IFM_ALIASES or base in IFM_MODELS
-    if separator and effort in MODEL_REASONING_EFFORTS and recognized_base:
+    if separator and effort:
         return AgentModelSelection(_normalize_model_id(base), effort)
     return AgentModelSelection(_normalize_model_id(value))
 
@@ -110,8 +106,6 @@ __all__ = [
     "K2_HORIZON_37B",
     "K2_HORIZON_375B_A23B",
     "K2_HORIZON_MOVA_36B_A4B",
-    "MODEL_REASONING_EFFORTS",
-    "PI_THINKING_LEVELS",
     "AgentModelSelection",
     "normalize_model_reference",
     "parse_model_selection",

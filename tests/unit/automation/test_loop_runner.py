@@ -296,6 +296,27 @@ def test_parse_args_model_flag_wires_to_namespace() -> None:
     assert loop_runner._parse_args([]).model == ""
 
 
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--planner-reasoning-effort",
+        "--reviewer-reasoning-effort",
+        "--implementer-reasoning-effort",
+    ],
+)
+def test_parse_args_rejects_removed_reasoning_effort_flags(flag: str) -> None:
+    """Model references are the only CLI reasoning-effort input."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args([flag, "high"])
+
+
+def test_parse_args_keeps_a_free_form_effort_in_the_model_reference() -> None:
+    """The parser does not validate a provider effort value."""
+    args = loop_runner._parse_args(["--reviewer-model", "gpt-6-astra:future-effort"])
+
+    assert args.reviewer_model == "gpt-6-astra:future-effort"
+
+
 # ---------------------------------------------------------------------------
 # CLI scope refinements: fork filter, comma-only --repos, cwd default, --org
 # ---------------------------------------------------------------------------
@@ -987,10 +1008,10 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
     assert config.agent == "codex"  # type: ignore[attr-defined]
 
 
-def test_main_binds_role_reasoning_before_pi_admission(
+def test_main_passes_inline_role_effort_before_pi_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pi admission must validate each fully resolved role selection."""
+    """Pi admission validates each model reference with its inline effort."""
     resolve = patch.object(loop_runner, "resolve_agent", return_value="pi")
     with resolve as mock_resolve:
         _capture_config(
@@ -1004,22 +1025,18 @@ def test_main_binds_role_reasoning_before_pi_admission(
                 "pi",
                 "--model",
                 "private/custom-model",
-                "--planner-reasoning-effort",
-                "default",
-                "--reviewer-reasoning-effort",
-                "high",
+                "--planner-model",
+                "private/custom-model:default",
+                "--reviewer-model",
+                "private/custom-model:high",
             ],
             monkeypatch,
         )
 
     call = mock_resolve.call_args
     references = call.kwargs["model_references"]
-    assert str(references[0]) == "private/custom-model:default"
-    assert references[0].model == "private/custom-model"
-    assert references[0].reasoning_effort == "default"
-    assert str(references[1]) == "private/custom-model:high"
-    assert references[1].model == "private/custom-model"
-    assert references[1].reasoning_effort == "high"
+    assert references[0] == "private/custom-model:default"
+    assert references[1] == "private/custom-model:high"
     assert references[2] == "private/custom-model"
 
 

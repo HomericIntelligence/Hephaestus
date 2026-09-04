@@ -11,6 +11,25 @@ Before a request, `merge_wait` may wait up to 15 minutes for operational GitHub
 readiness without spending a merge attempt; readiness is not authorization, and the
 exact-head/label admission is repeated before every request.
 
+### Model effort selection
+
+Put an effort in the applicable model reference as `MODEL:EFFORT`. Remove these
+separate options from automation commands:
+
+| Removed option | Replacement |
+|---|---|
+| `--planner-reasoning-effort EFFORT` | `--planner-model MODEL:EFFORT` |
+| `--reviewer-reasoning-effort EFFORT` | `--reviewer-model MODEL:EFFORT` |
+| `--implementer-reasoning-effort EFFORT` | `--implementer-model MODEL:EFFORT` |
+
+Programmatic `LoopConfig` and `PipelineConfig` callers must make the same
+change. Move each removed `*_reasoning_effort` field into the matching
+`*_model` value.
+
+The public `MODEL_REASONING_EFFORTS` and `PI_THINKING_LEVELS` fixed-list
+exports are removed. Use `parse_model_selection()` to separate a model and an
+effort. Let the selected provider validate the effort.
+
 ## 0.x → 1.0 (forthcoming — not yet released)
 
 ### Summary

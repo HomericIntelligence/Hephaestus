@@ -3691,8 +3691,7 @@ class TestCommitPushAndPrCreate:
         ctx = make_ctx(
             config_overrides={
                 "agent": "codex",
-                "implementer_model": "sol",
-                "implementer_reasoning_effort": "medium",
+                "implementer_model": "sol:medium",
             }
         )
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")

@@ -32,6 +32,7 @@ import subprocess
 from pathlib import Path
 
 import hephaestus.automation.subprocess_registry as subprocess_registry
+from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.automation.agent_config import (
     agent_default_timeout,
@@ -204,8 +205,9 @@ def invoke_claude_with_session(
             :mod:`hephaestus.automation.session_naming`.
         prompt: Prompt text. Passed as a positional argv unless
             ``input_via_stdin`` is True.
-        model: ``--model`` value; also part of the session key so a session
-            never crosses models.
+        model: ``MODEL[:EFFORT]`` value. Claude uses the base model and its
+            default effort. The base model is part of the session key so a
+            session never crosses models.
         cwd: Working directory for the subprocess.
         timeout: Subprocess timeout in seconds. When omitted, resolves to the
             generic :func:`agent_config.agent_default_timeout` (7200s) — this
@@ -235,6 +237,9 @@ def invoke_claude_with_session(
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
+    model = parse_model_selection(model).model
+    if fallback_model_value is not None:
+        fallback_model_value = parse_model_selection(fallback_model_value).model
     if timeout is None:
         timeout = agent_default_timeout()
     del recreate_on_resume_failure  # back-compat shim only; no recreate cascade

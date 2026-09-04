@@ -237,7 +237,7 @@ Examples:
         help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
     )
     add_agent_timeout_arg(parser, default=1800)
-    parser.add_argument("--reviewer-model", default="", metavar="MODEL")
+    parser.add_argument("--reviewer-model", default="", metavar="MODEL[:EFFORT]")
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
     parser.add_argument(
         "--address-review-timeout", type=positive_int, default=7200, metavar="SECONDS"

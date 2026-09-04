@@ -45,7 +45,6 @@ if TYPE_CHECKING:
 
 from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
-    apply_agent_model_reasoning_effort,
     resolve_agent,
 )
 from hephaestus.automation._review_utils import build_automation_parser
@@ -260,9 +259,6 @@ class LoopConfig:
     reviewer_model: str = ""
     implementer_model: str = ""
     fallback_model: str = ""
-    planner_reasoning_effort: str = ""
-    reviewer_reasoning_effort: str = ""
-    implementer_reasoning_effort: str = ""
     # Explicit, CLI-only extension to the system ``gh`` installation roots.
     # The parser admits only ``<root>/bin/gh`` and never consults an env var.
     gh_extra_path_root: Path | None = None
@@ -463,49 +459,43 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--model",
         default="",
+        metavar="MODEL[:EFFORT]",
         help=(
-            "Model ID applied to every phase (planner, reviewer, implementer, advise) "
+            "MODEL[:EFFORT] applied to every phase (planner, reviewer, implementer, advise) "
             "for child processes. The /learn "
             "step inherits its parent phase's model automatically. A per-phase flag below "
             "overrides this for that phase."
         ),
     )
-    p.add_argument("--planner-model", default="", help="Model ID for planner child processes")
-    reasoning_help = (
-        "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
-        "to select the agent configuration."
-    )
     p.add_argument(
-        "--planner-reasoning-effort",
-        choices=("default", "low", "medium", "high", "xhigh"),
+        "--planner-model",
         default="",
-        help=reasoning_help,
+        metavar="MODEL[:EFFORT]",
+        help="MODEL[:EFFORT] for planner child processes",
     )
     p.add_argument(
         "--reviewer-model",
         default="",
+        metavar="MODEL[:EFFORT]",
         help=(
-            "Model ID for reviewer child processes (plan-review + PR-review); "
-            "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
+            "MODEL[:EFFORT] for reviewer child processes (plan-review + PR-review); "
+            "use terra:default to select GPT-5.6 Terra with its provider default"
         ),
     )
     p.add_argument(
         "--implementer-model",
         default="",
-        help="Model ID for implementer child processes (implement, address-review, drive-green)",
-    )
-    p.add_argument("--fallback-model", default="", help="Claude quota fallback model ID")
-    p.add_argument(
-        "--reviewer-reasoning-effort",
-        choices=("default", "low", "medium", "high", "xhigh"),
-        default="",
-        help=reasoning_help,
+        metavar="MODEL[:EFFORT]",
+        help=(
+            "MODEL[:EFFORT] for implementer child processes "
+            "(implement, address-review, drive-green)"
+        ),
     )
     p.add_argument(
-        "--implementer-reasoning-effort",
-        choices=("default", "low", "medium", "high", "xhigh"),
+        "--fallback-model",
         default="",
-        help=reasoning_help,
+        metavar="MODEL[:EFFORT]",
+        help="Claude quota fallback model; Claude uses its default effort",
     )
     p.add_argument(
         "--org",
@@ -934,9 +924,6 @@ def _build_pipeline_config(
         reviewer_model=cfg.reviewer_model,
         implementer_model=cfg.implementer_model,
         fallback_model=cfg.fallback_model,
-        planner_reasoning_effort=cfg.planner_reasoning_effort,
-        reviewer_reasoning_effort=cfg.reviewer_reasoning_effort,
-        implementer_reasoning_effort=cfg.implementer_reasoning_effort,
         gh_extra_path_root=cfg.gh_extra_path_root,
         rate_guard_enabled=cfg.rate_guard_enabled,
         rate_guard_threshold=cfg.rate_guard_threshold,
@@ -1092,21 +1079,9 @@ def main(argv: list[str] | None = None) -> int:
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
         model_references=(
-            apply_agent_model_reasoning_effort(
-                args.agent or "",
-                args.planner_model or args.model,
-                args.planner_reasoning_effort,
-            ),
-            apply_agent_model_reasoning_effort(
-                args.agent or "",
-                args.reviewer_model or args.model,
-                args.reviewer_reasoning_effort,
-            ),
-            apply_agent_model_reasoning_effort(
-                args.agent or "",
-                args.implementer_model or args.model,
-                args.implementer_reasoning_effort,
-            ),
+            args.planner_model or args.model,
+            args.reviewer_model or args.model,
+            args.implementer_model or args.model,
         ),
     )
 
@@ -1174,9 +1149,6 @@ def main(argv: list[str] | None = None) -> int:
             args.model,
             _provider_model_default(agent, default_fallback_model()),
         ),
-        planner_reasoning_effort=args.planner_reasoning_effort,
-        reviewer_reasoning_effort=args.reviewer_reasoning_effort,
-        implementer_reasoning_effort=args.implementer_reasoning_effort,
         gh_extra_path_root=args.gh_extra_path_root,
         gh_global_rate=args.gh_global_rate,
         gh_global_burst=args.gh_global_burst,

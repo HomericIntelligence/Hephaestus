@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.automation import agent_config
 
 EXPECTED_IFM_MODELS = frozenset(
@@ -80,11 +81,34 @@ def test_ifm_aliases_resolve_to_canonical_model_references(model: str, expected:
     assert agent_config.normalize_model_reference(model) == expected
 
 
-def test_model_reference_preserves_colon_for_an_unregistered_model() -> None:
-    """A colon in an unrelated provider model ID is not a reasoning selector."""
+def test_unregistered_model_selection_stays_string_compatible() -> None:
+    """A compact unregistered model reference stays string-compatible."""
     model = "ollama/qwen:high"
 
     assert agent_config.normalize_model_reference(model) == model
+
+
+@pytest.mark.parametrize(
+    ("reference", "expected_model", "expected_effort"),
+    [
+        ("gpt-6-astra:max", "gpt-6-astra", "max"),
+        ("gpt-6-astra:future-effort", "gpt-6-astra", "future-effort"),
+        ("private/provider:model:ultra", "private/provider:model", "ultra"),
+        (":provider-default", "", "provider-default"),
+        ("private/provider:model", "private/provider", "model"),
+        ("private/provider:model:", "private/provider:model:", ""),
+    ],
+)
+def test_model_selection_uses_the_final_colon_for_any_nonempty_effort(
+    reference: str,
+    expected_model: str,
+    expected_effort: str,
+) -> None:
+    """The final nonempty segment is an open-ended provider effort value."""
+    selection = parse_model_selection(reference)
+
+    assert selection.model == expected_model
+    assert selection.reasoning_effort == expected_effort
 
 
 @pytest.mark.parametrize("model", ["private-model", "ollama/qwen:high"])
@@ -107,6 +131,18 @@ def test_registered_ifm_model_does_not_warn(caplog: pytest.LogCaptureFixture) ->
             agent_config.reviewer_model("IFM/K2-Horizon-0.9B:high", agent="pi")
             == "IFM/K2-Horizon-0.9B:high"
         )
+
+    assert "Unknown model" not in caplog.text
+
+
+@pytest.mark.parametrize("model", ["astra:future-effort", "gpt-6-astra:future-effort"])
+def test_registered_astra_model_does_not_warn(
+    model: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The supported Astra model does not produce an unknown-model warning."""
+    with caplog.at_level(logging.WARNING, logger=agent_config.__name__):
+        assert agent_config.reviewer_model(model, agent="codex") == model
 
     assert "Unknown model" not in caplog.text
 

@@ -119,6 +119,29 @@ def test_cycle_recovery_preserves_a_provider_native_model_default(tmp_path: Path
     assert restarted.reviewer_model == ""
 
 
+def test_cycle_recovery_preserves_an_arbitrary_reasoning_effort(tmp_path: Path) -> None:
+    """Durable model metadata accepts provider-defined effort names."""
+    store = _store(tmp_path)
+    store.start_cycle(
+        repo="org/repo",
+        issue=2799,
+        provider="opencode",
+        model="private/provider:model",
+        reviewer_config={
+            "model_selection_format": 1,
+            "reasoning_effort": "future-effort",
+        },
+        cwd=tmp_path,
+        plan_revision=1,
+        plan_fingerprint="plan-v1",
+    )
+
+    restarted = _store(tmp_path).recover_active(repo="org/repo", issue=2799)
+
+    assert restarted is not None
+    assert restarted.reviewer_config["reasoning_effort"] == "future-effort"
+
+
 @pytest.mark.parametrize(
     "reviewer_config",
     [

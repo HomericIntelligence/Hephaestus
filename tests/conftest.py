@@ -39,7 +39,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption(
         "--contract-model",
         default="haiku",
-        metavar="MODEL",
+        metavar="MODEL[:EFFORT]",
         help="agent model for contract tests (default: haiku)",
     )
     group.addoption(

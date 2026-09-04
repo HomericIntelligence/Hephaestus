@@ -668,13 +668,15 @@ on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,
 `--git-message-timeout`, etc.). Legacy `claude_models`, `claude_timeouts`, and
 `session_naming` modules remain compatibility shims over `agent_config`.
 
-The automation loop also accepts `--planner-reasoning-effort`,
-`--implementer-reasoning-effort`, and `--reviewer-reasoning-effort` for Codex,
-OpenCode, and Pi roles. Values are `default`, `low`, `medium`, `high`, or
-`xhigh`. A role value has priority over an inline IFM value. The runtime maps
-the value to Codex `model_reasoning_effort`, OpenCode `--variant`, or Pi
-`--thinking`. The `default` value selects the applicable agent configuration.
-Claude does not use these flags.
+The automation loop model options accept `MODEL[:EFFORT]`. The final nonempty
+colon segment is a free-form effort. The runtime maps it to Codex
+`model_reasoning_effort`, OpenCode `--variant`, or Pi `--thinking`. The value
+`default` selects the applicable provider default. Claude uses the base model
+without an effort selector. Codex retries one exact pre-work
+unsupported-effort rejection without an explicit effort. OpenCode and Pi own
+their native fallback behavior. OpenCode v1 applies only variants that its
+resolved model configuration defines. It uses the base model options for an
+unknown variant.
 
 ## Design Philosophy
 

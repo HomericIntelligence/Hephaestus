@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from hephaestus.agents.model_selection import MODEL_REASONING_EFFORTS
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import validate_durable_model_selection
 from hephaestus.io.utils import write_secure
@@ -261,9 +260,7 @@ class PlanReviewSessionStore:
             ) from error
         if selection_format == 1:
             reasoning_effort = record.reviewer_config.get("reasoning_effort")
-            if not isinstance(
-                reasoning_effort, str
-            ) or reasoning_effort not in MODEL_REASONING_EFFORTS | {""}:
+            if not isinstance(reasoning_effort, str):
                 raise PlanReviewSessionLostError("reviewer reasoning effort is invalid")
         config_digest = sha256(
             json.dumps(

@@ -284,7 +284,7 @@ class TestRunLearn:
                 42,
                 tmp_path,
                 session_agent="claude",
-                model="claude-opus-4-7",
+                model="claude-opus-4-7:future-effort",
             )
 
         cmd_args = mock_run.call_args[0][0]

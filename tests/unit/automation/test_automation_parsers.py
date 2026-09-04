@@ -763,7 +763,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             "",
             help_text=(
-                "Model ID applied to every phase (planner, reviewer, implementer, advise) "
+                "MODEL[:EFFORT] applied to every phase (planner, reviewer, implementer, advise) "
                 "for child processes, so no HEPH_*_MODEL env vars are required. The /learn "
                 "step inherits its parent phase's model automatically. A per-phase flag below "
                 "overrides this for that phase."
@@ -774,18 +774,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "planner_model",
             "_StoreAction",
             "",
-            help_text="Model ID for planner child processes",
-        ),
-        _action_spec(
-            ("--planner-reasoning-effort",),
-            "planner_reasoning_effort",
-            "_StoreAction",
-            "",
-            choices=("default", "low", "medium", "high", "xhigh"),
-            help_text=(
-                "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
-                "to select the agent configuration."
-            ),
+            help_text="MODEL[:EFFORT] for planner child processes",
         ),
         _action_spec(
             ("--reviewer-model",),
@@ -793,8 +782,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             "",
             help_text=(
-                "Model ID for reviewer child processes (plan-review + PR-review); "
-                "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
+                "MODEL[:EFFORT] for reviewer child processes (plan-review + PR-review); "
+                "use terra:default to select GPT-5.6 Terra with its provider default"
             ),
         ),
         _action_spec(
@@ -803,29 +792,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             "",
             help_text=(
-                "Model ID for implementer child processes (implement, address-review, drive-green)"
-            ),
-        ),
-        _action_spec(
-            ("--reviewer-reasoning-effort",),
-            "reviewer_reasoning_effort",
-            "_StoreAction",
-            "",
-            choices=("default", "low", "medium", "high", "xhigh"),
-            help_text=(
-                "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
-                "to select the agent configuration."
-            ),
-        ),
-        _action_spec(
-            ("--implementer-reasoning-effort",),
-            "implementer_reasoning_effort",
-            "_StoreAction",
-            "",
-            choices=("default", "low", "medium", "high", "xhigh"),
-            help_text=(
-                "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
-                "to select the agent configuration."
+                "MODEL[:EFFORT] for implementer child processes "
+                "(implement, address-review, drive-green)"
             ),
         ),
         _action_spec(
