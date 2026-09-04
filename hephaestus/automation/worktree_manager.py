@@ -344,6 +344,9 @@ class WorktreeManager:
         with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
             record = _IMPLEMENTATION_WRITER_AUTHORITIES.get(authority.token)
         if record != expected:
+            with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+                _IMPLEMENTATION_WRITER_AUTHORITIES.pop(authority.token, None)
+            self._pending_implementation_adoptions.pop(path, None)
             raise WorktreeCreationReceiptError("implementation writer adoption head changed")
         del self._pending_implementation_adoptions[path]
         return authority

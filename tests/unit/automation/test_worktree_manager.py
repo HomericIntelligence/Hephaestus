@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from hephaestus.automation import worktree_manager as worktree_manager_module
 from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     RemoteGitRefreshError,
@@ -703,6 +704,44 @@ class TestWorktreeManager:
         assert fetch_call.kwargs["env"] == {"GIT_ASKPASS": "/trusted/askpass"}
         remove.assert_not_called()
         assert writer.exists()
+
+    def test_authenticated_adoption_head_drift_revokes_minted_authority(
+        self, tmp_path: Path
+    ) -> None:
+        """A stale adopted head cannot leave a reusable writer authority."""
+        expected_head = "a" * 40
+        observed_head = "b" * 40
+        writer = tmp_path / "build" / ".worktrees" / "auto-35-impl"
+        writer.mkdir(parents=True)
+        manager = WorktreeManager(repo_root=tmp_path, base_dir=writer.parent)
+        path = writer.resolve()
+        manager._pending_implementation_adoptions[path] = (
+            worktree_manager_module._ImplementationWriterAuthorityRecord(
+                issue_number=35,
+                branch="35-adopted",
+                path=path,
+                revision=expected_head,
+            )
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=[Mock(stdout="35-adopted\n"), Mock(stdout=observed_head + "\n")],
+            ),
+            pytest.raises(WorktreeCreationReceiptError, match="head changed"),
+        ):
+            manager.mint_adopted_implementation_writer_authority(
+                issue_number=35,
+                branch_name="35-adopted",
+                worktree_path=writer,
+                expected_head=expected_head,
+                timeout=60,
+            )
+
+        assert path not in manager._pending_implementation_adoptions
+        with pytest.raises(WorktreeCreationReceiptError, match="authority is unavailable"):
+            manager.implementation_writer_authority(writer)
 
     @pytest.mark.parametrize(
         "reserved_remote_branch_sha", [None, "a" * 40], ids=["fresh", "direct"]
