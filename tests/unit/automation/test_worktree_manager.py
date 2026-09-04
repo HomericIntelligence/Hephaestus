@@ -695,6 +695,50 @@ class TestWorktreeManager:
         remove.assert_not_called()
         assert writer.exists()
 
+    def test_authenticated_adoption_preserves_unheld_local_branch_with_commits(
+        self, tmp_path: Path
+    ) -> None:
+        """Adoption never resets an unheld local branch that differs from origin."""
+        expected_head = "a" * 40
+        writer = tmp_path / "build" / ".worktrees" / "auto-35-impl"
+        writer.mkdir(parents=True)
+        manager = WorktreeManager(
+            repo_root=tmp_path,
+            base_dir=writer.parent,
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=[
+                    Mock(stdout=""),
+                    Mock(stdout=expected_head + "\n"),
+                    Mock(returncode=0, stdout=""),
+                    Mock(stdout="b" * 40 + "\n"),
+                ],
+            ),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch(
+                "hephaestus.automation.worktree_manager.is_clean_working_tree",
+                return_value=True,
+            ),
+            patch.object(manager, "_remove_worktree_path_forcefully") as remove,
+            pytest.raises(WorktreeCreationReceiptError, match="local branch changed"),
+        ):
+            manager._add_authenticated_adopted_implementation_writer(
+                issue_number=35,
+                branch_name="35-adopted",
+                worktree_path=writer,
+                expected_head=expected_head,
+                timeout=60,
+            )
+
+        remove.assert_not_called()
+        assert writer.exists()
+
     def test_registered_writer_same_path_requires_authenticated_adoption(
         self, worktree_mocks: Any, tmp_path: Path
     ) -> None:
@@ -731,6 +775,7 @@ class TestWorktreeManager:
                 side_effect=[
                     Mock(stdout=""),
                     Mock(stdout=expected_head + "\n"),
+                    Mock(returncode=1, stdout=""),
                     Mock(stdout=""),
                     Mock(stdout="36-adopted\n"),
                     Mock(stdout=expected_head + "\n"),
@@ -763,7 +808,7 @@ class TestWorktreeManager:
             )
 
         authenticated_remove.assert_called_once_with(writer, timeout=60)
-        assert run_mock.call_args_list[2].args[0] == [
+        assert run_mock.call_args_list[3].args[0] == [
             "git",
             "worktree",
             "add",

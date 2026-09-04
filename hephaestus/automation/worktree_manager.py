@@ -1130,6 +1130,11 @@ class WorktreeManager:
         holder = self._worktree_holding_branch(branch_name, timeout=timeout)
         if holder is not None and holder.resolve() != worktree_path.resolve():
             raise BranchWorktreeOwnedError(branch_name, holder)
+        self._assert_unheld_adoption_branch_matches(
+            branch_name=branch_name,
+            expected_head=expected_head,
+            timeout=timeout,
+        )
         registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
         if registered is not None and registered.get("branch") != f"refs/heads/{branch_name}":
             raise BranchWorktreeOwnedError(branch_name, worktree_path)
@@ -1166,6 +1171,49 @@ class WorktreeManager:
                 revision=expected_head,
             )
         )
+
+    def _assert_unheld_adoption_branch_matches(
+        self,
+        *,
+        branch_name: str,
+        expected_head: str,
+        timeout: int | None,
+    ) -> None:
+        """Reject an unheld local adoption branch unless it matches the remote head."""
+        local_ref = f"refs/heads/{branch_name}"
+        try:
+            local = run(
+                ["git", "show-ref", "--verify", "--quiet", local_ref],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+                **_timeout_kw(timeout),
+            )
+        except Exception as exc:
+            raise WorktreeCreationReceiptError(
+                "cannot safely verify local implementation writer adoption branch"
+            ) from exc
+        if local.returncode == 1:
+            return
+        if local.returncode != 0:
+            raise WorktreeCreationReceiptError(
+                "cannot safely verify local implementation writer adoption branch"
+            )
+        try:
+            local_head = run(
+                ["git", "rev-parse", "--verify", local_ref],
+                cwd=self.repo_root,
+                capture_output=True,
+                **_timeout_kw(timeout),
+            ).stdout.strip()
+        except Exception as exc:
+            raise WorktreeCreationReceiptError(
+                "cannot safely verify local implementation writer adoption branch"
+            ) from exc
+        if local_head != expected_head:
+            raise WorktreeCreationReceiptError(
+                "implementation writer adoption local branch changed"
+            )
 
     def _add_worktree_for_branch(
         self,
