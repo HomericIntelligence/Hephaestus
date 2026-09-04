@@ -311,7 +311,10 @@ class SourceWorkspaceManager:
                 validate_workspace_binding(binding)
             except WorkspaceBindingError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
-            self._write_receipt(receipt)
+            try:
+                self._write_receipt(receipt)
+            except OSError as exc:
+                raise SourceWorkspaceError("cannot record implementation writer receipt") from exc
             try:
                 consume_implementation_writer_authority(
                     authority,
@@ -321,10 +324,15 @@ class SourceWorkspaceManager:
                     revision=revision,
                 )
             except RuntimeError as exc:
-                if old is None:
-                    self._receipt_path(item_number, lane).unlink(missing_ok=True)
-                else:
-                    self._write_receipt(old)
+                try:
+                    if old is None:
+                        self._receipt_path(item_number, lane).unlink(missing_ok=True)
+                    else:
+                        self._write_receipt(old)
+                except OSError as rollback_exc:
+                    raise SourceWorkspaceError(
+                        "cannot roll back implementation writer receipt"
+                    ) from rollback_exc
                 raise SourceWorkspaceError(
                     f"implementation writer authority is invalid: {exc}"
                 ) from exc

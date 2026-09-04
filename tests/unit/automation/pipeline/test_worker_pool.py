@@ -4053,6 +4053,64 @@ class TestGitOps:
         )
         assert result.ok is True
 
+    @pytest.mark.parametrize("base_sha", [None, "a" * 40], ids=["fresh", "direct"])
+    def test_create_implementation_writer_passes_authenticated_transport_to_manager(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        base_sha: str | None,
+    ) -> None:
+        """Fresh and direct writer requests use controlled remote Git transport."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        remote_env = {"GIT_TERMINAL_PROMPT": "0"}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        authority = ImplementationWriterAuthority("authority-token")
+        worktree_manager.implementation_writer_authority.return_value = authority
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
+        with (
+            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(base_sha, "7-auto")),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(remote_env, remote_config),
+            ) as authentication,
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager) as manager_class,
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        authentication.assert_called_once_with(
+            cwd=tmp_path,
+            expected_repo="test/repo",
+            timeout=60,
+        )
+        manager_kwargs = manager_class.call_args.kwargs
+        assert manager_kwargs["remote_git_env"] == remote_env
+        assert manager_kwargs["remote_git_config"] == remote_config
+        if base_sha is None:
+            assert "base_branch" not in manager_kwargs
+        else:
+            assert manager_kwargs["base_branch"] == base_sha
+        assert result.ok is True
+
     def test_create_implementation_source_lane_returns_typed_claim_failure(
         self,
         pool: WorkerPool,

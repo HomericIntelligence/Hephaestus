@@ -3763,13 +3763,28 @@ class WorkerPool:
         ):
             return JobResult(ok=False, error="implementation writer adoption head is invalid")
 
+        implementation_source_lane = kwargs.get("source_lane") == "impl"
         if isinstance(base_sha, str):
+            remote_env: dict[str, str] | None = None
+            remote_config: tuple[str, ...] = ()
+            if implementation_source_lane:
+                remote_env, remote_config = self._authenticated_remote_git_configuration(
+                    cwd=repo_root,
+                    expected_repo=job.transport_repository,
+                    timeout=job.timeout_s,
+                )
             manager = WorktreeManager(
                 base_dir=base_dir,
                 base_branch=base_sha,
                 repo_root=repo_root,
+                remote_git_env=remote_env,
+                remote_git_config=remote_config,
             )
-        elif bool(kwargs.get("refresh_base", False)) or adopting_implementation_writer:
+        elif (
+            bool(kwargs.get("refresh_base", False))
+            or adopting_implementation_writer
+            or implementation_source_lane
+        ):
             remote_env, remote_config = self._authenticated_remote_git_configuration(
                 cwd=repo_root,
                 expected_repo=job.transport_repository,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 
@@ -245,6 +246,72 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
     assert binding.cwd == writer
     assert binding.revision == second
     assert rebound == binding
+
+
+def test_claim_implementation_writer_converts_receipt_write_error(
+    tmp_path: Path,
+) -> None:
+    """A receipt write failure is an ownership error, not a retryable Git error."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    authority = worktree_manager.implementation_writer_authority(writer)
+
+    with (
+        patch.object(manager, "_write_receipt", side_effect=OSError("disk full")),
+        pytest.raises(SourceWorkspaceError, match="cannot record implementation writer receipt"),
+    ):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=authority,
+        )
+
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_converts_receipt_rollback_error(
+    tmp_path: Path,
+) -> None:
+    """A receipt rollback failure remains an ownership error."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    manager.claim_implementation_writer(
+        9,
+        branch="writer-branch",
+        path=writer,
+        authority=worktree_manager.implementation_writer_authority(writer),
+    )
+
+    with (
+        patch.object(manager, "_write_receipt", side_effect=[None, OSError("disk full")]),
+        pytest.raises(SourceWorkspaceError, match="cannot roll back implementation writer receipt"),
+    ):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
 
 
 def test_claim_implementation_writer_rejects_clean_unauthorized_worktree(

@@ -534,7 +534,10 @@ class TestWorktreeManager:
     ) -> None:
         """A new writer lane cannot mint ownership for an existing branch."""
         worktree_mocks.repo_root.return_value = tmp_path
-        manager = WorktreeManager()
+        manager = WorktreeManager(
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
 
         def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
             if argv[1] == "show-ref":
@@ -562,7 +565,10 @@ class TestWorktreeManager:
     ) -> None:
         """A direct reservation does not look like a foreign writer branch."""
         worktree_mocks.repo_root.return_value = tmp_path
-        manager = WorktreeManager()
+        manager = WorktreeManager(
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
         pin = "a" * 40
 
         def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
@@ -601,7 +607,10 @@ class TestWorktreeManager:
     ) -> None:
         """A remote writer ref must still match the direct reservation pin."""
         worktree_mocks.repo_root.return_value = tmp_path
-        manager = WorktreeManager()
+        manager = WorktreeManager(
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
         pin = "a" * 40
 
         def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
@@ -694,6 +703,54 @@ class TestWorktreeManager:
         assert fetch_call.kwargs["env"] == {"GIT_ASKPASS": "/trusted/askpass"}
         remove.assert_not_called()
         assert writer.exists()
+
+    @pytest.mark.parametrize(
+        "reserved_remote_branch_sha", [None, "a" * 40], ids=["fresh", "direct"]
+    )
+    def test_implementation_writer_remote_probe_uses_controlled_transport(
+        self,
+        tmp_path: Path,
+        reserved_remote_branch_sha: str | None,
+    ) -> None:
+        """Fresh and direct writers probe origin with authenticated transport."""
+        manager = WorktreeManager(
+            repo_root=tmp_path,
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+        remote_head = reserved_remote_branch_sha or ""
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(
+                returncode=0,
+                stdout=(f"{remote_head}\trefs/heads/35-auto\n" if remote_head else ""),
+            )
+
+        with patch("hephaestus.automation.worktree_manager.run", side_effect=fake_run) as run_mock:
+            assert (
+                manager._implementation_writer_branch_exists(
+                    "35-auto",
+                    reserved_remote_branch_sha=reserved_remote_branch_sha,
+                    timeout=60,
+                )
+                is False
+            )
+
+        remote_call = run_mock.call_args_list[-1]
+        assert remote_call.args[0] == [
+            "git",
+            "-c",
+            "credential.helper=/trusted/helper",
+            "ls-remote",
+            "--heads",
+            "origin",
+            "35-auto",
+        ]
+        assert remote_call.kwargs["env"] == {"GIT_ASKPASS": "/trusted/askpass"}
 
     def test_authenticated_adoption_preserves_unheld_local_branch_with_commits(
         self, tmp_path: Path

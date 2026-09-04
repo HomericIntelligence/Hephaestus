@@ -900,12 +900,24 @@ class WorktreeManager:
                 )
             if "origin" not in (remotes.stdout or "").splitlines():
                 return False
+            if self._remote_git_env is None or not self._remote_git_config:
+                raise WorktreeCreationReceiptError(
+                    "cannot safely verify remote implementation writer branch transport"
+                )
             remote = run(
-                ["git", "ls-remote", "--heads", "origin", branch_name],
+                [
+                    "git",
+                    *self._remote_git_config,
+                    "ls-remote",
+                    "--heads",
+                    "origin",
+                    branch_name,
+                ],
                 cwd=self.repo_root,
                 capture_output=True,
                 check=False,
                 log_errors=False,
+                env=self._remote_git_env,
                 **_timeout_kw(timeout),
             )
         except WorktreeCreationReceiptError:
