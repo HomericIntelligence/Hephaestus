@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..diagnostics import redact_diagnostic_text
 from .base import (
     GIT_JOB_TIMEOUT_S,
     Continue,
@@ -186,9 +187,14 @@ class PrReviewCleanupMixin:
         review_worktree = item.payload.get("review_worktree")
         if not isinstance(review_worktree, str) or not review_worktree:
             return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_invalid")
-        if item.payload.pop("review_worktree_cleanup_error", None):
+        cleanup_error = item.payload.pop("review_worktree_cleanup_error", None)
+        if cleanup_error:
             item.worktree = review_worktree
-            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_failed")
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "review_worktree_cleanup_failed: "
+                + redact_diagnostic_text(str(cleanup_error))[:500],
+            )
         cleanup_state = item.payload.get("review_worktree_cleanup_done")
         if cleanup_state == "pending":
             expected_head = item.payload.get("review_worktree_expected_head")
@@ -206,6 +212,7 @@ class PrReviewCleanupMixin:
                     "issue_number": item.issue or item.pr or 0,
                     "expected_head": expected_head,
                     "expected_detached": True,
+                    "source_lane": "review",
                     "force": False,
                 },
                 descr="remove_read_only_review_worktree",
