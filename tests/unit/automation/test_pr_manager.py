@@ -1114,6 +1114,42 @@ class TestCoAuthorLine:
         assert "claude-env-override-5" not in coauthor_line
         assert coauthor_line == "Co-Authored-By: Claude Code <operator@example.com>"
 
+    def test_positional_agent_model_keeps_legacy_slot(self) -> None:
+        """The former positional model slot must not become the Git environment."""
+        porcelain = _porcelain(" M foo.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tfoo.py\n"),  # changed files context
+                _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="positional model compatibility")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(
+                pr_manager, "_invoke_git_message_agent", return_value="not json"
+            ) as invoke,
+        ):
+            pr_manager.commit_changes(
+                20,
+                Path("/tmp/wt"),
+                "claude",
+                1200,
+                None,
+                42,
+                "claude-positional-5",
+            )
+
+        assert invoke.call_args.kwargs["model_override"] == "claude-positional-5"
+        assert "env" not in run_mock.call_args_list[-1].kwargs
+
     def test_codex_coauthor_is_codex_human_name(self) -> None:
         porcelain = _porcelain(" M foo.py")
         run_mock = MagicMock(

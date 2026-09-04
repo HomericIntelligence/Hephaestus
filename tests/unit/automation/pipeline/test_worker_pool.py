@@ -6966,6 +6966,76 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
+    def test_dirty_commit_push_passes_controlled_signing_env_to_commit_helper(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A dirty worker passes the exact host signing environment to the commit."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=73,
+            kwargs={
+                "issue_number": 2874,
+                "worktree_path": tmp_path,
+                "branch": "2874-sign-commits",
+                "agent": "claude",
+                "agent_model": "sol:medium",
+                "git_message_timeout": 321,
+            },
+        )
+        signing_env = {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "commit.gpgsign",
+            "GIT_CONFIG_VALUE_0": "true",
+        }
+        remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+        with (
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=MagicMock(stdout=" M pending.py\n"),
+            ),
+            patch(
+                f"{_WP}._controlled_git_signing_env", return_value=signing_env
+            ) as controlled_signing,
+            patch("hephaestus.automation.pr_manager.commit_changes") as commit,
+            patch("hephaestus.automation.git_utils.push_branch") as push,
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(remote_env, remote_config),
+            ),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        controlled_signing.assert_called_once_with(tmp_path, timeout=73)
+        commit.assert_called_once_with(
+            2874,
+            tmp_path,
+            "claude",
+            allowed_paths=None,
+            agent_model="sol:medium",
+            git_timeout=73,
+            git_message_timeout=321,
+            signing_env=signing_env,
+        )
+        push.assert_called_once_with(
+            "2874-sign-commits",
+            tmp_path,
+            timeout=73,
+            env=remote_env,
+            remote_config=remote_config,
+        )
+        assert result.ok is True
+        assert result.value == {"pushed": True, "head_sha": "b" * 40}
+
     def test_commit_push_fails_before_commit_when_signing_is_unavailable(
         self,
         pool: WorkerPool,
