@@ -185,14 +185,14 @@ class ImplementationDispatcher(_CoordinatorHost):
         dispatch: list[ct.WorkItem] = []
         snapshots: dict[int, set[_admission.PlanFileClaim]] = {}
         selected_claims: set[_admission.PlanFileClaim] = set()
+        candidate_ids = {id(item) for item, _identity in candidates}
+        external_claims = self._active_implementation_file_claims(exclude_item_ids=candidate_ids)
         for item, identity in candidates:
             if item.issue is None:  # defensive: candidate construction excludes this case
                 continue
-            # A reviewed PR returning for remediation still owns its claims so
-            # it can block every *other* issue.  It must not block itself.
-            # Recompute per candidate rather than subtracting from an aggregate:
-            # another active item may independently own the same path.
-            claimed = self._active_implementation_file_claims(exclude_item=item)
+            # Queued candidates do not block one another before selection.
+            # The first selected item owns its claims for the rest of this pass.
+            claimed = set(external_claims)
             claimed.update(selected_claims)
             blocked_claims = item.payload.get(ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY)
             if blocked_claims is not None and set(blocked_claims) == claimed:
@@ -252,19 +252,24 @@ class ImplementationDispatcher(_CoordinatorHost):
         return duplicates
 
     def _active_implementation_file_claims(
-        self, *, exclude_item: ct.WorkItem | None = None
+        self,
+        *,
+        exclude_item: ct.WorkItem | None = None,
+        exclude_item_ids: set[int] | None = None,
     ) -> set[_admission.PlanFileClaim]:
-        """Return active claims, optionally excluding one candidate's ownership."""
+        """Return active claims without the specified candidate ownership."""
         claims: set[_admission.PlanFileClaim] = set()
-        excluded_id = id(exclude_item) if exclude_item is not None else None
+        excluded_ids = set(exclude_item_ids or ())
+        if exclude_item is not None:
+            excluded_ids.add(id(exclude_item))
         for item_id, item_claims in self._implementation_file_claims.items():
-            if item_id == excluded_id:
+            if item_id in excluded_ids:
                 continue
             claims.update(item_claims)
         for active_claims in self._inflight_implementation_claims.values():
             claims.update(active_claims)
         for item in self.items:
-            if item is exclude_item:
+            if id(item) in excluded_ids:
                 continue
             if item.stage not in ct._REALIZED_DIFF_CLAIM_STAGES:
                 continue

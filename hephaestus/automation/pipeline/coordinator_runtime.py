@@ -27,6 +27,7 @@ from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
+from .job_failures import is_durable_failure_kind
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
@@ -810,20 +811,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return "worker_crash"
         value = result.value if isinstance(result.value, dict) else {}
         failure_kind = value.get("failure_kind")
-        if isinstance(failure_kind, str) and failure_kind in {
-            "semantic_validation",
-            "publish_remote_head_changed",
-            "publish_remote_head_unchanged",
-            "publish_remote_probe_failed",
-            "publish_lease_drift",
-            "publish_unknown",
-            "publish_timeout",
-            "publish_transport_failed",
-            "validation",
-            "validation_runner",
-            "runner",
-            "timeout",
-        }:
+        if is_durable_failure_kind(failure_kind):
             return failure_kind
         if result.error == "timeout":
             return "timeout"

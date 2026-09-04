@@ -23,6 +23,7 @@ import pytest
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER
 from hephaestus.automation.pipeline import seeding as seeding_mod
+from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
     PipelineConfig,
@@ -2552,6 +2553,35 @@ class TestImplementationAdmission:
 
         assert dispatch == []
         assert returning.payload["file_overlap_deferrals"] == 1
+
+    def test_returning_candidate_cycle_admits_one_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A queued claim cycle admits one item and keeps its peers serialized."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=3)
+        claim_ab = (("org", "repo-a"), "ab.py")
+        claim_bc = (("org", "repo-a"), "bc.py")
+        claim_ca = (("org", "repo-a"), "ca.py")
+        first = _issue_item(21, StageName.IMPLEMENTATION)
+        second = _issue_item(22, StageName.IMPLEMENTATION)
+        third = _issue_item(23, StageName.IMPLEMENTATION)
+        claims_by_item: dict[int, set[PlanFileClaim]] = {
+            id(first): {claim_ab, claim_ca},
+            id(second): {claim_ab, claim_bc},
+            id(third): {claim_bc, claim_ca},
+        }
+        for item in (first, second, third):
+            item.payload["_implementation_file_claims"] = claims_by_item[id(item)]
+        coordinator._implementation_file_claims.update(claims_by_item)
+
+        dispatch, snapshots = coordinator._select_file_overlap_implementation_items(
+            [(first, "#21"), (second, "#22"), (third, "#23")]
+        )
+
+        assert dispatch == [first]
+        assert snapshots == {id(first): {claim_ab, claim_ca}}
+        assert second.payload["file_overlap_deferrals"] == 1
+        assert third.payload["file_overlap_deferrals"] == 1
 
     def test_overlap_claims_survive_review_and_merge_wait_until_finished(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

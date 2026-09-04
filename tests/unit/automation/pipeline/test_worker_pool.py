@@ -73,6 +73,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _verifier_owned_runtime_environment,
 )
 from hephaestus.automation.prompts.pr_review import PrReviewPromptSizeError
+from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
@@ -84,6 +85,7 @@ from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
     WorktreeCreationReceiptError,
 )
+from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
@@ -524,6 +526,101 @@ def test_failing_github_job_is_not_replayed_by_worker_pool(
     assert not result.ok
     assert "ambiguous transport" in (result.error or "")
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "failure_kind", "retry_delay_s"),
+    [
+        (GitHubRateLimitError("private rate detail", reset_epoch=145), "github_rate_limit", 45.0),
+        (GitHubUnavailableError("private breaker detail"), "github_unavailable", 60.0),
+        (CommentJournalReadError("private journal detail"), "comment_journal_read_error", 1.0),
+        (
+            subprocess.CalledProcessError(1, ["gh"], stderr="private CLI detail"),
+            "github_cli_error",
+            1.0,
+        ),
+    ],
+)
+def test_github_job_returns_safe_structured_failure(
+    shutdown_event: threading.Event,
+    completion_q: CompletionQueue,
+    tmp_path: Path,
+    error: Exception,
+    failure_kind: str,
+    retry_delay_s: float,
+) -> None:
+    """A GitHub failure keeps its class and removes provider details."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
+
+    class Runner:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+            del submitted
+            raise error
+
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+        github_job_runner=Runner(),
+    )
+    try:
+        with patch("hephaestus.automation.pipeline.worker_pool.time.time", return_value=100.0):
+            result = pool._run(GitHubJob("repo", tmp_path.resolve(), request, "append"))
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert not result.ok
+    assert result.error == failure_kind
+    assert result.value == {
+        "failure_kind": failure_kind,
+        "retry_delay_s": retry_delay_s,
+    }
+    assert "private" not in repr(result)
+
+
+def test_github_job_classifies_wrapped_rate_limit(
+    shutdown_event: threading.Event,
+    completion_q: CompletionQueue,
+    tmp_path: Path,
+) -> None:
+    """A journal error keeps the rate-limit class from its cause."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
+
+    class Runner:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+            del submitted
+            try:
+                raise GitHubRateLimitError("private rate detail", reset_epoch=145)
+            except GitHubRateLimitError as exc:
+                raise CommentJournalReadError("private journal detail") from exc
+
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+        github_job_runner=Runner(),
+    )
+    try:
+        with patch("hephaestus.automation.pipeline.worker_pool.time.time", return_value=100.0):
+            result = pool._run(GitHubJob("repo", tmp_path.resolve(), request, "append"))
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert not result.ok
+    assert result.error == "github_rate_limit"
+    assert result.value == {
+        "failure_kind": "github_rate_limit",
+        "retry_delay_s": 45.0,
+    }
+    assert "private" not in repr(result)
 
 
 class TestWorkerPoolSubmitComplete:

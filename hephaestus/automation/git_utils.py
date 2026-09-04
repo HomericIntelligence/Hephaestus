@@ -587,17 +587,35 @@ def push_head_to_branch(
 
 
 def has_unpushed_commits(
-    branch_name: str, worktree_path: Path, *, timeout: int | None = None
+    branch_name: str,
+    worktree_path: Path,
+    *,
+    base_revision: str | None = None,
+    timeout: int | None = None,
 ) -> bool:
-    """Return whether ``HEAD`` is ahead of ``origin/<branch_name>``.
+    """Return whether ``HEAD`` is ahead of the published or sealed base.
 
     This is used only by the coordinator-owned commit/push handoff to recover
     an address agent that committed locally despite its prompt.  It performs
     no network operation; worktree synchronization fetched the tracking ref
     before the agent ran.
     """
+    remote_ref = f"refs/remotes/origin/{branch_name}"
+    remote_probe = run(
+        ["git", "rev-parse", "--verify", "--quiet", remote_ref],
+        cwd=worktree_path,
+        capture_output=True,
+        check=False,
+        **_timeout_kw(timeout),
+    )
+    if remote_probe.returncode == 0:
+        comparison_base = remote_ref
+    elif base_revision is not None:
+        comparison_base = base_revision
+    else:
+        raise RuntimeError("Remote branch is missing and the sealed base is unavailable")
     result = run(
-        ["git", "rev-list", "--count", f"origin/{branch_name}..HEAD"],
+        ["git", "rev-list", "--count", f"{comparison_base}..HEAD"],
         cwd=worktree_path,
         capture_output=True,
         **_timeout_kw(timeout),

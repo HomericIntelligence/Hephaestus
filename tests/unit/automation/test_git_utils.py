@@ -60,6 +60,30 @@ def test_git_runtime_helpers_remain_public_reexports(name: str) -> None:
     assert inspect.signature(compatibility_value) == inspect.signature(runtime_value)
 
 
+def test_unpushed_commits_use_sealed_base_when_remote_branch_is_absent(
+    tmp_path: Path,
+) -> None:
+    """A new branch compares its local head with the sealed source revision."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "base"], cwd=tmp_path, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-c", "5-auto"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "local"], cwd=tmp_path, check=True)
+
+    assert git_utils.has_unpushed_commits("5-auto", tmp_path, base_revision=base_sha)
+
+    subprocess.run(["git", "reset", "--hard", base_sha], cwd=tmp_path, check=True)
+    assert not git_utils.has_unpushed_commits("5-auto", tmp_path, base_revision=base_sha)
+
+
 @pytest.fixture(autouse=True)
 def _clear_caches() -> Generator[None]:
     """Clear repo caches before each test to avoid cross-test interference."""

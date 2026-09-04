@@ -133,6 +133,7 @@ from ..reply_handoff import (
     IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RECOVERY_RETRIES,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES,
@@ -224,6 +225,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
 
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _REPLY_JOURNAL_RECOVERY_RESULT = "_reply_journal_recovery_result"
+_REPLY_JOURNAL_RECOVERY_DELAY = "_reply_journal_recovery_delay"
 _REPLY_JOURNAL_APPEND_RESULT = "_reply_journal_append_result"
 _REPLY_HANDOFF_RESULT = "_reply_handoff_result"
 _SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
@@ -1018,9 +1020,17 @@ class ImplementationStage(Stage):
                 recovery_result = item.payload.pop(_REPLY_JOURNAL_RECOVERY_RESULT, None)
                 if recovery_result == "retry":
                     item.state = REPLY_JOURNAL_RECOVERY_WAIT
+                    retry_delay = item.payload.pop(_REPLY_JOURNAL_RECOVERY_DELAY, None)
+                    if isinstance(retry_delay, (int, float)) and not isinstance(retry_delay, bool):
+                        item.payload["retry_delay_s"] = float(retry_delay)
                     return StageOutcome(
                         Disposition.RETRY,
                         "implementation_reply_handoff_journal_read",
+                    )
+                if recovery_result == "failed":
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "implementation_reply_handoff_journal_read_failed",
                     )
                 if recovery_result == "invalid":
                     return StageOutcome(
@@ -1295,6 +1305,11 @@ class ImplementationStage(Stage):
         }
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
+        publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
+            "_synced_default_branch_sha"
+        )
+        if is_full_commit_sha(publish_base_sha):
+            kwargs["publish_base_sha"] = publish_base_sha
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
         # A direct cursor's bootstrap pin reserves a newly created writer
         # branch.  Once an existing PR is adopted, its remote branch is the
@@ -1601,6 +1616,29 @@ class ImplementationStage(Stage):
     def _on_reply_journal_recovery_done(item: WorkItem, result: JobResult) -> None:
         """Apply a journal recovery receipt before the coordinator advances state."""
         if not result.ok:
+            retries = item.payload.get(
+                PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RECOVERY_RETRIES, 0
+            )
+            if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+                item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "invalid"
+                return
+            retries += 1
+            item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RECOVERY_RETRIES] = retries
+            if retries > IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP:
+                item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+                item.payload.pop(_REPLY_JOURNAL_RECOVERY_DELAY, None)
+                item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "failed"
+                return
+            value = result.value if isinstance(result.value, dict) else {}
+            retry_delay = value.get("retry_delay_s")
+            if (
+                value.get("failure_kind") not in {"github_rate_limit", "github_unavailable"}
+                or isinstance(retry_delay, bool)
+                or not isinstance(retry_delay, (int, float))
+                or retry_delay < 0
+            ):
+                retry_delay = float(2 ** (retries - 1))
+            item.payload[_REPLY_JOURNAL_RECOVERY_DELAY] = float(retry_delay)
             item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "retry"
             return
         receipt = result.value
@@ -1610,6 +1648,8 @@ class ImplementationStage(Stage):
             item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "invalid"
             return
         item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+        item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RECOVERY_RETRIES, None)
+        item.payload.pop(_REPLY_JOURNAL_RECOVERY_DELAY, None)
         item.payload["_reply_journal_recovery_complete"] = True
         if receipt.handoff is None:
             return

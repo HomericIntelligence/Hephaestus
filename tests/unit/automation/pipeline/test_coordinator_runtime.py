@@ -4,6 +4,19 @@ from hephaestus.automation.pipeline.coordinator_runtime import CoordinatorRuntim
 from hephaestus.automation.pipeline.jobs import JobResult
 
 
+def test_github_failure_has_specific_durable_error_class() -> None:
+    """A safe GitHub failure class remains available in the durable event."""
+    result = JobResult(
+        ok=False,
+        error="github_rate_limit",
+        value={"failure_kind": "github_rate_limit", "retry_delay_s": 45.0},
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result)
+
+    assert fields["error"] == "github_rate_limit"
+
+
 def test_semantic_rebase_failure_has_specific_durable_error_class() -> None:
     """Semantic validation is distinguishable from an undifferentiated error."""
     result = JobResult(

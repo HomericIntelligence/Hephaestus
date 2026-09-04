@@ -3703,6 +3703,22 @@ class TestCommitPushAndPrCreate:
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["agent_model"] == "sol:medium"
 
+    def test_commit_push_carries_the_sealed_implementation_base(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A new branch can prove whether a clean local head needs publication."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload["_impl_source_revision"] = "a" * 40
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["publish_base_sha"] == "a" * 40
+
     def test_direct_scope_commit_push_carries_its_remote_reservation_pin(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -4223,3 +4239,101 @@ class TestFullWalks:
 
         item.state = result.on_done_state
         assert stage.step(item, ctx) == Continue(next_state="REPLY_HANDOFF_WAIT")
+
+    def test_reply_journal_recovery_has_bounded_delayed_retries(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Three failed recovery reads stop without starting the implementer."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REPLY_JOURNAL_RECOVERY_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [{"id": "thread-1", "body": "fix it"}],
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "comments": [{"id": "comment-1", "body": "fix it"}],
+                    }
+                ],
+            }
+        )
+
+        for expected_delay in (1.0, 2.0):
+            request = stage.step(item, ctx)
+            assert isinstance(request, JobRequest)
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    error="comment_journal_read_error",
+                    value={
+                        "failure_kind": "comment_journal_read_error",
+                        "retry_delay_s": 1.0,
+                    },
+                ),
+                ctx,
+            )
+            item.state = request.on_done_state
+
+            outcome = stage.step(item, ctx)
+
+            assert outcome == StageOutcome(
+                Disposition.RETRY, "implementation_reply_handoff_journal_read"
+            )
+            assert item.payload["retry_delay_s"] == expected_delay
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="comment_journal_read_error",
+                value={
+                    "failure_kind": "comment_journal_read_error",
+                    "retry_delay_s": 1.0,
+                },
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_handoff_journal_read_failed",
+        )
+
+    def test_reply_journal_recovery_uses_provider_retry_delay(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A provider delay parks the recovery read until service can resume."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REPLY_JOURNAL_RECOVERY_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [{"id": "thread-1", "body": "fix it"}],
+                "remediation_thread_snapshots": [{"id": "thread-1", "comments": []}],
+            }
+        )
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="github_rate_limit",
+                value={"failure_kind": "github_rate_limit", "retry_delay_s": 45.0},
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_journal_read"
+        )
+        assert item.payload["retry_delay_s"] == 45.0
