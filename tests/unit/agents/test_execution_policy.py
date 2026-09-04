@@ -753,6 +753,42 @@ def test_pi_helpers_reject_invalid_defaults_before_admission(
     assert calls == []
 
 
+def test_resolve_agent_rejects_invalid_pi_defaults_before_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent selection must validate Pi defaults before process-backed admission."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text("{", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda *_args, **_kwargs: calls.append("admission"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_isolation_adapter",
+        lambda *_args, **_kwargs: calls.append("isolation"),
+    )
+
+    def record_authentication(*_args: object, **_kwargs: object) -> bool:
+        calls.append("authentication")
+        return True
+
+    monkeypatch.setattr(
+        agent_runtime,
+        "is_agent_authenticated",
+        record_authentication,
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_dir=pi_dir, model_references=("",))
+
+    assert calls == []
+
+
 def test_pi_resume_rejects_a_changed_operator_default(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

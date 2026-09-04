@@ -220,5 +220,6 @@ class TestCompactAgentSession:
             auth_status_timeout=10,
             pi_isolation_adapter="package:factory",
             pi_dir=pi_dir,
+            model_references=("",),
         )
         assert resume.call_args.kwargs["pi_dir"] == pi_dir

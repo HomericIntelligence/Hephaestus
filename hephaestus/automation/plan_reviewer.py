@@ -759,6 +759,7 @@ def main() -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
+        model_references=(args.reviewer_model or args.model,),
     )
 
     log = logging.getLogger(__name__)

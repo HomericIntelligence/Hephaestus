@@ -36,6 +36,12 @@ The runtime does not read project `.pi/settings.json`. Pi package preflight,
 private-value redaction, execution policy, and external isolation admission
 remain mandatory.
 
+Each provider-neutral agent-resolution boundary supplies its pending model
+references. For Pi, the runtime validates these references before admission or
+authentication can start a child process. The durable plan-review record binds
+the provider, model, and model-selection format as one identity. Recovery
+rejects a mismatched identity.
+
 ## Alternatives considered
 
 - Continue to pass Claude role defaults to all providers. Rejected because the

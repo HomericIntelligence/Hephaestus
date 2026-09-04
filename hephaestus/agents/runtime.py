@@ -757,6 +757,41 @@ def _require_pi_automation_admission(
     return result
 
 
+def _validate_pi_model_references_before_admission(
+    model_references: Sequence[str] | None,
+    *,
+    disable_pi_automation: bool,
+    pi_dir: Path | None,
+) -> None:
+    """Validate pending Pi selections before a process-backed admission check."""
+    if disable_pi_automation:
+        raise PiAutomationDisabledError(
+            "Pi automation disabled by CLI policy; no Pi or broker process was started"
+        )
+    if model_references is None:
+        return
+    if not model_references:
+        raise ValueError("Pi model references must not be empty")
+    for reference in dict.fromkeys(model_references):
+        _resolve_pi_model_selection(reference, pi_dir=pi_dir)
+
+
+def validate_durable_model_selection(
+    provider: str,
+    model: str,
+    selection_format: object,
+) -> None:
+    """Validate one durable provider, model, and selection-format identity."""
+    configured_default_providers = {"opencode", "pi"}
+    uses_configured_default = provider in configured_default_providers
+    if (
+        provider not in AGENT_CHOICES
+        or uses_configured_default != (selection_format == 1)
+        or (not model and not uses_configured_default)
+    ):
+        raise ValueError("invalid durable provider model selection")
+
+
 def resolve_agent(
     agent: str | None,
     *,
@@ -765,16 +800,26 @@ def resolve_agent(
     auth_status_timeout: int | None = None,
     pi_isolation_adapter: str | None = None,
     pi_dir: Path | None = None,
+    model_references: Sequence[str] | None = None,
 ) -> AgentName:
-    """Resolve an optional provider selection into a concrete backend."""
+    """Resolve an optional provider selection into a concrete backend.
+
+    When Pi is explicit, ``model_references`` binds all pending executions to
+    their model selections before admission or authentication starts a child
+    process. An empty reference resolves the trusted operator-global default.
+    """
     effective_cwd = Path.cwd() if cwd is None else cwd
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
         if agent == "pi":
+            _validate_pi_model_references_before_admission(
+                model_references,
+                disable_pi_automation=disable_pi_automation,
+                pi_dir=pi_dir,
+            )
             _require_pi_automation_admission(
                 effective_cwd,
-                disable_pi_automation=disable_pi_automation,
                 pi_dir=pi_dir,
             )
             _require_pi_isolation_adapter(pi_isolation_adapter)
@@ -910,8 +955,8 @@ def direct_agent_model(
 ) -> str:
     """Return a provider-neutral direct-runner model default.
 
-    The caller resolves any provider-specific defaults at the explicit CLI
-    boundary. Runtime execution never consults ambient model configuration.
+    The caller resolves provider defaults at the execution boundary. Pi can
+    read only its trusted operator-global settings at that boundary.
     """
     if model_value is not None:
         return model_value

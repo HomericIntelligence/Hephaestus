@@ -2159,6 +2159,7 @@ class WorkerPool:
                 auth_status_timeout=job.auth_status_timeout,
                 pi_isolation_adapter=job.pi_isolation_adapter,
                 pi_dir=job.pi_dir,
+                model_references=(job.model,),
             )
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent

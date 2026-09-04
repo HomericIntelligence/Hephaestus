@@ -514,6 +514,7 @@ def compact_agent_session(
         auth_status_timeout=auth_status_timeout,
         pi_isolation_adapter=pi_isolation_adapter,
         pi_dir=pi_dir,
+        model_references=(model or "",),
     )
     resume = agent_compaction_resume(
         provider,

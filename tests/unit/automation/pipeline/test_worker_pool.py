@@ -757,6 +757,7 @@ class TestWorkerPoolSubmitComplete:
             auth_status_timeout=10,
             pi_isolation_adapter=None,
             pi_dir=None,
+            model_references=(job.model,),
         )
         mock_session.assert_called_once_with(
             agent="codex",
@@ -775,6 +776,56 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert result.value == "codex output"
         assert result.session_id == "new-codex-session"
+
+    def test_pi_default_fails_before_worker_agent_admission(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A malformed Pi default must stop the worker before process-backed checks."""
+        pi_dir = tmp_path / "pi-agent"
+        pi_dir.mkdir()
+        (pi_dir / "settings.json").write_text("{", encoding="utf-8")
+        calls: list[str] = []
+        monkeypatch.setattr(
+            agent_runtime,
+            "_require_pi_automation_admission",
+            lambda *_args, **_kwargs: calls.append("admission"),
+        )
+        monkeypatch.setattr(
+            agent_runtime,
+            "_require_pi_isolation_adapter",
+            lambda *_args, **_kwargs: calls.append("isolation"),
+        )
+
+        def record_authentication(*_args: object, **_kwargs: object) -> bool:
+            calls.append("authentication")
+            return True
+
+        monkeypatch.setattr(
+            agent_runtime,
+            "is_agent_authenticated",
+            record_authentication,
+        )
+        request = ExecutionRequest(
+            AgentRole.PLANNER,
+            AgentOperation.PLAN,
+            SessionLifecycle.START_NEW,
+        )
+        job = _agent_job(
+            agent="pi",
+            model="",
+            execution_request=request,
+            cwd=tmp_path,
+            pi_dir=pi_dir,
+        )
+
+        result = pool._run_agent(job)
+
+        assert result.ok is False
+        assert "Pi default model configuration" in (result.error or "")
+        assert calls == []
 
     def test_non_claude_agent_job_resumes_a_saved_session(
         self,

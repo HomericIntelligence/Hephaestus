@@ -982,6 +982,7 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
         auth_status_timeout=10,
         pi_isolation_adapter=None,
         pi_dir=None,
+        model_references=("", "", ""),
     )
     assert config.agent == "codex"  # type: ignore[attr-defined]
 

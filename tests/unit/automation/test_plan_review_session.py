@@ -78,7 +78,7 @@ def test_cycle_recovery_preserves_provider_binding(tmp_path: Path) -> None:
         issue=2766,
         provider="pi",
         model="reviewer",
-        reviewer_config={},
+        reviewer_config={"model_selection_format": 1, "reasoning_effort": ""},
         cwd=tmp_path,
         plan_revision=1,
         plan_fingerprint="plan-v1",
@@ -144,6 +144,39 @@ def test_cycle_recovery_rejects_invalid_model_selection_metadata(
 
     with pytest.raises(PlanReviewSessionLostError, match=r"reviewer .* invalid"):
         _store(tmp_path).recover_active(repo="org/repo", issue=2768)
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "reviewer_config"),
+    [
+        ("unknown", "model", {}),
+        ("codex", "", {}),
+        ("opencode", "", {}),
+        ("claude", "model", {"model_selection_format": 1, "reasoning_effort": ""}),
+        ("pi", "model", {}),
+    ],
+)
+def test_cycle_recovery_rejects_invalid_provider_model_selection_tuple(
+    provider: str,
+    model: str,
+    reviewer_config: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    """Provider, model, and selection format must form one valid identity."""
+    store = _store(tmp_path)
+    store.start_cycle(
+        repo="org/repo",
+        issue=2769,
+        provider=provider,
+        model=model,
+        reviewer_config=reviewer_config,
+        cwd=tmp_path,
+        plan_revision=1,
+        plan_fingerprint="plan-v1",
+    )
+
+    with pytest.raises(PlanReviewSessionLostError, match="provider model selection is invalid"):
+        _store(tmp_path).recover_active(repo="org/repo", issue=2769)
 
 
 def test_separate_issues_cycles_and_reset_do_not_share_state(tmp_path: Path) -> None:

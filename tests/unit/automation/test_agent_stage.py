@@ -350,6 +350,7 @@ def test_run_agent_resolves_pi_against_repo_root(
         "auth_status_timeout": 10,
         "pi_isolation_adapter": None,
         "pi_dir": None,
+        "model_references": ("",),
     }
 
 

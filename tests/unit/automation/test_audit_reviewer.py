@@ -536,6 +536,7 @@ class TestParser:
             auth_status_timeout=10,
             pi_isolation_adapter=None,
             pi_dir=None,
+            model_references=("",),
         )
         assert mock_cls.call_args[1]["agent"] == "codex"
 

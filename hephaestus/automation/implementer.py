@@ -504,6 +504,10 @@ def main() -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
+        model_references=(
+            args.implementer_model or args.model,
+            args.reviewer_model or args.model,
+        ),
     )
 
     state_dir = ensure_state_dir(get_repo_root())

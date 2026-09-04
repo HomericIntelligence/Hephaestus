@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from hephaestus.agents.model_selection import MODEL_REASONING_EFFORTS
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
+from hephaestus.agents.runtime import validate_durable_model_selection
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 
@@ -248,6 +249,16 @@ class PlanReviewSessionStore:
             or selection_format != 1
         ):
             raise PlanReviewSessionLostError("reviewer model selection format is invalid")
+        try:
+            validate_durable_model_selection(
+                record.provider,
+                record.reviewer_model,
+                selection_format,
+            )
+        except ValueError as error:
+            raise PlanReviewSessionLostError(
+                "reviewer provider model selection is invalid"
+            ) from error
         if selection_format == 1:
             reasoning_effort = record.reviewer_config.get("reasoning_effort")
             if not isinstance(
