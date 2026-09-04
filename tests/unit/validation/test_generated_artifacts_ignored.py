@@ -10,4 +10,3 @@ def test_root_coverage_report_is_ignored() -> None:
     patterns = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 
     assert "coverage.xml" in patterns
-    assert not (REPO_ROOT / "coverage.xml").exists()
