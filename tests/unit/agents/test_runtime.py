@@ -17,7 +17,13 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
-from hephaestus.agents.execution_policy import ExecutionPolicyError, SessionLifecycle
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionPolicyError,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 
 PI_SMOKE_COMMAND_PREFIX = [
     "pi",
@@ -2431,6 +2437,22 @@ def test_pi_default_model_rejects_group_or_other_writable_settings(tmp_path: Pat
         agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
 
 
+def test_pi_default_model_rejects_settings_owned_by_another_user(tmp_path: Path) -> None:
+    """Pi must not trust settings that another account owns."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B"}',
+        encoding="utf-8",
+    )
+
+    with (
+        patch("hephaestus.agents.runtime.os.getuid", return_value=os.getuid() + 1),
+        pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"),
+    ):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
 @pytest.mark.parametrize(
     "raw_settings",
     [
@@ -3159,7 +3181,18 @@ def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: P
         "hephaestus.agents.runtime.preflight_pi_environment", return_value=failure
     ) as preflight:
         with pytest.raises(RuntimeError, match="package_inventory_mismatch"):
-            agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
+            agent_runtime.run_agent_text(
+                "pi",
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+                model="explicit/model",
+                execution_request=ExecutionRequest(
+                    AgentRole.PR_REVIEWER,
+                    AgentOperation.PR_REVIEW,
+                    SessionLifecycle.ONE_SHOT,
+                ),
+            )
     preflight.assert_called_once_with(tmp_path, pi_dir=None)
 
 

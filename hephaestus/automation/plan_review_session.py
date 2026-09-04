@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from hephaestus.agents.model_selection import MODEL_REASONING_EFFORTS
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
@@ -208,7 +209,6 @@ class PlanReviewSessionStore:
             record.repo,
             record.cycle_id,
             record.provider,
-            record.reviewer_model,
             record.reviewer_config_fingerprint,
             record.canonical_cwd,
             record.session_key,
@@ -218,6 +218,8 @@ class PlanReviewSessionStore:
         )
         if not all(isinstance(value, str) and value for value in required_text):
             raise PlanReviewSessionLostError("review session record text fields are invalid")
+        if not isinstance(record.reviewer_model, str):
+            raise PlanReviewSessionLostError("reviewer model is invalid")
         if not isinstance(record.issue, int) or isinstance(record.issue, bool):
             raise PlanReviewSessionLostError("review session issue identity is invalid")
         if record.state not in {"starting", "active", "reset", "completed", "recovery-required"}:
@@ -239,6 +241,19 @@ class PlanReviewSessionStore:
             raise PlanReviewSessionLostError("reviewer session id is invalid")
         if not isinstance(record.reviewer_config, dict):
             raise PlanReviewSessionLostError("reviewer configuration is invalid")
+        selection_format = record.reviewer_config.get("model_selection_format")
+        if selection_format is not None and (
+            not isinstance(selection_format, int)
+            or isinstance(selection_format, bool)
+            or selection_format != 1
+        ):
+            raise PlanReviewSessionLostError("reviewer model selection format is invalid")
+        if selection_format == 1:
+            reasoning_effort = record.reviewer_config.get("reasoning_effort")
+            if not isinstance(
+                reasoning_effort, str
+            ) or reasoning_effort not in MODEL_REASONING_EFFORTS | {""}:
+                raise PlanReviewSessionLostError("reviewer reasoning effort is invalid")
         config_digest = sha256(
             json.dumps(
                 record.reviewer_config,

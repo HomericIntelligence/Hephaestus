@@ -627,6 +627,8 @@ def _validate_pi_settings_metadata(metadata: os.stat_result) -> None:
         raise OSError
     if metadata.st_size > PI_CONFIG_MAX_BYTES:
         raise OSError
+    if not hasattr(os, "getuid") or metadata.st_uid != os.getuid():
+        raise OSError
     if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise OSError
 
@@ -2601,20 +2603,17 @@ def _require_pi_request(execution_request: ExecutionRequest | None) -> Execution
     return resolve_policy(execution_request)
 
 
-def _require_admitted_pi_policy(
-    cwd: Path,
+def _require_pi_execution_policy(
     execution_request: ExecutionRequest | None,
     *,
     disable_pi_automation: bool = False,
-    pi_dir: Path | None = None,
-) -> tuple[ExecutionPolicy, PiPreflightResult]:
-    """Require Pi admission before resolving its caller-supplied execution policy."""
-    preflight = _require_pi_automation_admission(
-        cwd,
-        disable_pi_automation=disable_pi_automation,
-        pi_dir=pi_dir,
-    )
-    return _require_pi_request(execution_request), preflight
+) -> ExecutionPolicy:
+    """Validate Pi policy and the emergency stop before model resolution."""
+    if disable_pi_automation:
+        raise PiAutomationDisabledError(
+            "Pi automation disabled by CLI policy; no Pi or broker process was started"
+        )
+    return _require_pi_request(execution_request)
 
 
 def _pi_policy_args(
@@ -2783,11 +2782,9 @@ def run_agent_text(
     """Run a direct-runner agent non-interactively and return text output."""
     pi_thinking = ""
     if is_pi(agent):
-        policy, preflight = _require_admitted_pi_policy(
-            cwd,
+        policy = _require_pi_execution_policy(
             execution_request,
             disable_pi_automation=disable_pi_automation,
-            pi_dir=pi_dir,
         )
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is not SessionLifecycle.ONE_SHOT:
@@ -2795,6 +2792,7 @@ def run_agent_text(
         pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
         model = pi_selection.reference
         pi_thinking = pi_selection.reasoning_effort
+        preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
         return run_codex_text(
             prompt,
@@ -2851,11 +2849,9 @@ def run_agent_session(
     """Run a direct-runner agent session and return output plus session id."""
     pi_thinking = ""
     if is_pi(agent):
-        policy, preflight = _require_admitted_pi_policy(
-            cwd,
+        policy = _require_pi_execution_policy(
             execution_request,
             disable_pi_automation=disable_pi_automation,
-            pi_dir=pi_dir,
         )
         pi_request = cast(ExecutionRequest, execution_request)
         pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
@@ -2871,6 +2867,7 @@ def run_agent_session(
             raise PiSessionBindingError(
                 "Pi start-new or one-shot execution must not receive a session binding"
             )
+        preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
         return run_codex_session(
             prompt,
@@ -2949,25 +2946,24 @@ def resume_agent_session(
     """Resume a direct-runner agent session."""
     pi_thinking = ""
     if is_pi(agent):
-        policy, preflight = _require_admitted_pi_policy(
-            cwd,
+        policy = _require_pi_execution_policy(
             execution_request,
             disable_pi_automation=disable_pi_automation,
-            pi_dir=pi_dir,
         )
         pi_request = cast(ExecutionRequest, execution_request)
-        pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
-        model = pi_selection.reference
-        pi_thinking = pi_selection.reasoning_effort
         if pi_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
             raise ExecutionPolicyError(
                 "Pi session resume requires a RESUME_REQUIRED ExecutionRequest"
             )
+        pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
+        model = pi_selection.reference
+        pi_thinking = pi_selection.reasoning_effort
         if resume_binding is None:
             raise PiSessionBindingError("Pi session resume requires a complete session binding")
         validate_pi_binding(resume_binding, cwd=cwd, role=pi_request.role, model=model)
         if session_id != resume_binding.session_id:
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
+        preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
         return resume_codex_session(
             session_id,

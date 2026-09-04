@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -686,6 +687,70 @@ def test_pi_session_start_binds_the_operator_default_and_thinking_level(
         role=AgentRole.PLANNER,
         model="IFM/K2-Horizon-0.9B:high",
     )
+
+
+@pytest.mark.parametrize("helper", ["text", "session", "resume"])
+def test_pi_helpers_reject_invalid_defaults_before_admission(
+    helper: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid Pi settings must fail before preflight or adapter dispatch."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text("{", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda *_args, **_kwargs: calls.append("admission"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_run_pi_with_policy",
+        lambda **_kwargs: calls.append("adapter"),
+    )
+    request = (
+        ExecutionRequest(
+            AgentRole.PR_REVIEWER,
+            AgentOperation.PR_REVIEW,
+            SessionLifecycle.ONE_SHOT,
+        )
+        if helper == "text"
+        else ExecutionRequest(
+            AgentRole.PLANNER,
+            AgentOperation.AMEND,
+            SessionLifecycle.RESUME_REQUIRED,
+        )
+        if helper == "resume"
+        else ExecutionRequest(
+            AgentRole.PLANNER,
+            AgentOperation.PLAN,
+            SessionLifecycle.START_NEW,
+        )
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        if helper == "text":
+            agent_runtime.run_agent_text(
+                "pi", "plan", cwd=tmp_path, timeout=30, pi_dir=pi_dir, execution_request=request
+            )
+        elif helper == "session":
+            agent_runtime.run_agent_session(
+                "pi", "plan", cwd=tmp_path, timeout=30, pi_dir=pi_dir, execution_request=request
+            )
+        else:
+            agent_runtime.resume_agent_session(
+                "pi",
+                "pi-session",
+                "plan",
+                cwd=tmp_path,
+                timeout=30,
+                pi_dir=pi_dir,
+                execution_request=request,
+            )
+
+    assert calls == []
 
 
 def test_pi_resume_rejects_a_changed_operator_default(
