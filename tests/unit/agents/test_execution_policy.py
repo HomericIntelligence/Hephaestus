@@ -23,6 +23,7 @@ from hephaestus.agents.execution_policy import (
     intersect_child_policy,
     resolve_policy,
 )
+from hephaestus.agents.model_selection import AgentModelSelection
 from hephaestus.agents.pi_session import (
     PiSessionBindingError,
     create_pi_binding,
@@ -753,7 +754,12 @@ def test_pi_helpers_reject_invalid_defaults_before_admission(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "model_reference",
+    ["", AgentModelSelection("private/custom-model", "default")],
+)
 def test_resolve_agent_rejects_invalid_pi_defaults_before_admission(
+    model_reference: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -784,7 +790,12 @@ def test_resolve_agent_rejects_invalid_pi_defaults_before_admission(
     )
 
     with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
-        agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_dir=pi_dir, model_references=("",))
+        agent_runtime.resolve_agent(
+            "pi",
+            cwd=tmp_path,
+            pi_dir=pi_dir,
+            model_references=(model_reference,),
+        )
 
     assert calls == []
 

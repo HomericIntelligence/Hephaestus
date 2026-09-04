@@ -43,7 +43,11 @@ if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
     from hephaestus.automation.pipeline.routing import PipelineScope
 
-from hephaestus.agents.runtime import agent_uses_configured_model_default, resolve_agent
+from hephaestus.agents.runtime import (
+    agent_uses_configured_model_default,
+    apply_agent_model_reasoning_effort,
+    resolve_agent,
+)
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.agent_config import (
     fallback_model as default_fallback_model,
@@ -1088,9 +1092,21 @@ def main(argv: list[str] | None = None) -> int:
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
         model_references=(
-            args.planner_model or args.model,
-            args.reviewer_model or args.model,
-            args.implementer_model or args.model,
+            apply_agent_model_reasoning_effort(
+                args.agent or "",
+                args.planner_model or args.model,
+                args.planner_reasoning_effort,
+            ),
+            apply_agent_model_reasoning_effort(
+                args.agent or "",
+                args.reviewer_model or args.model,
+                args.reviewer_reasoning_effort,
+            ),
+            apply_agent_model_reasoning_effort(
+                args.agent or "",
+                args.implementer_model or args.model,
+                args.implementer_reasoning_effort,
+            ),
         ),
     )
 

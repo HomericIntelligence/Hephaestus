@@ -987,6 +987,42 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
     assert config.agent == "codex"  # type: ignore[attr-defined]
 
 
+def test_main_binds_role_reasoning_before_pi_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pi admission must validate each fully resolved role selection."""
+    resolve = patch.object(loop_runner, "resolve_agent", return_value="pi")
+    with resolve as mock_resolve:
+        _capture_config(
+            [
+                "--repos",
+                "Repo",
+                "--dry-run",
+                "--loops",
+                "1",
+                "--agent",
+                "pi",
+                "--model",
+                "private/custom-model",
+                "--planner-reasoning-effort",
+                "default",
+                "--reviewer-reasoning-effort",
+                "high",
+            ],
+            monkeypatch,
+        )
+
+    call = mock_resolve.call_args
+    references = call.kwargs["model_references"]
+    assert str(references[0]) == "private/custom-model:default"
+    assert references[0].model == "private/custom-model"
+    assert references[0].reasoning_effort == "default"
+    assert str(references[1]) == "private/custom-model:high"
+    assert references[1].model == "private/custom-model"
+    assert references[1].reasoning_effort == "high"
+    assert references[2] == "private/custom-model"
+
+
 def test_main_errors_on_empty_repo_list() -> None:
     """An empty resolved repo list is a clean exit-1, not a pipeline dispatch."""
     # resolve_agent() probes PATH for a real backend; mock it so the test does
