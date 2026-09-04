@@ -25,14 +25,17 @@ that runs the automation. Recovery procedure for a force-killed loop:
 """
 
 import contextlib
+import json
 import logging
 import shutil
 import subprocess
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.worktree_identity import source_worktree_name
 
@@ -104,6 +107,63 @@ class BranchWorktreeOwnedError(RuntimeError):
         self.branch = branch
         self.owner_path = owner_path
         super().__init__(f"{branch!r} is already checked out at {owner_path}")
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeCreationReceipt:
+    """Atomic proof that the worktree manager created one writer checkout."""
+
+    issue_number: int
+    branch: str
+    path: Path
+    revision: str
+    source_lane: str = "impl"
+    schema_version: int = 1
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the closed JSON representation of this receipt."""
+        return {
+            "schema_version": self.schema_version,
+            "issue_number": self.issue_number,
+            "branch": self.branch,
+            "path": str(self.path),
+            "revision": self.revision,
+            "source_lane": self.source_lane,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "WorktreeCreationReceipt":
+        """Parse a creation receipt and reject unknown or malformed fields."""
+        fields = {
+            "schema_version",
+            "issue_number",
+            "branch",
+            "path",
+            "revision",
+            "source_lane",
+        }
+        if set(payload) != fields:
+            raise RuntimeError("worktree creation receipt schema mismatch")
+        try:
+            receipt = cls(
+                schema_version=int(payload["schema_version"]),
+                issue_number=int(payload["issue_number"]),
+                branch=str(payload["branch"]),
+                path=Path(str(payload["path"])),
+                revision=str(payload["revision"]),
+                source_lane=str(payload["source_lane"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid worktree creation receipt: {exc}") from exc
+        if (
+            receipt.schema_version != 1
+            or receipt.issue_number <= 0
+            or not receipt.branch
+            or receipt.source_lane != "impl"
+            or not _is_full_commit_sha(receipt.revision)
+        ):
+            raise RuntimeError("unsupported worktree creation receipt")
+        return receipt
 
 
 class WorktreeManager:
@@ -199,6 +259,92 @@ class WorktreeManager:
     def base_branch(self) -> str:
         """The base branch, auto-detected on first access."""
         return self._resolve_base_branch()
+
+    @staticmethod
+    def creation_receipt_path(worktree_path: Path) -> Path:
+        """Return the atomic writer-creation receipt path for a worktree."""
+        return worktree_path.with_name(f".{worktree_path.name}.creation.json")
+
+    @classmethod
+    def read_creation_receipt(cls, worktree_path: Path) -> WorktreeCreationReceipt | None:
+        """Read a writer-creation receipt, or return ``None`` when absent."""
+        path = cls.creation_receipt_path(worktree_path)
+        if not path.exists():
+            return None
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlinked worktree creation receipt: {path}")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read worktree creation receipt: {path}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("worktree creation receipt must be an object")
+        receipt = WorktreeCreationReceipt.from_dict(payload)
+        if receipt.path.resolve() != worktree_path.resolve():
+            raise RuntimeError("worktree creation receipt path mismatch")
+        return receipt
+
+    def _write_creation_receipt(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        timeout: int | None,
+    ) -> None:
+        """Atomically record a newly materialized deterministic writer."""
+        revision = run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        if not _is_full_commit_sha(revision):
+            raise RuntimeError("worktree creation returned a malformed writer revision")
+        receipt = WorktreeCreationReceipt(
+            issue_number=issue_number,
+            branch=branch_name,
+            path=worktree_path.resolve(),
+            revision=revision,
+        )
+        write_secure(
+            self.creation_receipt_path(worktree_path),
+            json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
+        )
+
+    def refresh_creation_receipt(
+        self,
+        receipt: WorktreeCreationReceipt,
+        *,
+        timeout: int | None,
+    ) -> WorktreeCreationReceipt:
+        """Bind a verified writer-creation receipt to its final clean revision."""
+        worktree_path = receipt.path.resolve()
+        recorded = self.read_creation_receipt(worktree_path)
+        if recorded != receipt:
+            raise RuntimeError("worktree creation receipt changed before finalization")
+        branch = run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        if branch != receipt.branch:
+            raise RuntimeError("worktree creation receipt branch no longer matches checkout")
+        revision = run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        if not _is_full_commit_sha(revision):
+            raise RuntimeError("worktree finalization returned a malformed writer revision")
+        refreshed = replace(receipt, path=worktree_path, revision=revision)
+        write_secure(
+            self.creation_receipt_path(worktree_path),
+            json.dumps(refreshed.to_dict(), sort_keys=True, indent=2) + "\n",
+        )
+        return refreshed
 
     def _resolve_base_branch(self, *, timeout: int | None = None) -> str:
         """Return the base branch, using ``timeout`` for lazy git detection."""
@@ -410,6 +556,10 @@ class WorktreeManager:
                             timeout=timeout,
                         )
                     ):
+                        if source_lane == "impl" and self.read_creation_receipt(existing) is None:
+                            raise RuntimeError(
+                                "deterministic implementation worktree has no creation receipt"
+                            )
                         return existing
                     if source_lane == "impl" and base_sha is not None and worktree_path.exists():
                         if not is_clean_working_tree(worktree_path, timeout=timeout):
@@ -435,6 +585,13 @@ class WorktreeManager:
                             refresh_base=refresh_base,
                             timeout=timeout,
                         )
+                        if source_lane == "impl":
+                            self._write_creation_receipt(
+                                issue_number=issue_number,
+                                branch_name=branch_name,
+                                worktree_path=worktree_path,
+                                timeout=timeout,
+                            )
                     except Exception:
                         self.worktrees.pop(worktree_key, None)
                         if base_sha is None:
@@ -778,6 +935,8 @@ class WorktreeManager:
                         e,
                     )
         finally:
+            with contextlib.suppress(OSError):
+                self.creation_receipt_path(worktree_path).unlink(missing_ok=True)
             try:
                 run(
                     ["git", "worktree", "prune"],
@@ -1203,6 +1362,8 @@ class WorktreeManager:
                 with file_lock(self._git_metadata_lock_path()):
                     run(cmd, cwd=self.repo_root, **_timeout_kw(timeout))
 
+                with contextlib.suppress(OSError):
+                    self.creation_receipt_path(worktree_path).unlink(missing_ok=True)
                 del self.worktrees[issue_number]
                 logger.info("Removed worktree for issue #%s", issue_number)
 

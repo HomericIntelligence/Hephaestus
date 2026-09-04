@@ -84,6 +84,7 @@ from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
     RemoteGitRefreshError,
+    WorktreeCreationReceipt,
     WorktreeManager,
 )
 from hephaestus.config.child_environments import (
@@ -3801,10 +3802,17 @@ class WorkerPool:
             branch_name=branch_name,
             repo_root=repo_root,
             repo=job.transport_repository,
+            source_repository=job.repo,
             sync_to_remote=sync_to_remote,
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
             item_number=kwargs.get("issue_number"),
+            creation_receipt=(
+                manager.read_creation_receipt(Path(created))
+                if kwargs.get("source_lane") == "impl"
+                else None
+            ),
+            worktree_manager=manager,
             timeout_s=job.timeout_s,
         )
 
@@ -3875,11 +3883,14 @@ class WorkerPool:
         branch_name: str,
         repo_root: Path,
         repo: str,
+        source_repository: str | None = None,
         sync_to_remote: bool,
         pr_number: object,
         timeout_s: int,
         source_lane: object = None,
         item_number: object = None,
+        creation_receipt: WorktreeCreationReceipt | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
         if created is None:
@@ -3957,15 +3968,22 @@ class WorkerPool:
             if source_lane == "impl" and not dirty:
                 if isinstance(item_number, bool) or not isinstance(item_number, int):
                     raise SourceWorkspaceError("implementation writer item number is invalid")
+                if creation_receipt is None or worktree_manager is None:
+                    raise SourceWorkspaceError("implementation writer creation receipt is missing")
+                creation_receipt = worktree_manager.refresh_creation_receipt(
+                    creation_receipt,
+                    timeout=timeout_s,
+                )
                 source_manager = SourceWorkspaceManager(
                     repo_root,
-                    repository=repo,
+                    repository=source_repository or repo,
                     base_dir=worktree_path.parent,
                 )
                 source_manager.claim_implementation_writer(
                     item_number,
                     branch=branch_name,
                     path=worktree_path,
+                    creation_receipt=creation_receipt,
                 )
         except Exception as exc:
             if isinstance(exc, SourceWorkspaceError):

@@ -81,6 +81,7 @@ from hephaestus.automation.source_worktree import SourceWorkspaceError
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
+    WorktreeCreationReceipt,
 )
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
@@ -3907,6 +3908,14 @@ class TestGitOps:
         )
         worktree_manager = MagicMock()
         worktree_manager.create_worktree.return_value = writer_path
+        creation_receipt = WorktreeCreationReceipt(
+            issue_number=7,
+            branch="7-auto",
+            path=writer_path,
+            revision="a" * 40,
+        )
+        worktree_manager.read_creation_receipt.return_value = creation_receipt
+        worktree_manager.refresh_creation_receipt.return_value = creation_receipt
         source_manager = MagicMock()
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
@@ -3925,6 +3934,50 @@ class TestGitOps:
             7,
             branch="7-auto",
             path=writer_path,
+            creation_receipt=creation_receipt,
+        )
+        worktree_manager.refresh_creation_receipt.assert_called_once_with(
+            creation_receipt,
+            timeout=60,
+        )
+        assert result.ok is True
+
+    def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Source ownership uses the stage repository, not its transport target."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="org/repo",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="transport/repo",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        source_manager = MagicMock()
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        source_class.assert_called_once_with(
+            tmp_path,
+            repository="org/repo",
+            base_dir=writer_path.parent,
         )
         assert result.ok is True
 
