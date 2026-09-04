@@ -147,17 +147,16 @@ class TestWiring:
                 gh_extra_path_root: Path | None = None,
                 github_job_runner: Any = None,
                 athena_skill_executor: Any = None,
-                rebase_adr_validator: Any = None,
-                rebase_structural_test_argv: Any = None,
+                rebase_policy_selector: Any = None,
                 evidence_receipt_dir: Path | None = None,
             ) -> None:
-                del rebase_adr_validator, rebase_structural_test_argv
                 created["size"] = size
                 created["shutdown"] = shutdown
                 created["completion_q"] = completion_q
                 created["gh_extra_path_root"] = gh_extra_path_root
                 created["github_job_runner"] = github_job_runner
                 created["athena_skill_executor"] = athena_skill_executor
+                created["rebase_policy_selector"] = rebase_policy_selector
                 created["evidence_receipt_dir"] = evidence_receipt_dir
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
@@ -166,7 +165,7 @@ class TestWiring:
         )
         gh_root = tmp_path / "custom-gh"
         config = PipelineConfig(
-            org="org",
+            org="HomericIntelligence",
             repos=["r"],
             parallel_repos=3,
             max_workers=4,
@@ -182,6 +181,9 @@ class TestWiring:
         assert created["github_job_runner"] is not None
         assert created["athena_skill_executor"] is not None
         assert created["athena_gh_extra_path_root"] == gh_root
+        selected_policy = created["rebase_policy_selector"]("Hephaestus")
+        assert selected_policy is not None
+        assert selected_policy.name == "hephaestus-adr-v1"
         assert created["evidence_receipt_dir"] is None
 
     def test_run_pipeline_wires_accessor_and_runs(

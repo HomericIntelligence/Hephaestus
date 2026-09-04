@@ -1112,6 +1112,27 @@ class TestGate:
             "rebase semantic validation failed: duplicate ADR number 0027",
         )
 
+    def test_failed_host_rebase_retains_policy_from_result_value(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The stage stores a valid policy name from structured result data."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="host rebase failed without a policy name",
+                value={"failure_kind": "semantic_validation", "rebase_policy": "hephaestus-adr-v1"},
+            ),
+            ctx,
+        )
+
+        assert item.payload["rebase_error_policy"] == "hephaestus-adr-v1"
+        assert "rebase_policy" not in item.payload["rebase_error_detail"]
+
     def test_failed_host_rebase_redacts_secret_like_tails(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
