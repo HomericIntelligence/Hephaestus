@@ -521,7 +521,11 @@ class WorktreeManager:
                 try:
                     if not isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
                         raise RuntimeError("implementation writer handoff is missing")
-                    implementation_writer_handoff._validate(self.repo_root, issue_number)
+                    implementation_writer_handoff._validate(
+                        self.repo_root,
+                        issue_number,
+                        self.source_lane_lock_path(self.repo_root, issue_number, "impl"),
+                    )
                 except RuntimeError as exc:
                     raise WorktreeCreationReceiptError(str(exc)) from exc
             elif implementation_writer_handoff is not None:

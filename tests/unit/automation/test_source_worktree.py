@@ -263,10 +263,62 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
 def test_implementation_writer_handoff_cannot_be_forged_outside_manager(
     tmp_path: Path,
 ) -> None:
-    """The handoff capability requires the manager's private factory."""
-    with pytest.raises(TypeError, match="private factory"):
-        implementation_writer.ImplementationWriterHandoff(tmp_path, 9, token=object())
+    """The handoff capability requires the issuer context manager."""
+    assert not hasattr(implementation_writer, "_CONSTRUCTION_TOKEN")
+    assert not hasattr(implementation_writer, "_new_implementation_writer_handoff")
+    assert not hasattr(implementation_writer, "_set_implementation_writer_handoff_active")
+    handoff_type: Any = implementation_writer.ImplementationWriterHandoff
+    with pytest.raises(TypeError, match="issuer context manager"):
+        handoff_type(tmp_path, 9, token=object())
     assert not hasattr(implementation_writer.ImplementationWriterHandoff, "_activate")
+
+    repo, _, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        base_branch=second,
+    )
+    forged = object.__new__(implementation_writer.ImplementationWriterHandoff)
+    object.__setattr__(forged, "_active", True)
+    object.__setattr__(forged, "_construction_token", object())
+    object.__setattr__(forged, "_item_number", 9)
+    object.__setattr__(
+        forged,
+        "_lock_path",
+        worktree_manager.source_lane_lock_path(repo, 9, "impl"),
+    )
+    object.__setattr__(forged, "_repo_root", repo.resolve())
+    with pytest.raises(WorktreeCreationReceiptError, match="inactive"):
+        worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=forged,
+        )
+
+
+def test_implementation_writer_handoff_rejects_a_noncanonical_lock_path(
+    tmp_path: Path,
+) -> None:
+    """A handoff issued on another lock cannot authorize writer creation."""
+    repo, _, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        base_branch=second,
+    )
+    wrong_lock = tmp_path / "not-the-source-lane.lock"
+
+    with implementation_writer.implementation_writer_handoff(repo, 9, wrong_lock) as handoff:
+        with pytest.raises(WorktreeCreationReceiptError, match="inactive"):
+            worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
 
 
 def test_implementation_writer_creation_requires_an_active_handoff(tmp_path: Path) -> None:
@@ -530,7 +582,7 @@ def test_claim_does_not_reacquire_the_active_lane_lock(tmp_path: Path) -> None:
         with file_lock(path, **kwargs):
             yield
 
-    with patch("hephaestus.automation.source_worktree.file_lock", side_effect=tracked_lock):
+    with patch("hephaestus.automation.implementation_writer.file_lock", side_effect=tracked_lock):
         with manager.implementation_writer_handoff(9) as handoff:
             writer = worktree_manager.create_worktree(
                 9,

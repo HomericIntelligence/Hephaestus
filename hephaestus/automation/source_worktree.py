@@ -19,8 +19,7 @@ from hephaestus.agents.workspace import (
 )
 from hephaestus.automation.implementation_writer import (
     ImplementationWriterHandoff,
-    _new_implementation_writer_handoff,
-    _set_implementation_writer_handoff_active,
+    implementation_writer_handoff,
 )
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
@@ -163,16 +162,12 @@ class SourceWorkspaceManager:
         """Hold the implementation lane for one complete writer handoff."""
         if isinstance(item_number, bool) or not isinstance(item_number, int):
             raise SourceWorkspaceError("implementation writer handoff item number is invalid")
-        handoff = _new_implementation_writer_handoff(self.repo_root, item_number)
-        with file_lock(
+        with implementation_writer_handoff(
+            self.repo_root,
+            item_number,
             self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
-            require_exclusive=True,
-        ):
-            _set_implementation_writer_handoff_active(handoff, True)
-            try:
-                yield handoff
-            finally:
-                _set_implementation_writer_handoff_active(handoff, False)
+        ) as handoff:
+            yield handoff
 
     @staticmethod
     def guard_branch(item_number: int) -> str:
@@ -298,7 +293,11 @@ class SourceWorkspaceManager:
         if handoff is None:
             raise SourceWorkspaceError("implementation writer handoff is missing")
         try:
-            handoff._validate(self.repo_root, item_number)
+            handoff._validate(
+                self.repo_root,
+                item_number,
+                self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
+            )
         except RuntimeError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
         if path.resolve() != expected_path:
