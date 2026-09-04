@@ -102,6 +102,7 @@ from hephaestus.resilience import (
 )
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
+from hephaestus.utils.worktree_identity import source_worktree_name
 
 logger = logging.getLogger(__name__)
 
@@ -3752,6 +3753,7 @@ class WorkerPool:
             return direct_setup
         base_sha, branch_name = direct_setup
         base_dir = repo_root / "build" / ".worktrees"
+
         if isinstance(base_sha, str):
             manager = WorktreeManager(
                 base_dir=base_dir,
@@ -3775,25 +3777,31 @@ class WorkerPool:
         if base_sha is not None:
             kwargs["base_sha"] = base_sha
             kwargs["remote_branch_reserved"] = True
+        created_or_failure = self._create_managed_worktree(
+            manager=manager,
+            kwargs=kwargs,
+            base_dir=base_dir,
+            base_sha=base_sha,
+            branch_name=branch_name,
+            repo_root=repo_root,
+            expected_repo=job.transport_repository,
+            timeout_s=job.timeout_s,
+        )
+        if isinstance(created_or_failure, JobResult):
+            return created_or_failure
+        created = created_or_failure
         try:
-            created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
-        except (RemoteGitRefreshError, subprocess.CalledProcessError):
-            if bool(kwargs.get("refresh_base", False)):
-                return JobResult(
-                    ok=False,
-                    error="worktree remote refresh failed",
-                    value={"failure_kind": "remote_git_transport"},
-                )
-            raise
-        except Exception as exc:
-            if base_sha is not None:
-                return self._rollback_direct_scope_reservation(
-                    branch_name=branch_name,
-                    base_sha=base_sha,
-                    repo_root=repo_root,
-                    expected_repo=job.transport_repository,
-                    timeout_s=job.timeout_s,
-                    error=f"worktree creation failed: {exc}",
+            creation_receipt = (
+                manager.read_creation_receipt(Path(created))
+                if kwargs.get("source_lane") == "impl"
+                else None
+            )
+        except RuntimeError as exc:
+            if kwargs.get("source_lane") == "impl":
+                return self._creation_receipt_failure(
+                    base_dir=base_dir,
+                    item_number=kwargs.get("issue_number"),
+                    exc=exc,
                 )
             raise
         return self._finalize_created_worktree(
@@ -3807,13 +3815,71 @@ class WorkerPool:
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
             item_number=kwargs.get("issue_number"),
-            creation_receipt=(
-                manager.read_creation_receipt(Path(created))
-                if kwargs.get("source_lane") == "impl"
-                else None
-            ),
+            creation_receipt=creation_receipt,
             worktree_manager=manager,
             timeout_s=job.timeout_s,
+        )
+
+    def _create_managed_worktree(
+        self,
+        *,
+        manager: WorktreeManager,
+        kwargs: dict[str, Any],
+        base_dir: Path,
+        base_sha: str | None,
+        branch_name: str,
+        repo_root: Path,
+        expected_repo: str,
+        timeout_s: int,
+    ) -> Path | JobResult:
+        """Create a worktree and preserve typed writer-receipt failures."""
+        try:
+            return manager.create_worktree(**kwargs, timeout=timeout_s)
+        except (RemoteGitRefreshError, subprocess.CalledProcessError):
+            if bool(kwargs.get("refresh_base", False)):
+                return JobResult(
+                    ok=False,
+                    error="worktree remote refresh failed",
+                    value={"failure_kind": "remote_git_transport"},
+                )
+            raise
+        except Exception as exc:
+            if kwargs.get("source_lane") == "impl" and "creation receipt" in str(exc):
+                return self._creation_receipt_failure(
+                    base_dir=base_dir,
+                    item_number=kwargs.get("issue_number"),
+                    exc=exc,
+                )
+            if base_sha is not None:
+                return self._rollback_direct_scope_reservation(
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                    repo_root=repo_root,
+                    expected_repo=expected_repo,
+                    timeout_s=timeout_s,
+                    error=f"worktree creation failed: {exc}",
+                )
+            raise
+
+    @staticmethod
+    def _creation_receipt_failure(
+        *,
+        base_dir: Path,
+        item_number: object,
+        exc: Exception,
+    ) -> JobResult:
+        """Preserve a materialized writer when its ownership proof fails."""
+        error = f"source_workspace_ownership_unavailable: {exc}"
+        if isinstance(item_number, bool) or not isinstance(item_number, int):
+            return JobResult(ok=False, error=error)
+        worktree_path = base_dir / source_worktree_name(item_number, "impl")
+        return JobResult(
+            ok=False,
+            error=error,
+            value={
+                "path": str(worktree_path),
+                WORKTREE_MATERIALIZED_KEY: worktree_path.exists(),
+            },
         )
 
     def _release_direct_scope_reservation(
@@ -3986,7 +4052,9 @@ class WorkerPool:
                     creation_receipt=creation_receipt,
                 )
         except Exception as exc:
-            if isinstance(exc, SourceWorkspaceError):
+            if isinstance(exc, SourceWorkspaceError) or (
+                source_lane == "impl" and "creation receipt" in str(exc)
+            ):
                 return JobResult(
                     ok=False,
                     error=f"source_workspace_ownership_unavailable: {exc}",

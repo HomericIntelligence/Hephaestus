@@ -302,16 +302,25 @@ class SourceWorkspaceManager:
                 branch=branch,
                 obligations=old.obligations if old is not None else (),
             )
-            if creation_receipt is None:
-                raise SourceWorkspaceError("implementation writer creation receipt is missing")
-            if not isinstance(creation_receipt, WorktreeCreationReceipt):
-                raise SourceWorkspaceError("implementation writer creation receipt is invalid")
+            try:
+                recorded_creation_receipt = WorktreeManager.read_creation_receipt(expected_path)
+            except RuntimeError as exc:
+                raise SourceWorkspaceError(
+                    f"implementation writer creation receipt is invalid: {exc}"
+                ) from exc
             if (
-                creation_receipt.issue_number != item_number
-                or creation_receipt.branch != branch
-                or creation_receipt.path.resolve() != expected_path
-                or creation_receipt.revision != revision
-                or creation_receipt.source_lane != SourceLane.IMPLEMENTATION.value
+                creation_receipt is None
+                or recorded_creation_receipt is None
+                or not isinstance(creation_receipt, WorktreeCreationReceipt)
+                or recorded_creation_receipt != creation_receipt
+            ):
+                raise SourceWorkspaceError("implementation writer creation receipt is missing")
+            if (
+                recorded_creation_receipt.issue_number != item_number
+                or recorded_creation_receipt.branch != branch
+                or recorded_creation_receipt.path.resolve() != expected_path
+                or recorded_creation_receipt.revision != revision
+                or recorded_creation_receipt.source_lane != SourceLane.IMPLEMENTATION.value
             ):
                 raise SourceWorkspaceError(
                     "implementation writer creation receipt revision is invalid"

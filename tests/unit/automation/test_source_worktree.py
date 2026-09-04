@@ -14,7 +14,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
 )
-from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.automation.worktree_manager import WorktreeCreationReceipt, WorktreeManager
 
 
 def _git(path: Path, *args: str) -> str:
@@ -257,6 +257,32 @@ def test_claim_implementation_writer_rejects_clean_unreceipted_worktree(
             9,
             branch="writer-branch",
             path=writer,
+        )
+
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_rejects_a_constructed_receipt(
+    tmp_path: Path,
+) -> None:
+    """An in-memory receipt cannot authorize an unrecorded writer checkout."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
+    constructed = WorktreeCreationReceipt(
+        issue_number=9,
+        branch="writer-branch",
+        path=writer,
+        revision=second,
+    )
+
+    with pytest.raises(SourceWorkspaceError, match="creation receipt"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            creation_receipt=constructed,
         )
 
     assert not (manager.state_dir / "9-impl.json").exists()

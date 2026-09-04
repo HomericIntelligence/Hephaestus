@@ -4020,6 +4020,44 @@ class TestGitOps:
             WORKTREE_MATERIALIZED_KEY: True,
         }
 
+    def test_create_implementation_source_lane_returns_typed_receipt_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An unreceipted existing writer reaches the ownership terminal path."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.side_effect = RuntimeError(
+            "deterministic implementation worktree has no creation receipt"
+        )
+        with patch(f"{_WP}.WorktreeManager", return_value=worktree_manager):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: "
+            "deterministic implementation worktree has no creation receipt"
+        )
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
     def test_create_isolated_worktree_syncs_only_detached_checkout(
         self,
         pool: WorkerPool,
