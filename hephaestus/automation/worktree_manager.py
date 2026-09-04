@@ -96,6 +96,10 @@ class RemoteGitRefreshError(RuntimeError):
     """Raised when the required remote base refresh does not complete."""
 
 
+class WorktreeCreationReceiptError(RuntimeError):
+    """Raised when a writer checkout has no manager-owned creation proof."""
+
+
 BRANCH_WORKTREE_OWNED = "branch_worktree_owned"
 
 
@@ -272,16 +276,23 @@ class WorktreeManager:
         if not path.exists():
             return None
         if path.is_symlink():
-            raise RuntimeError(f"refusing symlinked worktree creation receipt: {path}")
+            raise WorktreeCreationReceiptError(
+                f"refusing symlinked worktree creation receipt: {path}"
+            )
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"cannot read worktree creation receipt: {path}") from exc
+            raise WorktreeCreationReceiptError(
+                f"cannot read worktree creation receipt: {path}"
+            ) from exc
         if not isinstance(payload, dict):
-            raise RuntimeError("worktree creation receipt must be an object")
-        receipt = WorktreeCreationReceipt.from_dict(payload)
+            raise WorktreeCreationReceiptError("worktree creation receipt must be an object")
+        try:
+            receipt = WorktreeCreationReceipt.from_dict(payload)
+        except RuntimeError as exc:
+            raise WorktreeCreationReceiptError(str(exc)) from exc
         if receipt.path.resolve() != worktree_path.resolve():
-            raise RuntimeError("worktree creation receipt path mismatch")
+            raise WorktreeCreationReceiptError("worktree creation receipt path mismatch")
         return receipt
 
     def _write_creation_receipt(
@@ -307,10 +318,15 @@ class WorktreeManager:
             path=worktree_path.resolve(),
             revision=revision,
         )
-        write_secure(
-            self.creation_receipt_path(worktree_path),
-            json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
-        )
+        try:
+            write_secure(
+                self.creation_receipt_path(worktree_path),
+                json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
+            )
+        except OSError as exc:
+            raise WorktreeCreationReceiptError(
+                f"cannot write worktree creation receipt: {worktree_path}"
+            ) from exc
 
     def refresh_creation_receipt(
         self,
@@ -322,7 +338,9 @@ class WorktreeManager:
         worktree_path = receipt.path.resolve()
         recorded = self.read_creation_receipt(worktree_path)
         if recorded != receipt:
-            raise RuntimeError("worktree creation receipt changed before finalization")
+            raise WorktreeCreationReceiptError(
+                "worktree creation receipt changed before finalization"
+            )
         branch = run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
             cwd=worktree_path,
@@ -330,7 +348,9 @@ class WorktreeManager:
             **_timeout_kw(timeout),
         ).stdout.strip()
         if branch != receipt.branch:
-            raise RuntimeError("worktree creation receipt branch no longer matches checkout")
+            raise WorktreeCreationReceiptError(
+                "worktree creation receipt branch no longer matches checkout"
+            )
         revision = run(
             ["git", "rev-parse", "HEAD"],
             cwd=worktree_path,
@@ -338,12 +358,19 @@ class WorktreeManager:
             **_timeout_kw(timeout),
         ).stdout.strip()
         if not _is_full_commit_sha(revision):
-            raise RuntimeError("worktree finalization returned a malformed writer revision")
+            raise WorktreeCreationReceiptError(
+                "worktree finalization returned a malformed writer revision"
+            )
         refreshed = replace(receipt, path=worktree_path, revision=revision)
-        write_secure(
-            self.creation_receipt_path(worktree_path),
-            json.dumps(refreshed.to_dict(), sort_keys=True, indent=2) + "\n",
-        )
+        try:
+            write_secure(
+                self.creation_receipt_path(worktree_path),
+                json.dumps(refreshed.to_dict(), sort_keys=True, indent=2) + "\n",
+            )
+        except OSError as exc:
+            raise WorktreeCreationReceiptError(
+                f"cannot write worktree creation receipt: {worktree_path}"
+            ) from exc
         return refreshed
 
     def _resolve_base_branch(self, *, timeout: int | None = None) -> str:
@@ -545,6 +572,14 @@ class WorktreeManager:
                 )
             try:
                 with file_lock(self._git_metadata_lock_path()):
+                    if source_lane == "impl":
+                        self._assert_implementation_writer_is_controlled(
+                            issue_number=issue_number,
+                            branch_name=branch_name,
+                            worktree_path=worktree_path,
+                            base_sha=base_sha,
+                            timeout=timeout,
+                        )
                     if base_sha is None and (
                         existing := self._reuse_or_clear_normal_worktree(
                             issue_number=issue_number,
@@ -557,7 +592,7 @@ class WorktreeManager:
                         )
                     ):
                         if source_lane == "impl" and self.read_creation_receipt(existing) is None:
-                            raise RuntimeError(
+                            raise WorktreeCreationReceiptError(
                                 "deterministic implementation worktree has no creation receipt"
                             )
                         return existing
@@ -607,7 +642,11 @@ class WorktreeManager:
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
 
-            except (BranchWorktreeOwnedError, RemoteGitRefreshError):
+            except (
+                BranchWorktreeOwnedError,
+                RemoteGitRefreshError,
+                WorktreeCreationReceiptError,
+            ):
                 raise
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
@@ -791,6 +830,99 @@ class WorktreeManager:
             logger.warning("Removing existing worktree directory: %s", worktree_path)
             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
         return None
+
+    def _assert_implementation_writer_is_controlled(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        base_sha: str | None,
+        timeout: int | None,
+    ) -> None:
+        """Reject an unowned writer path or branch before cleanup or reuse."""
+        registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
+        if registered is not None:
+            if registered.get("branch") != f"refs/heads/{branch_name}":
+                raise WorktreeCreationReceiptError(
+                    "deterministic implementation worktree has a foreign registered branch"
+                )
+            receipt = self.read_creation_receipt(worktree_path)
+            if (
+                receipt is None
+                or receipt.issue_number != issue_number
+                or receipt.branch != branch_name
+                or receipt.path.resolve() != worktree_path.resolve()
+            ):
+                raise WorktreeCreationReceiptError(
+                    "deterministic implementation worktree has no controlled creation receipt"
+                )
+            return
+        if worktree_path.exists():
+            raise WorktreeCreationReceiptError(
+                "deterministic implementation worktree is an unowned path"
+            )
+        if base_sha is not None:
+            return
+        if self._worktree_holding_branch(branch_name, timeout=timeout) is not None:
+            raise WorktreeCreationReceiptError(
+                "implementation writer branch is held by an unowned worktree"
+            )
+        if self._implementation_writer_branch_exists(branch_name, timeout=timeout):
+            raise WorktreeCreationReceiptError(
+                "implementation writer branch is an unowned existing branch"
+            )
+
+    def _implementation_writer_branch_exists(
+        self, branch_name: str, *, timeout: int | None
+    ) -> bool:
+        """Return branch presence only when local and remote reads are conclusive."""
+        try:
+            local = run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+                **_timeout_kw(timeout),
+            )
+            if local.returncode == 0:
+                return True
+            if local.returncode != 1:
+                raise WorktreeCreationReceiptError(
+                    "cannot safely verify local implementation writer branch ownership"
+                )
+            remotes = run(
+                ["git", "remote"],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+                **_timeout_kw(timeout),
+            )
+            if remotes.returncode != 0:
+                raise WorktreeCreationReceiptError(
+                    "cannot safely determine implementation writer remotes"
+                )
+            if "origin" not in (remotes.stdout or "").splitlines():
+                return False
+            remote = run(
+                ["git", "ls-remote", "--heads", "origin", branch_name],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+                log_errors=False,
+                **_timeout_kw(timeout),
+            )
+        except WorktreeCreationReceiptError:
+            raise
+        except Exception as exc:
+            raise WorktreeCreationReceiptError(
+                "cannot safely verify implementation writer branch ownership"
+            ) from exc
+        if remote.returncode != 0:
+            raise WorktreeCreationReceiptError(
+                "cannot safely verify remote implementation writer branch ownership"
+            )
+        return f"refs/heads/{branch_name}" in (remote.stdout or "")
 
     def _validate_direct_scope_worktree_request(
         self,

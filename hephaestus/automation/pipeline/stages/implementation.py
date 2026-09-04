@@ -1898,6 +1898,22 @@ class ImplementationStage(Stage):
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
             if (result.error or "").startswith("source_workspace_ownership_unavailable:"):
                 item.payload["source_workspace_ownership_unavailable"] = True
+                direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+                reservation = (
+                    result.value.get("direct_scope_reservation")
+                    if isinstance(result.value, dict)
+                    else None
+                )
+                if (
+                    is_full_commit_sha(direct_base_sha)
+                    and isinstance(reservation, dict)
+                    and reservation.get("branch") == item.branch
+                    and reservation.get("base_sha") == direct_base_sha
+                ):
+                    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
+                        "branch": item.branch,
+                        "base_sha": direct_base_sha,
+                    }
                 materialized_path = (
                     result.value.get("path")
                     if isinstance(result.value, dict)
@@ -1989,6 +2005,9 @@ class ImplementationStage(Stage):
         value = result.value
         if isinstance(value, dict):
             item.worktree = str(value.get("path", item.worktree))
+            source_revision = value.get("impl_source_revision")
+            if is_full_commit_sha(source_revision):
+                item.payload["_impl_source_revision"] = source_revision
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))

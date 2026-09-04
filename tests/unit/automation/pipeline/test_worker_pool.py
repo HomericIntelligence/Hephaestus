@@ -82,6 +82,7 @@ from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
     WorktreeCreationReceipt,
+    WorktreeCreationReceiptError,
 )
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
@@ -3915,7 +3916,13 @@ class TestGitOps:
             revision="a" * 40,
         )
         worktree_manager.read_creation_receipt.return_value = creation_receipt
-        worktree_manager.refresh_creation_receipt.return_value = creation_receipt
+        final_receipt = WorktreeCreationReceipt(
+            issue_number=7,
+            branch="7-auto",
+            path=writer_path,
+            revision="b" * 40,
+        )
+        worktree_manager.refresh_creation_receipt.return_value = final_receipt
         source_manager = MagicMock()
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
@@ -3934,13 +3941,17 @@ class TestGitOps:
             7,
             branch="7-auto",
             path=writer_path,
-            creation_receipt=creation_receipt,
+            creation_receipt=final_receipt,
         )
         worktree_manager.refresh_creation_receipt.assert_called_once_with(
             creation_receipt,
             timeout=60,
         )
         assert result.ok is True
+        assert result.value == {
+            "path": str(writer_path),
+            "impl_source_revision": "b" * 40,
+        }
 
     def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
         self,
@@ -4041,7 +4052,7 @@ class TestGitOps:
             },
         )
         worktree_manager = MagicMock()
-        worktree_manager.create_worktree.side_effect = RuntimeError(
+        worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError(
             "deterministic implementation worktree has no creation receipt"
         )
         with patch(f"{_WP}.WorktreeManager", return_value=worktree_manager):
@@ -4056,6 +4067,75 @@ class TestGitOps:
         assert result.value == {
             "path": str(writer_path),
             WORKTREE_MATERIALIZED_KEY: True,
+        }
+
+    def test_create_implementation_source_lane_returns_typed_receipt_write_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Receipt write errors preserve the deterministic writer for recovery."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError("disk full")
+        with patch(f"{_WP}.WorktreeManager", return_value=worktree_manager):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "source_workspace_ownership_unavailable: disk full"
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
+    def test_direct_writer_receipt_failure_keeps_remote_reservation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed direct writer leaves a receipt for bounded remote cleanup."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+                "base_sha": pin,
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError("disk full")
+        with (
+            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(pin, "7-auto")),
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {
+            "path": str(tmp_path / "build" / ".worktrees" / "auto-7-impl"),
+            WORKTREE_MATERIALIZED_KEY: False,
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pin},
         }
 
     def test_create_isolated_worktree_syncs_only_detached_checkout(

@@ -1774,6 +1774,57 @@ class TestWorktreeAndAdvise:
             "base_sha": "a" * 40,
         }
 
+    def test_direct_ownership_failure_preserves_remote_reservation_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Finished can release a direct reservation after an ownership failure."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="source_workspace_ownership_unavailable: receipt unavailable",
+                value={
+                    "path": "/tmp/wt",
+                    WORKTREE_MATERIALIZED_KEY: True,
+                    "direct_scope_reservation": {
+                        "branch": "1-auto-impl",
+                        "base_sha": "a" * 40,
+                    },
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == "/tmp/wt"
+        assert item.payload["_direct_scope_reservation"] == {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+    def test_writer_receipt_result_persists_final_source_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Advice binds the writer to the final receipt revision after refresh."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={"path": "/tmp/wt", "impl_source_revision": "b" * 40},
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == "/tmp/wt"
+        assert item.payload["_impl_source_revision"] == "b" * 40
+
     def test_direct_worktree_rejects_missing_remote_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

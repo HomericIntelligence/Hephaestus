@@ -85,6 +85,7 @@ from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     RemoteGitRefreshError,
     WorktreeCreationReceipt,
+    WorktreeCreationReceiptError,
     WorktreeManager,
 )
 from hephaestus.config.child_environments import (
@@ -3796,14 +3797,14 @@ class WorkerPool:
                 if kwargs.get("source_lane") == "impl"
                 else None
             )
-        except RuntimeError as exc:
-            if kwargs.get("source_lane") == "impl":
-                return self._creation_receipt_failure(
-                    base_dir=base_dir,
-                    item_number=kwargs.get("issue_number"),
-                    exc=exc,
-                )
-            raise
+        except WorktreeCreationReceiptError as exc:
+            return self._creation_receipt_failure(
+                base_dir=base_dir,
+                item_number=kwargs.get("issue_number"),
+                exc=exc,
+                branch_name=branch_name,
+                base_sha=base_sha,
+            )
         return self._finalize_created_worktree(
             created=created,
             base_sha=base_sha,
@@ -3843,13 +3844,15 @@ class WorkerPool:
                     value={"failure_kind": "remote_git_transport"},
                 )
             raise
+        except WorktreeCreationReceiptError as exc:
+            return self._creation_receipt_failure(
+                base_dir=base_dir,
+                item_number=kwargs.get("issue_number"),
+                exc=exc,
+                branch_name=branch_name,
+                base_sha=base_sha,
+            )
         except Exception as exc:
-            if kwargs.get("source_lane") == "impl" and "creation receipt" in str(exc):
-                return self._creation_receipt_failure(
-                    base_dir=base_dir,
-                    item_number=kwargs.get("issue_number"),
-                    exc=exc,
-                )
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
                     branch_name=branch_name,
@@ -3867,19 +3870,27 @@ class WorkerPool:
         base_dir: Path,
         item_number: object,
         exc: Exception,
+        branch_name: str,
+        base_sha: str | None,
     ) -> JobResult:
         """Preserve a materialized writer when its ownership proof fails."""
         error = f"source_workspace_ownership_unavailable: {exc}"
         if isinstance(item_number, bool) or not isinstance(item_number, int):
             return JobResult(ok=False, error=error)
         worktree_path = base_dir / source_worktree_name(item_number, "impl")
+        value: dict[str, object] = {
+            "path": str(worktree_path),
+            WORKTREE_MATERIALIZED_KEY: worktree_path.exists(),
+        }
+        if base_sha is not None:
+            value["direct_scope_reservation"] = {
+                "branch": branch_name,
+                "base_sha": base_sha,
+            }
         return JobResult(
             ok=False,
             error=error,
-            value={
-                "path": str(worktree_path),
-                WORKTREE_MATERIALIZED_KEY: worktree_path.exists(),
-            },
+            value=value,
         )
 
     def _release_direct_scope_reservation(
@@ -4052,13 +4063,13 @@ class WorkerPool:
                     creation_receipt=creation_receipt,
                 )
         except Exception as exc:
-            if isinstance(exc, SourceWorkspaceError) or (
-                source_lane == "impl" and "creation receipt" in str(exc)
-            ):
-                return JobResult(
-                    ok=False,
-                    error=f"source_workspace_ownership_unavailable: {exc}",
-                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
+            if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)):
+                return self._creation_receipt_failure(
+                    base_dir=worktree_path.parent,
+                    item_number=item_number,
+                    exc=exc,
+                    branch_name=branch_name,
+                    base_sha=base_sha,
                 )
             return JobResult(
                 ok=False,
@@ -4066,8 +4077,18 @@ class WorkerPool:
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
         if not dirty and not sync_to_remote and base_sha is None:
+            if source_lane == "impl" and creation_receipt is not None:
+                return JobResult(
+                    ok=True,
+                    value={
+                        "path": str(worktree_path),
+                        "impl_source_revision": creation_receipt.revision,
+                    },
+                )
             return JobResult(ok=True, value=str(worktree_path))
         value: dict[str, object] = {"path": str(worktree_path)}
+        if source_lane == "impl" and creation_receipt is not None:
+            value["impl_source_revision"] = creation_receipt.revision
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
         if dirty:

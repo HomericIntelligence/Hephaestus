@@ -12,6 +12,7 @@ import pytest
 from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     RemoteGitRefreshError,
+    WorktreeCreationReceiptError,
     WorktreeDirtyError,
     WorktreeManager,
 )
@@ -500,6 +501,103 @@ class TestWorktreeManager:
         # Should call prune after
         prune_calls = [c for c in worktree_mocks.run.call_args_list if "prune" in c[0][0]]
         assert len(prune_calls) >= 1
+
+    def test_impl_writer_preserves_registered_foreign_checkout_before_cleanup(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A foreign deterministic writer is never removed before ownership is checked."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        writer = manager.base_dir / "auto-31-impl"
+        writer.mkdir(parents=True)
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path") as registered,
+            patch.object(manager, "_remove_worktree_path_forcefully") as remove,
+            pytest.raises(WorktreeCreationReceiptError, match="foreign"),
+        ):
+            registered.return_value = {
+                "path": str(writer),
+                "branch": "refs/heads/foreign-writer",
+            }
+            manager.create_worktree(31, "31-auto", source_lane="impl")
+
+        remove.assert_not_called()
+        assert writer.exists()
+
+    @pytest.mark.parametrize("branch_location", ["local", "remote"])
+    def test_impl_writer_rejects_unowned_branch_reuse(
+        self,
+        branch_location: str,
+        worktree_mocks: Any,
+        tmp_path: Path,
+    ) -> None:
+        """A new writer lane cannot mint ownership for an existing branch."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=0 if branch_location == "local" else 1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(
+                returncode=0,
+                stdout="deadbeef\trefs/heads/32-auto\n" if branch_location == "remote" else "",
+            )
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch.object(manager, "_add_worktree_for_branch") as add,
+            pytest.raises(RuntimeError, match="unowned"),
+        ):
+            manager.create_worktree(32, "32-auto", source_lane="impl")
+
+        add.assert_not_called()
+
+    def test_impl_writer_receipt_write_failure_has_a_typed_error(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """An I/O failure after writer creation remains an ownership failure."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        worktree_mocks.run.return_value.stdout = "a" * 40
+        manager = WorktreeManager()
+        writer = manager.base_dir / "auto-33-impl"
+        writer.mkdir(parents=True)
+
+        with (
+            patch(
+                "hephaestus.automation.worktree_manager.write_secure",
+                side_effect=OSError("full"),
+            ),
+            pytest.raises(WorktreeCreationReceiptError, match="cannot write"),
+        ):
+            manager._write_creation_receipt(
+                issue_number=33,
+                branch_name="33-auto",
+                worktree_path=writer,
+                timeout=None,
+            )
+
+    def test_impl_writer_rejects_uncertain_branch_ownership(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A lookup failure cannot make an existing writer branch appear absent."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=subprocess.TimeoutExpired(["git", "show-ref"], 1),
+            ),
+            pytest.raises(WorktreeCreationReceiptError, match="cannot safely verify"),
+        ):
+            manager.create_worktree(34, "34-auto", source_lane="impl")
 
     @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
     def test_create_worktree_reuses_registered_dirty_existing_path(
