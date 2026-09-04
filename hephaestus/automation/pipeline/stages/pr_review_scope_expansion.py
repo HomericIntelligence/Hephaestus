@@ -34,6 +34,7 @@ from .pr_review_threads import (
     REVIEW_WAIT,
     SCOPE_DEPENDENCY_WAIT,
     SCOPE_EXPANSION_PREPARE_SUBMIT,
+    _clear_round_review_state,
     _issue_number,
     _scope_retraction_paths,
 )
@@ -47,6 +48,9 @@ _SCOPE_EXPANSION_PREPARED_RECEIPT = "_scope_expansion_prepared_receipt"
 _SCOPE_DEPENDENCY_PENDING_REQUEST = "_scope_dependency_pending_request"
 _SCOPE_DEPENDENCY_RECEIPT = "_scope_dependency_receipt"
 _SCOPE_DEPENDENCY_RECEIPT_ERROR = "_scope_dependency_receipt_error"
+_POST_REMEDIATION_REVIEW_HEAD = "_post_remediation_review_head_sha"
+_POST_REMEDIATION_REVIEW_HEAD_RETRIES = "_post_remediation_review_head_retries"
+POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP = 3
 
 
 class PrReviewScopeExpansionMixin:
@@ -67,6 +71,13 @@ class PrReviewScopeExpansionMixin:
         """Reconcile durable child dependencies before checkout or review."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        _clear_round_review_state(item)
+        for key in (
+            _SCOPE_DEPENDENCY_PENDING_REQUEST,
+            _SCOPE_DEPENDENCY_RECEIPT,
+            _SCOPE_DEPENDENCY_RECEIPT_ERROR,
+        ):
+            item.payload.pop(key, None)
         state = ctx.github.gh_pr_state(item.pr)
         if not isinstance(state, dict):
             return StageOutcome(Disposition.BLOCKED, "scope_dependency_pr_state_unavailable")
@@ -76,8 +87,28 @@ class PrReviewScopeExpansionMixin:
             or "autoMergeRequest" not in state
             or state.get("autoMergeRequest") is not None
             or not is_full_commit_sha(head_sha)
+            or state.get("baseRefName") != "main"
         ):
             return StageOutcome(Disposition.BLOCKED, "scope_dependency_pr_state_invalid")
+        expected_head = item.payload.get(_POST_REMEDIATION_REVIEW_HEAD)
+        if expected_head is not None:
+            if not is_full_commit_sha(expected_head):
+                return StageOutcome(Disposition.FINISH_FAIL, "post_remediation_head_invalid")
+            if head_sha != expected_head:
+                retries = item.payload.get(_POST_REMEDIATION_REVIEW_HEAD_RETRIES, 0)
+                if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+                    return StageOutcome(Disposition.FINISH_FAIL, "post_remediation_head_invalid")
+                retries += 1
+                item.payload[_POST_REMEDIATION_REVIEW_HEAD_RETRIES] = retries
+                if retries > POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP:
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL, "post_remediation_head_unavailable"
+                    )
+                item.payload["retry_delay_s"] = float(2 ** (retries - 1))
+                return StageOutcome(Disposition.RETRY, "post_remediation_head_visibility")
+            item.payload.pop(_POST_REMEDIATION_REVIEW_HEAD, None)
+            item.payload.pop(_POST_REMEDIATION_REVIEW_HEAD_RETRIES, None)
+            item.payload.pop("retry_delay_s", None)
         request = ReconcileScopeExpansionDependenciesRequest(
             issue_number=_issue_number(item),
             pr_number=item.pr,

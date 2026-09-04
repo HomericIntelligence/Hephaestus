@@ -1717,6 +1717,13 @@ class ImplementationStage(Stage):
                 # A published branch has real commits and must not be
                 # released by terminal cleanup.
                 item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+                if item.payload.get("implementation_remediation") and is_full_commit_sha(
+                    receipt_head
+                ):
+                    # GitHub can briefly return the pre-remediation head.
+                    # Retain the published head for the next review entry.
+                    item.payload["_impl_source_revision"] = receipt_head
+                    item.payload["_post_remediation_review_head_sha"] = receipt_head
             ImplementationStage._post_remediation_replies_after_push(item, result)
             # A successful worker result ends the consecutive-git-failure
             # streak even when no commit was produced; PR_CREATE handles skip.

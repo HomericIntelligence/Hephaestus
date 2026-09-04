@@ -12,6 +12,7 @@ written along the dead cycle.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any
 
 from hephaestus.automation.pipeline.github_jobs import (
@@ -204,6 +205,88 @@ class TestAgentErrorPingPongTerminates:
         assert final.note == "agent_error_exhausted"
         label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
         assert label_writes == []
+
+
+def test_pushed_remediation_head_survives_stale_review_entry_read(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A fresh review waits for pushed head B instead of reconciling stale A."""
+
+    class SequencedHeadGitHub(FakeStageGitHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
+
+        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+            del pr_number
+            head = self.heads.popleft() if len(self.heads) > 1 else self.heads[0]
+            return {
+                "state": "OPEN",
+                "headRefOid": head,
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+            }
+
+    github = SequencedHeadGitHub()
+    ctx = make_ctx(github=github)
+    implementation = ImplementationStage()
+    implementation_item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+    implementation_item.payload.update(
+        {
+            "implementation_remediation": True,
+            "remediation_thread_snapshots": [
+                {
+                    "id": "thread-1",
+                    "path": "a.py",
+                    "line": 3,
+                    "body": "fix it",
+                    "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                }
+            ],
+            "remediation_output": {
+                "addressed": ["thread-l"],
+                "replies": {"thread-l": "[Response] Fixed the missing guard."},
+            },
+        }
+    )
+
+    implementation.on_job_done(
+        implementation_item,
+        JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+        ctx,
+    )
+
+    assert implementation_item.payload["_impl_source_revision"] == "b" * 40
+    assert implementation_item.payload["_post_remediation_review_head_sha"] == "b" * 40
+
+    review = PrReviewStage()
+    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
+    review_item.payload.update(implementation_item.payload)
+    review_item.payload.update(
+        {
+            "review_audit": "stale",
+            "pr_diff": "stale diff",
+            "_scope_dependency_pending_request": "stale request",
+            "_scope_dependency_receipt": "stale receipt",
+            "_scope_dependency_receipt_error": "stale error",
+        }
+    )
+    assert review.on_enter(review_item, ctx) is None
+
+    first = review.step(review_item, ctx)
+
+    assert isinstance(first, StageOutcome)
+    assert first.disposition is Disposition.RETRY
+    assert not isinstance(first, JobRequest)
+    assert "_scope_dependency_pending_request" not in review_item.payload
+
+    second = review.step(review_item, ctx)
+
+    assert isinstance(second, JobRequest)
+    assert isinstance(second.job, GitHubJob)
+    request = second.job.request
+    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
+    assert request.source_head_sha == "b" * 40
 
 
 class TestEmptyDiffReroutesToSubstantiveImplementation:
