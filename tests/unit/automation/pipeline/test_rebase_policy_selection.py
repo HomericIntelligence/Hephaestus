@@ -8,7 +8,7 @@ import threading
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -210,6 +210,110 @@ def test_ordinary_rebase_does_not_select_a_conflict_policy(tmp_path: Path) -> No
 
     assert result == JobResult(ok=True, value=True)
     select.assert_not_called()
+
+
+def test_published_ordinary_rebase_does_not_run_repository_policy(tmp_path: Path) -> None:
+    """An ordinary published rebase keeps lease publication independent of ADR policy."""
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        rebase_policy_selector=lambda _repo: RebaseValidationPolicy(
+            name="hephaestus-adr-v1",
+            semantic_validator=lambda _cwd: JobResult(
+                ok=False,
+                value={"failure_kind": "semantic_validation"},
+                error="policy must not run",
+            ),
+            structural_test_argv=("tests/unit/docs/test_adr_records.py",),
+        ),
+    )
+    job = GitJob(
+        repo="Hephaestus",
+        expected_repository="HomericIntelligence/Hephaestus",
+        op="rebase",
+        timeout_s=60,
+        kwargs={
+            "cwd": tmp_path,
+            "base_branch": "main",
+            "remote": "origin",
+            "publish_rebased_head": True,
+            "branch": "7-auto-impl",
+            "expected_remote_sha": "a" * 40,
+        },
+    )
+    try:
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({"AUTH": "fresh"}, ()),
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=lambda: ({"AUTH": "initial"}, ()),
+            ),
+            patch(
+                "hephaestus.automation.pipeline.worker_pool._required_git_signing_env",
+                return_value={"SIGNING": "required"},
+            ) as signing,
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.git_utils.run",
+                side_effect=(
+                    MagicMock(returncode=0),
+                    MagicMock(returncode=1),
+                ),
+            ),
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.git_utils.rebase_worktree_onto",
+                return_value=True,
+            ) as rebase,
+            patch.object(pool, "_select_rebase_policy", wraps=pool._select_rebase_policy) as select,
+            patch.object(pool, "_run_rebase_structural_validation") as structural,
+            patch.object(pool, "_validate_rebased_tree") as semantic,
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.git_utils.push_head_to_branch"
+            ) as push,
+        ):
+            result = pool._git_rebase(job)
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result == JobResult(
+        ok=True,
+        value={
+            "rebased": True,
+            "published": True,
+            "head_sha": "b" * 40,
+        },
+    )
+    signing.assert_called_once_with(tmp_path, timeout=60)
+    select.assert_not_called()
+    structural.assert_not_called()
+    semantic.assert_not_called()
+    rebase.assert_called_once_with(
+        cwd=tmp_path,
+        base_branch="main",
+        remote="origin",
+        preserve_conflicts=True,
+        timeout=60,
+        env={"SIGNING": "required"},
+        fetch_env={"AUTH": "initial"},
+        fetch_config=(),
+    )
+    push.assert_called_once_with(
+        "7-auto-impl",
+        "a" * 40,
+        tmp_path,
+        source_sha="b" * 40,
+        timeout=60,
+        env={"AUTH": "fresh"},
+        remote_config=(),
+        revalidate_remote=ANY,
+    )
 
 
 def test_unconfigured_target_continuation_skips_policy_gates(tmp_path: Path) -> None:
