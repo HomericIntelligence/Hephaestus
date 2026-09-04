@@ -6,6 +6,7 @@ import time
 from collections import Counter, OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import hephaestus.automation.pipeline.admission as _admission
@@ -157,8 +158,7 @@ class Coordinator(
             # I/O-capable module and tests never need it.
             from hephaestus.automation.mnemosyne_skill_host import MnemosyneSkillHost
             from hephaestus.automation.pipeline.rebase_adr_policy import (
-                REBASE_STRUCTURAL_TEST_ARGV,
-                validate_rebased_adr_tree,
+                select_rebase_policy,
             )
             from hephaestus.automation.pipeline.worker_pool import WorkerPool
             from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -179,11 +179,9 @@ class Coordinator(
                     gh_timeout=config.gh_timeout,
                 ),
                 athena_skill_executor=athena_executor,
-                # The owning repository injects its own ADR policy so the
-                # shared executor never applies it to another repository with
-                # a different valid docs/adr layout.
-                rebase_adr_validator=validate_rebased_adr_tree,
-                rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+                # Bind the configured organization before the shared worker
+                # selects a policy for each repository job.
+                rebase_policy_selector=partial(select_rebase_policy, config.org),
                 evidence_receipt_dir=config.evidence_receipt_dir,
             )
         else:

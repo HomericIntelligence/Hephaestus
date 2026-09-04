@@ -16,6 +16,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import Future
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, call, patch
@@ -286,8 +287,7 @@ def pool(
     unaffected-layout regression tests below.
     """
     from hephaestus.automation.pipeline.rebase_adr_policy import (
-        REBASE_STRUCTURAL_TEST_ARGV,
-        validate_rebased_adr_tree,
+        select_rebase_policy,
     )
 
     p = WorkerPool(
@@ -295,8 +295,7 @@ def pool(
         shutdown=shutdown_event,
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
-        rebase_adr_validator=validate_rebased_adr_tree,
-        rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+        rebase_policy_selector=partial(select_rebase_policy, "HomericIntelligence"),
     )
     yield p
     p.shutdown()
@@ -2698,7 +2697,12 @@ class TestGitOps:
 
         assert rebase == JobResult(
             ok=True,
-            value={"rebased": False, "published": False, "head_sha": recovered_head},
+            value={
+                "rebased": False,
+                "published": False,
+                "head_sha": recovered_head,
+                "rebase_policy": None,
+            },
         )
         remote_head = subprocess.run(
             ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
@@ -4788,7 +4792,10 @@ class TestGitOps:
             fetch_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
         )
         assert result.ok is rebase_clean
-        assert result.value is rebase_clean
+        if rebase_clean:
+            assert result.value is True
+        else:
+            assert result.value is False
         assert result.error == expected_error
 
     def test_remote_git_configuration_preserves_hooks_and_isolates_ssh(
@@ -5126,7 +5133,7 @@ class TestGitOps:
     @staticmethod
     def _continue_rebase_job(tmp_path: Path) -> GitJob:
         return GitJob(
-            repo="test/repo",
+            repo="Hephaestus",
             op="continue_rebase",
             timeout_s=60,
             kwargs={
@@ -5175,12 +5182,19 @@ class TestGitOps:
             "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
         )
 
-        result = pool._validate_rebased_tree(tmp_path)
+        result = pool._validate_rebased_tree(
+            tmp_path,
+            policy=pool._select_rebase_policy("Hephaestus"),
+        )
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "semantic_validation"},
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "hephaestus-adr-v1",
+            },
             error=(
+                "rebase policy hephaestus-adr-v1 semantic validation failed: "
                 "rebase semantic validation failed: duplicate ADR number 0027 "
                 "(0027-durable-plan-review-conversations.md, "
                 "0027-host-owned-learning-preparation.md)"
@@ -5198,13 +5212,21 @@ class TestGitOps:
         )
         (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
 
-        result = pool._validate_rebased_tree(tmp_path)
+        result = pool._validate_rebased_tree(
+            tmp_path,
+            policy=pool._select_rebase_policy("Hephaestus"),
+        )
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "semantic_validation"},
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "hephaestus-adr-v1",
+            },
             error=(
-                "rebase semantic validation failed: malformed ADR record 0001-first-decision.md"
+                "rebase policy hephaestus-adr-v1 semantic validation failed: "
+                "rebase semantic validation failed: malformed ADR record "
+                "0001-first-decision.md"
             ),
         )
 
@@ -5233,6 +5255,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
@@ -5240,8 +5263,12 @@ class TestGitOps:
             result = pool._git_continue_rebase(job)
 
         assert result.ok is False
-        assert result.value == {"failure_kind": "semantic_validation"}
+        assert result.value == {
+            "failure_kind": "semantic_validation",
+            "rebase_policy": "hephaestus-adr-v1",
+        }
         assert result.error == (
+            "rebase policy hephaestus-adr-v1 semantic validation failed: "
             "rebase semantic validation failed: duplicate ADR number 0027 "
             "(0027-durable-plan-review-conversations.md, "
             "0027-host-owned-learning-preparation.md)"
@@ -5298,7 +5325,11 @@ class TestGitOps:
             result = pool._git_continue_rebase(job)
 
         assert result.ok is True
-        validate.assert_called_once_with(tmp_path, timeout=60)
+        validate.assert_called_once_with(
+            tmp_path,
+            timeout=60,
+            policy=pool._select_rebase_policy("Hephaestus"),
+        )
         push.assert_called_once()
 
     def test_rebase_structural_validation_preserves_bounded_diagnostics(
@@ -5320,12 +5351,16 @@ class TestGitOps:
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch.object(pool, "_run_immutable_build_test", return_value=failed) as run_test,
         ):
-            result = pool._run_rebase_structural_validation(tmp_path, timeout=60)
+            result = pool._run_rebase_structural_validation(
+                tmp_path,
+                timeout=60,
+                policy=pool._select_rebase_policy("Hephaestus"),
+            )
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "validation"},
-            error="rebase structural validation failed",
+            value={"failure_kind": "validation", "rebase_policy": "hephaestus-adr-v1"},
+            error="rebase policy hephaestus-adr-v1 structural validation failed: rc=1",
             stdout_tail="duplicate ADR number 0027",
             stderr_tail="pytest diagnostics",
         )
@@ -5623,6 +5658,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
         ):
@@ -5661,6 +5697,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
         ):
@@ -5699,6 +5736,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch.object(
                 pool,
@@ -5726,7 +5764,12 @@ class TestGitOps:
 
         assert result == JobResult(
             ok=True,
-            value={"rebased": True, "published": True, "head_sha": "d" * 40},
+            value={
+                "rebased": True,
+                "published": True,
+                "head_sha": "d" * 40,
+                "rebase_policy": "hephaestus-adr-v1",
+            },
         )
         push.assert_called_once_with(
             "7-auto-impl",
@@ -6055,6 +6098,7 @@ class TestGitOps:
             "rebased": False,
             "published": False,
             "head_sha": head,
+            "rebase_policy": None,
         }
         assert [call.args[0] for call in run.call_args_list] == [
             [
@@ -6189,6 +6233,7 @@ class TestGitOps:
             "published": False,
             "head_drift": True,
             "head_sha": synced_head,
+            "rebase_policy": None,
         }
         clean.assert_called_once_with(tmp_path, timeout=60)
         sync.assert_called_once()
