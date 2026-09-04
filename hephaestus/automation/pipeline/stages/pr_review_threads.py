@@ -310,7 +310,6 @@ def _review_context_kind(item: WorkItem) -> str:
 #: plan_review.REVIEW_ERROR_RETRY_CAP). Reset whenever a valid audit arrives.
 REVIEW_ERROR_RETRY_CAP = 2
 REVIEW_CHECKOUT_RETRY_CAP = 2
-_REVIEW_HEAD_VISIBILITY_RETRIES = "review_head_visibility_retries"
 
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
@@ -823,7 +822,6 @@ __all__ = [
     '_JSON_RESPONSE_BLOCK_RE', '_PENDING_IMPLEMENTATION_REPLY_HANDOFF',
     '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES',
     '_REPLY_HANDOFF_RECEIPT', '_REPLY_HANDOFF_RECEIPT_ERROR', '_REPLY_VISIBILITY_RETRIES',
-    '_REVIEW_HEAD_VISIBILITY_RETRIES',
     '_ROUND_PAYLOAD_KEYS', '_STEP_HANDLER_NAMES',
     'AgentJob', 'Any', 'BuildTestJob', 'Callable', 'CompactJob', 'Continue', 'Disposition',
     'GitJob', 'ItemKind', 'JobRequest', 'JobResult', 'PrReviewStage', 'ReviewAudit', 'Stage',
