@@ -78,6 +78,9 @@ class PrReviewScopeExpansionMixin:
             or not is_full_commit_sha(head_sha)
         ):
             return StageOutcome(Disposition.BLOCKED, "scope_dependency_pr_state_invalid")
+        visibility_outcome = self._implementation_head_visibility_outcome(item, head_sha)
+        if visibility_outcome is not None:
+            return cast(StepResult, visibility_outcome)
         request = ReconcileScopeExpansionDependenciesRequest(
             issue_number=_issue_number(item),
             pr_number=item.pr,
@@ -96,6 +99,9 @@ class PrReviewScopeExpansionMixin:
 
     def _scope_dependency_wait(self: Any, item: WorkItem, ctx: StageContext) -> StepResult:
         """Route one closed dependency receipt before broad review work."""
+        visibility_outcome = cast(Any, self)._check_implementation_head_visibility(item, ctx)
+        if visibility_outcome is not None:
+            return cast(StepResult, visibility_outcome)
         outcome = self._route_scope_dependency_receipt(item)
         if outcome is not None:
             if (
@@ -227,9 +233,8 @@ class PrReviewScopeExpansionMixin:
             return Continue(next_state=REVIEW_WAIT)
         return StageOutcome(Disposition.BLOCKED, "scope_dependency_receipt_invalid")
 
-    @staticmethod
     def _route_scope_expansion_receipt(
-        item: WorkItem, receipt: ScopeExpansionChildrenEnsured
+        self, item: WorkItem, receipt: ScopeExpansionChildrenEnsured
     ) -> StepResult | None:
         """Route one child-creation result and preserve retraction-only work."""
         if receipt.status == "dry_run":
@@ -324,8 +329,8 @@ class PrReviewScopeExpansionMixin:
             )
         return None
 
-    @staticmethod
     def _handle_scope_expansions(  # noqa: C901
+        self,
         item: WorkItem,
         ctx: StageContext,
         audit: ReviewAudit,
@@ -340,6 +345,9 @@ class PrReviewScopeExpansionMixin:
             item.payload.pop(_SCOPE_EXPANSION_RECEIPT, None)
             item.payload.pop(_SCOPE_EXPANSION_PREPARED_RECEIPT, None)
             return None
+        visibility_outcome = cast(Any, self)._check_implementation_head_visibility(item, ctx)
+        if visibility_outcome is not None:
+            return cast(StepResult, visibility_outcome)
         error = item.payload.pop(_SCOPE_EXPANSION_RECEIPT_ERROR, None)
         if error is not None:
             item.payload.pop(_SCOPE_EXPANSION_RECEIPT, None)
@@ -372,7 +380,7 @@ class PrReviewScopeExpansionMixin:
                 return None
             if not from_prepared_receipt:
                 item.payload.pop(_SCOPE_EXPANSION_PENDING_REQUEST, None)
-            outcome = PrReviewScopeExpansionMixin._route_scope_expansion_receipt(item, receipt)
+            outcome = self._route_scope_expansion_receipt(item, receipt)
             if outcome is not None:
                 return outcome
             item.payload["review_audit_failure"] = True

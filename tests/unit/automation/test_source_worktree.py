@@ -14,6 +14,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
 )
+from hephaestus.automation.worktree_manager import WorktreeManager
 
 
 def _git(path: Path, *args: str) -> str:
@@ -124,6 +125,190 @@ def test_implementation_rebinds_when_physical_branch_is_wrong(tmp_path: Path) ->
 
     assert rebound.generation == original.generation + 1
     assert _git(rebound.cwd, "symbolic-ref", "HEAD") == "refs/heads/expected-implementation-branch"
+
+
+def test_acquire_requires_current_attached_implementation_branch(tmp_path: Path) -> None:
+    """An implementation receipt is usable only on its current branch."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="expected-implementation-branch",
+    )
+
+    with manager.acquire(binding, expected_branch="expected-implementation-branch") as path:
+        assert path == binding.cwd
+
+    with pytest.raises(SourceWorkspaceError, match="branch"):
+        with manager.acquire(binding, expected_branch="wrong-implementation-branch"):
+            pass
+
+    _git(binding.cwd, "switch", "-c", "wrong-implementation-branch")
+    with pytest.raises(SourceWorkspaceError, match="branch"):
+        with manager.acquire(binding, expected_branch="expected-implementation-branch"):
+            pass
+
+
+def test_worktree_manager_writer_can_be_adopted_into_source_lane(tmp_path: Path) -> None:
+    """A clean deterministic writer created by the worktree manager is reusable."""
+    repo, _, second = _repository(tmp_path)
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=repo / "build" / ".worktrees",
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        branch_name="expected-implementation-branch",
+        source_lane="impl",
+    )
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+
+    binding = source_manager.claim_implementation_writer(
+        9,
+        branch="expected-implementation-branch",
+        path=writer,
+        expected_revision=second,
+    )
+
+    assert binding.cwd == writer
+    assert binding.revision == second
+
+
+def test_writer_claim_rejects_other_deterministic_path(tmp_path: Path) -> None:
+    """A writer from another item cannot enter this lane receipt."""
+    repo, _, second = _repository(tmp_path)
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=repo / "build" / ".worktrees",
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        10,
+        branch_name="writer-branch",
+        source_lane="impl",
+    )
+
+    with pytest.raises(SourceWorkspaceError, match="deterministic lane"):
+        SourceWorkspaceManager(repo, repository="example/project").claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            expected_revision=second,
+        )
+
+
+def test_writer_claim_rejects_wrong_branch_and_head(tmp_path: Path) -> None:
+    """A writer claim requires the attached branch and exact head."""
+    repo, first, second = _repository(tmp_path)
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=repo / "build" / ".worktrees",
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        branch_name="expected-implementation-branch",
+        source_lane="impl",
+    )
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+
+    with pytest.raises(SourceWorkspaceError, match="requested branch"):
+        source_manager.claim_implementation_writer(
+            9,
+            branch="wrong-implementation-branch",
+            path=writer,
+            expected_revision=second,
+        )
+    with pytest.raises(SourceWorkspaceError, match="expected head"):
+        source_manager.claim_implementation_writer(
+            9,
+            branch="expected-implementation-branch",
+            path=writer,
+            expected_revision=first,
+        )
+
+
+def test_writer_claim_rejects_dirty_checkout_and_preserves_it(tmp_path: Path) -> None:
+    """A dirty writer is not adopted or removed by the claim."""
+    repo, _, second = _repository(tmp_path)
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=repo / "build" / ".worktrees",
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        branch_name="expected-implementation-branch",
+        source_lane="impl",
+    )
+    marker = writer / "recover-me.txt"
+    marker.write_text("preserve\n", encoding="utf-8")
+
+    with pytest.raises(SourceWorkspaceError, match="dirty"):
+        SourceWorkspaceManager(repo, repository="example/project").claim_implementation_writer(
+            9,
+            branch="expected-implementation-branch",
+            path=writer,
+            expected_revision=second,
+        )
+
+    assert marker.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_writer_claim_rejects_inactive_checkout(tmp_path: Path) -> None:
+    """A branch without an active worktree cannot enter the source lane."""
+    repo, _, second = _repository(tmp_path)
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=repo / "build" / ".worktrees",
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        branch_name="expected-implementation-branch",
+        source_lane="impl",
+    )
+    _git(repo, "worktree", "remove", str(writer))
+    writer.mkdir(parents=True)
+
+    with pytest.raises(SourceWorkspaceError, match="active owned worktree"):
+        SourceWorkspaceManager(repo, repository="example/project").claim_implementation_writer(
+            9,
+            branch="expected-implementation-branch",
+            path=writer,
+            expected_revision=second,
+        )
+
+
+def test_writer_claim_rejects_worktree_from_another_repository(tmp_path: Path) -> None:
+    """A matching path from another repository cannot be adopted."""
+    (tmp_path / "primary").mkdir()
+    (tmp_path / "foreign").mkdir()
+    repo, _, _ = _repository(tmp_path / "primary")
+    foreign_repo, _, foreign_head = _repository(tmp_path / "foreign")
+    shared_base = tmp_path / "build" / ".worktrees"
+    foreign_writer = WorktreeManager(
+        repo_root=foreign_repo,
+        base_dir=shared_base,
+        base_branch=foreign_head,
+    ).create_worktree(
+        9,
+        branch_name="expected-implementation-branch",
+        source_lane="impl",
+    )
+
+    with pytest.raises(SourceWorkspaceError, match="active owned worktree"):
+        SourceWorkspaceManager(
+            repo, repository="example/project", base_dir=shared_base
+        ).claim_implementation_writer(
+            9,
+            branch="expected-implementation-branch",
+            path=foreign_writer,
+            expected_revision=foreign_head,
+        )
 
 
 def test_implementation_rebinds_clean_stale_branch_to_exact_revision(

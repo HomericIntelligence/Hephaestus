@@ -251,8 +251,99 @@ class SourceWorkspaceManager:
             self._write_receipt(receipt)
             return binding
 
+    def claim_implementation_writer(
+        self,
+        item_number: int,
+        *,
+        branch: str,
+        path: Path,
+        expected_revision: str | None = None,
+    ) -> WorkspaceBinding:
+        """Adopt one clean WorktreeManager-created implementation checkout.
+
+        This narrow handoff is for the worker that has just materialized the
+        deterministic implementation lane. It accepts only the exact lane
+        path, a registered attached branch, and the expected clean head.
+        """
+        lane = SourceLane.IMPLEMENTATION
+        if not branch:
+            raise SourceWorkspaceError("implementation writer branch is unavailable")
+        expected_path = self.path_for(item_number, lane).resolve()
+        try:
+            actual_path = path.resolve(strict=True)
+        except OSError as exc:
+            raise SourceWorkspaceError("implementation writer worktree does not exist") from exc
+        if actual_path != expected_path:
+            raise SourceWorkspaceError(
+                "implementation writer path does not match the deterministic lane"
+            )
+        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+            old = self._read_receipt(item_number, lane)
+            self._reject_foreign_owner(old, item_number, lane)
+            if old is not None and (
+                old.path.resolve() != expected_path or old.detached or old.branch != branch
+            ):
+                raise SourceWorkspaceError("incompatible source workspace receipt")
+            try:
+                physical_branch = (
+                    self._head_branch(actual_path) if (actual_path / ".git").exists() else None
+                )
+            except SourceWorkspaceError:
+                physical_branch = None
+            if physical_branch is not None and physical_branch != f"refs/heads/{branch}":
+                raise SourceWorkspaceError(
+                    "implementation writer checkout does not match the requested branch"
+                )
+            if not self._worktree_identity(actual_path, branch):
+                raise SourceWorkspaceError(
+                    "implementation writer checkout is not an active owned worktree"
+                )
+            if self._is_dirty(actual_path):
+                raise SourceWorkspaceError(
+                    f"source workspace is dirty and preserved: {actual_path}"
+                )
+            revision = self._head_revision(actual_path)
+            if expected_revision is not None and revision != expected_revision:
+                raise SourceWorkspaceError(
+                    "implementation writer checkout does not match the expected head"
+                )
+            receipt = SourceWorkspaceReceipt(
+                repository=self.repository,
+                repository_identity=self.repository_identity,
+                ownership_key=self.ownership_key(item_number, lane),
+                item_number=item_number,
+                lane=lane,
+                path=actual_path,
+                revision=revision,
+                generation=(
+                    old.generation
+                    if old is not None
+                    and old.path.resolve() == actual_path
+                    and old.revision == revision
+                    else old.generation + 1
+                    if old is not None
+                    else 1
+                ),
+                detached=False,
+                branch=branch,
+                obligations=old.obligations if old is not None else (),
+            )
+            binding = self._binding(receipt)
+            try:
+                validate_workspace_binding(binding)
+            except WorkspaceBindingError as exc:
+                raise SourceWorkspaceError(str(exc)) from exc
+            self._write_receipt(receipt)
+            return binding
+
     @contextmanager
-    def acquire(self, binding: WorkspaceBinding, *, allowed_tools: str = "") -> Iterator[Path]:
+    def acquire(
+        self,
+        binding: WorkspaceBinding,
+        *,
+        allowed_tools: str = "",
+        expected_branch: str | None = None,
+    ) -> Iterator[Path]:
         """Hold the lane lease while validating and using a source workspace."""
         if binding.item_number is None or binding.lane is None:
             raise SourceWorkspaceError("source workspace binding is incomplete")
@@ -263,6 +354,13 @@ class SourceWorkspaceManager:
             receipt = self._read_receipt(binding.item_number, binding.lane)
             if receipt is None or self._binding(receipt) != binding:
                 raise SourceWorkspaceError("source workspace receipt no longer matches binding")
+            if expected_branch is not None and (
+                not expected_branch
+                or receipt.detached
+                or receipt.branch != expected_branch
+                or not self._worktree_identity(binding.cwd, expected_branch)
+            ):
+                raise SourceWorkspaceError("source workspace branch no longer matches binding")
             try:
                 yield validate_workspace_binding(binding, allowed_tools=allowed_tools)
             except WorkspaceBindingError as exc:
@@ -402,6 +500,26 @@ class SourceWorkspaceManager:
             generation=receipt.generation,
             detached=receipt.detached,
         )
+
+    def _worktree_identity(self, path: Path, branch: str) -> bool:
+        """Return whether path is this repository's active branch worktree."""
+        try:
+            top = Path(_git(path, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+            common_raw = _git(path, "rev-parse", "--git-common-dir").stdout.strip()
+            common = Path(common_raw)
+            if not common.is_absolute():
+                common = path / common
+            symbolic = self._head_branch(path)
+            if top != path or common.resolve() != self.common_dir:
+                return False
+            if symbolic != f"refs/heads/{branch}":
+                return False
+            revision = self._head_revision(path)
+            listing = _git(self.repo_root, "worktree", "list", "--porcelain").stdout
+        except (OSError, SourceWorkspaceError, subprocess.SubprocessError):
+            return False
+        block = f"worktree {path}\nHEAD {revision}\nbranch refs/heads/{branch}\n"
+        return block in f"{listing.rstrip()}\n"
 
     def _lane_lock_path(self, item_number: int, lane: SourceLane) -> Path:
         return self.state_dir / f"{item_number}-{lane.value}.lock"
