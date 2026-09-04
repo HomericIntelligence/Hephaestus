@@ -5,7 +5,6 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation import implementation_writer
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -260,6 +260,15 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
     assert rebound == binding
 
 
+def test_implementation_writer_handoff_cannot_be_forged_outside_manager(
+    tmp_path: Path,
+) -> None:
+    """The handoff capability requires the manager's private factory."""
+    with pytest.raises(TypeError, match="private factory"):
+        implementation_writer.ImplementationWriterHandoff(tmp_path, 9, token=object())
+    assert not hasattr(implementation_writer.ImplementationWriterHandoff, "_activate")
+
+
 def test_implementation_writer_creation_requires_an_active_handoff(tmp_path: Path) -> None:
     """An implementation writer cannot allocate without its lane handoff."""
     repo, _, second = _repository(tmp_path)
@@ -296,48 +305,75 @@ def test_fresh_writer_claim_blocks_concurrent_adoption_until_claim_finishes(
         remote_git_env={},
         remote_git_config=("-c", "credential.helper="),
     )
-    adoption_errors: list[BaseException] = []
+    adoption_errors: list[Exception] = []
+    contention_observed = threading.Event()
+    adoption_mutation_started = threading.Event()
+    adoption_finished = threading.Event()
 
-    with source_manager.implementation_writer_handoff(9) as handoff:
-        writer = worktree_manager.create_worktree(
-            9,
-            "writer-branch",
-            source_lane=SourceLane.IMPLEMENTATION.value,
-            implementation_writer_handoff=handoff,
-        )
-        authority = worktree_manager.implementation_writer_authority(writer)
-        _git(repo, "push", "origin", "writer-branch")
-        adopted_source = SourceWorkspaceManager(repo, repository="example/project")
+    adopted_source = SourceWorkspaceManager(repo, repository="example/project")
 
-        def adopt() -> None:
-            try:
-                with adopted_source.implementation_writer_handoff(9) as adopted_handoff:
-                    adopted_manager.create_worktree(
-                        9,
-                        "writer-branch",
-                        source_lane=SourceLane.IMPLEMENTATION.value,
-                        implementation_adoption_head=second,
-                        implementation_writer_handoff=adopted_handoff,
-                    )
-            except BaseException as exc:  # pragma: no cover - assertion below reports failures
-                adoption_errors.append(exc)
+    def adopt() -> None:
+        try:
+            with file_lock(
+                adopted_source._lane_lock_path(9, SourceLane.IMPLEMENTATION),
+                blocking=False,
+                require_exclusive=True,
+            ):
+                raise AssertionError("source lease was not held")
+        except LockUnavailableError:
+            contention_observed.set()
+        try:
+            with adopted_source.implementation_writer_handoff(9) as adopted_handoff:
+                adopted_manager.create_worktree(
+                    9,
+                    "writer-branch",
+                    source_lane=SourceLane.IMPLEMENTATION.value,
+                    implementation_adoption_head=second,
+                    implementation_writer_handoff=adopted_handoff,
+                )
+        except Exception as exc:  # pragma: no cover - assertion below reports failures
+            adoption_errors.append(exc)
+        finally:
+            adoption_finished.set()
 
-        worker = threading.Thread(target=adopt)
-        worker.start()
-        time.sleep(0.05)
-        assert worker.is_alive()
-        assert _git(writer, "rev-parse", "HEAD") == second
+    real_adoption = adopted_manager._add_authenticated_adopted_implementation_writer
 
-        source_manager.claim_implementation_writer(
-            9,
-            branch="writer-branch",
-            path=writer,
-            authority=authority,
-            handoff=handoff,
-        )
+    def observe_adoption(*args: Any, **kwargs: Any) -> None:
+        adoption_mutation_started.set()
+        real_adoption(*args, **kwargs)
 
-    worker.join(timeout=5)
-    assert not worker.is_alive()
+    worker = threading.Thread(target=adopt)
+    with patch.object(
+        adopted_manager,
+        "_add_authenticated_adopted_implementation_writer",
+        side_effect=observe_adoption,
+    ):
+        with source_manager.implementation_writer_handoff(9) as handoff:
+            writer = worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+            authority = worktree_manager.implementation_writer_authority(writer)
+            _git(repo, "push", "origin", "writer-branch")
+            worker.start()
+            assert contention_observed.wait(timeout=5)
+            assert not adoption_mutation_started.is_set()
+            assert writer.exists()
+            assert _git(writer, "rev-parse", "HEAD") == second
+
+            source_manager.claim_implementation_writer(
+                9,
+                branch="writer-branch",
+                path=writer,
+                authority=authority,
+                handoff=handoff,
+            )
+
+        assert adoption_mutation_started.wait(timeout=5)
+
+    assert adoption_finished.wait(timeout=5)
     assert not adoption_errors
 
 
@@ -381,13 +417,22 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
     )
-    adoption_started = threading.Event()
+    contention_observed = threading.Event()
+    adoption_mutation_started = threading.Event()
     sync_completed = threading.Event()
     real_handoff = SourceWorkspaceManager.implementation_writer_handoff
 
     @contextmanager
     def observed_handoff(manager: SourceWorkspaceManager, item_number: int):
-        adoption_started.set()
+        try:
+            with file_lock(
+                manager._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
+                blocking=False,
+                require_exclusive=True,
+            ):
+                raise AssertionError("source lease was not held")
+        except LockUnavailableError:
+            contention_observed.set()
         with real_handoff(manager, item_number) as handoff:
             yield handoff
 
@@ -396,6 +441,12 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
     def observed_sync(*args: Any, **kwargs: Any) -> None:
         real_sync(*args, **kwargs)
         sync_completed.set()
+
+    real_adoption = WorktreeManager._add_authenticated_adopted_implementation_writer
+
+    def observed_adoption(manager: WorktreeManager, *args: Any, **kwargs: Any) -> None:
+        adoption_mutation_started.set()
+        real_adoption(manager, *args, **kwargs)
 
     job = GitJob(
         repo="example/project",
@@ -424,24 +475,22 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
                 return_value=({}, ("-c", "credential.helper=")),
             ) as remote_configuration,
             patch.object(pool, "_sync_worktree_to_remote_branch", observed_sync),
+            patch.object(
+                WorktreeManager,
+                "_add_authenticated_adopted_implementation_writer",
+                observed_adoption,
+            ),
         ):
             with source_manager.acquire(binding):
                 pool.submit(job, StageName.REPO)
-                assert adoption_started.wait(timeout=2)
-                with pytest.raises(LockUnavailableError):
-                    with file_lock(
-                        source_manager._lane_lock_path(9, SourceLane.IMPLEMENTATION),
-                        blocking=False,
-                        require_exclusive=True,
-                    ):
-                        pass
+                assert contention_observed.wait(timeout=5)
+                assert not adoption_mutation_started.is_set()
                 assert writer.exists()
                 assert _git(writer, "rev-parse", "HEAD") == second
                 assert _git(writer, "branch", "--show-current") == "writer-branch"
-                with pytest.raises(queue.Empty):
-                    completion_q.get(timeout=0.1)
 
             _, result = completion_q.get(timeout=10)
+            assert adoption_mutation_started.is_set()
             assert result.ok is True, (result.error, remote_configuration.call_args_list)
             assert sync_completed.is_set()
             assert result.value == {

@@ -17,7 +17,11 @@ from hephaestus.agents.workspace import (
     WorkspaceBindingError,
     validate_workspace_binding,
 )
-from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
+from hephaestus.automation.implementation_writer import (
+    ImplementationWriterHandoff,
+    _new_implementation_writer_handoff,
+    _set_implementation_writer_handoff_active,
+)
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
     WorktreeManager,
@@ -159,16 +163,16 @@ class SourceWorkspaceManager:
         """Hold the implementation lane for one complete writer handoff."""
         if isinstance(item_number, bool) or not isinstance(item_number, int):
             raise SourceWorkspaceError("implementation writer handoff item number is invalid")
-        handoff = ImplementationWriterHandoff(self.repo_root, item_number)
+        handoff = _new_implementation_writer_handoff(self.repo_root, item_number)
         with file_lock(
             self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
             require_exclusive=True,
         ):
-            handoff._activate()
+            _set_implementation_writer_handoff_active(handoff, True)
             try:
                 yield handoff
             finally:
-                handoff._deactivate()
+                _set_implementation_writer_handoff_active(handoff, False)
 
     @staticmethod
     def guard_branch(item_number: int) -> str:
