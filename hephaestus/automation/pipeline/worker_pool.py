@@ -4272,9 +4272,7 @@ class WorkerPool:
                 if source_manager is None or implementation_writer_handoff is None:
                     raise SourceWorkspaceError("implementation writer handoff is missing")
                 if expected_revision is not None and not _is_full_commit_sha(expected_revision):
-                    raise SourceWorkspaceError(
-                        "implementation writer expected revision is invalid"
-                    )
+                    raise SourceWorkspaceError("implementation writer expected revision is invalid")
                 source_binding = source_manager.claim_implementation_writer(
                     implementation_item_number,
                     branch=branch_name,

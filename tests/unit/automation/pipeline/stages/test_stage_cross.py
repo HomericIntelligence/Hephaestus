@@ -248,9 +248,7 @@ def test_pushed_remediation_head_survives_stale_review_entry_read(
         def pr_review_context(self, pr_number: int) -> dict[str, str]:
             del pr_number
             head = (
-                self.review_heads.popleft()
-                if len(self.review_heads) > 1
-                else self.review_heads[0]
+                self.review_heads.popleft() if len(self.review_heads) > 1 else self.review_heads[0]
             )
             return {"pr_head_sha": head}
 
