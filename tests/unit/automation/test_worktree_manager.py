@@ -16,6 +16,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeCreationReceiptError,
     WorktreeDirtyError,
     WorktreeManager,
+    consume_implementation_writer_authority,
 )
 from hephaestus.utils.file_lock import file_lock
 
@@ -677,7 +678,7 @@ class TestWorktreeManager:
                 Mock(stdout="33-auto\n"),
                 Mock(stdout="a" * 40 + "\n"),
                 Mock(stdout="33-auto\n"),
-                Mock(stdout="b" * 40 + "\n"),
+                Mock(stdout="a" * 40 + "\n"),
             ],
         ):
             first = first_manager._mint_writer_authority(
@@ -695,6 +696,14 @@ class TestWorktreeManager:
 
         assert second != first
         assert second_manager.implementation_writer_authority(writer) == second
+        with pytest.raises(WorktreeCreationReceiptError, match="invalid or stale"):
+            consume_implementation_writer_authority(
+                first,
+                issue_number=33,
+                branch="33-auto",
+                path=writer,
+                revision="a" * 40,
+            )
 
     def test_authenticated_adoption_uses_controlled_transport_before_path_replacement(
         self, tmp_path: Path

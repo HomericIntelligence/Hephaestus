@@ -147,6 +147,9 @@ def _mint_implementation_writer_authority(
         revision=revision,
     )
     with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+        for token, existing in tuple(_IMPLEMENTATION_WRITER_AUTHORITIES.items()):
+            if existing.path == record.path:
+                del _IMPLEMENTATION_WRITER_AUTHORITIES[token]
         _IMPLEMENTATION_WRITER_AUTHORITIES[authority.token] = record
     return authority
 
