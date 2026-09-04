@@ -17,6 +17,7 @@ from hephaestus.agents.workspace import (
     WorkspaceBindingError,
     validate_workspace_binding,
 )
+from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
     WorktreeManager,
@@ -151,6 +152,24 @@ class SourceWorkspaceManager:
         """Return the repository-qualified internal ownership key."""
         return f"{self.repository_identity}:{item_number}:{lane.value}"
 
+    @contextmanager
+    def implementation_writer_handoff(
+        self, item_number: int
+    ) -> Iterator[ImplementationWriterHandoff]:
+        """Hold the implementation lane for one complete writer handoff."""
+        if isinstance(item_number, bool) or not isinstance(item_number, int):
+            raise SourceWorkspaceError("implementation writer handoff item number is invalid")
+        handoff = ImplementationWriterHandoff(self.repo_root, item_number)
+        with file_lock(
+            self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
+            require_exclusive=True,
+        ):
+            handoff._activate()
+            try:
+                yield handoff
+            finally:
+                handoff._deactivate()
+
     @staticmethod
     def guard_branch(item_number: int) -> str:
         """Return the stable control-plane branch name; it owns no worktree."""
@@ -262,6 +281,7 @@ class SourceWorkspaceManager:
         branch: str,
         path: Path,
         authority: ImplementationWriterAuthority | None = None,
+        handoff: ImplementationWriterHandoff | None = None,
     ) -> WorkspaceBinding:
         """Record ownership of one verified implementation writer checkout.
 
@@ -271,63 +291,66 @@ class SourceWorkspaceManager:
         """
         lane = SourceLane.IMPLEMENTATION
         expected_path = self.path_for(item_number, lane).resolve()
+        if handoff is None:
+            raise SourceWorkspaceError("implementation writer handoff is missing")
+        try:
+            handoff._validate(self.repo_root, item_number)
+        except RuntimeError as exc:
+            raise SourceWorkspaceError(str(exc)) from exc
         if path.resolve() != expected_path:
             raise SourceWorkspaceError(
                 "implementation writer path does not match the deterministic lane"
             )
-        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
-            old = self._read_receipt(item_number, lane)
-            self._reject_foreign_owner(old, item_number, lane)
-            if old is not None and (
-                old.path.resolve() != expected_path or old.detached or old.branch != branch
-            ):
-                raise SourceWorkspaceError("incompatible source workspace receipt")
-            if not expected_path.exists():
-                raise SourceWorkspaceError("implementation writer worktree does not exist")
-            if self._is_dirty(expected_path):
-                raise SourceWorkspaceError(
-                    f"source workspace is dirty and preserved: {expected_path}"
-                )
-            revision = self._head_revision(expected_path)
-            if self._head_branch(expected_path) != f"refs/heads/{branch}":
-                raise SourceWorkspaceError(
-                    "implementation writer checkout does not match the requested branch"
-                )
-            receipt = SourceWorkspaceReceipt(
-                repository=self.repository,
-                repository_identity=self.repository_identity,
-                ownership_key=self.ownership_key(item_number, lane),
-                item_number=item_number,
-                lane=lane,
+        old = self._read_receipt(item_number, lane)
+        self._reject_foreign_owner(old, item_number, lane)
+        if old is not None and (
+            old.path.resolve() != expected_path or old.detached or old.branch != branch
+        ):
+            raise SourceWorkspaceError("incompatible source workspace receipt")
+        if not expected_path.exists():
+            raise SourceWorkspaceError("implementation writer worktree does not exist")
+        if self._is_dirty(expected_path):
+            raise SourceWorkspaceError(f"source workspace is dirty and preserved: {expected_path}")
+        revision = self._head_revision(expected_path)
+        if self._head_branch(expected_path) != f"refs/heads/{branch}":
+            raise SourceWorkspaceError(
+                "implementation writer checkout does not match the requested branch"
+            )
+        receipt = SourceWorkspaceReceipt(
+            repository=self.repository,
+            repository_identity=self.repository_identity,
+            ownership_key=self.ownership_key(item_number, lane),
+            item_number=item_number,
+            lane=lane,
+            path=expected_path,
+            revision=revision,
+            generation=old.generation + 1 if old is not None else 1,
+            detached=False,
+            branch=branch,
+            obligations=old.obligations if old is not None else (),
+        )
+        binding = self._binding(receipt)
+        try:
+            validate_workspace_binding(binding)
+        except WorkspaceBindingError as exc:
+            raise SourceWorkspaceError(str(exc)) from exc
+        try:
+            consume_implementation_writer_authority(
+                authority,
+                issue_number=item_number,
+                branch=branch,
                 path=expected_path,
                 revision=revision,
-                generation=old.generation + 1 if old is not None else 1,
-                detached=False,
-                branch=branch,
-                obligations=old.obligations if old is not None else (),
             )
-            binding = self._binding(receipt)
-            try:
-                validate_workspace_binding(binding)
-            except WorkspaceBindingError as exc:
-                raise SourceWorkspaceError(str(exc)) from exc
-            try:
-                consume_implementation_writer_authority(
-                    authority,
-                    issue_number=item_number,
-                    branch=branch,
-                    path=expected_path,
-                    revision=revision,
-                )
-            except RuntimeError as exc:
-                raise SourceWorkspaceError(
-                    f"implementation writer authority is invalid: {exc}"
-                ) from exc
-            try:
-                self._write_receipt(receipt)
-            except OSError as exc:
-                raise SourceWorkspaceError("cannot record implementation writer receipt") from exc
-            return binding
+        except RuntimeError as exc:
+            raise SourceWorkspaceError(
+                f"implementation writer authority is invalid: {exc}"
+            ) from exc
+        try:
+            self._write_receipt(receipt)
+        except OSError as exc:
+            raise SourceWorkspaceError("cannot record implementation writer receipt") from exc
+        return binding
 
     @contextmanager
     def acquire(self, binding: WorkspaceBinding, *, allowed_tools: str = "") -> Iterator[Path]:
@@ -482,7 +505,7 @@ class SourceWorkspaceManager:
         )
 
     def _lane_lock_path(self, item_number: int, lane: SourceLane) -> Path:
-        return self.state_dir / f"{item_number}-{lane.value}.lock"
+        return WorktreeManager.source_lane_lock_path(self.repo_root, item_number, lane.value)
 
     def _receipt_path(self, item_number: int, lane: SourceLane) -> Path:
         return self.state_dir / f"{item_number}-{lane.value}.json"

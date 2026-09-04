@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from hephaestus.automation import worktree_manager as worktree_manager_module
+from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     RemoteGitRefreshError,
@@ -25,6 +26,13 @@ from hephaestus.utils.file_lock import file_lock
 def _clear_loop_trunk_githash(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep unit tests independent from automation-loop parent env."""
     monkeypatch.delenv("HEPH_TRUNK_GITHASH", raising=False)
+
+
+def _active_handoff(repo_root: Path, issue_number: int) -> ImplementationWriterHandoff:
+    """Return an active handoff for isolated WorktreeManager unit tests."""
+    handoff = ImplementationWriterHandoff(repo_root.resolve(), issue_number)
+    handoff._activate()
+    return handoff
 
 
 class TestWorktreeManager:
@@ -522,7 +530,12 @@ class TestWorktreeManager:
                 "path": str(writer),
                 "branch": "refs/heads/foreign-writer",
             }
-            manager.create_worktree(31, "31-auto", source_lane="impl")
+            manager.create_worktree(
+                31,
+                "31-auto",
+                source_lane="impl",
+                implementation_writer_handoff=_active_handoff(tmp_path, 31),
+            )
 
         remove.assert_not_called()
         assert writer.exists()
@@ -558,7 +571,12 @@ class TestWorktreeManager:
             patch.object(manager, "_add_worktree_for_branch") as add,
             pytest.raises(RuntimeError, match="unowned"),
         ):
-            manager.create_worktree(32, "32-auto", source_lane="impl")
+            manager.create_worktree(
+                32,
+                "32-auto",
+                source_lane="impl",
+                implementation_writer_handoff=_active_handoff(tmp_path, 32),
+            )
 
         add.assert_not_called()
 
@@ -593,6 +611,7 @@ class TestWorktreeManager:
                 base_sha=pin,
                 remote_branch_reserved=True,
                 source_lane="impl",
+                implementation_writer_handoff=_active_handoff(tmp_path, 33),
             )
 
         assert result == manager.base_dir / "auto-33-impl"
@@ -635,6 +654,7 @@ class TestWorktreeManager:
                 base_sha=pin,
                 remote_branch_reserved=True,
                 source_lane="impl",
+                implementation_writer_handoff=_active_handoff(tmp_path, 33),
             )
 
         add.assert_not_called()
@@ -897,7 +917,12 @@ class TestWorktreeManager:
             patch.object(manager, "_remove_worktree_path_forcefully") as remove,
             pytest.raises(WorktreeCreationReceiptError, match="already registered"),
         ):
-            manager.create_worktree(36, "36-adopted", source_lane="impl")
+            manager.create_worktree(
+                36,
+                "36-adopted",
+                source_lane="impl",
+                implementation_writer_handoff=_active_handoff(tmp_path, 36),
+            )
 
         remove.assert_not_called()
         assert writer.exists()
@@ -976,7 +1001,12 @@ class TestWorktreeManager:
             ),
             pytest.raises(WorktreeCreationReceiptError, match="cannot safely verify"),
         ):
-            manager.create_worktree(34, "34-auto", source_lane="impl")
+            manager.create_worktree(
+                34,
+                "34-auto",
+                source_lane="impl",
+                implementation_writer_handoff=_active_handoff(tmp_path, 34),
+            )
 
     @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
     def test_create_worktree_reuses_registered_dirty_existing_path(

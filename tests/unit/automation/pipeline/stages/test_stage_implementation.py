@@ -1399,6 +1399,72 @@ class TestGitErrorRetryCap:
         assert item.worktree == "/tmp/auto-1-impl"
         assert item.payload[WORKTREE_MATERIALIZED_KEY] is True
 
+    def test_source_workspace_ownership_failure_clears_stale_worktree_state(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A terminal ownership failure cannot expose a prior writer snapshot."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        stale = {
+            "worktree_dirty": True,
+            "worktree_status": " M stale.py",
+            "worktree_diff": "stale diff",
+            "worktree_content_snapshot": {"stale": True},
+            "worktree_branch": "stale-branch",
+            "worktree_head_sha": "b" * 40,
+            "_impl_source_revision": "c" * 40,
+        }
+        item.payload.update(stale)
+        detail = "source_workspace_ownership_unavailable: " + ("x" * 700)
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=detail,
+                value={"path": "/tmp/auto-1-impl", WORKTREE_MATERIALIZED_KEY: True},
+            ),
+            make_ctx(),
+        )
+
+        assert item.payload["source_workspace_ownership_unavailable"] is True
+        assert item.payload["source_workspace_ownership_error"] == detail[:500]
+        assert len(item.payload["source_workspace_ownership_error"]) == 500
+        for key in stale:
+            assert key not in item.payload
+
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, make_ctx())
+        assert outcome == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "source_workspace_ownership_unavailable",
+        )
+
+    def test_source_workspace_ownership_failure_clears_stale_materialization_and_reservation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A non-materialized ownership result cannot retain prior cleanup state."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.payload[WORKTREE_MATERIALIZED_KEY] = True
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="source_workspace_ownership_unavailable: no handoff",
+                value={"path": "/tmp/auto-1-impl", WORKTREE_MATERIALIZED_KEY: False},
+            ),
+            make_ctx(),
+        )
+
+        assert WORKTREE_MATERIALIZED_KEY not in item.payload
+        assert "_direct_scope_reservation" not in item.payload
+
     def test_adopted_impl_go_worktree_failure_retries_worktree_not_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
