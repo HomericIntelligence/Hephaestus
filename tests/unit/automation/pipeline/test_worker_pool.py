@@ -2856,7 +2856,6 @@ class TestGitOps:
                 "rebased": False,
                 "published": False,
                 "head_sha": recovered_head,
-                "rebase_policy": None,
             },
         )
         remote_head = subprocess.run(
@@ -6796,7 +6795,6 @@ class TestGitOps:
             "rebased": False,
             "published": False,
             "head_sha": head,
-            "rebase_policy": None,
         }
         assert [call.args[0] for call in run.call_args_list] == [
             [
@@ -6931,7 +6929,6 @@ class TestGitOps:
             "published": False,
             "head_drift": True,
             "head_sha": synced_head,
-            "rebase_policy": None,
         }
         clean.assert_called_once_with(tmp_path, timeout=60)
         sync.assert_called_once()

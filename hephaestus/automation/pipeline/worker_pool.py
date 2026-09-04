@@ -2826,11 +2826,6 @@ class WorkerPool:
                 timeout=job.timeout_s,
             )
             if synced is not None:
-                if synced.ok:
-                    policy = self._select_rebase_policy(job.repo)
-                    value = dict(synced.value) if isinstance(synced.value, dict) else {}
-                    value["rebase_policy"] = policy.name if policy is not None else None
-                    return replace(synced, value=value)
                 return synced
             git_utils.run(
                 ["git", *remote_config, "fetch", remote, base_branch],
@@ -2854,7 +2849,6 @@ class WorkerPool:
                     expected_repo=job.transport_repository,
                     expected_remote_sha=expected_remote_sha,
                     timeout=job.timeout_s,
-                    rebase_policy=self._select_rebase_policy(job.repo),
                 )
             if ancestry.returncode != 1:
                 return JobResult(ok=False, error="cannot determine writer base ancestry")
@@ -2890,17 +2884,6 @@ class WorkerPool:
             )
         if not publish_rebased_head:
             return JobResult(ok=True, value=True)
-        policy = self._select_rebase_policy(job.repo)
-        structural = self._run_rebase_structural_validation(
-            cwd,
-            timeout=job.timeout_s,
-            policy=policy,
-        )
-        if structural is not None:
-            return structural
-        semantic = self._validate_rebased_tree(cwd, policy=policy)
-        if semantic is not None:
-            return semantic
         if required_error := verify_required_ancestors():
             return required_error
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
@@ -2927,7 +2910,6 @@ class WorkerPool:
                 "rebased": True,
                 "published": True,
                 "head_sha": source_sha,
-                "rebase_policy": policy.name if policy is not None else None,
             },
         )
 
@@ -4982,7 +4964,6 @@ class WorkerPool:
         expected_repo: str,
         expected_remote_sha: str,
         timeout: int,
-        rebase_policy: RebaseValidationPolicy | None,
     ) -> JobResult:
         """Bind an already-current local writer to its unchanged remote head."""
         source_sha = self._read_publish_head(worktree_path, timeout=timeout)
@@ -5013,7 +4994,6 @@ class WorkerPool:
                 "rebased": False,
                 "published": False,
                 "head_sha": source_sha,
-                "rebase_policy": rebase_policy.name if rebase_policy is not None else None,
             },
         )
 
