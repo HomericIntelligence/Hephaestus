@@ -229,6 +229,7 @@ class WorktreeManager:
         self._pending_implementation_adoptions: dict[
             Path, _ImplementationWriterAuthorityRecord
         ] = {}
+        self._implementation_writer_authorities: dict[Path, ImplementationWriterAuthority] = {}
         self.worktrees: dict[int | str, Path] = {}
         self.preserved: list[tuple[int | str, Path]] = []
         self.lock = threading.Lock()
@@ -297,21 +298,26 @@ class WorktreeManager:
         ).stdout.strip()
         if branch != branch_name or not _is_full_commit_sha(revision):
             raise WorktreeCreationReceiptError("implementation writer identity is invalid")
-        return _mint_implementation_writer_authority(
+        authority = _mint_implementation_writer_authority(
             issue_number=issue_number,
             branch=branch_name,
             path=worktree_path,
             revision=revision,
         )
+        self._implementation_writer_authorities[worktree_path.resolve()] = authority
+        return authority
 
     def implementation_writer_authority(self, worktree_path: Path) -> ImplementationWriterAuthority:
         """Return the fresh authority minted for a controlled writer path."""
         path = worktree_path.resolve()
+        authority = self._implementation_writer_authorities.get(path)
+        if authority is None:
+            raise WorktreeCreationReceiptError("implementation writer authority is unavailable")
         with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
-            for token, record in _IMPLEMENTATION_WRITER_AUTHORITIES.items():
-                if record.path == path:
-                    return ImplementationWriterAuthority(token)
-        raise WorktreeCreationReceiptError("implementation writer authority is unavailable")
+            if authority.token not in _IMPLEMENTATION_WRITER_AUTHORITIES:
+                self._implementation_writer_authorities.pop(path, None)
+                raise WorktreeCreationReceiptError("implementation writer authority is unavailable")
+        return authority
 
     def mint_adopted_implementation_writer_authority(
         self,
@@ -346,6 +352,7 @@ class WorktreeManager:
         if record != expected:
             with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
                 _IMPLEMENTATION_WRITER_AUTHORITIES.pop(authority.token, None)
+            self._implementation_writer_authorities.pop(path, None)
             self._pending_implementation_adoptions.pop(path, None)
             raise WorktreeCreationReceiptError("implementation writer adoption head changed")
         del self._pending_implementation_adoptions[path]

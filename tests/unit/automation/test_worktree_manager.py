@@ -661,6 +661,41 @@ class TestWorktreeManager:
         assert manager.implementation_writer_authority(writer) == authority
         assert not list(manager.base_dir.glob("*.creation.json"))
 
+    def test_recreated_writer_authority_stays_with_its_creating_manager(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A later writer creation cannot receive an earlier manager's token."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        writer = tmp_path / "build" / ".worktrees" / "auto-33-impl"
+        writer.mkdir(parents=True)
+        first_manager = WorktreeManager(base_dir=writer.parent)
+        second_manager = WorktreeManager(base_dir=writer.parent)
+
+        with patch(
+            "hephaestus.automation.worktree_manager.run",
+            side_effect=[
+                Mock(stdout="33-auto\n"),
+                Mock(stdout="a" * 40 + "\n"),
+                Mock(stdout="33-auto\n"),
+                Mock(stdout="b" * 40 + "\n"),
+            ],
+        ):
+            first = first_manager._mint_writer_authority(
+                issue_number=33,
+                branch_name="33-auto",
+                worktree_path=writer,
+                timeout=None,
+            )
+            second = second_manager._mint_writer_authority(
+                issue_number=33,
+                branch_name="33-auto",
+                worktree_path=writer,
+                timeout=None,
+            )
+
+        assert second != first
+        assert second_manager.implementation_writer_authority(writer) == second
+
     def test_authenticated_adoption_uses_controlled_transport_before_path_replacement(
         self, tmp_path: Path
     ) -> None:
