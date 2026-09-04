@@ -273,7 +273,7 @@ class SourceWorkspaceManager:
             self._write_receipt(receipt)
             return binding
 
-    def claim_implementation_writer(
+    def claim_implementation_writer(  # noqa: C901
         self,
         item_number: int,
         *,
@@ -306,9 +306,9 @@ class SourceWorkspaceManager:
             )
         old = self._read_receipt(item_number, lane)
         self._reject_foreign_owner(old, item_number, lane)
-        if old is not None and (
-            old.path.resolve() != expected_path or old.detached or old.branch != branch
-        ):
+        if old is not None and old.path.resolve() != expected_path:
+            raise SourceWorkspaceError("incompatible source workspace receipt")
+        if old is not None and not old.detached and old.branch != branch:
             raise SourceWorkspaceError("incompatible source workspace receipt")
         if not expected_path.exists():
             raise SourceWorkspaceError("implementation writer worktree does not exist")
@@ -338,7 +338,7 @@ class SourceWorkspaceManager:
         except WorkspaceBindingError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
         try:
-            consume_implementation_writer_authority(
+            predecessor_evidence = consume_implementation_writer_authority(
                 authority,
                 issue_number=item_number,
                 branch=branch,
@@ -349,11 +349,72 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError(
                 f"implementation writer authority is invalid: {exc}"
             ) from exc
+        if old is not None and old.detached:
+            try:
+                handoff._validate_consumed_direct_transition(
+                    predecessor_evidence,
+                    path=expected_path,
+                    predecessor_generation=old.generation,
+                    predecessor_revision=old.revision,
+                    branch=branch,
+                )
+            except RuntimeError as exc:
+                raise SourceWorkspaceError(str(exc)) from exc
+        elif predecessor_evidence is not None:
+            raise SourceWorkspaceError("unexpected implementation writer transition evidence")
         try:
             self._write_receipt(receipt)
         except OSError as exc:
             raise SourceWorkspaceError("cannot record implementation writer receipt") from exc
         return binding
+
+    def authorize_direct_implementation_writer_transition(
+        self,
+        item_number: int,
+        *,
+        branch: str,
+        base_sha: str,
+        handoff: ImplementationWriterHandoff | None,
+    ) -> None:
+        """Arm one exact detached predecessor transition for a direct writer."""
+        lane = SourceLane.IMPLEMENTATION
+        expected_path = self.path_for(item_number, lane).resolve()
+        if handoff is None:
+            raise SourceWorkspaceError("implementation writer handoff is missing")
+        try:
+            handoff._validate(
+                self.repo_root,
+                item_number,
+                self._lane_lock_path(item_number, lane),
+            )
+        except RuntimeError as exc:
+            raise SourceWorkspaceError(str(exc)) from exc
+        old = self._read_receipt(item_number, lane)
+        self._reject_foreign_owner(old, item_number, lane)
+        if (
+            old is None
+            or old.path.resolve() != expected_path
+            or not old.detached
+            or old.branch is not None
+            or not expected_path.exists()
+            or self._is_dirty(expected_path)
+            or self._head_branch(expected_path) is not None
+            or self._head_revision(expected_path) != old.revision
+        ):
+            raise SourceWorkspaceError("detached implementation writer predecessor is invalid")
+        target = _git(self.repo_root, "rev-parse", f"{base_sha}^{{commit}}").stdout.strip()
+        if target != base_sha:
+            raise SourceWorkspaceError("direct implementation writer base is invalid")
+        try:
+            handoff._arm_direct_transition(
+                path=expected_path,
+                predecessor_generation=old.generation,
+                predecessor_revision=old.revision,
+                branch=branch,
+                base_sha=base_sha,
+            )
+        except RuntimeError as exc:
+            raise SourceWorkspaceError(str(exc)) from exc
 
     @contextmanager
     def acquire(self, binding: WorkspaceBinding, *, allowed_tools: str = "") -> Iterator[Path]:

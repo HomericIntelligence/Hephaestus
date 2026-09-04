@@ -124,6 +124,7 @@ class _ImplementationWriterAuthorityRecord:
     branch: str
     path: Path
     revision: str
+    predecessor_evidence: object | None = None
 
 
 _IMPLEMENTATION_WRITER_AUTHORITIES: dict[str, _ImplementationWriterAuthorityRecord] = {}
@@ -131,7 +132,12 @@ _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK = threading.Lock()
 
 
 def _mint_implementation_writer_authority(
-    *, issue_number: int, branch: str, path: Path, revision: str
+    *,
+    issue_number: int,
+    branch: str,
+    path: Path,
+    revision: str,
+    predecessor_evidence: object | None = None,
 ) -> ImplementationWriterAuthority:
     """Mint one opaque process-local authority after a verified writer create."""
     if not _is_full_commit_sha(revision):
@@ -142,6 +148,7 @@ def _mint_implementation_writer_authority(
         branch=branch,
         path=path.resolve(),
         revision=revision,
+        predecessor_evidence=predecessor_evidence,
     )
     with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
         for token, existing in tuple(_IMPLEMENTATION_WRITER_AUTHORITIES.items()):
@@ -158,23 +165,24 @@ def consume_implementation_writer_authority(
     branch: str,
     path: Path,
     revision: str,
-) -> None:
+) -> object | None:
     """Validate and consume a writer authority exactly once."""
     if not isinstance(authority, ImplementationWriterAuthority):
         raise WorktreeCreationReceiptError("implementation writer authority is missing")
-    expected = _ImplementationWriterAuthorityRecord(
-        issue_number=issue_number,
-        branch=branch,
-        path=path.resolve(),
-        revision=revision,
-    )
     with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
         record = _IMPLEMENTATION_WRITER_AUTHORITIES.get(authority.token)
-        if record != expected:
+        if (
+            record is None
+            or record.issue_number != issue_number
+            or record.branch != branch
+            or record.path != path.resolve()
+            or record.revision != revision
+        ):
             raise WorktreeCreationReceiptError(
                 "implementation writer authority is invalid or stale"
             )
         del _IMPLEMENTATION_WRITER_AUTHORITIES[authority.token]
+    return record.predecessor_evidence
 
 
 class WorktreeManager:
@@ -288,6 +296,7 @@ class WorktreeManager:
         branch_name: str,
         worktree_path: Path,
         timeout: int | None,
+        predecessor_evidence: object | None = None,
     ) -> ImplementationWriterAuthority:
         """Mint authority only after Git proves the attached writer identity."""
         branch = run(
@@ -309,6 +318,7 @@ class WorktreeManager:
             branch=branch_name,
             path=worktree_path,
             revision=revision,
+            predecessor_evidence=predecessor_evidence,
         )
         self._implementation_writer_authorities[worktree_path.resolve()] = authority
         return authority
@@ -598,14 +608,16 @@ class WorktreeManager:
                 # handoff. Do not acquire it here: nested flock calls can
                 # release the worker's lock when this scope exits.
                 with file_lock(self._git_metadata_lock_path()):
+                    direct_predecessor = False
                     if source_lane == "impl" and not adopting_implementation_writer:
-                        self._assert_implementation_writer_is_controlled(
+                        direct_predecessor = self._assert_implementation_writer_is_controlled(
                             issue_number=issue_number,
                             branch_name=branch_name,
                             worktree_path=worktree_path,
                             reserved_remote_branch_sha=(
                                 base_sha if remote_branch_reserved else None
                             ),
+                            implementation_writer_handoff=implementation_writer_handoff,
                             timeout=timeout,
                         )
                     if (
@@ -629,7 +641,31 @@ class WorktreeManager:
                             raise RuntimeError(
                                 f"deterministic implementation worktree is dirty: {worktree_path}"
                             )
+                        predecessor_evidence = None
+                        if direct_predecessor:
+                            if not isinstance(
+                                implementation_writer_handoff, ImplementationWriterHandoff
+                            ):  # pragma: no cover - checked before this lock scope
+                                raise WorktreeCreationReceiptError(
+                                    "implementation writer handoff is missing"
+                                )
+                            predecessor_revision = run(
+                                ["git", "rev-parse", "HEAD"],
+                                cwd=worktree_path,
+                                capture_output=True,
+                                **_timeout_kw(timeout),
+                            ).stdout.strip()
+                            predecessor_evidence = (
+                                implementation_writer_handoff._consume_direct_transition(
+                                    path=worktree_path,
+                                    predecessor_revision=predecessor_revision,
+                                    branch=branch_name,
+                                    base_sha=base_sha,
+                                )
+                            )
                         self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+                    else:
+                        predecessor_evidence = None
                     self._validate_direct_scope_worktree_request(
                         base_sha=base_sha,
                         remote_branch_reserved=remote_branch_reserved,
@@ -663,6 +699,7 @@ class WorktreeManager:
                                     branch_name=branch_name,
                                     worktree_path=worktree_path,
                                     timeout=timeout,
+                                    predecessor_evidence=predecessor_evidence,
                                 )
                     except Exception:
                         self.worktrees.pop(worktree_key, None)
@@ -875,11 +912,40 @@ class WorktreeManager:
         branch_name: str,
         worktree_path: Path,
         reserved_remote_branch_sha: str | None,
+        implementation_writer_handoff: object,
         timeout: int | None,
-    ) -> None:
+    ) -> bool:
         """Reject every pre-existing fresh-writer path or branch before cleanup."""
         registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
         if registered is not None:
+            if reserved_remote_branch_sha is not None and isinstance(
+                implementation_writer_handoff, ImplementationWriterHandoff
+            ):
+                predecessor_revision = run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    **_timeout_kw(timeout),
+                ).stdout.strip()
+                detached = run(
+                    ["git", "symbolic-ref", "--quiet", "HEAD"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    check=False,
+                    **_timeout_kw(timeout),
+                ).returncode == 1
+                if detached and is_clean_working_tree(worktree_path, timeout=timeout):
+                    try:
+                        implementation_writer_handoff._validate_direct_transition(
+                            path=worktree_path,
+                            predecessor_revision=predecessor_revision,
+                            branch=branch_name,
+                            base_sha=reserved_remote_branch_sha,
+                        )
+                    except RuntimeError:
+                        pass
+                    else:
+                        return True
             raise WorktreeCreationReceiptError(
                 "deterministic implementation writer is already registered and preserved"
             )
@@ -899,6 +965,7 @@ class WorktreeManager:
             raise WorktreeCreationReceiptError(
                 "implementation writer branch is an unowned existing branch"
             )
+        return False
 
     def _implementation_writer_branch_exists(
         self,

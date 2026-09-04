@@ -260,6 +260,87 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
     assert rebound == binding
 
 
+def test_direct_writer_replaces_owned_detached_source_before_rebinding(
+    tmp_path: Path,
+) -> None:
+    """A direct writer can replace its exact owned detached predecessor."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    _git(repo, "push", "origin", "main:writer-branch")
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        source_manager.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+        writer = worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            base_sha=second,
+            remote_branch_reserved=True,
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+        binding = source_manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=worktree_manager.implementation_writer_authority(writer),
+            handoff=handoff,
+        )
+
+    rebound = source_manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="writer-branch",
+    )
+    assert writer == predecessor.cwd
+    assert binding.revision == second
+    assert rebound == binding
+
+
+@pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift"])
+def test_direct_writer_transition_preserves_invalid_predecessor(
+    tmp_path: Path, mutation: str
+) -> None:
+    """An invalid detached predecessor cannot arm a direct transition."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    if mutation == "dirty":
+        (predecessor.cwd / "pending-change").write_text("preserve\n", encoding="utf-8")
+    elif mutation == "attached":
+        _git(predecessor.cwd, "switch", "-c", "unexpected-branch")
+    else:
+        _git(predecessor.cwd, "reset", "--hard", second)
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="predecessor is invalid"):
+            manager.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    assert predecessor.cwd.exists()
+    assert manager._read_receipt(9, SourceLane.IMPLEMENTATION) is not None
+
+
 def test_implementation_writer_handoff_cannot_be_forged_outside_manager(
     tmp_path: Path,
 ) -> None:
