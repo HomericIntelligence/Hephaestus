@@ -15,7 +15,7 @@ from pathlib import Path
 from .job_results import JobResult
 from .rebase_policy import RebaseValidationPolicy
 
-HEPHAESTUS_ADR_POLICY_NAME = "hephaestus-adr-v1"
+HEPHAESTUS_ADR_REBASE_POLICY_NAME = "hephaestus-adr-v1"
 
 ADR_FILENAME_RE = re.compile(r"^(?P<number>[0-9]{4})-[a-z0-9-]+\.md$")
 ADR_README_LINK_RE = re.compile(r"\(([0-9]{4}-[a-z0-9-]+\.md)\)")
@@ -123,7 +123,7 @@ def validate_rebased_adr_tree(cwd: Path) -> JobResult | None:
 
 
 HEPHAESTUS_ADR_REBASE_POLICY = RebaseValidationPolicy(
-    name=HEPHAESTUS_ADR_POLICY_NAME,
+    name=HEPHAESTUS_ADR_REBASE_POLICY_NAME,
     semantic_validator=validate_rebased_adr_tree,
     structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
 )

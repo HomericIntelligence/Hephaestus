@@ -18,10 +18,8 @@ if _typing.TYPE_CHECKING:
         ENTER as ENTER,
         GO_AUDIT_RECEIPT as GO_AUDIT_RECEIPT,
         HOST_VERIFICATION_WAIT as HOST_VERIFICATION_WAIT,
-        REVIEW_CHECKOUT_RETRY_CAP as REVIEW_CHECKOUT_RETRY_CAP,
         REVIEW_CHECKOUT_WAIT as REVIEW_CHECKOUT_WAIT,
         REVIEW_ERROR_RETRY_CAP as REVIEW_ERROR_RETRY_CAP,
-        REVIEW_WAIT as REVIEW_WAIT,
         Callable,
         Continue,
         Disposition,
@@ -76,12 +74,6 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
             # PR_CREATE step is the designated (re)creation path.
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
-        if item.state == ENTER:
-            visibility_outcome = self._check_implementation_head_visibility(item, ctx)
-            if visibility_outcome is not None:
-                if visibility_outcome.disposition is Disposition.FINISH_FAIL:
-                    self._restore_writer_worktree(item)
-                return visibility_outcome
         if item.state == ENTER and item.payload.get("pending_implementation_go_audit"):
             audit = item.payload["pending_implementation_go_audit"]
             if is_clean_go_review(audit):

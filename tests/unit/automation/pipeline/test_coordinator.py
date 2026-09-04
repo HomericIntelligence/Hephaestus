@@ -712,98 +712,6 @@ class TestQuiescence:
         assert len(coordinator.ledger) == 1
         assert coordinator.ledger[0].passed
 
-    def test_explicit_scope_keeps_one_item_live_during_head_drift_retries(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Stage retries do not reseed or duplicate an explicit PR item."""
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            issues=[101],
-            loops=3,
-            projects_dir=tmp_path,
-        )
-        coordinator = Coordinator(
-            config,
-            github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-        item = _issue_item(101, StageName.PR_REVIEW)
-        attempts: list[int] = []
-
-        class RetryThenPass(StubStage):
-            def step(self, current: WorkItem, ctx: Any) -> Any:
-                attempts.append(current.issue or 0)
-                if len(attempts) < 3:
-                    return StageOutcome(Disposition.RETRY, "review_head_drift")
-                return StageOutcome(Disposition.FINISH_PASS, "reviewed")
-
-        coordinator.stages[StageName.PR_REVIEW] = RetryThenPass()
-        seed_calls = 0
-
-        def seed_once() -> None:
-            nonlocal seed_calls
-            seed_calls += 1
-            coordinator._push_item(item, StageName.PR_REVIEW, enter=True)
-
-        monkeypatch.setattr(coordinator, "_seed_pass", seed_once)
-
-        assert coordinator.run() == 0
-        assert seed_calls == 1
-        assert attempts == [101, 101, 101]
-        assert len(coordinator.ledger) == 1
-
-    def test_explicit_pr_scope_keeps_one_item_live_during_head_drift_retries(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Stage retries do not reseed or duplicate an explicit PR item."""
-        config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            prs=[701],
-            loops=3,
-            projects_dir=tmp_path,
-        )
-        coordinator = Coordinator(
-            config,
-            github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=1,
-            pr=701,
-            stage=StageName.PR_REVIEW,
-            state="ENTER",
-        )
-        attempts: list[int] = []
-
-        class RetryThenPass(StubStage):
-            def step(self, current: WorkItem, ctx: Any) -> Any:
-                del ctx
-                attempts.append(current.pr or 0)
-                if len(attempts) < 3:
-                    return StageOutcome(Disposition.RETRY, "review_head_drift")
-                return StageOutcome(Disposition.FINISH_PASS, "reviewed")
-
-        coordinator.stages[StageName.PR_REVIEW] = RetryThenPass()
-        seed_calls = 0
-
-        def seed_once() -> None:
-            nonlocal seed_calls
-            seed_calls += 1
-            coordinator._push_item(item, StageName.PR_REVIEW, enter=True)
-
-        monkeypatch.setattr(coordinator, "_seed_pass", seed_once)
-
-        assert coordinator.run() == 0
-        assert seed_calls == 1
-        assert attempts == [701, 701, 701]
-        assert len(coordinator.ledger) == 1
-
     def test_loop_budget_bounds_reseeding(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -918,17 +826,7 @@ class TestQuiescence:
                 ),
             )
         )
-        pool.queue_result(
-            JobResult(
-                ok=True,
-                value={
-                    "path": str(worktree),
-                    "head_sha": "a" * 40,
-                    "detached": True,
-                    "dirty": False,
-                },
-            )
-        )
+        pool.queue_result(JobResult(ok=True, value={"path": str(worktree), "dirty": False}))
         # Stop after the review job is submitted. This keeps the assertion at
         # the adoption boundary while exercising the real completion drain.
         pool.queue_result(JobResult(ok=False, interrupted=True, error="stop"))

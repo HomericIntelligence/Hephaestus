@@ -23,21 +23,14 @@ from ..github_jobs import (
     ReconcilePrReviewRequest,
     ReplyHandoffAttempted,
 )
-from ..jobs import validate_commit_push_receipt
 from .base import source_workspace_binding, stage_timeout
-from .pr_review_barriers import (
-    _REVIEW_HEAD_VISIBILITY_RETRIES,
-    PrReviewCheckoutMixin,
-    PrReviewCleanupMixin,
-    PrReviewHeadVisibilityMixin,
-)
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
+    empty_diff_outcome,
     restart_direct_pr_review,
 )
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
-from .pr_review_thread_routing import PrReviewThreadRoutingMixin
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -51,14 +44,7 @@ _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 
 
-class PrReviewJobs(
-    PrReviewHeadVisibilityMixin,
-    PrReviewCheckoutMixin,
-    PrReviewCleanupMixin,
-    PrReviewThreadRoutingMixin,
-    PrReviewScopeExpansionMixin,
-    _PrReviewHost,
-):
+class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
     """Own review worktrees, validation jobs, and result handoffs."""
 
     @staticmethod
@@ -89,13 +75,6 @@ class PrReviewJobs(
             item.payload["pr_review_cycle"] = cycle
             item.payload["pr_review_round"] = 0
             item.payload.pop("review_error_retries", None)
-            item.payload.pop(_REVIEW_HEAD_VISIBILITY_RETRIES, None)
-        if item.pr is not None:
-            visibility_outcome = self._check_implementation_head_visibility(item, ctx)
-            if visibility_outcome is not None:
-                if visibility_outcome.disposition is Disposition.FINISH_FAIL:
-                    self._restore_writer_worktree(item)
-                return visibility_outcome
         return None
 
     @staticmethod
@@ -276,15 +255,12 @@ class PrReviewJobs(
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         review_context = ctx.github.pr_review_context(item.pr)
-        if not isinstance(review_context, dict):
+        if review_context is None:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_review_context_unavailable")
         expected_head = str(review_context.get("pr_head_sha") or "")
         expected_base = str(review_context.get("pr_base_sha") or "")
         if not expected_head:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_review_head_unavailable")
-        visibility_outcome = self._implementation_head_visibility_outcome(item, expected_head)
-        if visibility_outcome is not None:
-            return self._cleanup_review_worktree_then(item, visibility_outcome)
         base_branch = str(review_context.get("pr_base_branch") or "main")
         item.payload.update(review_context)
         item.payload["review_checkout_expected_head"] = expected_head
@@ -311,7 +287,6 @@ class PrReviewJobs(
         """Submit review only after the fresh snapshot matches a clean checkout."""
         expected_head = str(item.payload.pop("review_checkout_expected_head", "") or "")
         error = str(item.payload.pop("review_checkout_error", "") or "")
-        reason = str(item.payload.pop("review_checkout_reason", "") or "")
         ready = bool(item.payload.pop("review_checkout_ready", False))
         if error:
             return self._cleanup_review_worktree_then(
@@ -319,20 +294,6 @@ class PrReviewJobs(
                 StageOutcome(Disposition.FINISH_FAIL, "review_checkout_unavailable"),
             )
         if not ready:
-            source_revision = item.payload.get("_impl_source_revision")
-            if reason == "head_drift" and source_revision is not None:
-                if not is_full_commit_sha(source_revision):
-                    return self._cleanup_review_worktree_then(
-                        item,
-                        StageOutcome(
-                            Disposition.FINISH_FAIL,
-                            "implementation_source_revision_invalid",
-                        ),
-                    )
-                return self._cleanup_review_worktree_then(
-                    item,
-                    self._record_review_head_drift(item, wait_note="review_head_drift"),
-                )
             # A review is a one-shot immutable snapshot.  Do not retry by
             # mutating the PR branch (or repeatedly re-fetching it) here: the
             # next loop item will take a fresh detached snapshot if needed.
@@ -456,22 +417,12 @@ class PrReviewJobs(
                 StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_unavailable"),
             )
         try:
-            if item.payload.get("_impl_source_revision") is not None:
-                visibility_outcome = self._check_implementation_head_visibility(item, ctx)
-                if visibility_outcome is not None:
-                    return self._cleanup_review_worktree_then(item, visibility_outcome)
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)
             receipts = ctx.github.reviewer_validation_receipts(
                 item.pr,
                 reviewed_head_sha=reviewed_head,
                 threads=live_threads,
             )
-            if item.payload.get("_impl_source_revision") is not None:
-                visibility_outcome = self._check_implementation_head_visibility(
-                    item, ctx, wait_note="review_head_drift"
-                )
-                if visibility_outcome is not None:
-                    return self._cleanup_review_worktree_then(item, visibility_outcome)
         except Exception as error:
             logger.warning(
                 "pr_review:%s: could not reread threads before broad review (%s)",
@@ -482,7 +433,43 @@ class PrReviewJobs(
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"),
             )
-        return self._route_review_threads(item, ctx, live_threads, receipts)
+        if item.payload.pop("scope_dependency_force_fresh_review", False):
+            empty_diff = empty_diff_outcome(item)
+            if empty_diff:
+                return self._cleanup_review_worktree_then(item, empty_diff)
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            return self._submit_review_job(item, ctx)
+        if not live_threads:
+            if item.payload.get(_COMMENT_VALIDATION_ONLY):
+                # A reply may resolve the last thread while the immutable
+                # host checks are running. Keep the already-selected
+                # validation-only route instead of opening a second audit.
+                return Continue(next_state=VALIDATE_WAIT)
+            empty_diff = empty_diff_outcome(item)
+            if empty_diff:
+                return self._cleanup_review_worktree_then(item, empty_diff)
+            return self._submit_review_job(item, ctx)
+        snapshots = _validation_thread_snapshots(live_threads, receipts)
+        remediation_threads = _normalize_remediation_threads(live_threads)
+        if (
+            snapshots is None
+            or _validation_receipt_fingerprints(receipts) is None
+            or len(remediation_threads) != len(live_threads)
+            or _scope_retraction_paths(remediation_threads) is None
+        ):
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_invalid"),
+            )
+        if all(bool(snapshot.get("implementation_reply_submitted")) for snapshot in snapshots):
+            item.payload[_COMMENT_VALIDATION_ONLY] = True
+            return Continue(next_state=VALIDATE_WAIT)
+        item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
+        item.payload["remediation_threads"] = remediation_threads
+        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
+        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        return Continue(next_state=ADDRESS_WAIT)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Perform a fresh review of implementation replies before resolution."""
@@ -496,10 +483,6 @@ class PrReviewJobs(
             return Continue(next_state=EVAL)
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         try:
-            if item.payload.get("_impl_source_revision") is not None:
-                visibility_outcome = self._check_implementation_head_visibility(item, ctx)
-                if visibility_outcome is not None:
-                    return self._cleanup_review_worktree_then(item, visibility_outcome)
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)
             receipts = (
                 ctx.github.reviewer_validation_receipts(
@@ -511,14 +494,6 @@ class PrReviewJobs(
                 else []
             )
             pr_context = ctx.github.pr_review_context(item.pr)
-            if item.payload.get("_impl_source_revision") is not None:
-                visibility_outcome = self._implementation_head_visibility_outcome(
-                    item,
-                    pr_context.get("pr_head_sha") if isinstance(pr_context, dict) else None,
-                    wait_note="review_head_drift",
-                )
-                if visibility_outcome is not None:
-                    return self._cleanup_review_worktree_then(item, visibility_outcome)
         except Exception as error:
             logger.warning(
                 "pr_review:%s: could not fetch validation receipts (%s)",
@@ -643,24 +618,6 @@ class PrReviewJobs(
         reason: str,
     ) -> StepResult:
         """Durably reject a failed host test without entering audit retries."""
-        if item.payload.get("_impl_source_revision") is not None:
-            try:
-                visibility_outcome = self._check_implementation_head_visibility(
-                    item, ctx, wait_note="review_head_drift"
-                )
-            except Exception as error:
-                logger.warning(
-                    "pr_review:%s: could not verify implementation head before failure "
-                    "publication (%s)",
-                    item.issue,
-                    type(error).__name__,
-                )
-                return self._cleanup_review_worktree_then(
-                    item,
-                    StageOutcome(Disposition.FINISH_FAIL, "review_head_visibility_unavailable"),
-                )
-            if visibility_outcome is not None:
-                return self._cleanup_review_worktree_then(item, visibility_outcome)
         receipts = item.payload.get("host_verification_receipts")
         receipt = (
             receipts[-1]
@@ -802,17 +759,90 @@ class PrReviewJobs(
         elif item.payload.get("review_worktree") == item.worktree:
             item.worktree = ""
 
+    def _cleanup_review_worktree_then(
+        self,
+        item: WorkItem,
+        outcome: StageOutcome,
+    ) -> StepResult:
+        """Remove the detached review snapshot before leaving this stage.
+
+        A reviewer may inspect exactly one fetched PR head.  Its checkout is
+        evidence, not a recovery branch, so it must be removed before either
+        a writer handoff or a terminal outcome.  We retain the intended stage
+        disposition in memory until the removal job completes; cleanup failure
+        is terminal so a potentially dirty snapshot is never silently lost.
+        """
+        review_worktree = item.payload.get("review_worktree")
+        if not isinstance(review_worktree, str) or not review_worktree:
+            self._restore_writer_worktree(item)
+            return outcome
+        item.payload["review_worktree_cleanup_outcome"] = outcome.disposition.value
+        item.payload["review_worktree_cleanup_note"] = outcome.note
+        item.payload["review_worktree_cleanup_done"] = "pending"
+        return Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+
+    def _cleanup_review_worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Remove the detached reviewer checkout and continue its saved outcome."""
+        review_worktree = item.payload.get("review_worktree")
+        if not isinstance(review_worktree, str) or not review_worktree:
+            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_invalid")
+        cleanup_error = item.payload.pop("review_worktree_cleanup_error", None)
+        if cleanup_error:
+            item.worktree = review_worktree
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                f"review_worktree_cleanup_failed: "
+                f"{redact_diagnostic_text(str(cleanup_error))[:500]}",
+            )
+        cleanup_state = item.payload.get("review_worktree_cleanup_done")
+        if cleanup_state == "pending":
+            expected_head = item.payload.get("review_worktree_expected_head")
+            if not is_full_commit_sha(expected_head):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "review_worktree_cleanup_identity_invalid"
+                )
+            job = GitJob(
+                repo=item.repo,
+                op="remove_worktree",
+                timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+                kwargs={
+                    "worktree_path": review_worktree,
+                    "repo_root": str(ctx.paths.repo_root),
+                    "issue_number": item.issue or item.pr or 0,
+                    "expected_head": expected_head,
+                    "expected_detached": True,
+                    "source_lane": SourceLane.REVIEW.value,
+                    "force": False,
+                },
+                descr="remove_read_only_review_worktree",
+            )
+            return JobRequest(job, on_done_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        if cleanup_state is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_state_invalid")
+        outcome_value = item.payload.pop("review_worktree_cleanup_outcome", None)
+        note = str(item.payload.pop("review_worktree_cleanup_note", "") or "")
+        try:
+            disposition = Disposition(str(outcome_value))
+        except ValueError:
+            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_outcome_invalid")
+        if disposition is Disposition.RETRY:
+            item.worktree = ""
+            if item.payload.get("writer_worktree"):
+                item.payload["reviewer_checkout_needed"] = True
+            item.state = ENTER
+        else:
+            self._restore_writer_worktree(item)
+        item.payload.pop("review_worktree", None)
+        for key in ("direct_pr_worktree", "direct_pr_worktree_dirty"):
+            item.payload.pop(key, None)
+        item.payload.pop("review_worktree_cleanup_done", None)
+        item.payload.pop("review_worktree_expected_head", None)
+        return StageOutcome(disposition, note)
+
     def on_job_done(  # noqa: C901
         self, item: WorkItem, result: JobResult, ctx: StageContext
     ) -> None:
-        """Store job results on the item payload (state is still the WAIT state).
-
-        Args:
-            item: The work item to update.
-            result: The job result from the worker pool.
-            ctx: Stage context.
-
-        """
+        """Store one completed job result for the current review wait state."""
         if self._consume_scope_expansion_result(item, result):
             return
         if item.state == POST:
@@ -842,12 +872,12 @@ class PrReviewJobs(
             # was actually produced (value/changed True). A no-commit push
             # means the address turn was a phantom fix — EVAL must NOT treat
             # the round as addressed.
-            push_receipt = validate_commit_push_receipt(result.value)
-            if push_receipt is None:
-                item.payload["push_receipt_invalid"] = True
-                return
-            published_head = push_receipt["head_sha"]
-            produced_commit = push_receipt["pushed"] is True
+            push_receipt = result.value if isinstance(result.value, dict) else {}
+            raw_published_head = push_receipt.get("head_sha")
+            published_head = raw_published_head if isinstance(raw_published_head, str) else ""
+            produced_commit = bool(push_receipt.get("pushed")) and is_full_commit_sha(
+                published_head
+            )
             if produced_commit:
                 remediation_threads = item.payload.get("remediation_threads")
                 threads = remediation_threads if isinstance(remediation_threads, list) else []
@@ -912,6 +942,44 @@ class PrReviewJobs(
         if not item.payload.pop("direct_pr_worktree_pending", None):
             return False
         PrReviewStage._on_direct_pr_worktree_done(item, result)
+        return True
+
+    @staticmethod
+    def _consume_review_worktree_cleanup_result(item: WorkItem, result: JobResult) -> bool:
+        """Store one disposable-review-worktree cleanup result."""
+        if item.payload.get("review_worktree_cleanup_done") != "pending":
+            return False
+        if result.ok:
+            item.payload["review_worktree_cleanup_done"] = True
+        else:
+            item.payload["review_worktree_cleanup_error"] = result.error or "remove worktree failed"
+        return True
+
+    @staticmethod
+    def _consume_review_checkout_result(item: WorkItem, result: JobResult) -> bool:
+        """Store the review checkout barrier result when one is pending."""
+        if not item.payload.pop("review_checkout_pending", None):
+            return False
+        if not result.ok:
+            item.payload["review_checkout_error"] = result.error or "checkout job failed"
+            return True
+        value = result.value
+        ready = bool(isinstance(value, dict) and value.get("ready"))
+        review_diff = value.get("diff") if isinstance(value, dict) else None
+        review_base = value.get("base") if isinstance(value, dict) else None
+        changed_paths = value.get("changed_paths") if isinstance(value, dict) else None
+        if ready and not isinstance(review_diff, str):
+            item.payload["review_checkout_error"] = "checkout job returned no bound diff"
+            ready = False
+        if ready:
+            item.payload["pr_diff"] = review_diff
+            if isinstance(changed_paths, list) and all(
+                isinstance(path, str) and bool(path) for path in changed_paths
+            ):
+                item.payload["review_changed_paths"] = list(changed_paths)
+            if is_full_commit_sha(review_base):
+                item.payload["reviewed_pr_base_sha"] = review_base
+        item.payload["review_checkout_ready"] = ready
         return True
 
     @staticmethod
@@ -984,6 +1052,29 @@ class PrReviewJobs(
             item.payload["review_threads"] = [dict(comment) for comment in value.findings]
             return
         item.payload["review_audit_failure"] = True
+
+    @staticmethod
+    def _on_direct_pr_worktree_done(item: WorkItem, result: JobResult) -> None:
+        """Record the exact checkout created for a direct PR review."""
+        if not result.ok:
+            logger.warning("pr_review:%s: direct PR worktree failed: %s", item.issue, result.error)
+            item.worktree = ""
+            item.payload["direct_pr_worktree_error"] = result.error or "worktree job failed"
+            return
+        value = result.value
+        if isinstance(value, dict):
+            item.worktree = str(value.get("path", ""))
+            item.payload["direct_pr_worktree_dirty"] = bool(value.get("dirty"))
+            if item.worktree and not item.payload["direct_pr_worktree_dirty"]:
+                item.payload["direct_pr_worktree"] = item.worktree
+                item.payload["review_worktree"] = item.worktree
+        elif isinstance(value, str):
+            item.worktree = value
+            if item.worktree:
+                item.payload["direct_pr_worktree"] = item.worktree
+                item.payload["review_worktree"] = item.worktree
+        else:
+            item.payload["direct_pr_worktree_error"] = "worktree job returned no path"
 
     @staticmethod
     def _on_job_failed(item: WorkItem, result: JobResult) -> None:

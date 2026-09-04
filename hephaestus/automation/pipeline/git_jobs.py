@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TypeGuard
+from typing import Any
 
 GIT_OPS: frozenset[str] = frozenset(
     {
@@ -23,26 +23,6 @@ GIT_OPS: frozenset[str] = frozenset(
 )
 
 WORKTREE_MATERIALIZED_KEY = "worktree_materialized"
-
-
-def is_full_commit_sha(value: object) -> TypeGuard[str]:
-    """Return whether ``value`` is a complete lower-case commit SHA."""
-    return bool(
-        isinstance(value, str)
-        and len(value) in (40, 64)
-        and all(character in "0123456789abcdef" for character in value)
-    )
-
-
-def validate_commit_push_receipt(value: object) -> dict[str, object] | None:
-    """Return a closed commit/push receipt, or ``None`` for malformed data."""
-    if type(value) is not dict or set(value) != {"pushed", "head_sha"}:
-        return None
-    pushed = value.get("pushed")
-    head_sha = value.get("head_sha")
-    if type(pushed) is not bool or not is_full_commit_sha(head_sha):
-        return None
-    return {"pushed": pushed, "head_sha": head_sha}
 
 
 @dataclass(frozen=True)

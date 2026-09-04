@@ -17,7 +17,7 @@ class RebaseValidationPolicy:
 
     name: str
     semantic_validator: RebaseSemanticValidator
-    structural_test_argv: tuple[str, ...] | None
+    structural_test_argv: tuple[str, ...]
 
 
 RebasePolicySelector = Callable[[str], RebaseValidationPolicy | None]

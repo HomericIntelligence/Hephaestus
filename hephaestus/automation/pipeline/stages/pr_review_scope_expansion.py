@@ -109,9 +109,6 @@ class PrReviewScopeExpansionMixin:
             item.payload.pop(_POST_REMEDIATION_REVIEW_HEAD, None)
             item.payload.pop(_POST_REMEDIATION_REVIEW_HEAD_RETRIES, None)
             item.payload.pop("retry_delay_s", None)
-        visibility_outcome = self._implementation_head_visibility_outcome(item, head_sha)
-        if visibility_outcome is not None:
-            return cast(StepResult, visibility_outcome)
         request = ReconcileScopeExpansionDependenciesRequest(
             issue_number=_issue_number(item),
             pr_number=item.pr,

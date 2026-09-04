@@ -34,7 +34,6 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
-from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -797,7 +796,7 @@ class TestWorkerPoolSubmitComplete:
     ) -> None:
         """A failed /compact never blocks the next review round."""
         job = CompactJob(
-            repo="Hephaestus",
+            repo="test/repo",
             issue=123,
             agent="claude",
             session_agent="implementer",
@@ -814,7 +813,7 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert result.value is False
         compact.assert_called_once_with(
-            repo="Hephaestus",
+            repo="test/repo",
             issue=123,
             provider="claude",
             session_agent="implementer",
@@ -2494,114 +2493,6 @@ class TestGitOps:
             "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
         }
 
-    def test_create_worktree_adopts_clean_implementation_receipt(
-        self,
-        pool: WorkerPool,
-        tmp_path: Path,
-    ) -> None:
-        """A clean implementation checkout is handed to the source-lane owner."""
-        worktree = tmp_path / "build" / ".worktrees" / "auto-7-impl"
-        job = GitJob(
-            repo="Hephaestus",
-            op="create_worktree",
-            timeout_s=60,
-            kwargs={
-                "issue_number": 7,
-                "branch_name": "7-auto-impl",
-                "repo_root": str(tmp_path),
-                "source_lane": "impl",
-                "source_workspace_expected_revision": "b" * 40,
-            },
-            expected_repository="HomericIntelligence/Hephaestus",
-        )
-        manager = MagicMock()
-        manager.create_worktree.return_value = worktree
-        worktree.mkdir(parents=True)
-        source_manager = MagicMock()
-        binding = WorkspaceBinding.source(
-            cwd=worktree,
-            reusable_root=tmp_path,
-            repository="Hephaestus",
-            ownership_key="owner-key",
-            item_number=7,
-            lane=SourceLane.IMPLEMENTATION,
-            revision="b" * 40,
-            generation=1,
-            detached=False,
-        )
-        source_manager.claim_implementation_writer.return_value = binding
-        with (
-            patch(f"{_WP}.WorktreeManager", return_value=manager),
-            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as manager_type,
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-        ):
-            result = pool._git_create_worktree(job)
-
-        assert result.ok is True
-        manager_type.assert_called_once_with(
-            tmp_path,
-            repository="Hephaestus",
-            base_dir=worktree.parent,
-        )
-        source_manager.claim_implementation_writer.assert_called_once_with(
-            7,
-            branch="7-auto-impl",
-            path=worktree,
-            authority=ANY,
-            handoff=ANY,
-            expected_revision="b" * 40,
-        )
-        assert result.value == {
-            "path": str(worktree),
-            "impl_source_revision": "b" * 40,
-            "workspace_binding": binding,
-            "workspace_revision": "b" * 40,
-            "branch": "7-auto-impl",
-        }
-
-    def test_create_worktree_reports_source_receipt_rejection(
-        self,
-        pool: WorkerPool,
-        tmp_path: Path,
-    ) -> None:
-        """A rejected writer handoff preserves the materialized checkout."""
-        worktree = tmp_path / "build" / ".worktrees" / "auto-7-impl"
-        job = GitJob(
-            repo="test/repo",
-            op="create_worktree",
-            timeout_s=60,
-            kwargs={
-                "issue_number": 7,
-                "branch_name": "7-auto-impl",
-                "repo_root": str(tmp_path),
-                "source_lane": "impl",
-                "source_workspace_expected_revision": "a" * 40,
-            },
-        )
-        manager = MagicMock()
-        manager.create_worktree.return_value = worktree
-        worktree.mkdir(parents=True)
-        source_manager = MagicMock()
-        source_manager.claim_implementation_writer.side_effect = SourceWorkspaceError(
-            "implementation writer checkout is not an active owned worktree"
-        )
-        with (
-            patch(f"{_WP}.WorktreeManager", return_value=manager),
-            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-        ):
-            result = pool._git_create_worktree(job)
-
-        assert result.ok is False
-        assert result.error == (
-            "source_workspace_ownership_unavailable: "
-            "implementation writer checkout is not an active owned worktree"
-        )
-        assert result.value == {
-            "path": str(worktree),
-            WORKTREE_MATERIALIZED_KEY: True,
-        }
-
     @pytest.mark.parametrize("changed_kind", ["staged", "untracked", "untracked_newline"])
     def test_recover_dirty_worktree_rejects_byte_drift_with_unchanged_status(
         self,
@@ -3864,17 +3755,7 @@ class TestGitOps:
         writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
         writer_path.mkdir(parents=True)
         authority = MagicMock(spec=ImplementationWriterAuthority)
-        binding = WorkspaceBinding.source(
-            cwd=writer_path,
-            reusable_root=tmp_path,
-            repository="test/repo",
-            ownership_key="owner-key",
-            item_number=7,
-            lane=SourceLane.IMPLEMENTATION,
-            revision=pinned_sha,
-            generation=1,
-            detached=False,
-        )
+        binding = MagicMock(revision=pinned_sha)
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
@@ -3932,15 +3813,11 @@ class TestGitOps:
             path=writer_path,
             authority=authority,
             handoff=ANY,
-            expected_revision=None,
         )
         assert result.ok is True
         assert result.value == {
             "path": str(writer_path),
             "impl_source_revision": pinned_sha,
-            "workspace_binding": binding,
-            "workspace_revision": pinned_sha,
-            "branch": "7-auto",
             "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
         }
 
@@ -4340,18 +4217,7 @@ class TestGitOps:
         authority = ImplementationWriterAuthority("authority-token")
         worktree_manager.implementation_writer_authority.return_value = authority
         source_manager = MagicMock()
-        binding = WorkspaceBinding.source(
-            cwd=writer_path,
-            reusable_root=tmp_path,
-            repository="test/repo",
-            ownership_key="owner-key",
-            item_number=7,
-            lane=SourceLane.IMPLEMENTATION,
-            revision="b" * 40,
-            generation=1,
-            detached=False,
-        )
-        source_manager.claim_implementation_writer.return_value = binding
+        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
@@ -4371,16 +4237,12 @@ class TestGitOps:
             path=writer_path,
             authority=authority,
             handoff=ANY,
-            expected_revision=None,
         )
         worktree_manager.implementation_writer_authority.assert_called_once_with(writer_path)
         assert result.ok is True
         assert result.value == {
             "path": str(writer_path),
             "impl_source_revision": "b" * 40,
-            "workspace_binding": binding,
-            "workspace_revision": "b" * 40,
-            "branch": "7-auto",
         }
 
     def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
@@ -4407,17 +4269,6 @@ class TestGitOps:
         worktree_manager = MagicMock()
         worktree_manager.create_worktree.return_value = writer_path
         source_manager = MagicMock()
-        source_manager.claim_implementation_writer.return_value = WorkspaceBinding.source(
-            cwd=writer_path,
-            reusable_root=tmp_path,
-            repository="org/repo",
-            ownership_key="owner-key",
-            item_number=7,
-            lane=SourceLane.IMPLEMENTATION,
-            revision="b" * 40,
-            generation=1,
-            detached=False,
-        )
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
@@ -4462,17 +4313,7 @@ class TestGitOps:
         authority = ImplementationWriterAuthority("authority-token")
         worktree_manager.implementation_writer_authority.return_value = authority
         source_manager = MagicMock()
-        source_manager.claim_implementation_writer.return_value = WorkspaceBinding.source(
-            cwd=writer_path,
-            reusable_root=tmp_path,
-            repository="test/repo",
-            ownership_key="owner-key",
-            item_number=7,
-            lane=SourceLane.IMPLEMENTATION,
-            revision="b" * 40,
-            generation=1,
-            detached=False,
-        )
+        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
         with (
             patch.object(pool, "_prepare_direct_scope_worktree", return_value=(base_sha, "7-auto")),
             patch.object(
@@ -4609,17 +4450,6 @@ class TestGitOps:
         with (
             patch.object(pool, "_sync_worktree_to_remote_branch") as sync,
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch(
-                f"{_WP}.git_utils.run",
-                side_effect=(
-                    [
-                        subprocess.CompletedProcess([], 0, stdout="\n"),
-                        subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n"),
-                    ]
-                    if source_lane == "review"
-                    else None
-                ),
-            ),
             patch(f"{_WP}.SourceWorkspaceManager") as source_manager,
         ):
             result = pool._finalize_created_worktree(
@@ -4638,13 +4468,6 @@ class TestGitOps:
 
         assert result.ok is True
         sync.assert_called_once()
-        if source_lane == "review":
-            assert result.value == {
-                "path": str(checkout),
-                "head_sha": "a" * 40,
-                "detached": True,
-                "dirty": False,
-            }
         manager.mint_adopted_implementation_writer_authority.assert_not_called()
         source_manager.assert_not_called()
 
@@ -4843,53 +4666,6 @@ class TestGitOps:
             "dirty": False,
             "status": "",
             "diff": "",
-        }
-
-    def test_create_isolated_review_worktree_returns_an_immutable_head_receipt(
-        self,
-        pool: WorkerPool,
-        tmp_path: Path,
-    ) -> None:
-        """A detached review checkout returns its exact head and state."""
-        review_path = tmp_path / "build" / ".worktrees" / "pr-review-pr-70"
-        review_path.mkdir(parents=True)
-        job = GitJob(
-            repo="test/repo",
-            op="create_worktree",
-            timeout_s=60,
-            kwargs={
-                "issue_number": 70,
-                "branch_name": "70-existing",
-                "isolated": True,
-                "repo_root": str(tmp_path),
-                "sync_to_remote": False,
-                "pr_number": 70,
-                "source_lane": "review",
-            },
-        )
-        instance = MagicMock()
-        instance.create_worktree.return_value = review_path
-
-        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            if args == ["git", "rev-parse", "HEAD"]:
-                return subprocess.CompletedProcess(args, 0, stdout=f"{'b' * 40}\n")
-            if args == ["git", "branch", "--show-current"]:
-                return subprocess.CompletedProcess(args, 0, stdout="\n")
-            raise AssertionError(args)
-
-        with (
-            patch(f"{_WP}.WorktreeManager", return_value=instance),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch(f"{_WP}.git_utils.run", side_effect=run_git),
-        ):
-            result = pool._git_create_worktree(job)
-
-        assert result.ok is True
-        assert result.value == {
-            "path": str(review_path),
-            "head_sha": "b" * 40,
-            "detached": True,
-            "dirty": False,
         }
 
     def test_verify_pr_review_checkout_rejects_a_dirty_worktree(
@@ -6052,9 +5828,9 @@ class TestGitOps:
         ]
 
     @staticmethod
-    def _continue_rebase_job(tmp_path: Path) -> GitJob:
+    def _continue_rebase_job(tmp_path: Path, *, repo: str = "Hephaestus") -> GitJob:
         return GitJob(
-            repo="Hephaestus",
+            repo=repo,
             op="continue_rebase",
             timeout_s=60,
             kwargs={
@@ -6090,68 +5866,7 @@ class TestGitOps:
         assert result.error == "rebase conflict resolution required: agent made no file changes"
         run.assert_not_called()
 
-    def test_rebase_semantic_validation_rejects_duplicate_adr_numbers(
-        self, pool: WorkerPool, tmp_path: Path
-    ) -> None:
-        """A resolved README conflict cannot publish duplicate ADR identities."""
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
-        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
-        (adr_dir / "README.md").write_text(
-            "- [Durable plan review conversations](0027-durable-plan-review-conversations.md)\n"
-            "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
-        )
-
-        result = pool._validate_rebased_tree(
-            tmp_path,
-            policy=pool._select_rebase_policy("Hephaestus"),
-        )
-
-        assert result == JobResult(
-            ok=False,
-            value={
-                "failure_kind": "semantic_validation",
-                "rebase_policy": "hephaestus-adr-v1",
-            },
-            error=(
-                "rebase policy hephaestus-adr-v1 semantic validation failed: "
-                "rebase semantic validation failed: duplicate ADR number 0027 "
-                "(0027-durable-plan-review-conversations.md, "
-                "0027-host-owned-learning-preparation.md)"
-            ),
-        )
-
-    def test_rebase_semantic_validation_rejects_malformed_adr_record(
-        self, pool: WorkerPool, tmp_path: Path
-    ) -> None:
-        """An ADR that bypasses the duplicate check still cannot be published."""
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "0001-first-decision.md").write_text(
-            "# ADR-0001: First decision\n- Status: Accepted\n"
-        )
-        (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
-
-        result = pool._validate_rebased_tree(
-            tmp_path,
-            policy=pool._select_rebase_policy("Hephaestus"),
-        )
-
-        assert result == JobResult(
-            ok=False,
-            value={
-                "failure_kind": "semantic_validation",
-                "rebase_policy": "hephaestus-adr-v1",
-            },
-            error=(
-                "rebase policy hephaestus-adr-v1 semantic validation failed: "
-                "rebase semantic validation failed: malformed ADR record "
-                "0001-first-decision.md"
-            ),
-        )
-
-    def test_continue_rebase_does_not_publish_semantically_invalid_tree(
+    def test_continue_rebase_selected_policy_semantic_failure_does_not_publish(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
         """Semantic validation fails closed after Git completes and before push."""
@@ -6160,6 +5875,9 @@ class TestGitOps:
         adr_dir.mkdir(parents=True)
         (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
         (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        structural_test = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        structural_test.parent.mkdir(parents=True)
+        structural_test.write_text("# structural test\n", encoding="utf-8")
         job = self._continue_rebase_job(tmp_path)
         receipt = {
             "conflict_paths": ("x.py",),
@@ -6176,7 +5894,8 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
-            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch.object(pool, "_run_immutable_build_test", return_value=JobResult(ok=True)),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
@@ -6196,15 +5915,77 @@ class TestGitOps:
         )
         push.assert_not_called()
 
-    def test_continue_rebase_runs_repository_structural_validation_before_publish(
+    def test_continue_rebase_selected_policy_structural_failure_does_not_publish(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """The repository-owned ADR test runs after continuation and before push."""
+        """A selected structural failure stops publication and keeps diagnostics."""
         (tmp_path / "x.py").write_text("resolved\n")
         test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
         test_path.parent.mkdir(parents=True)
         test_path.write_text("# repository-owned structural test\n")
+        failed = JobResult(
+            ok=False,
+            value={"failure_kind": "validation"},
+            error="rc=1",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
         job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="x.py\0")
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=0, stdout="")
+            if argv[:3] == ["git", "rev-list", "--reverse"]:
+                return MagicMock(returncode=0, stdout="c" * 40)
+            if argv[:3] == ["git", "cat-file", "-p"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
+                        "Signed-off-by: Test User <test@example.com>\n"
+                    ),
+                )
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch.object(pool, "_run_immutable_build_test", return_value=failed),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "validation", "rebase_policy": "hephaestus-adr-v1"},
+            error="rebase policy hephaestus-adr-v1 structural validation failed: rc=1",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
+        push.assert_not_called()
+
+    def test_continue_rebase_unconfigured_target_adr_layout_publishes(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An unconfigured target publishes after a valid conflict continuation."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "index.md").write_text("# Index\n", encoding="utf-8")
+        (adr_dir / "0000-template.md").write_text("# Template\n", encoding="utf-8")
+        (adr_dir / "0001-fleet-routing.md").write_text("# Fleet routing\n", encoding="utf-8")
+        job = self._continue_rebase_job(tmp_path, repo="Comet")
         receipt = {
             "conflict_paths": ("x.py",),
             "conflict_snapshot": {"x.py": "after"},
@@ -6236,21 +6017,28 @@ class TestGitOps:
             patch.object(
                 pool,
                 "_run_rebase_structural_validation",
-                create=True,
-                return_value=None,
-            ) as validate,
+                wraps=pool._run_rebase_structural_validation,
+            ) as structural,
+            patch.object(
+                pool, "_validate_rebased_tree", wraps=pool._validate_rebased_tree
+            ) as semantic,
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
             result = pool._git_continue_rebase(job)
 
-        assert result.ok is True
-        validate.assert_called_once_with(
-            tmp_path,
-            timeout=60,
-            policy=pool._select_rebase_policy("Hephaestus"),
+        assert result == JobResult(
+            ok=True,
+            value={
+                "rebased": True,
+                "published": True,
+                "head_sha": "d" * 40,
+                "rebase_policy": None,
+            },
         )
+        structural.assert_called_once_with(tmp_path, timeout=60, policy=None)
+        semantic.assert_called_once_with(tmp_path, policy=None)
         push.assert_called_once()
 
     def test_rebase_structural_validation_preserves_bounded_diagnostics(
@@ -6286,34 +6074,6 @@ class TestGitOps:
             stderr_tail="pytest diagnostics",
         )
         run_test.assert_called_once()
-
-    def test_rebase_semantic_validation_unaffected_without_injected_policy(
-        self, shutdown_event: threading.Event, completion_q: CompletionQueue, tmp_path: Path
-    ) -> None:
-        """A different valid ADR layout passes when no repository policy is injected.
-
-        The shared executor must not apply the owning repository's ADR
-        filename/section/README-index contract to another repository.  A
-        policy-free pool leaves a non-4-digit ADR layout with a custom
-        section structure untouched.
-        """
-        policy_free = WorkerPool(
-            size=1,
-            shutdown=shutdown_event,
-            completion_q=completion_q,
-            lock_dir=tmp_path / "locks",
-        )
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "01-fleet-routing.md").write_text(
-            "# ADR-01: Fleet routing\n- Status: Accepted\n- Date: 2026-01-01\n"
-        )
-        (adr_dir / "README.md").write_text("- [Fleet routing](01-fleet-routing.md)\n")
-
-        assert policy_free._validate_rebased_tree(tmp_path) is None
-        assert policy_free._run_rebase_structural_validation(tmp_path, timeout=60) is None
-
-        policy_free.shutdown()
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path

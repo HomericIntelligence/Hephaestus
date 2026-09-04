@@ -197,25 +197,13 @@ class FakeWorkerPool:
             return JobResult(ok=True, value=True)
         # GitJob: mirror the real _dispatch_git_op value semantics so
         # coordinator tests reading result.value see the same shapes —
-        # rebase reports clean-rebase True; commit_push reports its closed
-        # publication receipt.
-        if job.op == "rebase":
-            return JobResult(ok=True, value={"rebased": True, "head_sha": "a" * 40})
-        if job.op == "commit_push":
-            return JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40})
+        # rebase reports clean-rebase True, commit_push reports changed True.
+        if job.op in ("rebase", "commit_push"):
+            return JobResult(ok=True, value=True)
         if job.op == "sync_checkout":
             return JobResult(ok=True, value="a" * 40)
         if job.op == "verify_pr_review_checkout":
-            return JobResult(
-                ok=True,
-                value={
-                    "ready": True,
-                    "head": "a" * 40,
-                    "base": "a" * 40,
-                    "diff": "checkout diff",
-                    "changed_paths": [],
-                },
-            )
+            return JobResult(ok=True, value={"ready": True, "diff": "checkout diff"})
         return JobResult(ok=True)
 
     def shutdown(self, *, mark_interrupted: bool = True) -> None:

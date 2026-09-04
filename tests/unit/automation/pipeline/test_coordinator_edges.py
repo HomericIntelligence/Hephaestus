@@ -324,34 +324,6 @@ class TestWiring:
         assert ctx.paths.worktree == checkout
         assert ctx.paths.projects_dir == tmp_path / "projects"
 
-    def test_source_workspace_uses_canonical_transport_repository_identity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Worker and coordinator source receipts use one repository identity."""
-        checkout = tmp_path / "Hephaestus"
-        checkout.mkdir()
-        (checkout / ".git").mkdir()
-        manager = MagicMock()
-        manager_type = MagicMock(return_value=manager)
-        monkeypatch.setattr(
-            "hephaestus.automation.source_worktree.SourceWorkspaceManager", manager_type
-        )
-        coordinator = Coordinator(
-            PipelineConfig(
-                org="HomericIntelligence",
-                repos=["Hephaestus"],
-                projects_dir=tmp_path,
-            ),
-            github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            install_signals=False,
-        )
-
-        ctx = coordinator._ctx_for_repo("Hephaestus")
-        ctx.paths.source_workspaces()
-
-        manager_type.assert_called_once_with(checkout, repository="HomericIntelligence/Hephaestus")
-
     def test_budget_lookup_known_and_default(self) -> None:
         assert _budget_lookup("clone") == 2
         assert _budget_lookup("nonexistent") == 1

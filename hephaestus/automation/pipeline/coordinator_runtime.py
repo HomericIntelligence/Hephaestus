@@ -90,7 +90,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 worktree=root,
                 projects_dir=Path(self.config.projects_dir),
                 source_workspaces=lambda: (
-                    SourceWorkspaceManager(root, repository=f"{self.config.org}/{repo}")
+                    SourceWorkspaceManager(root, repository=repo)
                     if (root / ".git").exists()
                     else None
                 ),

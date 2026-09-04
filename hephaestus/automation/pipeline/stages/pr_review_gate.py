@@ -2,12 +2,11 @@
 # ruff: noqa: F403, F405
 from hephaestus.automation.review_audit import is_clean_go_review
 
-from .pr_review_barriers import PrReviewGoReadbackMixin, PrReviewHeadVisibilityMixin
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
 
-class PrReviewGate(PrReviewGoReadbackMixin, PrReviewScopeExpansionMixin, _PrReviewHost):
+class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
     """Own bounded review iteration, label proofs, and GO/NO-GO routing."""
 
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
@@ -23,9 +22,6 @@ class PrReviewGate(PrReviewGoReadbackMixin, PrReviewScopeExpansionMixin, _PrRevi
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
-
-        if payload.pop("push_receipt_invalid", None):
-            return StageOutcome(Disposition.FINISH_FAIL, "commit_push_receipt_invalid")
 
         if scope_failure := self._scope_retraction_failure(item):
             return scope_failure
@@ -487,15 +483,96 @@ class PrReviewGate(PrReviewGoReadbackMixin, PrReviewScopeExpansionMixin, _PrRevi
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         live_head = str(pr_state.get("headRefOid") or "")
-        source_guard = PrReviewHeadVisibilityMixin._implementation_head_visibility_outcome(
-            item, live_head
-        )
-        if source_guard is not None:
-            return source_guard
         if not reviewed_head or not live_head or reviewed_head != live_head:
             item.payload.pop("reviewed_pr_head_sha", None)
             return Continue(next_state=REVIEW_WAIT)
         return None
+
+    @staticmethod
+    def _revalidate_go_write(item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Check the nonconditional GO write against fresh state and labels.
+
+        GitHub exposes no conditional label mutation. A push or external
+        label write can therefore race after the pre-write guard. A read after
+        our write cannot prove who owns an exclusive GO label, so a changed or
+        missing reviewed head only discards this process's proof and restarts
+        review. A complete thread read after the label write detects review
+        activity in the remaining admission window. This run cannot establish
+        ownership of a label after that race, so it preserves the live
+        threads for a fresh automation pass and makes no further label
+        mutation.
+        """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_number = item.pr
+        try:
+            state = ctx.github.gh_pr_state(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to revalidate GO write on PR #%d (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        if isinstance(state, dict) and state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        live_head = str(state.get("headRefOid") or "") if isinstance(state, dict) else ""
+        if not reviewed_head or not live_head or reviewed_head != live_head:
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return Continue(next_state=REVIEW_WAIT)
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to reread review threads after GO write on PR #%d (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
+        if live_threads:
+            return PrReviewStage._handle_late_threads_after_go_write(
+                item,
+                len(live_threads),
+                ctx,
+            )
+        try:
+            has_go, has_no_go = ctx.github.pr_has_implementation_state_label(pr_number)
+        except Exception as error:
+            logger.warning(
+                "pr_review: failed to revalidate GO write on PR #%d (%s)",
+                pr_number,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+        if _is_confirmed_open_unarmed(state) and has_go and not has_no_go:
+            return None
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
+
+    @staticmethod
+    def _handle_late_threads_after_go_write(
+        item: WorkItem,
+        unresolved_threads: int,
+        ctx: StageContext,
+    ) -> StageOutcome:
+        """Stand down after a post-GO thread race without touching state labels.
+
+        The GO write is non-conditional. A concurrent actor may own the current
+        implementation state by the time the late thread is observed, so
+        clearing or replacing a label would be an unsafe mutation. The next
+        loop invocation must start a new review proof before it can validate
+        and reconcile those threads.
+        """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        logger.warning(
+            "pr_review:%d: %d review thread(s) appeared during GO admission on PR #%d; "
+            "standing down without label changes",
+            item.issue,
+            unresolved_threads,
+            item.pr,
+        )
+        return StageOutcome(Disposition.FINISH_FAIL, "review_activity_changed")
 
     @staticmethod
     def _bind_current_head_for_negative(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -512,11 +589,6 @@ class PrReviewGate(PrReviewGoReadbackMixin, PrReviewScopeExpansionMixin, _PrRevi
         head = str(state.get("headRefOid") or "")
         if not head:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_head_unavailable")
-        source_guard = PrReviewHeadVisibilityMixin._implementation_head_visibility_outcome(
-            item, head
-        )
-        if source_guard is not None:
-            return source_guard
         item.payload["reviewed_pr_head_sha"] = head
         return None
 
@@ -597,11 +669,6 @@ class PrReviewGate(PrReviewGoReadbackMixin, PrReviewScopeExpansionMixin, _PrRevi
                 return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
             reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
             live_head = str(state.get("headRefOid") or "")
-            source_guard = PrReviewHeadVisibilityMixin._implementation_head_visibility_outcome(
-                item, live_head
-            )
-            if source_guard is not None:
-                return source_guard
             if not reviewed_head or reviewed_head != live_head:
                 item.payload.pop("reviewed_pr_head_sha", None)
                 return Continue(next_state=REVIEW_WAIT)
@@ -612,11 +679,6 @@ class PrReviewGate(PrReviewGoReadbackMixin, PrReviewScopeExpansionMixin, _PrRevi
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
             if state.get("autoMergeRequest") is not None:
                 return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-            source_guard = PrReviewHeadVisibilityMixin._implementation_head_visibility_outcome(
-                item, str(state.get("headRefOid") or "")
-            )
-            if source_guard is not None:
-                return source_guard
             if (
                 not _is_confirmed_open_unarmed(state)
                 or str(state.get("headRefOid") or "") != reviewed_head

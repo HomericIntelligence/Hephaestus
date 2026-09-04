@@ -75,15 +75,7 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             ):
                 stage.on_job_done(
                     item,
-                    JobResult(
-                        ok=True,
-                        value={
-                            "path": "/tmp/detached-review",
-                            "head_sha": "a" * 40,
-                            "detached": True,
-                            "dirty": False,
-                        },
-                    ),
+                    JobResult(ok=True, value={"path": "/tmp/detached-review", "dirty": False}),
                     ctx,
                 )
                 item.state = result.on_done_state
@@ -91,16 +83,7 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
                 stage.on_job_done(
                     item,
-                    JobResult(
-                        ok=True,
-                        value={
-                            "ready": True,
-                            "head": "a" * 40,
-                            "base": "a" * 40,
-                            "diff": "checkout diff",
-                            "changed_paths": [],
-                        },
-                    ),
+                    JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
                     ctx,
                 )
                 item.state = result.on_done_state
@@ -233,7 +216,6 @@ def test_pushed_remediation_head_survives_stale_review_entry_read(
         def __init__(self) -> None:
             super().__init__()
             self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
-            self.review_heads = deque(("a" * 40, "b" * 40))
 
         def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
             del pr_number
@@ -244,13 +226,6 @@ def test_pushed_remediation_head_survives_stale_review_entry_read(
                 "autoMergeRequest": None,
                 "baseRefName": "main",
             }
-
-        def pr_review_context(self, pr_number: int) -> dict[str, str]:
-            del pr_number
-            head = (
-                self.review_heads.popleft() if len(self.review_heads) > 1 else self.review_heads[0]
-            )
-            return {"pr_head_sha": head}
 
     github = SequencedHeadGitHub()
     ctx = make_ctx(github=github)
@@ -296,18 +271,20 @@ def test_pushed_remediation_head_survives_stale_review_entry_read(
             "_scope_dependency_receipt_error": "stale error",
         }
     )
-    retry = review.on_enter(review_item, ctx)
-
-    assert retry == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
-    assert review_item.payload["review_head_visibility_retries"] == 1
-    assert "_scope_dependency_pending_request" in review_item.payload
-
     assert review.on_enter(review_item, ctx) is None
-    request_job = review.step(review_item, ctx)
 
-    assert isinstance(request_job, JobRequest)
-    assert isinstance(request_job.job, GitHubJob)
-    request = request_job.job.request
+    first = review.step(review_item, ctx)
+
+    assert isinstance(first, StageOutcome)
+    assert first.disposition is Disposition.RETRY
+    assert not isinstance(first, JobRequest)
+    assert "_scope_dependency_pending_request" not in review_item.payload
+
+    second = review.step(review_item, ctx)
+
+    assert isinstance(second, JobRequest)
+    assert isinstance(second.job, GitHubJob)
+    request = second.job.request
     assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
     assert request.source_head_sha == "b" * 40
 

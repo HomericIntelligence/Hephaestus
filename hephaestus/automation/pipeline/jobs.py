@@ -18,12 +18,7 @@ from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.workspace import WorkspaceBinding, validate_workspace_binding
 
-from .git_jobs import (
-    GIT_OPS,
-    WORKTREE_MATERIALIZED_KEY,
-    GitJob,
-    validate_commit_push_receipt,
-)
+from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
 from .job_results import JobHandle, JobResult
 
 __all__ = [
@@ -36,7 +31,6 @@ __all__ = [
     "JobHandle",
     "JobResult",
     "JobWorkspaceError",
-    "validate_commit_push_receipt",
     "validate_job_workspace",
 ]
 

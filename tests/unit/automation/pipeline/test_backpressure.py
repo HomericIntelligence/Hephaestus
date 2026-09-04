@@ -103,7 +103,7 @@ def test_coordinator_passes_extra_gh_root_to_worker_pool(
     assert coordinator.pool.gh_extra_path_root == tmp_path
 
 
-def test_coordinator_wires_the_production_rebase_policy_selector(
+def test_coordinator_passes_bound_rebase_policy_selector_to_recording_pool(
     tmp_path: Path,
 ) -> None:
     """The production pool receives the selector for the configured organization."""
