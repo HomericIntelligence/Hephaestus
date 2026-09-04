@@ -24,6 +24,7 @@ from hephaestus.automation.pipeline.stages import (
     plan_review,
     planning,
     pr_review,
+    pr_review_jobs,
 )
 
 _STAGE_MODULES: dict[StageName, ModuleType] = {
@@ -32,6 +33,14 @@ _STAGE_MODULES: dict[StageName, ModuleType] = {
     StageName.IMPLEMENTATION: implementation,
     StageName.PR_REVIEW: pr_review,
     StageName.MERGE_WAIT: merge_wait,
+}
+
+# A stage can emit a routed outcome from an inherited mixin.  Scan those
+# runtime owners too, so the vocabulary lock follows method resolution rather
+# than only the façade's source file.
+_STAGE_REASON_MODULES: dict[StageName, tuple[ModuleType, ...]] = {
+    **{stage_name: (module,) for stage_name, module in _STAGE_MODULES.items()},
+    StageName.PR_REVIEW: (pr_review, pr_review_jobs),
 }
 
 #: Reasons each stage is EXPECTED to emit (lock: additions must edit this).
@@ -73,11 +82,24 @@ def _fail_back_reason_literals(module: ModuleType) -> set[str]:
     return reasons
 
 
+def _stage_fail_back_reason_literals(stage_name: StageName) -> set[str]:
+    """Return the FAIL_BACK literals declared by a stage's runtime owners."""
+    return {
+        reason
+        for module in _STAGE_REASON_MODULES[stage_name]
+        for reason in _fail_back_reason_literals(module)
+    }
+
+
+def test_pr_review_inherited_remediation_reason_is_scanned() -> None:
+    """PR review vocabulary includes the inherited remediation fail-back."""
+    assert "implementation_remediation" in _stage_fail_back_reason_literals(StageName.PR_REVIEW)
+
+
 @pytest.mark.parametrize("stage_name", list(_STAGE_MODULES), ids=lambda s: s.value)
 def test_every_fail_back_reason_is_routes_covered(stage_name: StageName) -> None:
     """Each emitted FAIL_BACK reason literal resolves in the stage's row."""
-    module = _STAGE_MODULES[stage_name]
-    reasons = _fail_back_reason_literals(module)
+    reasons = _stage_fail_back_reason_literals(stage_name)
     fail_routes = ROUTES[stage_name].fail_routes
     uncovered = {r for r in reasons if r not in fail_routes and "*" not in fail_routes}
     assert not uncovered, (
@@ -89,8 +111,7 @@ def test_every_fail_back_reason_is_routes_covered(stage_name: StageName) -> None
 @pytest.mark.parametrize("stage_name", list(_STAGE_MODULES), ids=lambda s: s.value)
 def test_emitted_reason_set_is_pinned(stage_name: StageName) -> None:
     """The set of emitted reasons matches the lock (no silent vocabulary drift)."""
-    module = _STAGE_MODULES[stage_name]
-    assert _fail_back_reason_literals(module) == _EXPECTED_REASONS[stage_name]
+    assert _stage_fail_back_reason_literals(stage_name) == _EXPECTED_REASONS[stage_name]
 
 
 def test_scan_is_not_vacuous() -> None:

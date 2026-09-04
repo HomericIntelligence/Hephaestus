@@ -56,12 +56,6 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
         item.payload["agent_error_failback"] = True
         return StageOutcome(Disposition.FAIL_BACK, "agent_error")
 
-    @staticmethod
-    def _fail_back_implementation_remediation(item: WorkItem) -> StageOutcome:
-        """Route unresolved review work back to implementation."""
-        item.payload["implementation_remediation"] = True
-        return StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
-
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Execute the next PR-review action for the item's current state.
 
