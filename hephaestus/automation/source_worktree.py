@@ -196,11 +196,15 @@ class SourceWorkspaceManager:
             path_already_at_target = (
                 path.exists()
                 and physical_revision == target
-                and old is not None
-                and old.path.resolve() == path.resolve()
-                and old.detached == desired_detached
-                and old.branch == branch
                 and physical_checkout_matches
+                and (
+                    old is None
+                    or (
+                        old.path.resolve() == path.resolve()
+                        and old.detached == desired_detached
+                        and old.branch == branch
+                    )
+                )
             )
             if not can_reuse and not path_already_at_target:
                 owns_branch = (

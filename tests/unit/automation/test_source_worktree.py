@@ -154,6 +154,29 @@ def test_implementation_rebinds_clean_stale_branch_to_exact_revision(
     assert _git(rebound.cwd, "symbolic-ref", "HEAD") == "refs/heads/expected-implementation-branch"
 
 
+def test_implementation_adopts_clean_fresh_writer_worktree_without_receipt(
+    tmp_path: Path,
+) -> None:
+    """A new writer worktree becomes the matching implementation source lane."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer_branch = "9-auto-impl"
+    writer_path = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    writer_path.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "-b", writer_branch, str(writer_path), second)
+
+    binding = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch=writer_branch,
+    )
+
+    assert binding.cwd == writer_path
+    assert binding.revision == second
+    assert _git(binding.cwd, "symbolic-ref", "HEAD") == f"refs/heads/{writer_branch}"
+
+
 def test_implementation_preserves_branch_held_by_another_worktree(
     tmp_path: Path,
 ) -> None:
