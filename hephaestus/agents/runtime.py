@@ -772,7 +772,7 @@ def _validate_pi_model_references_before_admission(
         return
     if not model_references:
         raise ValueError("Pi model references must not be empty")
-    for reference in dict.fromkeys(model_references):
+    for reference in model_references:
         _resolve_pi_model_selection(reference, pi_dir=pi_dir)
 
 

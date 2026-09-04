@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,30 @@ def test_model_reference_preserves_colon_for_an_unregistered_model() -> None:
     model = "ollama/qwen:high"
 
     assert agent_config.normalize_model_reference(model) == model
+
+
+@pytest.mark.parametrize("model", ["private-model", "ollama/qwen:high"])
+def test_unregistered_model_keeps_operator_warning(
+    model: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unregistered model remains usable and warns the operator."""
+    with caplog.at_level(logging.WARNING, logger=agent_config.__name__):
+        assert agent_config.reviewer_model(model, agent="pi") == model
+
+    assert "Unknown model" in caplog.text
+    assert model in caplog.text
+
+
+def test_registered_ifm_model_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    """A registered IFM model does not produce an unknown-model warning."""
+    with caplog.at_level(logging.WARNING, logger=agent_config.__name__):
+        assert (
+            agent_config.reviewer_model("IFM/K2-Horizon-0.9B:high", agent="pi")
+            == "IFM/K2-Horizon-0.9B:high"
+        )
+
+    assert "Unknown model" not in caplog.text
 
 
 @pytest.mark.parametrize("agent", ["opencode", "pi"])

@@ -800,6 +800,41 @@ def test_resolve_agent_rejects_invalid_pi_defaults_before_admission(
     assert calls == []
 
 
+def test_resolve_agent_validates_equal_pi_references_with_distinct_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """String equality must not hide a structured Pi default selection."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text("{", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda *_args, **_kwargs: calls.append("admission"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_isolation_adapter",
+        lambda *_args, **_kwargs: calls.append("isolation"),
+    )
+
+    plain_reference = "private/custom-model:default"
+    structured_reference = AgentModelSelection("private/custom-model", "default")
+    assert plain_reference == structured_reference
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_agent(
+            "pi",
+            cwd=tmp_path,
+            pi_dir=pi_dir,
+            model_references=(plain_reference, structured_reference),
+        )
+
+    assert calls == []
+
+
 def test_pi_resume_rejects_a_changed_operator_default(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
