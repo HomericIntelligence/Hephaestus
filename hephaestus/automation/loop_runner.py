@@ -741,9 +741,20 @@ def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) ->
             f"ERROR: `gh` token preflight for {org}/{probe_repo} timed out after {exc.timeout}s."
         ) from exc
     except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        if "HTTP 404" in detail:
+            raise SystemExit(
+                f"ERROR: GitHub returned HTTP 404 for {org}/{probe_repo}.\n"
+                "  GitHub cannot confirm whether the repository exists.\n"
+                "  Confirm that the repository name is correct and that the current account "
+                "has access.\n"
+                f"  Repository check: gh repo view {org}/{probe_repo}\n"
+                "  Authentication check: gh auth status\n"
+                f"  GitHub response: {detail}"
+            ) from exc
         raise SystemExit(
             f"ERROR: `gh` cannot read {org}/{probe_repo} with the current token.\n"
-            f"  {(exc.stderr or '').strip()}\n"
+            f"  {detail}\n"
             "  Required scopes: repo (classic) OR "
             "Issues+PRs+Contents Read & Write (fine-grained).\n"
             "  Check with: gh auth status"
