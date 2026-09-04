@@ -657,6 +657,27 @@ def test_preflight_token_scopes_timeout_raises_systemexit() -> None:
             _preflight_token_scopes("Org", "Repo")
 
 
+def test_preflight_token_scopes_404_explains_repository_access() -> None:
+    """An HTTP 404 identifies repository name and access as possible causes."""
+    error = subprocess.CalledProcessError(
+        1,
+        ["gh", "api"],
+        stderr="gh: Not Found (HTTP 404)",
+    )
+    with patch("hephaestus.automation.loop_runner.gh_call", side_effect=error):
+        with pytest.raises(SystemExit) as exc_info:
+            _preflight_token_scopes("Org", "Repo")
+
+    message = str(exc_info.value)
+    assert "GitHub returned HTTP 404 for Org/Repo" in message
+    assert "repository name is correct" in message
+    assert "current account has access" in message
+    assert "gh repo view Org/Repo" in message
+    assert "gh auth status" in message
+    assert "Required scopes:" not in message
+    assert "gh: Not Found (HTTP 404)" in message
+
+
 def test_preflight_token_scopes_warns_on_empty_permissions(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
