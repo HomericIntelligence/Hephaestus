@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import cast
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +15,10 @@ from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
+)
+from hephaestus.automation.worktree_manager import (
+    ImplementationWriterAuthority,
+    WorktreeManager,
 )
 
 
@@ -204,6 +210,345 @@ def test_implementation_preserves_inactive_unowned_branch(tmp_path: Path) -> Non
 
     assert _git(repo, "rev-parse", "unowned-implementation-branch") == first
     assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+
+
+def test_claim_implementation_writer_records_the_controlled_checkout(
+    tmp_path: Path,
+) -> None:
+    """A deterministic, clean writer can become its source lane."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    authority = worktree_manager.implementation_writer_authority(writer)
+
+    binding = manager.claim_implementation_writer(
+        9,
+        branch="writer-branch",
+        path=writer,
+        authority=authority,
+    )
+
+    rebound = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="writer-branch",
+    )
+    assert binding.cwd == writer
+    assert binding.revision == second
+    assert rebound == binding
+
+
+def test_claim_implementation_writer_converts_receipt_write_error(
+    tmp_path: Path,
+) -> None:
+    """A receipt write failure is an ownership error, not a retryable Git error."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    authority = worktree_manager.implementation_writer_authority(writer)
+
+    with (
+        patch.object(manager, "_write_receipt", side_effect=OSError("disk full")),
+        pytest.raises(SourceWorkspaceError, match="cannot record implementation writer receipt"),
+    ):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=authority,
+        )
+
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_authority_failure_preserves_existing_receipt(
+    tmp_path: Path,
+) -> None:
+    """An authority failure does not alter an existing durable receipt."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    manager.claim_implementation_writer(
+        9,
+        branch="writer-branch",
+        path=writer,
+        authority=worktree_manager.implementation_writer_authority(writer),
+    )
+
+    with (
+        patch.object(manager, "_write_receipt") as write_receipt,
+        pytest.raises(SourceWorkspaceError, match="authority is invalid"),
+    ):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    write_receipt.assert_not_called()
+    assert (
+        manager.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="writer-branch",
+        ).cwd
+        == writer
+    )
+
+
+def test_claim_implementation_writer_restart_cannot_adopt_unconsumed_authority(
+    tmp_path: Path,
+) -> None:
+    """A stopped authority handoff leaves no durable writer ownership record."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    authority = worktree_manager.implementation_writer_authority(writer)
+
+    with (
+        patch(
+            "hephaestus.automation.source_worktree.consume_implementation_writer_authority",
+            side_effect=RuntimeError("worker stopped"),
+        ),
+        pytest.raises(SourceWorkspaceError, match="authority is invalid"),
+    ):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=authority,
+        )
+
+    restarted = SourceWorkspaceManager(repo, repository="example/project")
+    assert not (restarted.state_dir / "9-impl.json").exists()
+    with pytest.raises(SourceWorkspaceError, match="not owned by this lane"):
+        restarted.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="writer-branch",
+        )
+
+
+def test_claim_implementation_writer_rejects_clean_unauthorized_worktree(
+    tmp_path: Path,
+) -> None:
+    """A clean deterministic path is not writer evidence without an authority."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
+
+    with pytest.raises(SourceWorkspaceError, match="authority"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_rejects_a_constructed_authority(
+    tmp_path: Path,
+) -> None:
+    """An opaque authority that the manager did not mint cannot claim a writer."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
+    constructed = cast(ImplementationWriterAuthority, object())
+
+    with pytest.raises(SourceWorkspaceError, match="authority"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=constructed,
+        )
+
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_rejects_a_stale_authority(
+    tmp_path: Path,
+) -> None:
+    """An authority from before a clean writer move cannot authorize the lane."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    authority = worktree_manager.implementation_writer_authority(writer)
+    _git(writer, "reset", "--hard", first)
+
+    with pytest.raises(SourceWorkspaceError, match="authority"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=authority,
+        )
+
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_rejects_a_non_lane_path(tmp_path: Path) -> None:
+    """A writer outside the deterministic lane cannot become source state."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    foreign_writer = tmp_path / "foreign-writer"
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(foreign_writer), second)
+
+    with pytest.raises(SourceWorkspaceError, match="does not match the deterministic lane"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=foreign_writer,
+        )
+
+    assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+
+
+def test_claim_implementation_writer_rejects_an_incompatible_receipt(
+    tmp_path: Path,
+) -> None:
+    """A controlled handoff cannot replace a lane's recorded branch."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="previous-writer-branch",
+    ).cwd
+    _git(writer, "switch", "-c", "writer-branch")
+
+    with pytest.raises(SourceWorkspaceError, match="incompatible source workspace receipt"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert _git(writer, "branch", "--show-current") == "writer-branch"
+
+
+def test_claim_implementation_writer_rejects_a_wrong_attached_branch(
+    tmp_path: Path,
+) -> None:
+    """A deterministic path does not authorize a different writer branch."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "other-writer-branch", str(writer), second)
+
+    with pytest.raises(SourceWorkspaceError, match="does not match the requested branch"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert _git(writer, "branch", "--show-current") == "other-writer-branch"
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_preserves_a_dirty_writer(tmp_path: Path) -> None:
+    """A dirty controlled writer remains available for recovery."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
+    dirty_file = writer / "recover-me.txt"
+    dirty_file.write_text("preserve this\n", encoding="utf-8")
+
+    with pytest.raises(SourceWorkspaceError, match="dirty and preserved"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert dirty_file.read_text(encoding="utf-8") == "preserve this\n"
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -> None:
+    """A different repository identity cannot refresh a writer receipt."""
+    repo, _, second = _repository(tmp_path)
+    first = SourceWorkspaceManager(repo, repository="one/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=first.base_dir,
+        base_branch=second,
+    )
+    writer = worktree_manager.create_worktree(
+        9,
+        "writer-branch",
+        source_lane=SourceLane.IMPLEMENTATION.value,
+    )
+    first.claim_implementation_writer(
+        9,
+        branch="writer-branch",
+        path=writer,
+        authority=worktree_manager.implementation_writer_authority(writer),
+    )
+    second_manager = SourceWorkspaceManager(repo, repository="two/project")
+
+    with pytest.raises(SourceWorkspaceError, match="owned by another repository"):
+        second_manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert _git(writer, "branch", "--show-current") == "writer-branch"
 
 
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:

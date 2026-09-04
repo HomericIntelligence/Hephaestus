@@ -77,9 +77,12 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceError
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
+    ImplementationWriterAuthority,
+    WorktreeCreationReceiptError,
 )
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
@@ -3586,6 +3589,153 @@ class TestGitOps:
             },
         }
 
+    def test_direct_pinned_impl_writer_reserves_creates_and_claims(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A direct writer claims its source lane after its remote reservation."""
+        pinned_sha = "a" * 40
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        authority = MagicMock(spec=ImplementationWriterAuthority)
+        binding = MagicMock(revision=pinned_sha)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+                "source_lane": "impl",
+            },
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = writer_path
+        manager.implementation_writer_authority.return_value = authority
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.return_value = binding
+
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent") as reserve,
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        reserve.assert_called_once_with(
+            "7-auto",
+            pinned_sha,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
+        manager.create_worktree.assert_called_once_with(
+            issue_number=7,
+            branch_name="7-auto",
+            refresh_base=False,
+            base_sha=pinned_sha,
+            source_lane="impl",
+            remote_branch_reserved=True,
+            timeout=60,
+        )
+        manager.implementation_writer_authority.assert_called_once_with(writer_path)
+        source_manager.claim_implementation_writer.assert_called_once_with(
+            7,
+            branch="7-auto",
+            path=writer_path,
+            authority=authority,
+        )
+        assert result.ok is True
+        assert result.value == {
+            "path": str(writer_path),
+            "impl_source_revision": pinned_sha,
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
+        }
+
+    def test_implementation_source_lane_rejects_unmaterialized_writer(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An implementation lane cannot succeed when no writer was created."""
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = None
+
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ()),
+            ),
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: implementation writer was not materialized"
+        )
+        assert result.value == {
+            "path": str(tmp_path / "build" / ".worktrees" / "auto-7-impl"),
+            WORKTREE_MATERIALIZED_KEY: False,
+        }
+
+    def test_implementation_source_lane_rejects_missing_clean_writer_path(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A planned writer path cannot bypass implementation ownership checks."""
+        planned_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+
+        result = pool._finalize_created_worktree(
+            created=planned_path,
+            base_sha=None,
+            branch_name="7-auto",
+            repo_root=tmp_path,
+            repo="test/repo",
+            sync_to_remote=False,
+            pr_number=None,
+            timeout_s=60,
+            source_lane="impl",
+            item_number=7,
+            writer_authority=MagicMock(spec=ImplementationWriterAuthority),
+        )
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: implementation writer was not materialized"
+        )
+        assert result.value == {
+            "path": str(planned_path),
+            WORKTREE_MATERIALIZED_KEY: False,
+        }
+
     def test_direct_pinned_worktree_releases_reservation_when_no_worktree_is_created(
         self,
         pool: WorkerPool,
@@ -3883,6 +4033,391 @@ class TestGitOps:
             WORKTREE_MATERIALIZED_KEY: True,
         }
         assert "post-create preparation failed" in (result.error or "")
+
+    def test_create_implementation_source_lane_claims_writer_ownership(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A controlled implementation writer is registered before source use."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        authority = ImplementationWriterAuthority("authority-token")
+        worktree_manager.implementation_writer_authority.return_value = authority
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        source_class.assert_called_once_with(
+            tmp_path,
+            repository="test/repo",
+            base_dir=writer_path.parent,
+        )
+        source_manager.claim_implementation_writer.assert_called_once_with(
+            7,
+            branch="7-auto",
+            path=writer_path,
+            authority=authority,
+        )
+        worktree_manager.implementation_writer_authority.assert_called_once_with(writer_path)
+        assert result.ok is True
+        assert result.value == {
+            "path": str(writer_path),
+            "impl_source_revision": "b" * 40,
+        }
+
+    def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Source ownership uses the stage repository, not its transport target."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="org/repo",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="transport/repo",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        source_manager = MagicMock()
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        source_class.assert_called_once_with(
+            tmp_path,
+            repository="org/repo",
+            base_dir=writer_path.parent,
+        )
+        assert result.ok is True
+
+    @pytest.mark.parametrize("base_sha", [None, "a" * 40], ids=["fresh", "direct"])
+    def test_create_implementation_writer_passes_authenticated_transport_to_manager(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        base_sha: str | None,
+    ) -> None:
+        """Fresh and direct writer requests use controlled remote Git transport."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        remote_env = {"GIT_TERMINAL_PROMPT": "0"}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        authority = ImplementationWriterAuthority("authority-token")
+        worktree_manager.implementation_writer_authority.return_value = authority
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
+        with (
+            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(base_sha, "7-auto")),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(remote_env, remote_config),
+            ) as authentication,
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager) as manager_class,
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        authentication.assert_called_once_with(
+            cwd=tmp_path,
+            expected_repo="test/repo",
+            timeout=60,
+        )
+        manager_kwargs = manager_class.call_args.kwargs
+        assert manager_kwargs["remote_git_env"] == remote_env
+        assert manager_kwargs["remote_git_config"] == remote_config
+        if base_sha is None:
+            assert "base_branch" not in manager_kwargs
+        else:
+            assert manager_kwargs["base_branch"] == base_sha
+        assert result.ok is True
+
+    def test_create_implementation_source_lane_returns_typed_claim_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed writer handoff does not become a generic Git error."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.side_effect = SourceWorkspaceError("mismatch")
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "source_workspace_ownership_unavailable: mismatch"
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
+    def test_adopted_writer_head_drift_prevents_authority_mint_and_claim(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A post-sync head move preserves the writer and does not claim its lane."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        manager = MagicMock()
+        manager.mint_adopted_implementation_writer_authority.side_effect = (
+            WorktreeCreationReceiptError("implementation writer adoption head changed")
+        )
+        source_manager = MagicMock()
+
+        with (
+            patch.object(pool, "_sync_worktree_to_remote_branch") as sync,
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            result = pool._finalize_created_worktree(
+                created=writer_path,
+                base_sha=None,
+                branch_name="7-adopted",
+                repo_root=tmp_path,
+                repo="test/repo",
+                source_repository="test/repo",
+                sync_to_remote=True,
+                pr_number=700,
+                timeout_s=60,
+                source_lane="impl",
+                item_number=7,
+                worktree_manager=manager,
+                implementation_adoption_head="a" * 40,
+            )
+
+        sync.assert_called_once()
+        manager.mint_adopted_implementation_writer_authority.assert_called_once_with(
+            issue_number=7,
+            branch_name="7-adopted",
+            worktree_path=writer_path,
+            expected_head="a" * 40,
+            timeout=60,
+        )
+        source_class.assert_not_called()
+        source_manager.claim_implementation_writer.assert_not_called()
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: implementation writer adoption head changed"
+        )
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
+    @pytest.mark.parametrize("source_lane", [None, "review"])
+    def test_nonimplementation_sync_never_requires_writer_authority(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        source_lane: str | None,
+    ) -> None:
+        """A review or normal checkout can synchronize without writer authority."""
+        checkout = tmp_path / "build" / ".worktrees" / "review-7"
+        checkout.mkdir(parents=True)
+        manager = MagicMock()
+
+        with (
+            patch.object(pool, "_sync_worktree_to_remote_branch") as sync,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.SourceWorkspaceManager") as source_manager,
+        ):
+            result = pool._finalize_created_worktree(
+                created=checkout,
+                base_sha=None,
+                branch_name="7-review",
+                repo_root=tmp_path,
+                repo="test/repo",
+                sync_to_remote=True,
+                pr_number=700,
+                source_lane=source_lane,
+                item_number=7,
+                worktree_manager=manager,
+                timeout_s=60,
+            )
+
+        assert result.ok is True
+        sync.assert_called_once()
+        manager.mint_adopted_implementation_writer_authority.assert_not_called()
+        source_manager.assert_not_called()
+
+    def test_create_implementation_source_lane_returns_typed_receipt_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An unreceipted existing writer reaches the ownership terminal path."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError(
+            "deterministic implementation worktree has no creation receipt"
+        )
+        with patch(f"{_WP}.WorktreeManager", return_value=worktree_manager):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: "
+            "deterministic implementation worktree has no creation receipt"
+        )
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
+    def test_create_implementation_source_lane_returns_typed_receipt_write_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Receipt write errors preserve the deterministic writer for recovery."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError("disk full")
+        with patch(f"{_WP}.WorktreeManager", return_value=worktree_manager):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "source_workspace_ownership_unavailable: disk full"
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
+    def test_direct_writer_receipt_failure_keeps_remote_reservation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed direct writer leaves a receipt for bounded remote cleanup."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+                "base_sha": pin,
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.side_effect = WorktreeCreationReceiptError("disk full")
+        with (
+            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(pin, "7-auto")),
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {
+            "path": str(tmp_path / "build" / ".worktrees" / "auto-7-impl"),
+            WORKTREE_MATERIALIZED_KEY: False,
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pin},
+        }
 
     def test_create_isolated_worktree_syncs_only_detached_checkout(
         self,

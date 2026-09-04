@@ -9,11 +9,14 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from hephaestus.automation import worktree_manager as worktree_manager_module
 from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     RemoteGitRefreshError,
+    WorktreeCreationReceiptError,
     WorktreeDirtyError,
     WorktreeManager,
+    consume_implementation_writer_authority,
 )
 from hephaestus.utils.file_lock import file_lock
 
@@ -500,6 +503,480 @@ class TestWorktreeManager:
         # Should call prune after
         prune_calls = [c for c in worktree_mocks.run.call_args_list if "prune" in c[0][0]]
         assert len(prune_calls) >= 1
+
+    def test_impl_writer_preserves_registered_foreign_checkout_before_cleanup(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A foreign deterministic writer is never removed before ownership is checked."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        writer = manager.base_dir / "auto-31-impl"
+        writer.mkdir(parents=True)
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path") as registered,
+            patch.object(manager, "_remove_worktree_path_forcefully") as remove,
+            pytest.raises(WorktreeCreationReceiptError, match="already registered"),
+        ):
+            registered.return_value = {
+                "path": str(writer),
+                "branch": "refs/heads/foreign-writer",
+            }
+            manager.create_worktree(31, "31-auto", source_lane="impl")
+
+        remove.assert_not_called()
+        assert writer.exists()
+
+    @pytest.mark.parametrize("branch_location", ["local", "remote"])
+    def test_impl_writer_rejects_unowned_branch_reuse(
+        self,
+        branch_location: str,
+        worktree_mocks: Any,
+        tmp_path: Path,
+    ) -> None:
+        """A new writer lane cannot mint ownership for an existing branch."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager(
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+
+        def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=0 if branch_location == "local" else 1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(
+                returncode=0,
+                stdout="deadbeef\trefs/heads/32-auto\n" if branch_location == "remote" else "",
+            )
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch.object(manager, "_add_worktree_for_branch") as add,
+            pytest.raises(RuntimeError, match="unowned"),
+        ):
+            manager.create_worktree(32, "32-auto", source_lane="impl")
+
+        add.assert_not_called()
+
+    def test_impl_writer_accepts_its_reserved_direct_remote_branch(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A direct reservation does not look like a foreign writer branch."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager(
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+        pin = "a" * 40
+
+        def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(returncode=0, stdout=f"{pin}\trefs/heads/33-auto\n")
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch.object(manager, "_add_worktree_for_branch") as add,
+            patch.object(manager, "_mint_writer_authority"),
+        ):
+            result = manager.create_worktree(
+                33,
+                "33-auto",
+                base_sha=pin,
+                remote_branch_reserved=True,
+                source_lane="impl",
+            )
+
+        assert result == manager.base_dir / "auto-33-impl"
+        add.assert_called_once_with(
+            result,
+            "33-auto",
+            base_sha=pin,
+            refresh_base=False,
+            timeout=None,
+        )
+
+    def test_impl_writer_rejects_a_changed_direct_remote_reservation(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A remote writer ref must still match the direct reservation pin."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager(
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+        pin = "a" * 40
+
+        def branch_lookup(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(returncode=0, stdout=f"{'b' * 40}\trefs/heads/33-auto\n")
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch("hephaestus.automation.worktree_manager.run", side_effect=branch_lookup),
+            patch.object(manager, "_add_worktree_for_branch") as add,
+            pytest.raises(WorktreeCreationReceiptError, match="reservation changed"),
+        ):
+            manager.create_worktree(
+                33,
+                "33-auto",
+                base_sha=pin,
+                remote_branch_reserved=True,
+                source_lane="impl",
+            )
+
+        add.assert_not_called()
+
+    def test_impl_writer_authority_is_process_local_and_has_no_sidecar(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A fresh writer authority is not a mutable file in build/.worktrees."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        writer = manager.base_dir / "auto-33-impl"
+        writer.mkdir(parents=True)
+
+        with patch(
+            "hephaestus.automation.worktree_manager.run",
+            side_effect=[Mock(stdout="33-auto\n"), Mock(stdout="a" * 40 + "\n")],
+        ):
+            authority = manager._mint_writer_authority(
+                issue_number=33,
+                branch_name="33-auto",
+                worktree_path=writer,
+                timeout=None,
+            )
+
+        assert manager.implementation_writer_authority(writer) == authority
+        assert not list(manager.base_dir.glob("*.creation.json"))
+
+    def test_recreated_writer_authority_stays_with_its_creating_manager(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A later writer creation cannot receive an earlier manager's token."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        writer = tmp_path / "build" / ".worktrees" / "auto-33-impl"
+        writer.mkdir(parents=True)
+        first_manager = WorktreeManager(base_dir=writer.parent)
+        second_manager = WorktreeManager(base_dir=writer.parent)
+
+        with patch(
+            "hephaestus.automation.worktree_manager.run",
+            side_effect=[
+                Mock(stdout="33-auto\n"),
+                Mock(stdout="a" * 40 + "\n"),
+                Mock(stdout="33-auto\n"),
+                Mock(stdout="a" * 40 + "\n"),
+            ],
+        ):
+            first = first_manager._mint_writer_authority(
+                issue_number=33,
+                branch_name="33-auto",
+                worktree_path=writer,
+                timeout=None,
+            )
+            second = second_manager._mint_writer_authority(
+                issue_number=33,
+                branch_name="33-auto",
+                worktree_path=writer,
+                timeout=None,
+            )
+
+        assert second != first
+        assert second_manager.implementation_writer_authority(writer) == second
+        with pytest.raises(WorktreeCreationReceiptError, match="invalid or stale"):
+            consume_implementation_writer_authority(
+                first,
+                issue_number=33,
+                branch="33-auto",
+                path=writer,
+                revision="a" * 40,
+            )
+
+    def test_authenticated_adoption_uses_controlled_transport_before_path_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """A remote-head mismatch preserves the writer before path replacement."""
+        expected_head = "a" * 40
+        writer = tmp_path / "build" / ".worktrees" / "auto-35-impl"
+        writer.mkdir(parents=True)
+        manager = WorktreeManager(
+            repo_root=tmp_path,
+            base_dir=writer.parent,
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=[Mock(stdout=""), Mock(stdout="b" * 40 + "\n")],
+            ) as run_mock,
+            patch.object(manager, "_remove_worktree_path_forcefully") as remove,
+            pytest.raises(WorktreeCreationReceiptError, match="head changed"),
+        ):
+            manager._add_authenticated_adopted_implementation_writer(
+                issue_number=35,
+                branch_name="35-adopted",
+                worktree_path=writer,
+                expected_head=expected_head,
+                timeout=60,
+            )
+
+        fetch_call = run_mock.call_args_list[0]
+        assert fetch_call.args[0] == [
+            "git",
+            "-c",
+            "credential.helper=/trusted/helper",
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/35-adopted:refs/remotes/origin/35-adopted",
+        ]
+        assert fetch_call.kwargs["env"] == {"GIT_ASKPASS": "/trusted/askpass"}
+        remove.assert_not_called()
+        assert writer.exists()
+
+    def test_authenticated_adoption_head_drift_revokes_minted_authority(
+        self, tmp_path: Path
+    ) -> None:
+        """A stale adopted head cannot leave a reusable writer authority."""
+        expected_head = "a" * 40
+        observed_head = "b" * 40
+        writer = tmp_path / "build" / ".worktrees" / "auto-35-impl"
+        writer.mkdir(parents=True)
+        manager = WorktreeManager(repo_root=tmp_path, base_dir=writer.parent)
+        path = writer.resolve()
+        manager._pending_implementation_adoptions[path] = (
+            worktree_manager_module._ImplementationWriterAuthorityRecord(
+                issue_number=35,
+                branch="35-adopted",
+                path=path,
+                revision=expected_head,
+            )
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=[Mock(stdout="35-adopted\n"), Mock(stdout=observed_head + "\n")],
+            ),
+            pytest.raises(WorktreeCreationReceiptError, match="head changed"),
+        ):
+            manager.mint_adopted_implementation_writer_authority(
+                issue_number=35,
+                branch_name="35-adopted",
+                worktree_path=writer,
+                expected_head=expected_head,
+                timeout=60,
+            )
+
+        assert path not in manager._pending_implementation_adoptions
+        with pytest.raises(WorktreeCreationReceiptError, match="authority is unavailable"):
+            manager.implementation_writer_authority(writer)
+
+    @pytest.mark.parametrize(
+        "reserved_remote_branch_sha", [None, "a" * 40], ids=["fresh", "direct"]
+    )
+    def test_implementation_writer_remote_probe_uses_controlled_transport(
+        self,
+        tmp_path: Path,
+        reserved_remote_branch_sha: str | None,
+    ) -> None:
+        """Fresh and direct writers probe origin with authenticated transport."""
+        manager = WorktreeManager(
+            repo_root=tmp_path,
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+        remote_head = reserved_remote_branch_sha or ""
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> Mock:
+            if argv[1] == "show-ref":
+                return Mock(returncode=1, stdout="")
+            if argv[1] == "remote":
+                return Mock(returncode=0, stdout="origin\n")
+            return Mock(
+                returncode=0,
+                stdout=(f"{remote_head}\trefs/heads/35-auto\n" if remote_head else ""),
+            )
+
+        with patch("hephaestus.automation.worktree_manager.run", side_effect=fake_run) as run_mock:
+            assert (
+                manager._implementation_writer_branch_exists(
+                    "35-auto",
+                    reserved_remote_branch_sha=reserved_remote_branch_sha,
+                    timeout=60,
+                )
+                is False
+            )
+
+        remote_call = run_mock.call_args_list[-1]
+        assert remote_call.args[0] == [
+            "git",
+            "-c",
+            "credential.helper=/trusted/helper",
+            "ls-remote",
+            "--heads",
+            "origin",
+            "35-auto",
+        ]
+        assert remote_call.kwargs["env"] == {"GIT_ASKPASS": "/trusted/askpass"}
+
+    def test_authenticated_adoption_preserves_unheld_local_branch_with_commits(
+        self, tmp_path: Path
+    ) -> None:
+        """Adoption never resets an unheld local branch that differs from origin."""
+        expected_head = "a" * 40
+        writer = tmp_path / "build" / ".worktrees" / "auto-35-impl"
+        writer.mkdir(parents=True)
+        manager = WorktreeManager(
+            repo_root=tmp_path,
+            base_dir=writer.parent,
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=[
+                    Mock(stdout=""),
+                    Mock(stdout=expected_head + "\n"),
+                    Mock(returncode=0, stdout=""),
+                    Mock(stdout="b" * 40 + "\n"),
+                ],
+            ),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch(
+                "hephaestus.automation.worktree_manager.is_clean_working_tree",
+                return_value=True,
+            ),
+            patch.object(manager, "_remove_worktree_path_forcefully") as remove,
+            pytest.raises(WorktreeCreationReceiptError, match="local branch changed"),
+        ):
+            manager._add_authenticated_adopted_implementation_writer(
+                issue_number=35,
+                branch_name="35-adopted",
+                worktree_path=writer,
+                expected_head=expected_head,
+                timeout=60,
+            )
+
+        remove.assert_not_called()
+        assert writer.exists()
+
+    def test_registered_writer_same_path_requires_authenticated_adoption(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A registered writer is reusable only through exact authenticated adoption."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        writer = manager.base_dir / "auto-36-impl"
+        writer.mkdir(parents=True)
+
+        with (
+            patch.object(
+                manager,
+                "_registered_worktree_at_path",
+                return_value={"path": str(writer), "branch": "refs/heads/36-adopted"},
+            ),
+            patch.object(manager, "_remove_worktree_path_forcefully") as remove,
+            pytest.raises(WorktreeCreationReceiptError, match="already registered"),
+        ):
+            manager.create_worktree(36, "36-adopted", source_lane="impl")
+
+        remove.assert_not_called()
+        assert writer.exists()
+
+        expected_head = "a" * 40
+        authenticated_manager = WorktreeManager(
+            repo_root=tmp_path,
+            base_dir=writer.parent,
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+        with (
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=[
+                    Mock(stdout=""),
+                    Mock(stdout=expected_head + "\n"),
+                    Mock(returncode=1, stdout=""),
+                    Mock(stdout=""),
+                    Mock(stdout="36-adopted\n"),
+                    Mock(stdout=expected_head + "\n"),
+                ],
+            ) as run_mock,
+            patch.object(
+                authenticated_manager,
+                "_worktree_holding_branch",
+                return_value=writer,
+            ),
+            patch.object(
+                authenticated_manager,
+                "_registered_worktree_at_path",
+                return_value={"path": str(writer), "branch": "refs/heads/36-adopted"},
+            ),
+            patch(
+                "hephaestus.automation.worktree_manager.is_clean_working_tree",
+                return_value=True,
+            ),
+            patch.object(
+                authenticated_manager, "_remove_worktree_path_forcefully"
+            ) as authenticated_remove,
+        ):
+            authenticated_manager._add_authenticated_adopted_implementation_writer(
+                issue_number=36,
+                branch_name="36-adopted",
+                worktree_path=writer,
+                expected_head=expected_head,
+                timeout=60,
+            )
+
+        authenticated_remove.assert_called_once_with(writer, timeout=60)
+        assert run_mock.call_args_list[3].args[0] == [
+            "git",
+            "worktree",
+            "add",
+            "-B",
+            "36-adopted",
+            str(writer),
+            expected_head,
+        ]
+        pending = authenticated_manager._pending_implementation_adoptions[writer.resolve()]
+        assert pending.revision == expected_head
+
+    def test_impl_writer_rejects_uncertain_branch_ownership(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A lookup failure cannot make an existing writer branch appear absent."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch(
+                "hephaestus.automation.worktree_manager.run",
+                side_effect=subprocess.TimeoutExpired(["git", "show-ref"], 1),
+            ),
+            pytest.raises(WorktreeCreationReceiptError, match="cannot safely verify"),
+        ):
+            manager.create_worktree(34, "34-auto", source_lane="impl")
 
     @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
     def test_create_worktree_reuses_registered_dirty_existing_path(

@@ -536,8 +536,13 @@ class ImplementationStage(Stage):
                     "direct_scope_worktree_nonce_invalid",
                 )
         if adopted:
+            adopted_head = self._fresh_adopted_pr_head(item, ctx)
+            if adopted_head is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "pr_head_revision_unavailable")
+            item.payload["adopted_pr_head_sha"] = adopted_head
             kwargs["sync_to_remote"] = True
             kwargs["pr_number"] = item.pr
+            kwargs["implementation_adoption_head"] = adopted_head
         worktree_job = GitJob(
             repo=item.repo,
             op="create_worktree",
@@ -553,6 +558,8 @@ class ImplementationStage(Stage):
     ) -> StepResult:
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
+        if item.payload.pop("source_workspace_ownership_unavailable", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
         if (ownership := item.payload.get("branch_worktree_owner")) is not None:
             branch = ownership.get("branch") if isinstance(ownership, dict) else None
             owner_path = ownership.get("owner_path") if isinstance(ownership, dict) else None
@@ -1894,6 +1901,36 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            if (result.error or "").startswith("source_workspace_ownership_unavailable:"):
+                item.payload["source_workspace_ownership_unavailable"] = True
+                direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+                reservation = (
+                    result.value.get("direct_scope_reservation")
+                    if isinstance(result.value, dict)
+                    else None
+                )
+                if (
+                    is_full_commit_sha(direct_base_sha)
+                    and isinstance(reservation, dict)
+                    and reservation.get("branch") == item.branch
+                    and reservation.get("base_sha") == direct_base_sha
+                ):
+                    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
+                        "branch": item.branch,
+                        "base_sha": direct_base_sha,
+                    }
+                materialized_path = (
+                    result.value.get("path")
+                    if isinstance(result.value, dict)
+                    and result.value.get(WORKTREE_MATERIALIZED_KEY) is True
+                    else None
+                )
+                if isinstance(materialized_path, str) and materialized_path:
+                    item.worktree = materialized_path
+                    item.payload[WORKTREE_MATERIALIZED_KEY] = True
+                else:
+                    item.worktree = ""
+                return
             if result.error == BRANCH_WORKTREE_OWNED:
                 ownership = result.value if isinstance(result.value, dict) else {}
                 item.payload["branch_worktree_owner"] = {
@@ -1973,6 +2010,9 @@ class ImplementationStage(Stage):
         value = result.value
         if isinstance(value, dict):
             item.worktree = str(value.get("path", item.worktree))
+            source_revision = value.get("impl_source_revision")
+            if is_full_commit_sha(source_revision):
+                item.payload["_impl_source_revision"] = source_revision
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
@@ -2196,6 +2236,10 @@ class ImplementationStage(Stage):
                 return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
         # Adopt the PR's REAL head branch — never assume {issue}-auto-impl.
         item.payload["existing_pr"] = True
+        adopted_head = self._fresh_adopted_pr_head(item, ctx)
+        if adopted_head is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_revision_unavailable")
+        item.payload["adopted_pr_head_sha"] = adopted_head
         logger.info(
             "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
             item.issue,
@@ -2203,6 +2247,15 @@ class ImplementationStage(Stage):
             item.branch,
         )
         return Continue(next_state=WORKTREE_WAIT)
+
+    @staticmethod
+    def _fresh_adopted_pr_head(item: WorkItem, ctx: StageContext) -> str | None:
+        """Return the current exact head for an adopted PR, or ``None``."""
+        if item.pr is None:
+            return None
+        state = ctx.github.gh_pr_state(item.pr)
+        head = state.get("headRefOid") if isinstance(state, dict) else None
+        return head if is_full_commit_sha(head) else None
 
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.

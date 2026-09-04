@@ -24,7 +24,13 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReplyJournalAppended,
     ReplyJournalRecovered,
 )
-from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, JobResult
+from hephaestus.automation.pipeline.jobs import (
+    WORKTREE_MATERIALIZED_KEY,
+    AgentJob,
+    BuildTestJob,
+    GitJob,
+    JobResult,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     implementation_reply_handoff,
@@ -659,6 +665,7 @@ class TestGate:
             "source_lane": "impl",
             "sync_to_remote": True,
             "pr_number": 1001,
+            "implementation_adoption_head": "a" * 40,
         }
 
     def test_adopted_clean_worktree_advances_to_pr_review(
@@ -1360,6 +1367,38 @@ class TestGitErrorRetryCap:
         assert outcome.note == "git_error"
         assert item.attempts["implement"] == 0  # git failures never burn implement
 
+    def test_source_workspace_ownership_failure_is_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A rejected writer handoff does not spend the Git retry budget."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="source_workspace_ownership_unavailable: writer mismatch",
+                value={
+                    "path": "/tmp/auto-1-impl",
+                    WORKTREE_MATERIALIZED_KEY: True,
+                },
+            ),
+            ctx,
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "source_workspace_ownership_unavailable",
+        )
+        assert "git_error_retries" not in item.payload
+        assert item.worktree == "/tmp/auto-1-impl"
+        assert item.payload[WORKTREE_MATERIALIZED_KEY] is True
+
     def test_adopted_impl_go_worktree_failure_retries_worktree_not_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1637,6 +1676,7 @@ class TestWorktreeAndAdvise:
             "direct_worktree_nonce": run_nonce,
             "sync_to_remote": True,
             "pr_number": 1001,
+            "implementation_adoption_head": "a" * 40,
         }
 
     def test_adopted_direct_pr_rejects_a_malformed_writer_identity(
@@ -1735,6 +1775,57 @@ class TestWorktreeAndAdvise:
             "branch": "1-auto-impl",
             "base_sha": "a" * 40,
         }
+
+    def test_direct_ownership_failure_preserves_remote_reservation_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Finished can release a direct reservation after an ownership failure."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="source_workspace_ownership_unavailable: receipt unavailable",
+                value={
+                    "path": "/tmp/wt",
+                    WORKTREE_MATERIALIZED_KEY: True,
+                    "direct_scope_reservation": {
+                        "branch": "1-auto-impl",
+                        "base_sha": "a" * 40,
+                    },
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == "/tmp/wt"
+        assert item.payload["_direct_scope_reservation"] == {
+            "branch": "1-auto-impl",
+            "base_sha": "a" * 40,
+        }
+
+    def test_writer_receipt_result_persists_final_source_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Advice binds the writer to the final receipt revision after refresh."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={"path": "/tmp/wt", "impl_source_revision": "b" * 40},
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == "/tmp/wt"
+        assert item.payload["_impl_source_revision"] == "b" * 40
 
     def test_direct_worktree_rejects_missing_remote_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
