@@ -117,6 +117,8 @@ class ExecutionCoordinator(_CoordinatorHost):
                 job,
                 disable_pi_automation=self.config.disable_pi_automation,
                 auth_status_timeout=self.config.auth_status_timeout,
+                pi_isolation_adapter=self.config.pi_isolation_adapter,
+                pi_dir=self.config.pi_dir,
             )
         claims = self._capture_implementation_file_claims(item)
         auxiliary = self._auxiliary_pool_separate and self._is_auxiliary_stage(item.stage)

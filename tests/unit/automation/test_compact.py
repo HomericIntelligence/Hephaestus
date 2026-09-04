@@ -174,6 +174,7 @@ class TestCompactAgentSession:
             sandbox="read-only",
             approval="never",
             disable_pi_automation=False,
+            pi_dir=None,
         )
 
     def test_direct_compact_without_a_session_is_a_safe_noop(self, tmp_path: Path) -> None:
@@ -188,3 +189,36 @@ class TestCompactAgentSession:
 
         assert compacted is False
         resume.assert_not_called()
+
+    def test_pi_compact_uses_the_selected_pi_configuration(self, tmp_path: Path) -> None:
+        """Pi compaction must reuse the admitted directory and adapter."""
+        pi_dir = tmp_path / "pi-agent"
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", return_value="pi") as resolve,
+            patch(
+                "hephaestus.automation.learn.agent_compaction_resume",
+                return_value=("pi-session", {}),
+            ),
+            patch("hephaestus.automation.learn.resume_agent_session") as resume,
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider="pi",
+                session_agent="pr-reviewer",
+                session_id="pi-session",
+                cwd=tmp_path,
+                pi_dir=pi_dir,
+                pi_isolation_adapter="package:factory",
+            )
+
+        assert compacted is True
+        resolve.assert_called_once_with(
+            "pi",
+            cwd=tmp_path,
+            disable_pi_automation=False,
+            auth_status_timeout=10,
+            pi_isolation_adapter="package:factory",
+            pi_dir=pi_dir,
+        )
+        assert resume.call_args.kwargs["pi_dir"] == pi_dir

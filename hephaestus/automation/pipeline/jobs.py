@@ -156,6 +156,8 @@ class CompactJob:
     timeout_s: int
     disable_pi_automation: bool = False
     auth_status_timeout: int = 10
+    pi_isolation_adapter: str | None = None
+    pi_dir: Path | None = None
     session_id: str | None = None
     # Direct-provider compaction only sends ``/compact`` and never needs write
     # access.  Keep the policy explicit so it cannot inherit user defaults.

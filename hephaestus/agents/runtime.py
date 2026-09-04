@@ -621,41 +621,49 @@ def _pi_models_configured(pi_dir: Path | None = None) -> bool:
     return False
 
 
+def _validate_pi_settings_metadata(metadata: os.stat_result) -> None:
+    """Validate one snapshot of the trusted global Pi settings file."""
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError
+    if metadata.st_size > PI_CONFIG_MAX_BYTES:
+        raise OSError
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise OSError
+
+
 def _read_pi_settings_payload(config_path: Path, *, required: bool) -> Any | None:
     """Read one bounded regular Pi settings file without following a link."""
+    failure: AgentExecutionError | None = None
+    payload: Any = None
     try:
         initial = config_path.lstat()
-        if stat.S_ISLNK(initial.st_mode) or not stat.S_ISREG(initial.st_mode):
+        if stat.S_ISLNK(initial.st_mode):
             raise OSError
-        if initial.st_size > PI_CONFIG_MAX_BYTES:
-            raise OSError
+        _validate_pi_settings_metadata(initial)
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(config_path, flags)
         try:
             opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode):
-                raise OSError
-            if opened.st_size > PI_CONFIG_MAX_BYTES:
-                raise OSError
+            _validate_pi_settings_metadata(opened)
             if (initial.st_dev, initial.st_ino) != (opened.st_dev, opened.st_ino):
                 raise OSError
             with os.fdopen(descriptor, "rb", closefd=False) as settings_file:
                 raw_settings = settings_file.read(PI_CONFIG_MAX_BYTES + 1)
             if len(raw_settings) > PI_CONFIG_MAX_BYTES:
                 raise OSError
-            payload: Any = json.loads(raw_settings)
+            payload = json.loads(raw_settings)
         finally:
             os.close(descriptor)
-    except FileNotFoundError as exc:
+    except FileNotFoundError:
         if not required:
             return None
-        raise AgentExecutionError(
-            "Pi default model configuration is unavailable or invalid"
-        ) from exc
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise AgentExecutionError(
-            "Pi default model configuration is unavailable or invalid"
-        ) from exc
+        failure = AgentExecutionError("Pi default model configuration is unavailable or invalid")
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        failure = AgentExecutionError("Pi default model configuration is unavailable or invalid")
+    if failure is not None:
+        raise failure
+    if not isinstance(payload, dict):
+        raise AgentExecutionError("Pi default model configuration must be a JSON object")
     return payload
 
 
@@ -674,8 +682,6 @@ def _load_pi_default_model_selection(
     if payload is None:
         return None
 
-    if not isinstance(payload, dict):
-        raise AgentExecutionError("Pi default model configuration must be a JSON object")
     provider = payload.get("defaultProvider")
     model = payload.get("defaultModel")
     thinking = payload.get("defaultThinkingLevel", "")

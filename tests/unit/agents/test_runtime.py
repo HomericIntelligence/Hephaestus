@@ -2416,10 +2416,60 @@ def test_pi_default_model_rejects_a_non_regular_settings_file(tmp_path: Path) ->
         agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
 
 
+def test_pi_default_model_rejects_group_or_other_writable_settings(tmp_path: Path) -> None:
+    """Pi must not trust a default that another account can modify."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B"}',
+        encoding="utf-8",
+    )
+    settings_path.chmod(0o622)
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+@pytest.mark.parametrize(
+    "raw_settings",
+    [
+        b'{"defaultProvider":"private-provider-alias","defaultModel":"private-test-alias"',
+        b"\xffprivate-provider-alias/private-test-alias",
+    ],
+)
+def test_pi_malformed_settings_do_not_remain_in_exception_chain(
+    tmp_path: Path,
+    raw_settings: bytes,
+) -> None:
+    """Pi settings failures must not retain private configuration bytes."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_bytes(raw_settings)
+
+    with pytest.raises(agent_runtime.AgentExecutionError) as exc_info:
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+    exc = exc_info.value
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+    diagnostics = " ".join(
+        [
+            str(exc),
+            repr(exc.args),
+            str(getattr(exc, "doc", "")),
+            str(getattr(exc, "object", "")),
+        ]
+    )
+    assert "private-provider-alias" not in diagnostics
+    assert "private-test-alias" not in diagnostics
+
+
 @pytest.mark.parametrize(
     "raw_settings",
     [
         "{",
+        "null",
         "[]",
         '{"defaultProvider":1,"defaultModel":"model"}',
         '{"defaultProvider":"provider","defaultModel":1}',

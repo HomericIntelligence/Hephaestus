@@ -707,6 +707,8 @@ class TestWorkerPoolSubmitComplete:
             model="claude-haiku-4-5",
             cwd=Path("/tmp"),
             timeout_s=60,
+            pi_isolation_adapter="package:factory",
+            pi_dir=Path("/private/pi-agent"),
         )
         with patch(f"{_WP}.compact_agent_session", return_value=False) as compact:
             pool.submit(job, StageName.PR_REVIEW)
@@ -728,6 +730,8 @@ class TestWorkerPoolSubmitComplete:
             session_binding=None,
             disable_pi_automation=False,
             auth_status_timeout=10,
+            pi_isolation_adapter="package:factory",
+            pi_dir=Path("/private/pi-agent"),
         )
 
     def test_submit_and_complete_non_claude_agent_job(
@@ -6933,6 +6937,7 @@ class TestGitOps:
                 "branch": "5-auto",
                 "agent": "claude",
                 "agent_model": "sol:medium",
+                "pi_dir": Path("/private/pi-agent"),
             },
         )
         remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
@@ -6959,6 +6964,7 @@ class TestGitOps:
             allowed_paths=None,
             timeout=60,
             agent_model="sol:medium",
+            pi_dir=Path("/private/pi-agent"),
             git_message_timeout=1200,
             signing_env_factory=mock_commit.call_args.kwargs["signing_env_factory"],
         )

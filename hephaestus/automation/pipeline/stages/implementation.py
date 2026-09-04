@@ -674,6 +674,7 @@ class ImplementationStage(Stage):
                         "git_message_timeout": stage_timeout(
                             ctx, "git_message", git_message_agent_timeout()
                         ),
+                        **({"pi_dir": ctx.config.pi_dir} if ctx.config.pi_dir is not None else {}),
                     },
                     descr="recover_dirty_worktree",
                 ),
@@ -1292,6 +1293,8 @@ class ImplementationStage(Stage):
             "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
             "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
         }
+        if ctx.config.pi_dir is not None:
+            kwargs["pi_dir"] = ctx.config.pi_dir
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
         # A direct cursor's bootstrap pin reserves a newly created writer
         # branch.  Once an existing PR is adopted, its remote branch is the

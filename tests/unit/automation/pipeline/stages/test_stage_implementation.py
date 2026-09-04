@@ -2101,6 +2101,7 @@ class TestWorktreeAndAdvise:
         """Agent prose cannot bypass the host-owned dirty recovery boundary."""
         stage = ImplementationStage()
         ctx = make_ctx(
+            config_overrides={"pi_dir": "/tmp/operator-pi"},
             github=FakeStageGitHub(
                 pr_head_branch="1-auto-impl",
                 pr_state={
@@ -2109,7 +2110,7 @@ class TestWorktreeAndAdvise:
                     "headRefName": "1-auto-impl",
                     "autoMergeRequest": None,
                 },
-            )
+            ),
         )
         item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
         item.branch = "1-auto-impl"
@@ -2141,6 +2142,7 @@ class TestWorktreeAndAdvise:
         assert recovery.job.kwargs["pre_action_head"] == "a" * 40
         assert recovery.job.kwargs["expected_remote_head"] == "a" * 40
         assert recovery.job.kwargs["content_snapshot"] == _DIRTY_CONTENT_SNAPSHOT
+        assert recovery.job.kwargs["pi_dir"] == "/tmp/operator-pi"
 
     @pytest.mark.parametrize("output", ["commit", "COMMIT now", "STASH\nextra", ""])
     def test_dirty_decision_rejects_any_nonexact_final_action(
@@ -3662,6 +3664,22 @@ class TestCommitPushAndPrCreate:
             "git_message_timeout": 1200,
         }
         assert result.on_done_state == "PR_CREATE"
+
+    def test_commit_push_includes_configured_pi_dir(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """COMMIT_PUSH_WAIT supplies the trusted Pi configuration directory."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"agent": "pi", "pi_dir": "/tmp/operator-pi"})
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["pi_dir"] == "/tmp/operator-pi"
 
     def test_commit_push_uses_configured_codex_implementer_model(
         self, make_ctx: Any, make_work_item: Any

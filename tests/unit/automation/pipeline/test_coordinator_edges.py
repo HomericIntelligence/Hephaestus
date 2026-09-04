@@ -40,6 +40,7 @@ _budget_lookup = coordinator_types_mod._budget_lookup
 run_pipeline = coordinator_mod.run_pipeline
 
 AgentJob = jobs_mod.AgentJob
+CompactJob = jobs_mod.CompactJob
 GitJob = jobs_mod.GitJob
 JobResult = jobs_mod.JobResult
 
@@ -674,6 +675,36 @@ class TestSubmitEdges:
 
         assert len(pool.submitted) == 1
         assert coordinator.timers == []
+
+    def test_compact_job_receives_pi_execution_configuration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Session compaction must retain the admitted Pi configuration."""
+        pi_dir = tmp_path / "pi-agent"
+        coordinator = _coordinator(
+            tmp_path,
+            monkeypatch,
+            pi_dir=pi_dir,
+            pi_isolation_adapter="package:factory",
+        )
+        pool = coordinator.pool
+        assert isinstance(pool, FakeWorkerPool)
+        job = CompactJob(
+            repo="repo-a",
+            issue=1,
+            agent="pi",
+            session_agent="reviewer",
+            model="IFM/K2-Horizon-0.9B",
+            cwd=tmp_path,
+            timeout_s=10,
+        )
+
+        coordinator._submit(_item(), JobRequest(job, on_done_state="V"))
+
+        submitted = pool.submitted[0].job
+        assert isinstance(submitted, CompactJob)
+        assert submitted.pi_dir == pi_dir
+        assert submitted.pi_isolation_adapter == "package:factory"
 
 
 class TestSeedingEdges:

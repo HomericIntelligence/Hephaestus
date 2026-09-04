@@ -67,6 +67,9 @@ class TestModuleSurface:
     def test_main_callable(self) -> None:
         assert callable(ci_driver_mod.main)
 
+    def test_cidriver_class_exposed(self) -> None:
+        assert hasattr(ci_driver_mod, "CIDriver")
+
 
 def test_timeout_flags_thread_into_pipeline_config() -> None:
     """Standalone CI-driver timeout options configure scoped operations."""
@@ -104,9 +107,6 @@ def test_provider_owned_defaults_remain_empty(agent: str) -> None:
 
     config = captured["config"]
     assert (config.reviewer_model, config.fallback_model) == ("", "")
-
-    def test_cidriver_class_exposed(self) -> None:
-        assert hasattr(ci_driver_mod, "CIDriver")
 
 
 def test_main_builds_review_merge_wait_scope_and_dispatches() -> None:

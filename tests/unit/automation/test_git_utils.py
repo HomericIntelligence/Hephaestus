@@ -191,6 +191,25 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
         )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_threads_pi_directory_to_commit_helper(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """The commit-message helper must use the admitted Pi directory."""
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\\n")
+        pi_dir = tmp_path / "pi-agent"
+
+        assert commit_if_changes(123, tmp_path, "pi", pi_dir=pi_dir) is True
+
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "pi",
+            allowed_paths=None,
+            git_message_timeout=1200,
+            pi_dir=pi_dir,
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_forwards_allowed_paths(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
