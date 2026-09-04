@@ -783,8 +783,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "",
             choices=("default", "low", "medium", "high", "xhigh"),
             help_text=(
-                "Explicit Codex reasoning effort for this role. Use default to omit "
-                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+                "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
+                "to select the agent configuration."
             ),
         ),
         _action_spec(
@@ -813,8 +813,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "",
             choices=("default", "low", "medium", "high", "xhigh"),
             help_text=(
-                "Explicit Codex reasoning effort for this role. Use default to omit "
-                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+                "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
+                "to select the agent configuration."
             ),
         ),
         _action_spec(
@@ -824,8 +824,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "",
             choices=("default", "low", "medium", "high", "xhigh"),
             help_text=(
-                "Explicit Codex reasoning effort for this role. Use default to omit "
-                "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+                "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
+                "to select the agent configuration."
             ),
         ),
         _action_spec(

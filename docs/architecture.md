@@ -1704,32 +1704,23 @@ stale remote-tracking ref, and its diagnostic does not copy remote command
 output. The summary retains only an allowed remote authentication, identity, or
 transport failure class.
 
-Three Codex-only flags control per-role reasoning effort:
+Three flags control per-role reasoning effort for Codex, OpenCode, and Pi:
 `--planner-reasoning-effort {default|low|medium|high|xhigh}` and the
 analogous `--reviewer-reasoning-effort` and `--implementer-reasoning-effort`
 ([`_build_parser`](../hephaestus/automation/loop_runner.py)). A role-specific
-value takes precedence over the selected model alias's `model_reasoning_effort`
-default; `default` deliberately omits the setting so the alias keeps its
-established baseline. These flags are applied only to the Codex provider
-and never modify Claude or Pi model IDs (#2287).
+value has priority over an inline IFM reasoning value. The runtime maps the
+value to Codex `model_reasoning_effort`, OpenCode `--variant`, or Pi
+`--thinking`. The `default` value selects the applicable agent configuration.
+Claude does not use these flags. See [IFM Model Configuration](ifm-models.md).
 The default pipeline accepts `--loops`, `--parallel-repos`, and the staged
 `--issue-limit` selector, which advances 1 → 2 → 4 → 8 → all only after the
 repository checkpoint verifies the previous wave. It also accepts
-`--max-workers` and per-agent `--agent` plus per-phase reasoning
-controls:
+`--max-workers`, per-agent `--agent`, and the role reasoning controls that this
+section describes.
 
 - `--learning-workers N` controls host-learning concurrency (default `1`).
 - `--learning-queue-capacity N` bounds auxiliary backlog (default `1`).
 - `--no-learn` creates no new learning intent.
-
-- `--planner-reasoning-effort`
-- `--implementer-reasoning-effort`
-- `--reviewer-reasoning-effort`
-Each takes `default | low | medium | high | xhigh`. `default` deliberately
-omits Codex's `model_reasoning_effort` setting. When omitted the
-selected model alias's default takes over. The values are injected
-through [`stage_model`](../hephaestus/automation/pipeline/stages/base.py),
-which re-cuts the model id with `:effort` for Codex only.
 
 ---
 
@@ -1951,7 +1942,7 @@ Exit-code priority is:
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
 - **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
-- **Reasoning effort** — explicit Codex-only `--<role>-reasoning-effort` CLI flag value (`default|low|medium|high|xhigh`) mapped onto Codex's `model_reasoning_effort`; `default` omits the setting, `low|medium|high|xhigh` override per-role, and omitted flags preserve the model-alias default (#2287).
+- **Reasoning effort** — explicit `--<role>-reasoning-effort` CLI flag value (`default|low|medium|high|xhigh`) for Codex, OpenCode, and Pi. A role value has priority over an inline IFM value. The runtime maps the value to Codex `model_reasoning_effort`, OpenCode `--variant`, or Pi `--thinking`. The `default` value selects the applicable agent configuration. Claude does not use these flags (#2287).
 - **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](../hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
 - **Push retry** — [`_git_retry(item, "commit_push failed")`](../hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
 

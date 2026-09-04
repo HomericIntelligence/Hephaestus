@@ -12,6 +12,7 @@ GitHub call is made.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -27,7 +28,9 @@ def _silence_logging(caplog: Any) -> None:
     caplog.set_level("CRITICAL")
 
 
-def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> dict[str, Any]:
+def _run_main_capturing_config(
+    argv: list[str], *, rc: int = 0, resolved_agent: str = "claude"
+) -> dict[str, Any]:
     """Run ``main()`` with ``argv``, capturing the PipelineConfig passed to run_pipeline.
 
     ``run_pipeline`` is stubbed to return ``rc``; ``_resolve_repo`` is pinned so
@@ -42,7 +45,7 @@ def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> dict[str, Any
     with (
         patch.object(sys, "argv", ["hephaestus-drive-prs-green", *argv]),
         patch.object(ci_driver_mod, "_resolve_repo", return_value=("acme", "widget")),
-        patch.object(ci_driver_mod, "resolve_agent", return_value="claude"),
+        patch.object(ci_driver_mod, "resolve_agent", return_value=resolved_agent),
         patch(
             # main() does ``from .pipeline.coordinator import run_pipeline`` at
             # call time (a deferred import, not a module-level binding), so the
@@ -64,6 +67,9 @@ class TestModuleSurface:
     def test_main_callable(self) -> None:
         assert callable(ci_driver_mod.main)
 
+    def test_cidriver_class_exposed(self) -> None:
+        assert hasattr(ci_driver_mod, "CIDriver")
+
 
 def test_timeout_flags_thread_into_pipeline_config() -> None:
     """Standalone CI-driver timeout options configure scoped operations."""
@@ -81,8 +87,26 @@ def test_timeout_flags_thread_into_pipeline_config() -> None:
     assert (config.reviewer_timeout, config.implementer_timeout) == (11, 11)
     assert config.poll_max_wait == 13
 
-    def test_cidriver_class_exposed(self) -> None:
-        assert hasattr(ci_driver_mod, "CIDriver")
+
+def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:
+    """The CI workers must use the Pi directory that admission used."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", "pi", "--pi-dir", str(tmp_path)],
+        resolved_agent="pi",
+    )
+
+    assert captured["config"].pi_dir == tmp_path
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_provider_owned_defaults_remain_empty(agent: str) -> None:
+    """The CI wrapper must not inject Claude defaults into direct providers."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", agent], resolved_agent=agent
+    )
+
+    config = captured["config"]
+    assert (config.reviewer_model, config.fallback_model) == ("", "")
 
 
 def test_main_builds_review_merge_wait_scope_and_dispatches() -> None:

@@ -43,7 +43,11 @@ if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
     from hephaestus.automation.pipeline.routing import PipelineScope
 
-from hephaestus.agents.runtime import resolve_agent
+from hephaestus.agents.runtime import (
+    agent_uses_configured_model_default,
+    apply_agent_model_reasoning_effort,
+    resolve_agent,
+)
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.agent_config import (
     fallback_model as default_fallback_model,
@@ -193,6 +197,13 @@ def _default_phase_timeout_s() -> float:
 def _resolve_model_option(role_value: str, global_value: str, default: str) -> str:
     """Resolve model precedence once at the CLI boundary."""
     return role_value or global_value or default
+
+
+def _provider_model_default(agent: str, default: str) -> str:
+    """Return a legacy role default only for Claude and Codex."""
+    if agent_uses_configured_model_default(agent):
+        return ""
+    return default
 
 
 @dataclass
@@ -461,8 +472,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--planner-model", default="", help="Model ID for planner child processes")
     reasoning_help = (
-        "Explicit Codex reasoning effort for this role. Use default to omit "
-        "model_reasoning_effort; when omitted, the selected model alias keeps its default."
+        "Reasoning effort for this role on Codex, OpenCode, or Pi. Use default "
+        "to select the agent configuration."
     )
     p.add_argument(
         "--planner-reasoning-effort",
@@ -1080,6 +1091,23 @@ def main(argv: list[str] | None = None) -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
+        model_references=(
+            apply_agent_model_reasoning_effort(
+                args.agent or "",
+                args.planner_model or args.model,
+                args.planner_reasoning_effort,
+            ),
+            apply_agent_model_reasoning_effort(
+                args.agent or "",
+                args.reviewer_model or args.model,
+                args.reviewer_reasoning_effort,
+            ),
+            apply_agent_model_reasoning_effort(
+                args.agent or "",
+                args.implementer_model or args.model,
+                args.implementer_reasoning_effort,
+            ),
+        ),
     )
 
     phases = _validate_phases(args.phases)
@@ -1127,16 +1155,24 @@ def main(argv: list[str] | None = None) -> int:
         run_pre_pr_tests=args.run_pre_pr_tests,
         model=args.model,
         planner_model=_resolve_model_option(
-            args.planner_model, args.model, default_planner_model()
+            args.planner_model,
+            args.model,
+            _provider_model_default(agent, default_planner_model()),
         ),
         reviewer_model=_resolve_model_option(
-            args.reviewer_model, args.model, default_reviewer_model()
+            args.reviewer_model,
+            args.model,
+            _provider_model_default(agent, default_reviewer_model()),
         ),
         implementer_model=_resolve_model_option(
-            args.implementer_model, args.model, default_implementer_model()
+            args.implementer_model,
+            args.model,
+            _provider_model_default(agent, default_implementer_model()),
         ),
         fallback_model=_resolve_model_option(
-            args.fallback_model, args.model, default_fallback_model()
+            args.fallback_model,
+            args.model,
+            _provider_model_default(agent, default_fallback_model()),
         ),
         planner_reasoning_effort=args.planner_reasoning_effort,
         reviewer_reasoning_effort=args.reviewer_reasoning_effort,

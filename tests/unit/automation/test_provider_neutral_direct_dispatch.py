@@ -818,3 +818,18 @@ def test_direct_provider_adapters_are_confined_to_runtime() -> None:
             )
 
     assert violations == []
+
+
+def test_automation_agent_resolution_binds_models_before_provider_probes() -> None:
+    """Every automation resolver supplies the pending model selections."""
+    violations: list[str] = []
+    automation_root = REPO_ROOT / "hephaestus" / "automation"
+    for path in sorted(automation_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _node_name(node.func) != "resolve_agent":
+                continue
+            if not any(keyword.arg == "model_references" for keyword in node.keywords):
+                violations.append(f"{path.relative_to(REPO_ROOT).as_posix()} line {node.lineno}")
+
+    assert violations == []

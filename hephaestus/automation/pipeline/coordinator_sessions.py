@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hephaestus.agents.pi_session import validate_pi_binding
+from hephaestus.agents.runtime import AgentExecutionError, resolve_pi_model_reference
 
 from .jobs import AgentJob, JobResult
 from .work_item import WorkItem
@@ -22,13 +23,14 @@ def store_agent_session_result(
         if job.execution_request is None:
             return "Pi binding returned without execution request"
         try:
+            effective_model = resolve_pi_model_reference(job.model, pi_dir=job.pi_dir)
             validate_pi_binding(
                 result.session_binding,
                 cwd=job.cwd,
                 role=job.execution_request.role,
-                model=job.model,
+                model=effective_model,
             )
-        except ValueError as exc:
+        except (AgentExecutionError, ValueError) as exc:
             return f"invalid Pi session binding: {exc}"
         item.session_bindings[session_key] = result.session_binding
     elif result.session_id:

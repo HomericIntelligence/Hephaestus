@@ -548,9 +548,11 @@ class PlanReviewer:
                     AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT
                 ),
                 model=direct_agent_model(
-                    agent, model_value=self.options.reviewer_model or reviewer_model()
+                    agent,
+                    model_value=self.options.reviewer_model or reviewer_model(agent=agent),
                 ),
                 sandbox="read-only",
+                pi_dir=self.options.pi_dir,
             )
             output = (result.stdout or "").strip()
             if not output:
@@ -757,6 +759,7 @@ def main() -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
+        model_references=(args.reviewer_model or args.model,),
     )
 
     log = logging.getLogger(__name__)
@@ -781,8 +784,13 @@ def main() -> int:
                 agent_timeout=(
                     args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
                 ),
-                reviewer_model=reviewer_model(args.reviewer_model or args.model or None),
-                fallback_model=fallback_model(args.fallback_model or args.model or None),
+                reviewer_model=reviewer_model(
+                    args.reviewer_model or args.model or None, agent=agent
+                ),
+                fallback_model=fallback_model(
+                    args.fallback_model or args.model or None, agent=agent
+                ),
+                pi_dir=args.pi_dir,
             )
 
             reviewer = PlanReviewer(options)

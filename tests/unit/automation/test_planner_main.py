@@ -11,6 +11,7 @@ GitHub call is made.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -27,7 +28,9 @@ def _silence_logging(caplog: Any) -> None:
     caplog.set_level("CRITICAL")
 
 
-def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> Any:
+def _run_main_capturing_config(
+    argv: list[str], *, rc: int = 0, resolved_agent: str = "claude"
+) -> Any:
     """Run ``main()`` with ``argv``, capturing the PipelineConfig passed to run_pipeline.
 
     Returns the captured ``PipelineConfig`` instance. ``run_pipeline`` is
@@ -47,7 +50,7 @@ def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> Any:
             "hephaestus.automation.pipeline.coordinator.run_pipeline",
             side_effect=_fake_run_pipeline,
         ),
-        patch.object(planner_mod, "resolve_agent", return_value="claude"),
+        patch.object(planner_mod, "resolve_agent", return_value=resolved_agent),
     ):
         result_rc = planner_mod.main()
 
@@ -79,6 +82,27 @@ def test_timeout_flags_thread_into_pipeline_config() -> None:
     config = captured["config"]
     assert (config.planner_timeout, config.reviewer_timeout) == (11, 12)
     assert config.reviewer_model == "review-model"
+
+
+def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:
+    """The planner worker must use the Pi directory that admission used."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", "pi", "--pi-dir", str(tmp_path)],
+        resolved_agent="pi",
+    )
+
+    assert captured["config"].pi_dir == tmp_path
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_provider_owned_defaults_remain_empty(agent: str) -> None:
+    """The planner wrapper must not inject Claude defaults into direct providers."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", agent], resolved_agent=agent
+    )
+
+    config = captured["config"]
+    assert (config.planner_model, config.reviewer_model, config.fallback_model) == ("", "", "")
 
 
 def test_plan_review_reset_is_scoped_to_explicit_issues() -> None:

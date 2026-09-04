@@ -2159,6 +2159,7 @@ class WorkerPool:
                 auth_status_timeout=job.auth_status_timeout,
                 pi_isolation_adapter=job.pi_isolation_adapter,
                 pi_dir=job.pi_dir,
+                model_references=(job.model,),
             )
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
@@ -2360,6 +2361,8 @@ class WorkerPool:
             session_binding=job.session_binding,
             disable_pi_automation=job.disable_pi_automation,
             auth_status_timeout=job.auth_status_timeout,
+            pi_isolation_adapter=job.pi_isolation_adapter,
+            pi_dir=job.pi_dir,
         )
         # ``compact_agent_session`` intentionally swallows expected failures; a
         # missing or uncompactable transcript must not stall a review cycle.
@@ -4703,7 +4706,10 @@ class WorkerPool:
             "signing_env_factory": signing_env_factory,
         }
         if agent_model is not None:
-            commit_kwargs["agent_model"] = str(agent_model)
+            commit_kwargs["agent_model"] = agent_model
+        pi_dir = job.kwargs.get("pi_dir")
+        if pi_dir is not None:
+            commit_kwargs["pi_dir"] = Path(str(pi_dir))
         try:
             return git_utils.commit_if_changes(*commit_args, **commit_kwargs)
         except git_utils.SigningEnvironmentUnavailableError as exc:

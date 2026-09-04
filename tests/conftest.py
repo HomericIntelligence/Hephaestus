@@ -204,8 +204,16 @@ def _agents_authenticated_by_default(
         auth_status_timeout: int = 10,
         pi_isolation_adapter: str | None = None,
         pi_dir: Path | None = None,
+        model_references: tuple[str, ...] | None = None,
     ) -> str:
-        del cwd, disable_pi_automation, auth_status_timeout, pi_isolation_adapter, pi_dir
+        del (
+            cwd,
+            disable_pi_automation,
+            auth_status_timeout,
+            pi_isolation_adapter,
+            pi_dir,
+            model_references,
+        )
         return agent if agent is not None else "claude"
 
     # Patch at the runtime module and at every automation module that imported

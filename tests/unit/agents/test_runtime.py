@@ -17,7 +17,13 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
-from hephaestus.agents.execution_policy import ExecutionPolicyError, SessionLifecycle
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionPolicyError,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 
 PI_SMOKE_COMMAND_PREFIX = [
     "pi",
@@ -1180,7 +1186,7 @@ def test_opencode_registry_contract() -> None:
     assert capabilities.supports_approval is False
     assert capabilities.supports_sandbox is True
     assert agent_runtime.uses_direct_agent_runner("opencode") is True
-    assert agent_runtime.agent_supports_model_reasoning_effort("opencode") is False
+    assert agent_runtime.agent_supports_model_reasoning_effort("opencode") is True
 
 
 def test_opencode_base_cmd_passes_model_through_and_omits_empty(tmp_path: Path) -> None:
@@ -1223,6 +1229,47 @@ def test_opencode_base_cmd_passes_model_through_and_omits_empty(tmp_path: Path) 
         "json",
         "--agent",
         "plan",
+    ]
+
+
+def test_opencode_base_cmd_translates_ifm_reasoning_to_variant(tmp_path: Path) -> None:
+    """OpenCode receives the canonical IFM model and a separate variant."""
+    assert agent_runtime._opencode_base_cmd(
+        cwd=tmp_path,
+        model="k2-horizon-0.9:high",
+    ) == [
+        "opencode",
+        "run",
+        "--dir",
+        str(tmp_path),
+        "--format",
+        "json",
+        "--model",
+        "IFM/K2-Horizon-0.9B",
+        "--variant",
+        "high",
+    ]
+
+
+def test_opencode_base_cmd_applies_variant_to_configured_default(tmp_path: Path) -> None:
+    """OpenCode can apply a role variant without an explicit model."""
+    command = agent_runtime._opencode_base_cmd(cwd=tmp_path, model=":high")
+
+    assert "--model" not in command
+    assert command[-2:] == ["--variant", "high"]
+
+
+def test_opencode_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
+    """A role option must not change an unrelated provider model identifier."""
+    selected = agent_runtime.apply_agent_model_reasoning_effort(
+        "opencode", "private/provider:model", "high"
+    )
+
+    assert agent_runtime._opencode_base_cmd(cwd=tmp_path, model=selected)[-4:] == [
+        "--model",
+        "private/provider:model",
+        "--variant",
+        "high",
     ]
 
 
@@ -1982,7 +2029,7 @@ def test_run_pi_smoke_session_rejects_incomplete_event_stdout(
 def _assert_pi_exception_chain_is_redacted(exc: BaseException) -> None:
     """Structured exception chains must not retain unredacted Pi diagnostics."""
     assert exc.__cause__ is None
-    for chained in (exc.__cause__, exc.__context__):
+    for chained in (exc, exc.__cause__, exc.__context__):
         if chained is None:
             continue
         diagnostics = " ".join(
@@ -2220,6 +2267,348 @@ def test_pi_automation_command_uses_only_its_explicit_model(
     ]
 
 
+def test_pi_automation_command_translates_ifm_reasoning_to_thinking(tmp_path: Path) -> None:
+    """Pi receives the canonical IFM model and a separate thinking level."""
+    command = agent_runtime._pi_automation_cmd(
+        tmp_path / "pi",
+        model="k2-horizon-0.9:high",
+        lifecycle=SessionLifecycle.ONE_SHOT,
+    )
+
+    assert command[-4:] == [
+        "--model",
+        "IFM/K2-Horizon-0.9B",
+        "--thinking",
+        "high",
+    ]
+
+
+def test_pi_command_keeps_a_native_configured_thinking_level_separate(tmp_path: Path) -> None:
+    """A Pi-native thinking level does not become part of the model ID."""
+    command = agent_runtime._pi_automation_cmd(
+        tmp_path / "pi",
+        model="IFM/K2-Horizon-0.9B",
+        thinking="off",
+        lifecycle=SessionLifecycle.ONE_SHOT,
+    )
+
+    assert command[-4:] == [
+        "--model",
+        "IFM/K2-Horizon-0.9B",
+        "--thinking",
+        "off",
+    ]
+
+
+def test_pi_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
+    """A Pi role option must not change an unrelated provider model identifier."""
+    selected = agent_runtime.apply_agent_model_reasoning_effort(
+        "pi", "private/provider:model", "high"
+    )
+
+    assert agent_runtime._pi_automation_cmd(
+        tmp_path / "pi",
+        model=selected,
+        lifecycle=SessionLifecycle.ONE_SHOT,
+    )[-4:] == [
+        "--model",
+        "private/provider:model",
+        "--thinking",
+        "high",
+    ]
+
+
+def test_pi_default_role_effort_uses_config_for_an_unknown_model(tmp_path: Path) -> None:
+    """The default role value must select the global Pi thinking level."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"configured","defaultModel":"other","defaultThinkingLevel":"high"}',
+        encoding="utf-8",
+    )
+    selected = agent_runtime.apply_agent_model_reasoning_effort(
+        "pi", "private/provider:model", "default"
+    )
+
+    assert agent_runtime.resolve_pi_model_reference(selected, pi_dir=pi_dir) == (
+        "private/provider:model:high"
+    )
+
+
+def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> None:
+    """An omitted Pi model becomes an explicit operator-global selection."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "defaultProvider": "IFM",
+                "defaultModel": "K2-Horizon-0.9B",
+                "defaultThinkingLevel": "high",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir) == (
+        "IFM/K2-Horizon-0.9B:high"
+    )
+
+
+def test_pi_default_reasoning_replaces_an_inline_reasoning_value(tmp_path: Path) -> None:
+    """The default selector removes an inline value and uses Pi settings."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-7B","defaultThinkingLevel":"medium"}',
+        encoding="utf-8",
+    )
+
+    assert (
+        agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-0.9B:default", pi_dir=pi_dir)
+        == "IFM/K2-Horizon-0.9B:medium"
+    )
+
+
+def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path) -> None:
+    """Pi fingerprints configured thinking when the model has no inline effort."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"private","defaultModel":"operator-model",'
+        '"defaultThinkingLevel":"high"}',
+        encoding="utf-8",
+    )
+
+    assert agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-7B", pi_dir=pi_dir) == (
+        "IFM/K2-Horizon-7B:high"
+    )
+
+
+def test_pi_default_model_rejects_a_settings_symlink(tmp_path: Path) -> None:
+    """Pi does not resolve a default through a settings-file symlink."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    target = tmp_path / "settings.json"
+    target.write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B"}',
+        encoding="utf-8",
+    )
+    (pi_dir / "settings.json").symlink_to(target)
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_rejects_an_oversized_settings_file(tmp_path: Path) -> None:
+    """Pi does not read a settings file above the configuration size limit."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        " " * (agent_runtime.PI_CONFIG_MAX_BYTES + 1), encoding="utf-8"
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_rejects_a_non_regular_settings_file(tmp_path: Path) -> None:
+    """Pi must reject a directory in place of the global settings file."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").mkdir()
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_rejects_group_or_other_writable_settings(tmp_path: Path) -> None:
+    """Pi must not trust a default that another account can modify."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B"}',
+        encoding="utf-8",
+    )
+    settings_path.chmod(0o622)
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_rejects_settings_owned_by_another_user(tmp_path: Path) -> None:
+    """Pi must not trust settings that another account owns."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B"}',
+        encoding="utf-8",
+    )
+
+    with (
+        patch("hephaestus.agents.runtime.os.getuid", return_value=os.getuid() + 1),
+        pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"),
+    ):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+@pytest.mark.parametrize(
+    "raw_settings",
+    [
+        b'{"defaultProvider":"private-provider-alias","defaultModel":"private-test-alias"',
+        b"\xffprivate-provider-alias/private-test-alias",
+    ],
+)
+def test_pi_malformed_settings_do_not_remain_in_exception_chain(
+    tmp_path: Path,
+    raw_settings: bytes,
+) -> None:
+    """Pi settings failures must not retain private configuration bytes."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_bytes(raw_settings)
+
+    with pytest.raises(agent_runtime.AgentExecutionError) as exc_info:
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+    exc = exc_info.value
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+    diagnostics = " ".join(
+        [
+            str(exc),
+            repr(exc.args),
+            str(getattr(exc, "doc", "")),
+            str(getattr(exc, "object", "")),
+        ]
+    )
+    assert "private-provider-alias" not in diagnostics
+    assert "private-test-alias" not in diagnostics
+
+
+@pytest.mark.parametrize(
+    "raw_settings",
+    [
+        "{",
+        "null",
+        "[]",
+        '{"defaultProvider":1,"defaultModel":"model"}',
+        '{"defaultProvider":"provider","defaultModel":1}',
+        '{"defaultProvider":"","defaultModel":"model"}',
+        '{"defaultProvider":"provider","defaultModel":""}',
+        '{"defaultProvider":" provider","defaultModel":"model"}',
+        '{"defaultProvider":"provider","defaultModel":"model "}',
+    ],
+)
+def test_pi_default_model_rejects_malformed_or_non_string_settings(
+    tmp_path: Path,
+    raw_settings: str,
+) -> None:
+    """Pi must reject malformed, non-string, blank, or padded default values."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(raw_settings, encoding="utf-8")
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_does_not_read_project_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi must use only the operator-global settings file."""
+    home_dir = tmp_path / "home"
+    pi_dir = home_dir / ".pi" / "agent"
+    pi_dir.mkdir(parents=True)
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"global","defaultModel":"model"}', encoding="utf-8"
+    )
+    project_dir = tmp_path / "project"
+    (project_dir / ".pi").mkdir(parents=True)
+    (project_dir / ".pi" / "settings.json").write_text(
+        '{"defaultProvider":"project","defaultModel":"poison"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(Path, "home", lambda: home_dir)
+    monkeypatch.chdir(project_dir)
+
+    assert agent_runtime.resolve_pi_model_reference("") == "global/model"
+
+
+def test_pi_adapter_failure_redacts_default_provider_and_model_components(
+    tmp_path: Path,
+) -> None:
+    """An adapter failure must not expose either part of the Pi default."""
+    from hephaestus.agents.execution_policy import (
+        AgentOperation,
+        AgentRole,
+        ExecutionRequest,
+        resolve_policy,
+    )
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    class FailingAdapter:
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            raise RuntimeError("private-provider-alias private-test-alias")
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    )
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", FailingAdapter()),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+        pytest.raises(agent_runtime.AgentExecutionError) as exc_info,
+    ):
+        agent_runtime._run_pi_with_policy(
+            prompt="review",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-provider-alias/private-test-alias",
+            policy=resolve_policy(request),
+            preflight=PiPreflightResult.ready_result(executable=executable),
+            lifecycle=SessionLifecycle.ONE_SHOT,
+        )
+
+    _assert_pi_exception_chain_is_redacted(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"defaultProvider": "IFM"},
+        {"defaultModel": "K2-Horizon-0.9B"},
+        {
+            "defaultProvider": "IFM",
+            "defaultModel": "K2-Horizon-0.9B",
+            "defaultThinkingLevel": "invalid",
+        },
+    ],
+)
+def test_pi_default_model_rejects_incomplete_operator_settings(
+    tmp_path: Path,
+    settings: dict[str, str],
+) -> None:
+    """Pi fails before launch when its operator-global default is invalid."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
 def test_pi_private_redaction_tokens_fail_closed_on_broken_policy_link(tmp_path: Path) -> None:
     """A configured-but-unreadable privacy policy cannot silently disable redaction."""
     (tmp_path / ".heph-project-denylist").symlink_to("missing-policy-file")
@@ -2451,14 +2840,15 @@ def test_resume_pi_session_rejects_raw_resume_even_after_admission(tmp_path: Pat
 
 
 def test_direct_agent_model_preserves_empty_explicit_value_and_default() -> None:
-    """Explicit values win; only ``None`` selects the established default."""
+    """Explicit values win and direct agents retain configured defaults."""
     for agent in agent_runtime.AGENT_CHOICES:
         assert agent_runtime.direct_agent_model(agent, "phase-model") == "phase-model"
         assert agent_runtime.direct_agent_model(agent, "") == ""
         assert agent_runtime.direct_agent_model(agent, None) == ""
+        expected = "" if agent in {"opencode", "pi"} else "standalone-default"
         assert (
             agent_runtime.direct_agent_model(agent, None, codex_default="standalone-default")
-            == "standalone-default"
+            == expected
         )
 
 
@@ -2791,7 +3181,18 @@ def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: P
         "hephaestus.agents.runtime.preflight_pi_environment", return_value=failure
     ) as preflight:
         with pytest.raises(RuntimeError, match="package_inventory_mismatch"):
-            agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
+            agent_runtime.run_agent_text(
+                "pi",
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+                model="explicit/model",
+                execution_request=ExecutionRequest(
+                    AgentRole.PR_REVIEWER,
+                    AgentOperation.PR_REVIEW,
+                    SessionLifecycle.ONE_SHOT,
+                ),
+            )
     preflight.assert_called_once_with(tmp_path, pi_dir=None)
 
 

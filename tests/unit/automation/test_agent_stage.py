@@ -298,12 +298,14 @@ def test_run_agent_dispatches_pi_and_logs_session(
 
     def fake_run_agent_session(*args: object, **kwargs: object) -> AgentRunResult:
         assert kwargs["agent"] == "pi"
+        assert kwargs["pi_dir"] == tmp_path / "pi-agent"
         return AgentRunResult(stdout="pi output", stderr="", session_id="pi-session-123")
 
     monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
     monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "pi")
 
     args = _args(tmp_path, agent="pi")
+    args.pi_dir = tmp_path / "pi-agent"
     rc = agent_stage.run_agent(args)
 
     assert rc == 0
@@ -348,6 +350,7 @@ def test_run_agent_resolves_pi_against_repo_root(
         "auth_status_timeout": 10,
         "pi_isolation_adapter": None,
         "pi_dir": None,
+        "model_references": ("",),
     }
 
 

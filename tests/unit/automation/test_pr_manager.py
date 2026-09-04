@@ -726,6 +726,7 @@ class TestEnsurePRCreated:
                 base="master",
                 worktree_path=Path("/tmp/wt"),
                 git_message_timeout=1200,
+                pi_dir=None,
             )
 
     def test_creates_pr_with_selected_agent_metadata(self) -> None:
@@ -761,6 +762,7 @@ class TestEnsurePRCreated:
                 worktree_path=Path("/tmp/wt"),
                 git_message_timeout=1200,
                 agent_model="sol:medium",
+                pi_dir=None,
             )
 
 
@@ -1000,6 +1002,7 @@ class TestMessageAgentInvocation:
                     agent="pi",
                     timeout=120,
                     model_override="operator-local-alias",
+                    pi_dir=Path("/private/pi-agent"),
                 )
                 == "{}"
             )
@@ -1009,6 +1012,7 @@ class TestMessageAgentInvocation:
         assert kwargs["cwd"] == Path("/tmp/wt")
         assert kwargs["sandbox"] == "read-only"
         assert kwargs["model"] == "operator-local-alias"
+        assert kwargs["pi_dir"] == Path("/private/pi-agent")
 
 
 # ---------------------------------------------------------------------------

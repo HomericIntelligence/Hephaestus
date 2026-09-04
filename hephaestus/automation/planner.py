@@ -223,6 +223,10 @@ def main() -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
+        model_references=(
+            args.planner_model or args.model,
+            args.reviewer_model or args.model,
+        ),
     )
 
     org, repo = _resolve_repo()
@@ -283,10 +287,11 @@ def main() -> int:
         agent=agent,
         disable_pi_automation=args.disable_pi_automation,
         auth_status_timeout=args.auth_status_timeout,
+        pi_dir=args.pi_dir,
         model=args.model,
-        planner_model=planner_model(args.planner_model or args.model or None),
-        reviewer_model=reviewer_model(args.reviewer_model or args.model or None),
-        fallback_model=fallback_model(args.fallback_model or args.model or None),
+        planner_model=planner_model(args.planner_model or args.model or None, agent=agent),
+        reviewer_model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),
+        fallback_model=fallback_model(args.fallback_model or args.model or None, agent=agent),
         planner_timeout=args.agent_timeout,
         reviewer_timeout=args.reviewer_timeout,
         no_advise=args.no_advise,

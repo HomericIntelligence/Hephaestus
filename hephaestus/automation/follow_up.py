@@ -431,7 +431,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                 prompt=prompt_file.read_text(),
                 cwd=worktree_path,
                 timeout=timeout,
-                model=direct_agent_model(agent, model_value=learn_model()),
+                model=direct_agent_model(agent, model_value=learn_model(agent=agent)),
             )
             stdout = agent_json_stdout(direct_result.stdout, direct_result.session_id)
         else:

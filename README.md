@@ -359,6 +359,10 @@ and the operator must select it with `--pi-isolation-adapter ENTRY_POINT`. That 
 enforces the resolved filesystem and network policy; the local setup otherwise
 supports only the explicit adapter-smoke seam.
 
+For IFM and K2-Horizon model IDs, aliases, reasoning controls, and external
+server requirements, see
+[`docs/ifm-models.md`](docs/ifm-models.md).
+
 #### Running the automation loop from a source checkout (macOS / Codex)
 
 When `hephaestus-automation-loop` is not installed on `PATH` (fresh source

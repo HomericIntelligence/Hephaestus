@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -22,7 +23,12 @@ from hephaestus.agents.execution_policy import (
     intersect_child_policy,
     resolve_policy,
 )
-from hephaestus.agents.pi_session import PiSessionBindingError, create_pi_binding
+from hephaestus.agents.model_selection import AgentModelSelection
+from hephaestus.agents.pi_session import (
+    PiSessionBindingError,
+    create_pi_binding,
+    validate_pi_binding,
+)
 
 
 def test_pr_review_one_shot_uses_the_read_only_review_policy() -> None:
@@ -326,7 +332,12 @@ def test_named_host_adapter_bootstraps_before_direct_policy_dispatch(
 
     agent_runtime.load_pi_isolation_adapter("operator-broker")
     result = agent_runtime.run_agent_text(
-        "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
+        "pi",
+        "review",
+        cwd=tmp_path,
+        timeout=30,
+        model="private-model",
+        execution_request=request,
     )
 
     assert result.stdout == "reviewed"
@@ -490,7 +501,12 @@ def test_pi_policy_dispatch_fails_before_provider_without_os_adapter(
         match=r"checkout_ro.*constrained_web",
     ):
         agent_runtime.run_agent_text(
-            "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
+            "pi",
+            "review",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-model",
+            execution_request=request,
         )
 
 
@@ -515,7 +531,12 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     )
 
     result = agent_runtime.run_agent_text(
-        "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
+        "pi",
+        "review",
+        cwd=tmp_path,
+        timeout=30,
+        model="private-model",
+        execution_request=request,
     )
 
     assert result.stdout == "review"
@@ -622,3 +643,233 @@ def test_pi_session_start_dispatches_without_resume_binding(
     assert result.session_id == "pi-session-new"
     assert result.session_binding is not None
     assert result.session_binding.session_id == "pi-session-new"
+
+
+def test_pi_session_start_binds_the_operator_default_and_thinking_level(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi resolves and fingerprints its global default before dispatch."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B","defaultThinkingLevel":"high"}',
+        encoding="utf-8",
+    )
+    received: dict[str, object] = {}
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_run_pi_with_policy",
+        lambda **kwargs: (
+            received.update(kwargs)
+            or agent_runtime.AgentRunResult("planned", "", session_id="pi-session-default")
+        ),
+    )
+    request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
+
+    result = agent_runtime.run_agent_session(
+        "pi",
+        "plan",
+        cwd=tmp_path,
+        timeout=30,
+        pi_dir=pi_dir,
+        execution_request=request,
+    )
+
+    assert received["model"] == "IFM/K2-Horizon-0.9B:high"
+    assert result.session_binding is not None
+    validate_pi_binding(
+        result.session_binding,
+        cwd=tmp_path,
+        role=AgentRole.PLANNER,
+        model="IFM/K2-Horizon-0.9B:high",
+    )
+
+
+@pytest.mark.parametrize("helper", ["text", "session", "resume"])
+def test_pi_helpers_reject_invalid_defaults_before_admission(
+    helper: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid Pi settings must fail before preflight or adapter dispatch."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text("{", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda *_args, **_kwargs: calls.append("admission"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_run_pi_with_policy",
+        lambda **_kwargs: calls.append("adapter"),
+    )
+    request = (
+        ExecutionRequest(
+            AgentRole.PR_REVIEWER,
+            AgentOperation.PR_REVIEW,
+            SessionLifecycle.ONE_SHOT,
+        )
+        if helper == "text"
+        else ExecutionRequest(
+            AgentRole.PLANNER,
+            AgentOperation.AMEND,
+            SessionLifecycle.RESUME_REQUIRED,
+        )
+        if helper == "resume"
+        else ExecutionRequest(
+            AgentRole.PLANNER,
+            AgentOperation.PLAN,
+            SessionLifecycle.START_NEW,
+        )
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        if helper == "text":
+            agent_runtime.run_agent_text(
+                "pi", "plan", cwd=tmp_path, timeout=30, pi_dir=pi_dir, execution_request=request
+            )
+        elif helper == "session":
+            agent_runtime.run_agent_session(
+                "pi", "plan", cwd=tmp_path, timeout=30, pi_dir=pi_dir, execution_request=request
+            )
+        else:
+            agent_runtime.resume_agent_session(
+                "pi",
+                "pi-session",
+                "plan",
+                cwd=tmp_path,
+                timeout=30,
+                pi_dir=pi_dir,
+                execution_request=request,
+            )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "model_reference",
+    ["", AgentModelSelection("private/custom-model", "default")],
+)
+def test_resolve_agent_rejects_invalid_pi_defaults_before_admission(
+    model_reference: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent selection must validate Pi defaults before process-backed admission."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text("{", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda *_args, **_kwargs: calls.append("admission"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_isolation_adapter",
+        lambda *_args, **_kwargs: calls.append("isolation"),
+    )
+
+    def record_authentication(*_args: object, **_kwargs: object) -> bool:
+        calls.append("authentication")
+        return True
+
+    monkeypatch.setattr(
+        agent_runtime,
+        "is_agent_authenticated",
+        record_authentication,
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_agent(
+            "pi",
+            cwd=tmp_path,
+            pi_dir=pi_dir,
+            model_references=(model_reference,),
+        )
+
+    assert calls == []
+
+
+def test_resolve_agent_validates_equal_pi_references_with_distinct_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """String equality must not hide a structured Pi default selection."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text("{", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda *_args, **_kwargs: calls.append("admission"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_isolation_adapter",
+        lambda *_args, **_kwargs: calls.append("isolation"),
+    )
+
+    plain_reference = "private/custom-model:default"
+    structured_reference = AgentModelSelection("private/custom-model", "default")
+    assert plain_reference == structured_reference
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_agent(
+            "pi",
+            cwd=tmp_path,
+            pi_dir=pi_dir,
+            model_references=(plain_reference, structured_reference),
+        )
+
+    assert calls == []
+
+
+def test_pi_resume_rejects_a_changed_operator_default(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed Pi default cannot resume a session with another fingerprint."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B","defaultThinkingLevel":"low"}',
+        encoding="utf-8",
+    )
+    binding = create_pi_binding(
+        session_id="pi-session-default",
+        cwd=tmp_path,
+        role=AgentRole.PLANNER,
+        model="IFM/K2-Horizon-0.9B:high",
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd, **_kwargs: None,
+    )
+    request = ExecutionRequest(
+        AgentRole.PLANNER,
+        AgentOperation.AMEND,
+        SessionLifecycle.RESUME_REQUIRED,
+    )
+
+    with pytest.raises(PiSessionBindingError, match="model does not match"):
+        agent_runtime.resume_agent_session(
+            "pi",
+            binding.session_id,
+            "amend",
+            cwd=tmp_path,
+            timeout=30,
+            pi_dir=pi_dir,
+            execution_request=request,
+            resume_binding=binding,
+        )

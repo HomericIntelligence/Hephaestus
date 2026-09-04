@@ -128,6 +128,7 @@ def run_audit_coordinator(
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     model: str | None = None,
     fallback_model_value: str | None = None,
+    pi_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Dispatch the coordinator agent; return parsed audit results.
 
@@ -158,8 +159,9 @@ def run_audit_coordinator(
                 execution_request=ExecutionRequest(
                     AgentRole.PR_REVIEWER, AgentOperation.AUDIT_REVIEW, SessionLifecycle.ONE_SHOT
                 ),
-                model=direct_agent_model(agent, model_value=model or reviewer_model()),
+                model=direct_agent_model(agent, model_value=model or reviewer_model(agent=agent)),
                 sandbox="read-only",
+                pi_dir=pi_dir,
             )
             response = result.stdout or ""
         else:
@@ -209,6 +211,7 @@ class AuditReviewer:
     timeout: int = DEFAULT_AGENT_TIMEOUT
     model: str = ""
     fallback_model: str = ""
+    pi_dir: Path | None = None
     shutdown_event: threading.Event | None = None
 
     def __post_init__(self) -> None:
@@ -234,6 +237,7 @@ class AuditReviewer:
                 timeout=self.timeout,
                 model=self.model,
                 fallback_model_value=self.fallback_model or None,
+                pi_dir=self.pi_dir,
             )
         except RuntimeError as exc:
             logger.error("Coordinator failed: %s", exc)
@@ -284,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             auth_status_timeout=args.auth_status_timeout,
             pi_isolation_adapter=args.pi_isolation_adapter,
             pi_dir=args.pi_dir,
+            model_references=(args.reviewer_model or args.model,),
         )
     )
 
@@ -295,9 +300,12 @@ def main(argv: list[str] | None = None) -> int:
                 pr_numbers=args.pr_numbers,
                 dry_run=args.dry_run,
                 shutdown_event=shutdown,
-                model=reviewer_model(args.reviewer_model or args.model or None),
-                fallback_model=fallback_model(args.fallback_model or args.model or None),
+                model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),
+                fallback_model=fallback_model(
+                    args.fallback_model or args.model or None, agent=agent
+                ),
                 timeout=args.agent_timeout,
+                pi_dir=args.pi_dir,
             )
             rc, audits = reviewer.run()
             if getattr(args, "json", False):

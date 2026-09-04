@@ -102,7 +102,8 @@ class ImplementPhase(StageMixin):
                     ),
                     model=direct_agent_model(
                         self.options.agent,
-                        model_value=getattr(self.options, "advise_model", "") or advise_model(),
+                        model_value=getattr(self.options, "advise_model", "")
+                        or advise_model(agent=self.options.agent),
                         codex_default=codex_advise_model(),
                     ),
                     sandbox="read-only",
@@ -294,7 +295,7 @@ class ImplementPhase(StageMixin):
                 model=direct_agent_model(
                     agent,
                     model_value=getattr(self.options, "implementer_model", "")
-                    or implementer_model(),
+                    or implementer_model(agent=agent),
                 ),
                 sandbox="workspace-write",
             )

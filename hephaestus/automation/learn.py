@@ -257,7 +257,7 @@ def run_learn(
                     prompt=build_learn_prompt(""),
                     cwd=worktree_path,
                     timeout=timeout,
-                    model=direct_agent_model(agent, model_value=learn_model(model)),
+                    model=direct_agent_model(agent, model_value=learn_model(model, agent=agent)),
                 ).stdout
                 or ""
             )
@@ -495,6 +495,8 @@ def compact_agent_session(
     session_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
     auth_status_timeout: int = 10,
+    pi_isolation_adapter: str | None = None,
+    pi_dir: Path | None = None,
 ) -> bool:
     """Compact a persisted provider session without making it a hard gate.
 
@@ -510,6 +512,9 @@ def compact_agent_session(
         cwd=cwd,
         disable_pi_automation=disable_pi_automation,
         auth_status_timeout=auth_status_timeout,
+        pi_isolation_adapter=pi_isolation_adapter,
+        pi_dir=pi_dir,
+        model_references=(model or "",),
     )
     resume = agent_compaction_resume(
         provider,
@@ -539,6 +544,7 @@ def compact_agent_session(
             sandbox=sandbox,
             approval="never",
             disable_pi_automation=disable_pi_automation,
+            pi_dir=pi_dir,
             **resume_options,
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, ValueError) as exc:

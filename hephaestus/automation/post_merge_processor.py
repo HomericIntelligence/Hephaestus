@@ -162,7 +162,9 @@ class PostMergeProcessor:
                     execution_request=ExecutionRequest(
                         AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW
                     ),
-                    model=direct_agent_model(options.agent, model_value=learn_model()),
+                    model=direct_agent_model(
+                        options.agent, model_value=learn_model(agent=options.agent)
+                    ),
                     sandbox="workspace-write",
                 )
                 self._last_learn_evidence = mnemosyne_update_evidence(direct_result.stdout or "")

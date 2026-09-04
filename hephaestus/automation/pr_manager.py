@@ -339,6 +339,7 @@ def _invoke_git_message_agent(
     agent: str,
     timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     model_override: str | None = None,
+    pi_dir: Path | None = None,
 ) -> str:
     """Run the lightweight message agent in a separate read-only session.
 
@@ -362,6 +363,7 @@ def _invoke_git_message_agent(
             ),
             model=model,
             sandbox="read-only",
+            pi_dir=pi_dir,
         )
         return (result.stdout or "").strip()
 
@@ -421,6 +423,7 @@ def _generate_commit_message(
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     git_timeout: int | None = None,
     agent_model: str | None = None,
+    pi_dir: Path | None = None,
 ) -> str:
     """Generate a commit message via a lightweight agent with deterministic fallback."""
     changed_files, diff_stat = _staged_change_context(worktree_path, timeout=git_timeout)
@@ -440,6 +443,7 @@ def _generate_commit_message(
             agent=agent,
             timeout=git_message_timeout,
             model_override=agent_model,
+            pi_dir=pi_dir,
         )
         data = _parse_agent_json(raw)
         if data is None:
@@ -498,6 +502,7 @@ def _generate_pr_message(
     agent: str,
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     agent_model: str | None = None,
+    pi_dir: Path | None = None,
 ) -> _PrMessageParts:
     """Generate PR text via a lightweight agent with deterministic fallback."""
     fallback = _fallback_pr_message(issue_number, issue_title, agent)
@@ -522,6 +527,7 @@ def _generate_pr_message(
             agent=agent,
             timeout=git_message_timeout,
             model_override=agent_model,
+            pi_dir=pi_dir,
         )
         data = _parse_agent_json(raw)
         if data is None:
@@ -888,6 +894,7 @@ def commit_changes(
     agent_model: str | None = None,
     *,
     signing_env: dict[str, str] | None = None,
+    pi_dir: Path | None = None,
 ) -> None:
     """Commit changes in worktree, filtering out secret files.
 
@@ -896,6 +903,7 @@ def commit_changes(
         worktree_path: Path to git worktree
         agent: Selected implementation agent. Defaults to Claude for backwards
             compatibility with existing direct callers.
+        pi_dir: Operator-global Pi directory for message generation.
         git_message_timeout: Timeout in seconds for the lightweight commit-message
             agent. Defaults to :data:`DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT`.
         allowed_paths: Optional exact set of porcelain paths allowed to be
@@ -935,6 +943,7 @@ def commit_changes(
         worktree_path=worktree_path,
         agent=agent,
         agent_model=agent_model,
+        pi_dir=pi_dir,
         git_message_timeout=git_message_timeout,
         git_timeout=git_timeout,
     )
@@ -956,6 +965,7 @@ def ensure_pr_created(
     agent: str = "claude",
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     agent_model: str | None = None,
+    pi_dir: Path | None = None,
 ) -> int:
     """Ensure the implementation commit is pushed and a PR exists.
 
@@ -970,6 +980,7 @@ def ensure_pr_created(
         agent: Selected implementation agent for generated PR metadata.
         agent_model: Explicit model and reasoning effort for generated PR
             metadata. When omitted, the deterministic message default is used.
+        pi_dir: Operator-global Pi directory for generated PR metadata.
         git_message_timeout: Timeout in seconds for the lightweight PR-message
             agent. Defaults to :data:`DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT`.
 
@@ -1055,6 +1066,7 @@ def ensure_pr_created(
             base=base_branch,
             worktree_path=worktree_path,
             git_message_timeout=git_message_timeout,
+            pi_dir=pi_dir,
         )
     else:
         pr_number = create_pr(
@@ -1066,6 +1078,7 @@ def ensure_pr_created(
             worktree_path=worktree_path,
             git_message_timeout=git_message_timeout,
             agent_model=agent_model,
+            pi_dir=pi_dir,
         )
     logger.info("Created PR #%s", pr_number)
     return pr_number
@@ -1080,6 +1093,7 @@ def create_pr(
     worktree_path: Path | None = None,
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     agent_model: str | None = None,
+    pi_dir: Path | None = None,
 ) -> int:
     """Create pull request for issue.
 
@@ -1091,6 +1105,7 @@ def create_pr(
         agent: Selected implementation agent for generated PR metadata.
         agent_model: Explicit model and reasoning effort for generated PR
             metadata. When omitted, the deterministic message default is used.
+        pi_dir: Operator-global Pi directory for generated PR metadata.
         base: Base branch used for changed-file and commit context.
         worktree_path: Optional worktree path used to invoke the lightweight
             PR-message agent. When omitted, deterministic fallback text is used.
@@ -1112,6 +1127,7 @@ def create_pr(
         worktree_path=worktree_path,
         agent=agent,
         agent_model=agent_model,
+        pi_dir=pi_dir,
         git_message_timeout=git_message_timeout,
     )
     pr_title = normalize_strict_conventional_title(pr_message.title)

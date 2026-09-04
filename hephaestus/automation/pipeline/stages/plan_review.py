@@ -62,7 +62,9 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.model_selection import AgentModelSelection, parse_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding
+from hephaestus.agents.runtime import agent_uses_configured_model_default
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import (
@@ -125,6 +127,37 @@ from .base import (
     stage_timeout,
 )
 from .planning import _publish_plan_blocked, build_plan_prompt
+
+_MODEL_SELECTION_FORMAT = 1
+
+
+def _durable_reviewer_selection(provider: str, model: str) -> tuple[str, dict[str, object]]:
+    """Split a direct-provider selection into JSON-safe journal fields."""
+    if agent_uses_configured_model_default(provider):
+        selection = parse_model_selection(model)
+        return selection.model, {
+            "model_selection_format": _MODEL_SELECTION_FORMAT,
+            "reasoning_effort": selection.reasoning_effort,
+        }
+    return model, {}
+
+
+def _restore_reviewer_selection(
+    provider: str,
+    model: str,
+    reviewer_config: dict[str, object],
+) -> str:
+    """Restore structured direct-provider model metadata from the journal."""
+    if (
+        agent_uses_configured_model_default(provider)
+        and reviewer_config.get("model_selection_format") == _MODEL_SELECTION_FORMAT
+    ):
+        effort = reviewer_config.get("reasoning_effort", "")
+        if not isinstance(effort, str):
+            raise PlanReviewSessionLostError("reviewer reasoning effort is invalid")
+        return AgentModelSelection(model, effort)
+    return model
+
 
 logger = logging.getLogger(__name__)
 
@@ -282,14 +315,16 @@ def _restore_review_conversation(
                 plan_fingerprint=plan_fingerprint(plan_text),
             )
         if active is None or reset:
+            provider = agent_provider(ctx)
+            selected_model = stage_model(ctx, "reviewer", reviewer_model)
+            stored_model, selection_config = _durable_reviewer_selection(provider, selected_model)
             active = store.start_cycle(
                 repo=item.repo,
                 issue=item.issue,
-                provider=agent_provider(ctx),
-                model=stage_model(ctx, "reviewer", reviewer_model),
-                reviewer_config={
-                    "reasoning_effort": getattr(ctx.config, "reviewer_reasoning_effort", "")
-                },
+                provider=provider,
+                model=stored_model,
+                reviewer_config=selection_config
+                or {"reasoning_effort": getattr(ctx.config, "reviewer_reasoning_effort", "")},
                 cwd=ctx.paths.worktree,
                 plan_revision=revision,
                 plan_fingerprint=plan_fingerprint(plan_text),
@@ -738,7 +773,11 @@ class PlanReviewStage(Stage):
                     review_session.provider if review_session is not None else agent_provider(ctx)
                 ),
                 model=(
-                    review_session.reviewer_model
+                    _restore_reviewer_selection(
+                        review_session.provider,
+                        review_session.reviewer_model,
+                        review_session.reviewer_config,
+                    )
                     if review_session is not None
                     else stage_model(ctx, "reviewer", reviewer_model)
                 ),

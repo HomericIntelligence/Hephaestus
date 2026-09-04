@@ -862,6 +862,35 @@ class TestMain:
         monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
         assert plan_reviewer.main() == 0
 
+    def test_main_threads_the_pi_directory_to_the_direct_reviewer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The plan review call must use the Pi directory that admission used."""
+        from hephaestus.automation import plan_reviewer
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "plan-reviewer",
+                "--issues",
+                "1",
+                "--no-ui",
+                "--agent",
+                "pi",
+                "--pi-dir",
+                str(tmp_path),
+            ],
+        )
+        monkeypatch.setattr(plan_reviewer, "resolve_agent", lambda *_args, **_kwargs: "pi")
+        with patch.object(plan_reviewer, "PlanReviewer") as reviewer_class:
+            reviewer_class.return_value.run.return_value = {}
+
+            assert plan_reviewer.main() == 0
+
+        assert reviewer_class.call_args.args[0].pi_dir == tmp_path
+        assert reviewer_class.call_args.args[0].reviewer_model == ""
+        assert reviewer_class.call_args.args[0].fallback_model == ""
+
     def test_success_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

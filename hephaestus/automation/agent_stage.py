@@ -145,6 +145,7 @@ def run_direct_agent(
             sandbox=args.sandbox,
             approval=args.approval,
             execution_request=agent_stage_execution_request(args.agent, args.stage),
+            pi_dir=getattr(args, "pi_dir", None),
         )
     except subprocess.TimeoutExpired as exc:
         write_log(log_file, str(exc))
@@ -262,6 +263,7 @@ def run_agent(args: argparse.Namespace) -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=getattr(args, "pi_isolation_adapter", None),
         pi_dir=getattr(args, "pi_dir", None),
+        model_references=(args.model,),
     )
     args.agent = agent
 
