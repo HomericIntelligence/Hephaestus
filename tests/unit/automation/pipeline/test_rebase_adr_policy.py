@@ -6,6 +6,7 @@ import importlib
 import queue
 import threading
 from collections.abc import Callable
+from dataclasses import FrozenInstanceError
 from functools import partial
 from pathlib import Path
 from typing import cast
@@ -50,6 +51,11 @@ def _write_valid_adr(path: Path) -> None:
     )
 
 
+def _mutate_policy_name(policy: RebaseValidationPolicy) -> None:
+    """Attempt the mutation that the frozen policy must reject."""
+    policy.name = "other"  # type: ignore[misc]
+
+
 def test_policy_selector_matches_only_hephaestus_repository() -> None:
     """The selector accepts only the exact Hephaestus repository identity."""
     selector = _selector()
@@ -58,8 +64,8 @@ def test_policy_selector_matches_only_hephaestus_repository() -> None:
     selected = bound("hEpHaEsTuS")
     assert selected is not None
     assert selected.name == "hephaestus-adr-v1"
-    with pytest.raises(AttributeError):
-        selected.name = "other"
+    with pytest.raises(FrozenInstanceError):
+        _mutate_policy_name(selected)
     assert bound("Hephaestus-extra") is None
     assert partial(selector, "OtherOrg")("Hephaestus") is None
 
