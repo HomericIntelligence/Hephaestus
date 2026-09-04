@@ -3819,6 +3819,7 @@ class WorkerPool:
                 manager.implementation_writer_authority(Path(created))
                 if kwargs.get("source_lane") == "impl"
                 and kwargs.get("implementation_adoption_head") is None
+                and created is not None
                 else None
             )
         except WorktreeCreationReceiptError as exc:
@@ -3997,6 +3998,14 @@ class WorkerPool:
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
         if created is None:
+            if source_lane == "impl":
+                return self._creation_receipt_failure(
+                    base_dir=repo_root / "build" / ".worktrees",
+                    item_number=item_number,
+                    exc=SourceWorkspaceError("implementation writer was not materialized"),
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                )
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
                     branch_name=branch_name,
@@ -4030,6 +4039,14 @@ class WorkerPool:
         if pr_number is not None and not isinstance(pr_number, (int, str)):
             return JobResult(ok=False, error="worktree sync received an invalid PR number")
         if not worktree_path.exists() and not sync_to_remote and base_sha is None:
+            if source_lane == "impl":
+                return self._creation_receipt_failure(
+                    base_dir=worktree_path.parent,
+                    item_number=item_number,
+                    exc=SourceWorkspaceError("implementation writer was not materialized"),
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                )
             # Keep compatibility with test and alternate managers that return
             # a planned path. A materialized reusable checkout always exists
             # and must pass through the dirty snapshot below.

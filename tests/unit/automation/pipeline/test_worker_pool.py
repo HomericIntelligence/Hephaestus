@@ -3664,6 +3664,78 @@ class TestGitOps:
             "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
         }
 
+    def test_implementation_source_lane_rejects_unmaterialized_writer(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An implementation lane cannot succeed when no writer was created."""
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = None
+
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ()),
+            ),
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: implementation writer was not materialized"
+        )
+        assert result.value == {
+            "path": str(tmp_path / "build" / ".worktrees" / "auto-7-impl"),
+            WORKTREE_MATERIALIZED_KEY: False,
+        }
+
+    def test_implementation_source_lane_rejects_missing_clean_writer_path(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A planned writer path cannot bypass implementation ownership checks."""
+        planned_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+
+        result = pool._finalize_created_worktree(
+            created=planned_path,
+            base_sha=None,
+            branch_name="7-auto",
+            repo_root=tmp_path,
+            repo="test/repo",
+            sync_to_remote=False,
+            pr_number=None,
+            timeout_s=60,
+            source_lane="impl",
+            item_number=7,
+            writer_authority=MagicMock(spec=ImplementationWriterAuthority),
+        )
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: implementation writer was not materialized"
+        )
+        assert result.value == {
+            "path": str(planned_path),
+            WORKTREE_MATERIALIZED_KEY: False,
+        }
+
     def test_direct_pinned_worktree_releases_reservation_when_no_worktree_is_created(
         self,
         pool: WorkerPool,
