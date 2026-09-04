@@ -885,8 +885,9 @@ def commit_changes(
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     allowed_paths: Collection[str] | None = None,
     git_timeout: int | None = None,
-    signing_env: dict[str, str] | None = None,
     agent_model: str | None = None,
+    *,
+    signing_env: dict[str, str] | None = None,
 ) -> None:
     """Commit changes in worktree, filtering out secret files.
 
@@ -895,14 +896,14 @@ def commit_changes(
         worktree_path: Path to git worktree
         agent: Selected implementation agent. Defaults to Claude for backwards
             compatibility with existing direct callers.
-        agent_model: Explicit model and reasoning effort selected by the
-            command line for the message-generation session.  When omitted,
-            the deterministic lightweight-message default is used.
         git_message_timeout: Timeout in seconds for the lightweight commit-message
             agent. Defaults to :data:`DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT`.
         allowed_paths: Optional exact set of porcelain paths allowed to be
             staged. Secret filtering still applies.
         git_timeout: Optional timeout in seconds for each local git command.
+        agent_model: Explicit model and reasoning effort selected by the
+            command line for the message-generation session. When omitted,
+            the deterministic lightweight-message default is used.
         signing_env: Optional validated Git environment for commit signing.
 
     Raises:
