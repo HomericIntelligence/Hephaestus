@@ -281,6 +281,7 @@ class SourceWorkspaceManager:
         path: Path,
         authority: ImplementationWriterAuthority | None = None,
         handoff: ImplementationWriterHandoff | None = None,
+        expected_revision: str | None = None,
     ) -> WorkspaceBinding:
         """Record ownership of one verified implementation writer checkout.
 
@@ -315,6 +316,10 @@ class SourceWorkspaceManager:
         if self._is_dirty(expected_path):
             raise SourceWorkspaceError(f"source workspace is dirty and preserved: {expected_path}")
         revision = self._head_revision(expected_path)
+        if expected_revision is not None and revision != expected_revision:
+            raise SourceWorkspaceError(
+                "implementation writer checkout does not match the expected head"
+            )
         if self._head_branch(expected_path) != f"refs/heads/{branch}":
             raise SourceWorkspaceError(
                 "implementation writer checkout does not match the requested branch"
@@ -356,7 +361,13 @@ class SourceWorkspaceManager:
         return binding
 
     @contextmanager
-    def acquire(self, binding: WorkspaceBinding, *, allowed_tools: str = "") -> Iterator[Path]:
+    def acquire(
+        self,
+        binding: WorkspaceBinding,
+        *,
+        allowed_tools: str = "",
+        expected_branch: str | None = None,
+    ) -> Iterator[Path]:
         """Hold the lane lease while validating and using a source workspace."""
         if binding.item_number is None or binding.lane is None:
             raise SourceWorkspaceError("source workspace binding is incomplete")
@@ -367,6 +378,13 @@ class SourceWorkspaceManager:
             receipt = self._read_receipt(binding.item_number, binding.lane)
             if receipt is None or self._binding(receipt) != binding:
                 raise SourceWorkspaceError("source workspace receipt no longer matches binding")
+            if expected_branch is not None and (
+                not expected_branch
+                or receipt.detached
+                or receipt.branch != expected_branch
+                or self._head_branch(binding.cwd) != f"refs/heads/{expected_branch}"
+            ):
+                raise SourceWorkspaceError("source workspace branch no longer matches binding")
             try:
                 yield validate_workspace_binding(binding, allowed_tools=allowed_tools)
             except WorkspaceBindingError as exc:

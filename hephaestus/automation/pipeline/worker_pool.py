@@ -44,7 +44,7 @@ from hephaestus.agents.runtime import (
     run_agent_session,
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
-from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
+from hephaestus.agents.workspace import WorkspaceBinding, WorkspaceKind, validate_workspace_binding
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -3871,6 +3871,7 @@ class WorkerPool:
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
         pr_number = kwargs.pop("pr_number", None)
+        source_expected_revision = kwargs.pop("source_workspace_expected_revision", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
         try:
@@ -3984,6 +3985,7 @@ class WorkerPool:
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
             item_number=kwargs.get("issue_number"),
+            expected_revision=source_expected_revision,
             writer_authority=writer_authority,
             worktree_manager=manager,
             implementation_adoption_head=kwargs.get("implementation_adoption_head"),
@@ -4137,6 +4139,7 @@ class WorkerPool:
         timeout_s: int,
         source_lane: object = None,
         item_number: object = None,
+        expected_revision: object = None,
         writer_authority: ImplementationWriterAuthority | None = None,
         worktree_manager: WorktreeManager | None = None,
         implementation_adoption_head: object = None,
@@ -4194,11 +4197,19 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                 )
+            if source_lane == "review":
+                return JobResult(
+                    ok=False,
+                    error="review worktree was not materialized",
+                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: False},
+                )
             # Keep compatibility with test and alternate managers that return
             # a planned path. A materialized reusable checkout always exists
             # and must pass through the dirty snapshot below.
             return JobResult(ok=True, value=str(worktree_path))
 
+        source_binding: WorkspaceBinding | None = None
+        review_receipt: dict[str, object] | None = None
         try:
             if source_lane == "impl" and (
                 isinstance(item_number, bool) or not isinstance(item_number, int)
@@ -4260,13 +4271,45 @@ class WorkerPool:
                     raise SourceWorkspaceError("implementation writer authority is missing")
                 if source_manager is None or implementation_writer_handoff is None:
                     raise SourceWorkspaceError("implementation writer handoff is missing")
-                binding = source_manager.claim_implementation_writer(
+                if expected_revision is not None and not _is_full_commit_sha(expected_revision):
+                    raise SourceWorkspaceError(
+                        "implementation writer expected revision is invalid"
+                    )
+                source_binding = source_manager.claim_implementation_writer(
                     implementation_item_number,
                     branch=branch_name,
                     path=worktree_path,
                     authority=writer_authority,
                     handoff=implementation_writer_handoff,
+                    expected_revision=expected_revision,
                 )
+                if not isinstance(source_binding, WorkspaceBinding):
+                    raise SourceWorkspaceError(
+                        "implementation writer claim returned an invalid workspace binding"
+                    )
+            if source_lane == "review":
+                if dirty:
+                    raise SourceWorkspaceError("review worktree is not clean")
+                detached_branch = git_utils.run(
+                    ["git", "branch", "--show-current"],
+                    cwd=worktree_path,
+                    timeout=timeout_s,
+                ).stdout.strip()
+                review_head = git_utils.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=worktree_path,
+                    timeout=timeout_s,
+                ).stdout.strip()
+                if detached_branch or not _is_full_commit_sha(review_head):
+                    raise SourceWorkspaceError(
+                        "review worktree receipt is not detached at a complete head"
+                    )
+                review_receipt = {
+                    "path": str(worktree_path),
+                    "head_sha": review_head,
+                    "detached": True,
+                    "dirty": False,
+                }
         except Exception as exc:
             if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)):
                 return self._creation_receipt_failure(
@@ -4281,19 +4324,27 @@ class WorkerPool:
                 error=f"worktree post-create preparation failed: {exc}",
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
+        if review_receipt is not None:
+            return JobResult(ok=True, value=review_receipt)
         if not dirty and not sync_to_remote and base_sha is None:
-            if source_lane == "impl":
+            if source_binding is not None:
                 return JobResult(
                     ok=True,
                     value={
                         "path": str(worktree_path),
-                        "impl_source_revision": binding.revision,
+                        "impl_source_revision": source_binding.revision,
+                        "workspace_binding": source_binding,
+                        "workspace_revision": source_binding.revision,
+                        "branch": branch_name,
                     },
                 )
             return JobResult(ok=True, value=str(worktree_path))
         value: dict[str, object] = {"path": str(worktree_path)}
-        if source_lane == "impl" and not dirty:
-            value["impl_source_revision"] = binding.revision
+        if source_binding is not None:
+            value["impl_source_revision"] = source_binding.revision
+            value["workspace_binding"] = source_binding
+            value["workspace_revision"] = source_binding.revision
+            value["branch"] = branch_name
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
         if dirty:

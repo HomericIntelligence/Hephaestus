@@ -75,7 +75,15 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             ):
                 stage.on_job_done(
                     item,
-                    JobResult(ok=True, value={"path": "/tmp/detached-review", "dirty": False}),
+                    JobResult(
+                        ok=True,
+                        value={
+                            "path": "/tmp/detached-review",
+                            "head_sha": "a" * 40,
+                            "detached": True,
+                            "dirty": False,
+                        },
+                    ),
                     ctx,
                 )
                 item.state = result.on_done_state
@@ -83,7 +91,16 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
                 stage.on_job_done(
                     item,
-                    JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+                    JobResult(
+                        ok=True,
+                        value={
+                            "ready": True,
+                            "head": "a" * 40,
+                            "base": "a" * 40,
+                            "diff": "checkout diff",
+                            "changed_paths": [],
+                        },
+                    ),
                     ctx,
                 )
                 item.state = result.on_done_state

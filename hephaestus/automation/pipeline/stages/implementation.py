@@ -78,7 +78,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding, WorkspaceKind
 from hephaestus.automation.address_review_core import (
     MAX_ADDRESS_REPLY_CHARS,
     _parse_addressed_block,
@@ -103,6 +103,7 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     issue_auto_impl_branch_name,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceError
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_IMPLEMENTATION_GO,
@@ -127,7 +128,7 @@ from ..github_jobs import (
     ReplyJournalAppended,
     ReplyJournalRecovered,
 )
-from ..jobs import WORKTREE_MATERIALIZED_KEY
+from ..jobs import WORKTREE_MATERIALIZED_KEY, validate_commit_push_receipt
 from ..reply_handoff import (
     IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP,
     IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
@@ -789,6 +790,7 @@ class ImplementationStage(Stage):
         if item.payload.get("rebase_conflict"):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if item.payload.pop(_REBASE_HEAD_DRIFT, None):
+            item.payload.pop("_impl_source_revision", None)
             item.payload.pop("post_review_rebase_required", None)
             item.payload.pop("scope_dependency_sync_required", None)
             item.payload.pop("scope_dependency_merge_shas", None)
@@ -922,8 +924,8 @@ class ImplementationStage(Stage):
             ctx,
             SourceLane.IMPLEMENTATION,
             revision=str(
-                item.payload.get("_worktree_cleanup_head_sha")
-                or item.payload.get("_impl_source_revision")
+                item.payload.get("_impl_source_revision")
+                or item.payload.get("_worktree_cleanup_head_sha")
                 or item.payload.get("_synced_default_branch_sha")
                 or ""
             ),
@@ -1088,8 +1090,8 @@ class ImplementationStage(Stage):
             ctx,
             SourceLane.IMPLEMENTATION,
             revision=str(
-                item.payload.get("_worktree_cleanup_head_sha")
-                or item.payload.get("_impl_source_revision")
+                item.payload.get("_impl_source_revision")
+                or item.payload.get("_worktree_cleanup_head_sha")
                 or item.payload.get("_synced_default_branch_sha")
                 or ""
             ),
@@ -1482,7 +1484,7 @@ class ImplementationStage(Stage):
 
         """
         if item.state == WORKTREE_WAIT:
-            self._on_worktree_done(item, result)
+            self._on_worktree_done(item, result, ctx)
             return
 
         if item.state == DIRTY_DECISION_WAIT:
@@ -1528,7 +1530,15 @@ class ImplementationStage(Stage):
                     head_sha = value.get("head_sha")
                     if is_full_commit_sha(head_sha):
                         item.payload["_impl_source_revision"] = head_sha
-                    item.payload["rebase_complete"] = True
+                        item.payload["rebase_complete"] = True
+                    else:
+                        self._record_rebase_failure(
+                            item,
+                            JobResult(
+                                ok=False,
+                                error="rebase result did not include a full published head",
+                            ),
+                        )
             elif result.error == "mechanical rebase hit conflicts; resolution required":
                 logger.warning(
                     "implementation:%s: writer rebase paused for host-owned conflict resolution",
@@ -1548,7 +1558,15 @@ class ImplementationStage(Stage):
                 head_sha = value.get("head_sha")
                 if is_full_commit_sha(head_sha):
                     item.payload["_impl_source_revision"] = head_sha
-                item.payload["rebase_complete"] = True
+                    item.payload["rebase_complete"] = True
+                else:
+                    self._record_rebase_failure(
+                        item,
+                        JobResult(
+                            ok=False,
+                            error="rebase result did not include a full published head",
+                        ),
+                    )
             elif (result.error or "").startswith("rebase conflict resolution required"):
                 self._record_rebase_conflict(item, result)
             else:
@@ -1738,11 +1756,14 @@ class ImplementationStage(Stage):
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
         """Record commit+push success, no-commit skip, or git failure."""
         if result.ok:
-            receipt = result.value if isinstance(result.value, dict) else {}
-            receipt_head = receipt.get("head_sha")
-            if is_full_commit_sha(receipt_head):
-                item.payload["_worktree_cleanup_head_sha"] = receipt_head
-            pushed = receipt.get("pushed") is True if receipt else bool(result.value)
+            receipt = validate_commit_push_receipt(result.value)
+            if receipt is None:
+                item.payload["commit_push_receipt_invalid"] = True
+                item.payload.pop("git_error_retries", None)
+                return
+            receipt_head = receipt["head_sha"]
+            item.payload["_worktree_cleanup_head_sha"] = receipt_head
+            pushed = receipt["pushed"] is True
             if not pushed:
                 item.payload["no_commits"] = True
                 # The worker's no-commit path conditionally released the
@@ -1756,6 +1777,7 @@ class ImplementationStage(Stage):
             else:
                 # A published branch has real commits and must not be
                 # released by terminal cleanup.
+                item.payload["_impl_source_revision"] = receipt_head
                 item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
                 if item.payload.get("implementation_remediation") and is_full_commit_sha(
                     receipt_head
@@ -1942,7 +1964,114 @@ class ImplementationStage(Stage):
         item.payload["rebase_expected_remote_sha"] = expected_remote_sha
 
     @staticmethod
-    def _on_worktree_done(item: WorkItem, result: JobResult) -> None:  # noqa: C901
+    def _valid_implementation_binding(
+        item: WorkItem,
+        value: dict[str, object],
+        binding: object,
+        ctx: StageContext,
+    ) -> bool:
+        """Return whether a clean implementation receipt is bound to this item."""
+        if (
+            not isinstance(binding, WorkspaceBinding)
+            or item.issue is None
+            or item.issue <= 0
+            or not isinstance(binding.cwd, Path)
+            or not isinstance(binding.reusable_root, Path)
+            or isinstance(binding.generation, bool)
+            or not isinstance(binding.generation, int)
+            or not isinstance(item.branch, str)
+            or not item.branch
+        ):
+            return False
+        source_workspaces = getattr(ctx.paths, "source_workspaces", None)
+        try:
+            if callable(source_workspaces):
+                source_workspaces = source_workspaces()
+                ctx.paths.source_workspaces = source_workspaces
+            if source_workspaces is None:
+                return False
+            expected_path = Path(
+                str(source_workspaces.path_for(item.issue, SourceLane.IMPLEMENTATION))
+            ).resolve()
+            expected_ownership_key = source_workspaces.ownership_key(
+                item.issue, SourceLane.IMPLEMENTATION
+            )
+            expected_root = Path(str(source_workspaces.repo_root)).resolve()
+            context_root = Path(str(ctx.paths.repo_root)).resolve()
+            acquire = source_workspaces.acquire
+            manager_repository = source_workspaces.repository
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+        try:
+            binding_path = binding.cwd.resolve()
+            reusable_root = binding.reusable_root.resolve()
+        except OSError:
+            return False
+        returned_path = value.get("path")
+        workspace_revision = value.get("workspace_revision")
+        expected_repository = f"{ctx.org}/{item.repo}"
+        ownership_key = binding.ownership_key
+        current = item.payload.get("workspace_binding")
+        current_revision = item.payload.get("_impl_source_revision")
+        if current_revision is not None and not is_full_commit_sha(current_revision):
+            return False
+        if isinstance(current, WorkspaceBinding):
+            if isinstance(current.generation, bool) or not isinstance(current.generation, int):
+                return False
+            generation_is_current = binding.generation >= current.generation
+            same_generation_is_same_receipt = (
+                binding.generation != current.generation or binding == current
+            )
+            same_generation_is_current_revision = (
+                binding.generation != current.generation
+                or current_revision is None
+                or current_revision == binding.revision
+            )
+        else:
+            generation_is_current = current is None
+            same_generation_is_same_receipt = True
+            same_generation_is_current_revision = (
+                current_revision is None or current_revision == binding.revision
+            )
+        if (
+            not isinstance(expected_ownership_key, str)
+            or manager_repository != expected_repository
+            or binding.repository != expected_repository
+            or binding.ownership_key != expected_ownership_key
+            or expected_root != context_root
+        ):
+            return False
+        try:
+            with acquire(binding, expected_branch=item.branch):
+                pass
+        except (OSError, SourceWorkspaceError):
+            return False
+        return (
+            isinstance(returned_path, str)
+            and bool(returned_path)
+            and returned_path == str(binding.cwd)
+            and binding_path == binding.cwd
+            and binding_path == expected_path
+            and reusable_root == binding.reusable_root
+            and reusable_root == expected_root
+            and isinstance(ownership_key, str)
+            and ownership_key == expected_ownership_key
+            and binding.kind is WorkspaceKind.SOURCE
+            and binding.lane is SourceLane.IMPLEMENTATION
+            and binding.item_number == item.issue
+            and binding.detached is False
+            and binding.generation > 0
+            and is_full_commit_sha(binding.revision)
+            and workspace_revision == binding.revision
+            and value.get("branch") == item.branch
+            and generation_is_current
+            and same_generation_is_same_receipt
+            and same_generation_is_current_revision
+        )
+
+    def _on_worktree_done(  # noqa: C901
+        self, item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> None:
         """Record the created worktree's path and dirty snapshot.
 
         A failed worktree job flags ``git_error`` (transient — the
@@ -2080,10 +2209,24 @@ class ImplementationStage(Stage):
             item.payload.pop(key, None)
         value = result.value
         if isinstance(value, dict):
-            item.worktree = str(value.get("path", item.worktree))
             source_revision = value.get("impl_source_revision")
             if is_full_commit_sha(source_revision):
                 item.payload["_impl_source_revision"] = source_revision
+            binding = value.get("workspace_binding")
+            if binding is not None:
+                if not self._valid_implementation_binding(item, value, binding, ctx):
+                    logger.warning(
+                        "implementation:%s: worktree result has an invalid source binding",
+                        item.issue,
+                    )
+                    item.worktree = ""
+                    item.payload["git_error"] = True
+                    return
+                item.worktree = str(value["path"])
+                item.payload["workspace_binding"] = binding
+                item.payload["_impl_source_revision"] = binding.revision
+            else:
+                item.worktree = str(value.get("path", item.worktree))
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
@@ -2419,6 +2562,8 @@ class ImplementationStage(Stage):
         """
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if item.payload.pop("commit_push_receipt_invalid", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "commit_push_receipt_invalid")
         if item.payload.pop("remediation_reply_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
 

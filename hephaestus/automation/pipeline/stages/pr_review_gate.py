@@ -2,6 +2,7 @@
 # ruff: noqa: F403, F405
 from hephaestus.automation.review_audit import is_clean_go_review
 
+from .pr_review_jobs import PrReviewJobs
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
@@ -22,6 +23,9 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
+
+        if payload.pop("push_receipt_invalid", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "commit_push_receipt_invalid")
 
         if scope_failure := self._scope_retraction_failure(item):
             return scope_failure
@@ -483,6 +487,9 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         live_head = str(pr_state.get("headRefOid") or "")
+        source_guard = PrReviewJobs._implementation_head_visibility_outcome(item, live_head)
+        if source_guard is not None:
+            return source_guard
         if not reviewed_head or not live_head or reviewed_head != live_head:
             item.payload.pop("reviewed_pr_head_sha", None)
             return Continue(next_state=REVIEW_WAIT)
@@ -518,6 +525,9 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         live_head = str(state.get("headRefOid") or "") if isinstance(state, dict) else ""
+        source_guard = PrReviewJobs._implementation_head_visibility_outcome(item, live_head)
+        if source_guard is not None:
+            return source_guard
         if not reviewed_head or not live_head or reviewed_head != live_head:
             item.payload.pop("reviewed_pr_head_sha", None)
             return Continue(next_state=REVIEW_WAIT)
@@ -589,6 +599,9 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         head = str(state.get("headRefOid") or "")
         if not head:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_head_unavailable")
+        source_guard = PrReviewJobs._implementation_head_visibility_outcome(item, head)
+        if source_guard is not None:
+            return source_guard
         item.payload["reviewed_pr_head_sha"] = head
         return None
 
@@ -669,6 +682,9 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
             reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
             live_head = str(state.get("headRefOid") or "")
+            source_guard = PrReviewJobs._implementation_head_visibility_outcome(item, live_head)
+            if source_guard is not None:
+                return source_guard
             if not reviewed_head or reviewed_head != live_head:
                 item.payload.pop("reviewed_pr_head_sha", None)
                 return Continue(next_state=REVIEW_WAIT)
@@ -679,6 +695,11 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
             if state.get("autoMergeRequest") is not None:
                 return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+            source_guard = PrReviewJobs._implementation_head_visibility_outcome(
+                item, str(state.get("headRefOid") or "")
+            )
+            if source_guard is not None:
+                return source_guard
             if (
                 not _is_confirmed_open_unarmed(state)
                 or str(state.get("headRefOid") or "") != reviewed_head

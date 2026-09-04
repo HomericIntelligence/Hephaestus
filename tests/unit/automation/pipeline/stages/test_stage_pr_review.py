@@ -58,8 +58,10 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
     DIRECT_PUSH_RETRY_CAP,
     HOST_VERIFICATION_WAIT,
+    REVIEW_CHECKOUT_RETRY_CAP,
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
+    REVIEW_WAIT,
     PrReviewStage,
     _address_replies,
     _implementation_reply_handoff,
@@ -250,15 +252,34 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             ):
                 stage.on_job_done(
                     item,
-                    JobResult(ok=True, value={"path": "/tmp/detached-review", "dirty": False}),
+                    JobResult(
+                        ok=True,
+                        value={
+                            "path": "/tmp/detached-review",
+                            "head_sha": "a" * 40,
+                            "detached": True,
+                            "dirty": False,
+                        },
+                    ),
                     ctx,
                 )
                 item.state = result.on_done_state
                 continue
             if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
+                expected_head = str(item.payload.get("review_checkout_expected_head") or "a" * 40)
+                expected_base = str(item.payload.get("reviewed_pr_base_sha") or "a" * 40)
                 stage.on_job_done(
                     item,
-                    JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+                    JobResult(
+                        ok=True,
+                        value={
+                            "ready": True,
+                            "head": expected_head,
+                            "base": expected_base,
+                            "diff": "checkout diff",
+                            "changed_paths": [],
+                        },
+                    ),
                     ctx,
                 )
                 item.state = result.on_done_state
@@ -313,7 +334,16 @@ def _dispatch_review(stage: Any, item: Any, ctx: Any) -> JobRequest:
     assert isinstance(barrier.job, GitJob)
     stage.on_job_done(
         item,
-        JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+        JobResult(
+            ok=True,
+            value={
+                "ready": True,
+                "head": str(item.payload.get("review_checkout_expected_head") or "a" * 40),
+                "base": str(item.payload.get("reviewed_pr_base_sha") or "a" * 40),
+                "diff": "checkout diff",
+                "changed_paths": [],
+            },
+        ),
         ctx,
     )
     item.state = barrier.on_done_state
@@ -333,6 +363,90 @@ def _reconcile_then_enter(stage: Any, item: Any, ctx: Any) -> Any:
 
 class TestPrReviewStageOnEnter:
     """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
+
+    def test_on_enter_waits_for_the_writer_head_before_scope_reconciliation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale published head blocks all review ingress side effects."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_head_sha": "a" * 40,
+                "pr_base_sha": "c" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        item.payload["_impl_source_revision"] = "b" * 40
+
+        result = stage.on_enter(item, ctx)
+
+        assert result == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
+        assert item.payload["retry_delay_s"] == 1.0
+        assert github.mutation_log == []
+
+    def test_enter_step_rechecks_the_writer_head_before_any_dispatch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The ENTER step also blocks a stale writer head without jobs."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={"pr_head_sha": "a" * 40, "pr_base_branch": "main"}
+        )
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        item.payload["_impl_source_revision"] = "b" * 40
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
+        assert item.payload["retry_delay_s"] == 1.0
+        assert github.mutation_log == []
+
+    def test_direct_review_adoption_binds_the_materialized_head_for_cleanup(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A clean detached checkout receipt carries its immutable head."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state=ADOPT_WORKTREE_WAIT)
+        item.payload["direct_pr_worktree_pending"] = True
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": "/tmp/detached-review",
+                    "dirty": False,
+                    "head_sha": "b" * 40,
+                    "detached": True,
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert item.payload["review_worktree_expected_head"] == "b" * 40
+
+    def test_direct_review_adoption_rejects_a_path_without_an_immutable_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A path-only checkout receipt cannot enter review."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state=ADOPT_WORKTREE_WAIT)
+        item.payload["direct_pr_worktree_pending"] = True
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={"path": "/tmp/detached-review", "dirty": False},
+            ),
+            make_ctx(),
+        )
+
+        assert item.worktree == ""
+        assert "direct_pr_worktree" not in item.payload
+        assert "direct_pr_worktree_error" in item.payload
 
     def test_on_enter_checks_only_the_external_arm_boundary(
         self, make_ctx: Any, make_work_item: Any
@@ -799,6 +913,191 @@ class TestPrReviewStageStep:
         assert result.on_done_state == REVIEW_CHECKOUT_WAIT
         assert "reviewed_pr_head_sha" not in item.payload
 
+    def test_review_wait_binds_implementation_head_after_visibility_delay(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A review waits for the exact pushed writer head before checkout."""
+
+        class VisibilityGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_review_context={
+                        "pr_description": "Closes #1",
+                        "pr_head_sha": "a" * 40,
+                        "pr_base_sha": "c" * 40,
+                        "pr_base_branch": "main",
+                    }
+                )
+                self.heads = deque(["a" * 40, "b" * 40])
+
+            def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+                context = super().pr_review_context(pr_number)
+                if context is not None:
+                    context["pr_head_sha"] = self.heads.popleft()
+                return context
+
+        stage = PrReviewStage()
+        github = VisibilityGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.payload["_impl_source_revision"] = "b" * 40
+
+        waiting = stage.step(item, ctx)
+
+        assert waiting == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
+        assert item.payload["review_head_visibility_retries"] == 1
+        assert item.payload["retry_delay_s"] == 1.0
+        assert not item.payload.get("review_job_pending")
+
+        checkout = stage.step(item, ctx)
+
+        assert isinstance(checkout, JobRequest)
+        assert isinstance(checkout.job, GitJob)
+        assert checkout.job.kwargs["expected_head_sha"] == "b" * 40
+        assert item.payload["review_head_visibility_retries"] == 1
+
+    def test_checkout_head_drift_exhausts_global_budget_without_review_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Continual checkout drift fails closed without dispatching a reviewer."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload["_impl_source_revision"] = "a" * 40
+
+        outcomes: list[StageOutcome] = []
+        for _ in range(REVIEW_CHECKOUT_RETRY_CAP + 1):
+            item.state = REVIEW_CHECKOUT_WAIT
+            item.payload.update(
+                {
+                    "review_checkout_ready": False,
+                    "review_checkout_reason": "head_drift",
+                }
+            )
+            outcome = stage.step(item, make_ctx())
+            assert isinstance(outcome, StageOutcome)
+            outcomes.append(outcome)
+
+        assert outcomes[:-1] == [
+            StageOutcome(Disposition.RETRY, "review_head_drift"),
+            StageOutcome(Disposition.RETRY, "review_head_drift"),
+        ]
+        assert outcomes[-1] == StageOutcome(
+            Disposition.FINISH_FAIL, "review_head_visibility_exhausted"
+        )
+        assert item.payload["review_head_visibility_retries"] == REVIEW_CHECKOUT_RETRY_CAP + 1
+        assert "review_job_pending" not in item.payload
+
+    def test_review_wait_fails_closed_after_persistent_head_mismatch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A PR that never exposes the pushed head receives no review job."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_description": "Closes #1",
+                "pr_head_sha": "a" * 40,
+                "pr_base_sha": "c" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.payload["_impl_source_revision"] = "b" * 40
+
+        outcomes = [stage.step(item, ctx) for _ in range(REVIEW_CHECKOUT_RETRY_CAP + 1)]
+
+        assert outcomes[:-1] == [
+            StageOutcome(Disposition.RETRY, "review_head_visibility_wait"),
+            StageOutcome(Disposition.RETRY, "review_head_visibility_wait"),
+        ]
+        assert outcomes[-1] == StageOutcome(
+            Disposition.FINISH_FAIL, "review_head_visibility_exhausted"
+        )
+        assert not item.payload.get("review_job_pending")
+
+    def test_head_drift_budget_is_global_and_monotonic_across_matches(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A transient matching head does not reset the bounded drift budget."""
+
+        class MatchThenDriftGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_review_context={
+                        "pr_description": "Closes #1",
+                        "pr_head_sha": "a" * 40,
+                        "pr_base_sha": "c" * 40,
+                        "pr_base_branch": "main",
+                    }
+                )
+                self.heads = deque(["b" * 40, "a" * 40, "b" * 40, "b" * 40])
+
+            def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+                context = super().pr_review_context(pr_number)
+                if context is not None:
+                    context["pr_head_sha"] = self.heads.popleft()
+                return context
+
+        stage = PrReviewStage()
+        ctx = make_ctx(github=MatchThenDriftGitHub())
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_WAIT)
+        item.payload["_impl_source_revision"] = "a" * 40
+
+        outcomes = [stage.step(item, ctx) for _ in range(4)]
+
+        assert outcomes[0] == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
+        assert isinstance(outcomes[1], JobRequest)
+        assert outcomes[2] == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
+        assert outcomes[3] == StageOutcome(
+            Disposition.FINISH_FAIL, "review_head_visibility_exhausted"
+        )
+        assert item.payload["review_head_visibility_retries"] == REVIEW_CHECKOUT_RETRY_CAP + 1
+        assert not item.payload.get("review_job_pending")
+
+    def test_review_restarts_without_agent_when_head_drifts_between_reads(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A head change during thread reads restarts the review barrier."""
+
+        class DriftingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_review_context={
+                        "pr_description": "Closes #1",
+                        "pr_head_sha": "a" * 40,
+                        "pr_base_sha": "c" * 40,
+                        "pr_base_branch": "main",
+                    }
+                )
+                self.heads = deque(["a" * 40, "b" * 40])
+
+            def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+                context = super().pr_review_context(pr_number)
+                if context is not None:
+                    context["pr_head_sha"] = self.heads.popleft()
+                return context
+
+        stage = PrReviewStage()
+        github = DriftingGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "_impl_source_revision": "a" * 40,
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+            }
+        )
+
+        restart = stage.step(item, ctx)
+
+        assert restart == StageOutcome(Disposition.RETRY, "review_head_drift")
+        assert item.state == REVIEW_WAIT
+        assert item.payload["review_head_visibility_retries"] == 1
+        assert "review_job_pending" not in item.payload
+
     def test_direct_pr_binds_a_single_read_only_snapshot_before_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1073,6 +1372,8 @@ class TestPrReviewStageStep:
                 ok=True,
                 value={
                     "ready": True,
+                    "head": "a" * 40,
+                    "base": "a" * 40,
                     "diff": "checkout diff for A",
                     "changed_paths": ["old.py", "new.py"],
                 },
@@ -1177,6 +1478,8 @@ class TestPrReviewStageStep:
                 ok=True,
                 value={
                     "path": "/tmp/review-pr",
+                    "head_sha": "a" * 40,
+                    "detached": True,
                     "dirty": False,
                 },
             ),
@@ -1191,6 +1494,173 @@ class TestPrReviewStageStep:
         assert item.worktree == "/tmp/review-pr"
         assert item.payload["direct_pr_worktree"] == "/tmp/review-pr"
         assert "direct_pr_worktree_pending" not in item.payload
+
+    def test_stale_post_push_snapshot_cleans_then_retries_before_review_dispatch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale PR head cleans the snapshot, retries at 1s and 2s, then restores the writer."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_description": "Closes #1",
+                "pr_head_sha": "a" * 40,
+                "pr_base_sha": "c" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state=ADOPT_WORKTREE_WAIT)
+        item.worktree = ""
+        item.payload.update(
+            {
+                "_impl_source_revision": "b" * 40,
+                "writer_worktree": "/tmp/implementation-writer",
+                "direct_pr_worktree_pending": True,
+                "pr_review_cycle": 0,
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": "/tmp/detached-review",
+                    "head_sha": "b" * 40,
+                    "detached": True,
+                    "dirty": False,
+                },
+            ),
+            ctx,
+        )
+        item.state = ADOPT_WORKTREE_WAIT
+        assert stage.step(item, ctx) == Continue(next_state=REVIEW_WAIT)
+        item.state = REVIEW_WAIT
+
+        cleanup = stage.step(item, ctx)
+
+        assert cleanup == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        assert item.payload["review_head_visibility_retries"] == 1
+        assert item.payload["retry_delay_s"] == 1.0
+        item.state = CLEANUP_REVIEW_WORKTREE_WAIT
+        remove = stage.step(item, ctx)
+        assert isinstance(remove, JobRequest)
+        assert remove.job.op == "remove_worktree"
+        assert remove.job.kwargs["expected_head"] == "b" * 40
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+        item.state = CLEANUP_REVIEW_WORKTREE_WAIT
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "review_head_visibility_wait"
+        )
+        assert item.state == "ENTER"
+        assert item.payload["review_head_visibility_retries"] == 1
+        assert item.worktree == ""
+
+        second = stage.on_enter(item, ctx)
+        assert second == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
+        assert item.payload["review_head_visibility_retries"] == 2
+        assert item.payload["retry_delay_s"] == 2.0
+        assert item.worktree == ""
+
+        exhausted = stage.on_enter(item, ctx)
+        assert exhausted == StageOutcome(
+            Disposition.FINISH_FAIL, "review_head_visibility_exhausted"
+        )
+        assert item.worktree == "/tmp/implementation-writer"
+        assert not item.payload.get("review_job_pending")
+        assert github.mutation_log == []
+
+    def test_production_enter_dependency_adoption_then_stale_head_is_bounded(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The live entry path never reviews a stale published head."""
+        writer_head = "b" * 40
+        stale_head = "a" * 40
+        github = FakeStageGitHub(
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": writer_head,
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+            },
+            pr_review_context={
+                "pr_description": "Closes #1",
+                "pr_head_sha": writer_head,
+                "pr_base_sha": "c" * 40,
+                "pr_base_branch": "main",
+            },
+            pr_head_branch="1-auto-impl",
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        item.worktree = "/tmp/implementation-writer"
+        item.payload["_impl_source_revision"] = writer_head
+
+        assert PrReviewStage().on_enter(item, ctx) is None
+        stage = PrReviewStage()
+        dependency = stage.step(item, ctx)
+        assert isinstance(dependency, JobRequest)
+        assert isinstance(dependency.job, GitHubJob)
+        assert isinstance(dependency.job.request, ReconcileScopeExpansionDependenciesRequest)
+        assert dependency.job.request.source_head_sha == writer_head
+
+        entry = _complete_github_job(stage, item, ctx)
+        assert entry == Continue(next_state="ENTER")
+        item.state = entry.next_state
+        adoption = stage.step(item, ctx)
+        assert isinstance(adoption, JobRequest)
+        assert isinstance(adoption.job, GitJob)
+        assert adoption.job.op == "create_worktree"
+        assert adoption.job.kwargs["source_lane"] == "review"
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": "/tmp/detached-review",
+                    "head_sha": writer_head,
+                    "detached": True,
+                    "dirty": False,
+                },
+            ),
+            ctx,
+        )
+        item.state = adoption.on_done_state
+        assert stage.step(item, ctx) == Continue(next_state=REVIEW_WAIT)
+        assert item.payload["review_worktree_expected_head"] == writer_head
+
+        github._pr_state["headRefOid"] = stale_head
+        github._pr_review_context["pr_head_sha"] = stale_head
+        item.state = REVIEW_WAIT
+
+        retry = stage.step(item, ctx)
+        assert retry == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        assert item.payload["review_head_visibility_retries"] == 1
+        assert item.payload["retry_delay_s"] == 1.0
+        item.state = retry.next_state
+        cleanup = stage.step(item, ctx)
+        assert isinstance(cleanup, JobRequest)
+        assert isinstance(cleanup.job, GitJob)
+        assert cleanup.job.op == "remove_worktree"
+        assert cleanup.job.kwargs["expected_head"] == writer_head
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "review_head_visibility_wait"
+        )
+        assert item.state == "ENTER"
+
+        second = stage.on_enter(item, ctx)
+        assert second == StageOutcome(Disposition.RETRY, "review_head_visibility_wait")
+        assert item.payload["review_head_visibility_retries"] == 2
+        assert item.payload["retry_delay_s"] == 2.0
+        exhausted = stage.on_enter(item, ctx)
+        assert exhausted == StageOutcome(
+            Disposition.FINISH_FAIL, "review_head_visibility_exhausted"
+        )
+        assert item.worktree == "/tmp/implementation-writer"
+        assert not item.payload.get("review_job_pending")
+        assert github.mutation_log == []
 
     def test_enter_reconciles_dependencies_before_review(
         self, make_ctx: Any, make_work_item: Any
@@ -6504,9 +6974,13 @@ class TestFullWalks:
             JobResult(ok=True, value='{"unaddressed": []}'),  # validate
             JobResult(ok=True, value="tier list"),  # difficulty
             JobResult(ok=True, value="addressed"),  # address
-            JobResult(ok=True, value=False),  # first no-commit push
+            JobResult(
+                ok=True, value={"pushed": False, "head_sha": "a" * 40}
+            ),  # first no-commit push
             JobResult(ok=True, value="still unaddressed"),  # address retry
-            JobResult(ok=True, value=False),  # unchanged-head round
+            JobResult(
+                ok=True, value={"pushed": False, "head_sha": "a" * 40}
+            ),  # unchanged-head round
             JobResult(ok=True, value=True),  # compact reviewer
             JobResult(ok=True, value=True),  # compact writer
         ]
@@ -6748,7 +7222,11 @@ class TestRealCommitGate:
         ctx = make_ctx()
         item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
 
-        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": False, "head_sha": "a" * 40}),
+            ctx,
+        )
         assert item.payload["push_no_commit"] is True
 
         stage.on_job_done(

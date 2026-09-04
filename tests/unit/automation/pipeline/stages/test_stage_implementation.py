@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
@@ -42,6 +45,7 @@ from hephaestus.automation.pipeline.stages import (
     Continue,
     ImplementationThreadReplyResult,
     JobRequest,
+    PrReviewStage,
     StageOutcome,
     implementation as implementation_module,
 )
@@ -54,6 +58,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_test_fix_prompt,
 )
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
+from hephaestus.automation.source_worktree import SourceWorkspaceError
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_NEEDS_PLAN,
@@ -741,7 +746,11 @@ class TestGate:
             "expected_remote_sha": "a" * 40,
         }
 
-        stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"rebased": True, "head_sha": "b" * 40}),
+            ctx,
+        )
         assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
     def test_successful_rebase_persists_published_head_for_remediation(
@@ -764,6 +773,22 @@ class TestGate:
         )
 
         assert item.payload["_impl_source_revision"] == "b" * 40
+
+    def test_rebase_without_published_head_fails_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A successful rebase result without its head cannot enter review."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), make_ctx())
+
+        assert "_impl_source_revision" not in item.payload
+        assert item.payload["rebase_error"] is True
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "rebase result did not include a full published head",
+        )
 
     def test_remediation_prefers_persisted_rebase_head(
         self, make_ctx: Any, make_work_item: Any
@@ -1550,7 +1575,11 @@ class TestGitErrorRetryCap:
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.payload["git_error_retries"] = 1
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
+            ctx,
+        )
 
         assert "git_error_retries" not in item.payload
 
@@ -1664,6 +1693,7 @@ class TestWorktreeAndAdvise:
             {
                 "post_review_rebase_required": True,
                 "sync_restored_writer_before_rebase": True,
+                "_impl_source_revision": "a" * 40,
             }
         )
 
@@ -1686,6 +1716,7 @@ class TestWorktreeAndAdvise:
         assert "post_review_rebase_required" not in item.payload
         assert "sync_restored_writer_before_rebase" not in item.payload
         assert "rebase_complete" not in item.payload
+        assert "_impl_source_revision" not in item.payload
 
     def test_direct_scope_worktree_uses_its_bootstrap_pin_without_refresh(
         self, make_ctx: Any, make_work_item: Any
@@ -1805,6 +1836,188 @@ class TestWorktreeAndAdvise:
         assert item.payload["worktree_status"] == "M x.py"
         assert item.payload["worktree_diff"] == "+x"
         assert item.payload["worktree_content_snapshot"] == _DIRTY_CONTENT_SNAPSHOT
+
+    @pytest.mark.parametrize(
+        "invalid_receipt",
+        [
+            "foreign_repository",
+            "binding_path",
+            "returned_path",
+            "reusable_root",
+            "branch",
+            "detached",
+            "workspace_revision",
+            "replayed_generation",
+            "replayed_revision",
+            "replayed_without_binding",
+            "replayed_first_receipt",
+        ],
+    )
+    def test_worktree_result_rejects_unbound_source_receipts(  # noqa: C901
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        invalid_receipt: str,
+    ) -> None:
+        """An implementation receipt must match the current writer lane."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        binding = WorkspaceBinding.source(
+            cwd=Path("/tmp/repo/build/.worktrees/auto-1-impl"),
+            reusable_root=Path("/tmp/repo"),
+            repository="test-org/test-repo",
+            ownership_key="test-org/test-repo:owner:1:impl",
+            item_number=1,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="b" * 40,
+            generation=2,
+            detached=False,
+        )
+        value: dict[str, object] = {
+            "path": str(binding.cwd),
+            "workspace_binding": binding,
+            "workspace_revision": binding.revision,
+            "branch": item.branch,
+        }
+        if invalid_receipt == "foreign_repository":
+            value["workspace_binding"] = replace(binding, repository="foreign/repo")
+        elif invalid_receipt == "binding_path":
+            value["workspace_binding"] = replace(
+                binding,
+                cwd=Path("/tmp/repo/build/.worktrees/auto-1-review"),
+            )
+        elif invalid_receipt == "returned_path":
+            value["path"] = "/tmp/repo/build/.worktrees/auto-1-review"
+        elif invalid_receipt == "reusable_root":
+            value["workspace_binding"] = replace(binding, reusable_root=Path("/tmp/other-repo"))
+        elif invalid_receipt == "branch":
+            value["branch"] = "foreign-branch"
+        elif invalid_receipt == "detached":
+            value["workspace_binding"] = replace(binding, detached=True)
+        elif invalid_receipt == "workspace_revision":
+            value["workspace_revision"] = "c" * 40
+        elif invalid_receipt == "replayed_generation":
+            item.payload["workspace_binding"] = replace(binding, revision="c" * 40, generation=3)
+            item.payload["_impl_source_revision"] = "c" * 40
+            value["workspace_binding"] = replace(binding, generation=2)
+        elif invalid_receipt == "replayed_revision":
+            item.payload["workspace_binding"] = replace(binding, revision="c" * 40)
+            item.payload["_impl_source_revision"] = "c" * 40
+        elif invalid_receipt == "replayed_without_binding":
+            item.payload["_impl_source_revision"] = "c" * 40
+
+        def reject_acquire(*_args: Any, **_kwargs: Any) -> Any:
+            raise SourceWorkspaceError("source workspace receipt is stale")
+
+        manager = SimpleNamespace(
+            path_for=lambda *_args: binding.cwd,
+            ownership_key=lambda *_args: binding.ownership_key,
+            repo_root=Path("/tmp/repo"),
+            repository="test-org/test-repo",
+            acquire=(
+                reject_acquire
+                if invalid_receipt == "replayed_first_receipt"
+                else lambda *_args, **_kwargs: nullcontext(binding.cwd)
+            ),
+        )
+        ctx = make_ctx(
+            paths=SimpleNamespace(
+                repo_root=Path("/tmp/repo"),
+                source_workspaces=manager,
+            )
+        )
+        stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+
+        assert item.worktree == ""
+        assert item.payload["git_error"] is True
+        if invalid_receipt in {
+            "replayed_generation",
+            "replayed_revision",
+            "replayed_without_binding",
+        }:
+            assert item.payload["_impl_source_revision"] == "c" * 40
+            if invalid_receipt != "replayed_without_binding":
+                assert item.payload["workspace_binding"].revision == "c" * 40
+        else:
+            assert "_impl_source_revision" not in item.payload
+            assert "workspace_binding" not in item.payload
+
+    def test_worktree_result_retains_binding_revision_for_next_source_read(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A refreshed writer checkout records its exact revision on the item."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        binding = WorkspaceBinding.source(
+            cwd=Path("/tmp/repo/build/.worktrees/auto-1-impl"),
+            reusable_root=Path("/tmp/repo"),
+            repository="test-org/test-repo",
+            ownership_key="test-org/test-repo:owner:1:impl",
+            item_number=1,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="b" * 40,
+            generation=2,
+            detached=False,
+        )
+
+        manager = SimpleNamespace(
+            path_for=lambda *_args: binding.cwd,
+            ownership_key=lambda *_args: binding.ownership_key,
+            repo_root=Path("/tmp/repo"),
+            repository="test-org/test-repo",
+            acquire=lambda *_args, **_kwargs: nullcontext(binding.cwd),
+        )
+        ctx = make_ctx(
+            paths=SimpleNamespace(
+                repo_root=Path("/tmp/repo"),
+                source_workspaces=manager,
+            )
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": str(binding.cwd),
+                    "workspace_binding": binding,
+                    "workspace_revision": binding.revision,
+                    "branch": item.branch,
+                },
+            ),
+            ctx,
+        )
+
+        assert item.payload["_impl_source_revision"] == "b" * 40
+        assert item.payload["workspace_binding"] == binding
+
+        prepared: list[str] = []
+
+        def prepare(*args: Any, **_kwargs: Any) -> WorkspaceBinding:
+            revision = str(args[2])
+            prepared.append(revision)
+            return binding
+
+        paths = SimpleNamespace(
+            repo_root=Path("/tmp/repo"),
+            worktree=binding.cwd,
+            source_workspaces=SimpleNamespace(prepare=prepare),
+        )
+        ctx = make_ctx(paths=paths)
+
+        item.state = "ADVISE_WAIT"
+        advise = stage.step(item, ctx)
+        assert isinstance(advise, JobRequest)
+        assert isinstance(advise.job, AthenaSkillJob)
+        assert advise.job.request.workspace == binding
+
+        item.state = "IMPLEMENT_WAIT"
+        implement = stage.step(item, ctx)
+        assert isinstance(implement, JobRequest)
+        assert isinstance(implement.job, AgentJob)
+        assert implement.job.workspace == binding
+        assert prepared == ["b" * 40, "b" * 40]
 
     def test_failed_worktree_result_clears_all_stale_dirty_identity_metadata(
         self, make_ctx: Any, make_work_item: Any
@@ -2705,8 +2918,6 @@ class TestImplementBudget:
 
     def test_budget_override_changes_the_cap(self, make_ctx: Any, make_work_item: Any) -> None:
         """An injected budget_fn (ROUTES stand-in) moves the exhaustion point."""
-        from dataclasses import replace
-
         stage = ImplementationStage()
         ctx = replace(make_ctx(), budget_fn=lambda name: 5)
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
@@ -3042,6 +3253,39 @@ class TestTestsAndFix:
 class TestCommitPushAndPrCreate:
     """COMMIT_PUSH_WAIT / PR_CREATE: durable journal entry + deferral order."""
 
+    def test_published_push_head_is_the_review_authority(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Review binds the pushed head, not the pre-write checkout head."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_description": "Closes #1",
+                "pr_head_sha": "b" * 40,
+                "pr_base_sha": "c" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload["_impl_source_revision"] = "a" * 40
+        item.payload["_worktree_cleanup_head_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+
+        assert item.payload["_impl_source_revision"] == "b" * 40
+        item.state = "REVIEW_WAIT"
+        review = PrReviewStage().step(item, ctx)
+
+        assert isinstance(review, JobRequest)
+        assert isinstance(review.job, GitJob)
+        assert review.job.op == "verify_pr_review_checkout"
+        assert review.job.kwargs["expected_head_sha"] == "b" * 40
+
     def test_pushed_remediation_with_malformed_reply_mapping_returns_to_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -3075,6 +3319,8 @@ class TestCommitPushAndPrCreate:
             ctx,
         )
 
+        assert item.payload["_impl_source_revision"] == "b" * 40
+        assert item.payload["_worktree_cleanup_head_sha"] == "b" * 40
         assert "remediation_reply_error" not in item.payload
         assert item.payload["_impl_source_revision"] == "b" * 40
         assert item.payload["_post_remediation_review_head_sha"] == "b" * 40
@@ -3785,7 +4031,11 @@ class TestCommitPushAndPrCreate:
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
 
-        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": False, "head_sha": "a" * 40}),
+            ctx,
+        )
 
         assert item.payload["no_commits"] is True
 
@@ -3801,7 +4051,11 @@ class TestCommitPushAndPrCreate:
             "base_sha": "a" * 40,
         }
 
-        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": False, "head_sha": "a" * 40}),
+            ctx,
+        )
 
         assert item.payload["no_commits"] is True
         assert "_direct_scope_reservation" not in item.payload
@@ -3822,9 +4076,58 @@ class TestCommitPushAndPrCreate:
             "base_sha": "a" * 40,
         }
 
-        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
 
         assert "_direct_scope_reservation" not in item.payload
+
+    @pytest.mark.parametrize(
+        "receipt",
+        [
+            True,
+            False,
+            None,
+            {},
+            {"pushed": True},
+            {"pushed": True, "head_sha": "short"},
+            {"pushed": "yes", "head_sha": "a" * 40},
+            {"pushed": True, "head_sha": "a" * 40, "extra": True},
+        ],
+    )
+    def test_malformed_commit_push_receipt_fails_before_pr_creation(
+        self, make_ctx: Any, make_work_item: Any, receipt: object
+    ) -> None:
+        """Malformed successful push data cannot reach PR creation."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        item.state = "PR_CREATE"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "commit_push_receipt_invalid")
+        assert ctx.github.mutation_log == []
+
+    def test_valid_no_commit_receipt_preserves_exact_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A valid no-commit receipt keeps its exact cleanup head."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": False, "head_sha": "c" * 40}),
+            make_ctx(),
+        )
+
+        assert item.payload["no_commits"] is True
+        assert item.payload["_worktree_cleanup_head_sha"] == "c" * 40
 
     def test_pr_create_journals_pr_without_auto_merge_mutation(
         self, make_ctx: Any, make_work_item: Any
@@ -4105,7 +4408,7 @@ class TestFullWalks:
             JobResult(ok=True, value="prior learnings"),  # advise
             JobResult(ok=True, value="Implemented the widget."),  # implement
             JobResult(ok=True, value=0),  # pre-PR tests green
-            JobResult(ok=True, value=True),  # commit_push
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),  # commit_push
         )
 
         outcome = _drive(stage, item, ctx, pool)
@@ -4141,7 +4444,7 @@ class TestFullWalks:
             JobResult(ok=False, value=1, stdout_tail="FAILED test_z"),  # tests red
             JobResult(ok=True, value="fixed"),  # test_fix resume
             JobResult(ok=True, value=0),  # tests green
-            JobResult(ok=True, value=True),  # commit_push
+            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),  # commit_push
         )
 
         outcome = _drive(stage, item, ctx, pool)

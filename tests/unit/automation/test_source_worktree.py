@@ -545,13 +545,18 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
             assert adoption_mutation_started.is_set()
             assert result.ok is True, (result.error, remote_configuration.call_args_list)
             assert sync_completed.is_set()
-            assert result.value == {
-                "path": str(writer),
-                "impl_source_revision": second,
-                "dirty": False,
-                "status": "",
-                "diff": "",
-            }
+            assert result.value is not None
+            assert result.value["path"] == str(writer)
+            assert result.value["impl_source_revision"] == second
+            assert result.value["workspace_revision"] == second
+            assert result.value["branch"] == "writer-branch"
+            assert result.value["dirty"] is False
+            assert result.value["status"] == ""
+            assert result.value["diff"] == ""
+            rebound_binding = result.value["workspace_binding"]
+            assert rebound_binding.cwd == writer
+            assert rebound_binding.revision == second
+            assert rebound_binding.generation == binding.generation + 1
         rebound = source_manager.prepare(
             9,
             SourceLane.IMPLEMENTATION,

@@ -777,8 +777,8 @@ def source_workspace_binding(
     if item_number is None:
         raise RuntimeError("source workspace requires an issue or pull request number")
     target = revision or str(
-        item.payload.get("_worktree_cleanup_head_sha")
-        or item.payload.get("_impl_source_revision")
+        item.payload.get("_impl_source_revision")
+        or item.payload.get("_worktree_cleanup_head_sha")
         or item.payload.get("reviewed_pr_head_sha")
         or item.payload.get("pr_head_sha")
         or item.payload.get("_synced_default_branch_sha")

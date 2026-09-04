@@ -34,6 +34,7 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -796,7 +797,7 @@ class TestWorkerPoolSubmitComplete:
     ) -> None:
         """A failed /compact never blocks the next review round."""
         job = CompactJob(
-            repo="test/repo",
+            repo="Hephaestus",
             issue=123,
             agent="claude",
             session_agent="implementer",
@@ -813,7 +814,7 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert result.value is False
         compact.assert_called_once_with(
-            repo="test/repo",
+            repo="Hephaestus",
             issue=123,
             provider="claude",
             session_agent="implementer",
@@ -2493,6 +2494,114 @@ class TestGitOps:
             "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
         }
 
+    def test_create_worktree_adopts_clean_implementation_receipt(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A clean implementation checkout is handed to the source-lane owner."""
+        worktree = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto-impl",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+                "source_workspace_expected_revision": "b" * 40,
+            },
+            expected_repository="HomericIntelligence/Hephaestus",
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = worktree
+        worktree.mkdir(parents=True)
+        source_manager = MagicMock()
+        binding = WorkspaceBinding.source(
+            cwd=worktree,
+            reusable_root=tmp_path,
+            repository="Hephaestus",
+            ownership_key="owner-key",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="b" * 40,
+            generation=1,
+            detached=False,
+        )
+        source_manager.claim_implementation_writer.return_value = binding
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as manager_type,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            result = pool._git_create_worktree(job)
+
+        assert result.ok is True
+        manager_type.assert_called_once_with(
+            tmp_path,
+            repository="Hephaestus",
+            base_dir=worktree.parent,
+        )
+        source_manager.claim_implementation_writer.assert_called_once_with(
+            7,
+            branch="7-auto-impl",
+            path=worktree,
+            authority=ANY,
+            handoff=ANY,
+            expected_revision="b" * 40,
+        )
+        assert result.value == {
+            "path": str(worktree),
+            "impl_source_revision": "b" * 40,
+            "workspace_binding": binding,
+            "workspace_revision": "b" * 40,
+            "branch": "7-auto-impl",
+        }
+
+    def test_create_worktree_reports_source_receipt_rejection(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A rejected writer handoff preserves the materialized checkout."""
+        worktree = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto-impl",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+                "source_workspace_expected_revision": "a" * 40,
+            },
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = worktree
+        worktree.mkdir(parents=True)
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.side_effect = SourceWorkspaceError(
+            "implementation writer checkout is not an active owned worktree"
+        )
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            result = pool._git_create_worktree(job)
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: "
+            "implementation writer checkout is not an active owned worktree"
+        )
+        assert result.value == {
+            "path": str(worktree),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
+
     @pytest.mark.parametrize("changed_kind", ["staged", "untracked", "untracked_newline"])
     def test_recover_dirty_worktree_rejects_byte_drift_with_unchanged_status(
         self,
@@ -3755,7 +3864,17 @@ class TestGitOps:
         writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
         writer_path.mkdir(parents=True)
         authority = MagicMock(spec=ImplementationWriterAuthority)
-        binding = MagicMock(revision=pinned_sha)
+        binding = WorkspaceBinding.source(
+            cwd=writer_path,
+            reusable_root=tmp_path,
+            repository="test/repo",
+            ownership_key="owner-key",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision=pinned_sha,
+            generation=1,
+            detached=False,
+        )
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
@@ -3813,11 +3932,15 @@ class TestGitOps:
             path=writer_path,
             authority=authority,
             handoff=ANY,
+            expected_revision=None,
         )
         assert result.ok is True
         assert result.value == {
             "path": str(writer_path),
             "impl_source_revision": pinned_sha,
+            "workspace_binding": binding,
+            "workspace_revision": pinned_sha,
+            "branch": "7-auto",
             "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
         }
 
@@ -4217,7 +4340,18 @@ class TestGitOps:
         authority = ImplementationWriterAuthority("authority-token")
         worktree_manager.implementation_writer_authority.return_value = authority
         source_manager = MagicMock()
-        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
+        binding = WorkspaceBinding.source(
+            cwd=writer_path,
+            reusable_root=tmp_path,
+            repository="test/repo",
+            ownership_key="owner-key",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="b" * 40,
+            generation=1,
+            detached=False,
+        )
+        source_manager.claim_implementation_writer.return_value = binding
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
@@ -4237,12 +4371,16 @@ class TestGitOps:
             path=writer_path,
             authority=authority,
             handoff=ANY,
+            expected_revision=None,
         )
         worktree_manager.implementation_writer_authority.assert_called_once_with(writer_path)
         assert result.ok is True
         assert result.value == {
             "path": str(writer_path),
             "impl_source_revision": "b" * 40,
+            "workspace_binding": binding,
+            "workspace_revision": "b" * 40,
+            "branch": "7-auto",
         }
 
     def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
@@ -4269,6 +4407,17 @@ class TestGitOps:
         worktree_manager = MagicMock()
         worktree_manager.create_worktree.return_value = writer_path
         source_manager = MagicMock()
+        source_manager.claim_implementation_writer.return_value = WorkspaceBinding.source(
+            cwd=writer_path,
+            reusable_root=tmp_path,
+            repository="org/repo",
+            ownership_key="owner-key",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="b" * 40,
+            generation=1,
+            detached=False,
+        )
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
@@ -4313,7 +4462,17 @@ class TestGitOps:
         authority = ImplementationWriterAuthority("authority-token")
         worktree_manager.implementation_writer_authority.return_value = authority
         source_manager = MagicMock()
-        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
+        source_manager.claim_implementation_writer.return_value = WorkspaceBinding.source(
+            cwd=writer_path,
+            reusable_root=tmp_path,
+            repository="test/repo",
+            ownership_key="owner-key",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="b" * 40,
+            generation=1,
+            detached=False,
+        )
         with (
             patch.object(pool, "_prepare_direct_scope_worktree", return_value=(base_sha, "7-auto")),
             patch.object(
@@ -4450,6 +4609,17 @@ class TestGitOps:
         with (
             patch.object(pool, "_sync_worktree_to_remote_branch") as sync,
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=(
+                    [
+                        subprocess.CompletedProcess([], 0, stdout="\n"),
+                        subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n"),
+                    ]
+                    if source_lane == "review"
+                    else None
+                ),
+            ),
             patch(f"{_WP}.SourceWorkspaceManager") as source_manager,
         ):
             result = pool._finalize_created_worktree(
@@ -4468,6 +4638,13 @@ class TestGitOps:
 
         assert result.ok is True
         sync.assert_called_once()
+        if source_lane == "review":
+            assert result.value == {
+                "path": str(checkout),
+                "head_sha": "a" * 40,
+                "detached": True,
+                "dirty": False,
+            }
         manager.mint_adopted_implementation_writer_authority.assert_not_called()
         source_manager.assert_not_called()
 
@@ -4666,6 +4843,53 @@ class TestGitOps:
             "dirty": False,
             "status": "",
             "diff": "",
+        }
+
+    def test_create_isolated_review_worktree_returns_an_immutable_head_receipt(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A detached review checkout returns its exact head and state."""
+        review_path = tmp_path / "build" / ".worktrees" / "pr-review-pr-70"
+        review_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 70,
+                "branch_name": "70-existing",
+                "isolated": True,
+                "repo_root": str(tmp_path),
+                "sync_to_remote": False,
+                "pr_number": 70,
+                "source_lane": "review",
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = review_path
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(args, 0, stdout=f"{'b' * 40}\n")
+            if args == ["git", "branch", "--show-current"]:
+                return subprocess.CompletedProcess(args, 0, stdout="\n")
+            raise AssertionError(args)
+
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+        ):
+            result = pool._git_create_worktree(job)
+
+        assert result.ok is True
+        assert result.value == {
+            "path": str(review_path),
+            "head_sha": "b" * 40,
+            "detached": True,
+            "dirty": False,
         }
 
     def test_verify_pr_review_checkout_rejects_a_dirty_worktree(
