@@ -1187,6 +1187,12 @@ Architectural contract:
   record when its immutable source-comment snapshots still match; the journal
   is a machine recovery artifact, not an implementation response, so the only
   human-facing `[Response]` remains anchored to the source review thread.
+- A pushed remediation records its exact commit as a one-use expected review
+  head. The next review entry clears prior round and dependency receipts, then
+  waits on the timer until GitHub reports that exact open, unarmed PR head.
+  It does not create a dependency request for an older or unrelated head. If
+  the expected head does not become visible within the bounded wait, the
+  stage fails closed.
 - The reviewer validates each implementation reply against the current diff;
   it resolves validated threads or posts corrective feedback and leaves them open.
 - Validation stores an immutable fingerprint of every implementation reply

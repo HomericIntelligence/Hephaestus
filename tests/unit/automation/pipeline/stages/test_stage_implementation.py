@@ -3055,6 +3055,8 @@ class TestCommitPushAndPrCreate:
         )
 
         assert "remediation_reply_error" not in item.payload
+        assert item.payload["_impl_source_revision"] == "b" * 40
+        assert item.payload["_post_remediation_review_head_sha"] == "b" * 40
         assert "pending_implementation_reply_handoff" not in item.payload
         assert "implementation_remediation" not in item.payload
         assert "remediation_output" not in item.payload

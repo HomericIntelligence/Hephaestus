@@ -72,6 +72,9 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     _validation_thread_snapshots,
     _without_duplicate_live_findings,
 )
+from hephaestus.automation.pipeline.stages.pr_review_scope_expansion import (
+    POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP,
+)
 from hephaestus.automation.pipeline.stages.pr_review_threads import _scope_retraction_paths
 from hephaestus.automation.pipeline.stages.pr_review_verification import (
     _FULL_UNIT_COVERAGE_SPEC,
@@ -1203,6 +1206,114 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, GitHubJob)
         assert isinstance(result.job.request, ReconcileScopeExpansionDependenciesRequest)
         assert result.on_done_state == "SCOPE_DEPENDENCY_WAIT"
+
+    def test_enter_waits_for_the_expected_pushed_head_before_reconciling(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale post-push read waits before it creates a dependency request."""
+
+        class SequencedHeadGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                head = self.heads.popleft() if len(self.heads) > 1 else self.heads[0]
+                return {
+                    "state": "OPEN",
+                    "headRefOid": head,
+                    "autoMergeRequest": None,
+                    "baseRefName": "main",
+                }
+
+        stage = PrReviewStage()
+        github = SequencedHeadGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        assert stage.on_enter(item, ctx) is None
+        item.payload.update(
+            {
+                "_post_remediation_review_head_sha": "b" * 40,
+                "review_audit": "stale",
+                "pr_diff": "stale diff",
+                "_scope_dependency_pending_request": "stale request",
+                "_scope_dependency_receipt": "stale receipt",
+                "_scope_dependency_receipt_error": "stale error",
+            }
+        )
+
+        first = stage.step(item, ctx)
+
+        assert first == StageOutcome(Disposition.RETRY, "post_remediation_head_visibility")
+        assert item.payload["retry_delay_s"] == 1.0
+        assert item.payload["_post_remediation_review_head_sha"] == "b" * 40
+        assert "review_audit" not in item.payload
+        assert "pr_diff" not in item.payload
+        assert "_scope_dependency_pending_request" not in item.payload
+        assert "_scope_dependency_receipt" not in item.payload
+        assert "_scope_dependency_receipt_error" not in item.payload
+
+        second = stage.step(item, ctx)
+
+        assert isinstance(second, JobRequest)
+        assert isinstance(second.job, GitHubJob)
+        assert isinstance(second.job.request, ReconcileScopeExpansionDependenciesRequest)
+        assert second.job.request.source_head_sha == "b" * 40
+        assert "_post_remediation_review_head_sha" not in item.payload
+
+    def test_enter_fails_closed_after_repeated_unexpected_heads(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An expected pushed head that never appears creates no request."""
+
+        class UnexpectedHeadGitHub(FakeStageGitHub):
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return {
+                    "state": "OPEN",
+                    "headRefOid": "c" * 40,
+                    "autoMergeRequest": None,
+                    "baseRefName": "main",
+                }
+
+        stage = PrReviewStage()
+        github = UnexpectedHeadGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        assert stage.on_enter(item, ctx) is None
+        item.payload["_post_remediation_review_head_sha"] = "b" * 40
+
+        outcomes = [
+            stage.step(item, ctx) for _ in range(POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP + 1)
+        ]
+
+        assert all(
+            isinstance(outcome, StageOutcome)
+            and outcome.disposition is Disposition.RETRY
+            and outcome.note == "post_remediation_head_visibility"
+            for outcome in outcomes[:-1]
+        )
+        assert outcomes[-1] == StageOutcome(
+            Disposition.FINISH_FAIL, "post_remediation_head_unavailable"
+        )
+        assert not any(isinstance(outcome, JobRequest) for outcome in outcomes)
+
+    def test_enter_without_expected_pushed_head_reconciles_current_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A normal entry without a marker reconciles the live head immediately."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub())
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitHubJob)
+        assert isinstance(result.job.request, ReconcileScopeExpansionDependenciesRequest)
+        assert result.job.request.source_head_sha == "a" * 40
 
     def test_open_scope_dependency_parks_before_checkout_or_budget(
         self, make_ctx: Any, make_work_item: Any
