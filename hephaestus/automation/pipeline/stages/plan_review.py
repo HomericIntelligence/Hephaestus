@@ -64,7 +64,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.model_selection import AgentModelSelection, parse_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding
-from hephaestus.agents.runtime import is_opencode, is_pi
+from hephaestus.agents.runtime import agent_uses_configured_model_default
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import (
@@ -133,7 +133,7 @@ _MODEL_SELECTION_FORMAT = 1
 
 def _durable_reviewer_selection(provider: str, model: str) -> tuple[str, dict[str, object]]:
     """Split a direct-provider selection into JSON-safe journal fields."""
-    if is_opencode(provider) or is_pi(provider):
+    if agent_uses_configured_model_default(provider):
         selection = parse_model_selection(model)
         return selection.model, {
             "model_selection_format": _MODEL_SELECTION_FORMAT,
@@ -148,9 +148,10 @@ def _restore_reviewer_selection(
     reviewer_config: dict[str, object],
 ) -> str:
     """Restore structured direct-provider model metadata from the journal."""
-    if (is_opencode(provider) or is_pi(provider)) and reviewer_config.get(
-        "model_selection_format"
-    ) == _MODEL_SELECTION_FORMAT:
+    if (
+        agent_uses_configured_model_default(provider)
+        and reviewer_config.get("model_selection_format") == _MODEL_SELECTION_FORMAT
+    ):
         effort = reviewer_config.get("reasoning_effort", "")
         if not isinstance(effort, str):
             raise PlanReviewSessionLostError("reviewer reasoning effort is invalid")
