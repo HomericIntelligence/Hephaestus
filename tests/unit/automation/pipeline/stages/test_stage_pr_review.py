@@ -1630,6 +1630,7 @@ class TestPrReviewStageStep:
         assert stage.step(item, ctx) == Continue(next_state=REVIEW_WAIT)
         assert item.payload["review_worktree_expected_head"] == writer_head
 
+        assert github._pr_state is not None
         github._pr_state["headRefOid"] = stale_head
         github._pr_review_context["pr_head_sha"] = stale_head
         item.state = REVIEW_WAIT
