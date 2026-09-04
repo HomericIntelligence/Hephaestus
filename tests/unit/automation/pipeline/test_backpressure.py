@@ -105,19 +105,28 @@ def test_coordinator_passes_extra_gh_root_to_worker_pool(
 
 def test_coordinator_passes_bound_rebase_policy_selector_to_recording_pool(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The production pool receives the selector for the configured organization."""
+    """The recording pool receives the selector without a capacity change."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_mod
+
+    monkeypatch.setattr(worker_pool_mod, "WorkerPool", _RecordingWorkerPool)
+    config = _config(tmp_path, org="HomericIntelligence")
+    capacity = config.parallel_repos * config.max_workers
     coordinator = Coordinator(
-        _config(tmp_path, org="HomericIntelligence"),
+        config,
         github=FakeStageGitHub(),
         install_signals=False,
     )
 
-    selector = coordinator.pool._rebase_policy_selector
+    assert coordinator.pool.size == capacity
+    assert coordinator.completion_q.maxsize == capacity
+    selector = coordinator.pool.rebase_policy_selector
     assert callable(selector)
     policy = selector("Hephaestus")
     assert policy is not None
     assert policy.name == "hephaestus-adr-v1"
+    assert selector("Comet") is None
 
 
 def test_admission_rejects_when_global_worker_capacity_is_live(tmp_path: Path) -> None:

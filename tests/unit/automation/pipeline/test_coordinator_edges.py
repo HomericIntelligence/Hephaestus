@@ -184,6 +184,7 @@ class TestWiring:
         selected_policy = created["rebase_policy_selector"]("Hephaestus")
         assert selected_policy is not None
         assert selected_policy.name == "hephaestus-adr-v1"
+        assert created["rebase_policy_selector"]("Comet") is None
         assert created["evidence_receipt_dir"] is None
 
     def test_run_pipeline_wires_accessor_and_runs(
