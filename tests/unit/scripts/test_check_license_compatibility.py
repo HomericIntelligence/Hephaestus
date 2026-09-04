@@ -68,14 +68,6 @@ class TestResolveLicenseReal:
         ids = set(resolve_license(md.metadata(pkg)))
         assert ids & expected_subset, f"{pkg} resolved to {ids}"
 
-    def test_pygithub_resolves_to_lgpl_if_installed(self):
-        try:
-            ids = resolve_license(md.metadata("pygithub"))
-        except md.PackageNotFoundError:
-            pytest.skip("pygithub (github extra) not installed in this env")
-        assert "LGPL-3.0" in ids or "LGPL" in ids
-        assert is_compatible("pygithub", ids)
-
 
 class TestIsCompatible:
     """is_compatible two-tier allowlist (blanket permissive + per-pkg copyleft)."""
@@ -89,8 +81,7 @@ class TestIsCompatible:
     def test_bare_gpl_rejected(self):
         assert is_compatible("anything", ["GPL-3.0"]) is False
 
-    def test_lgpl_allowed_only_for_pygithub(self):
-        assert is_compatible("pygithub", ["LGPL-3.0"]) is True
+    def test_lgpl_rejected_without_a_package_exception(self):
         assert is_compatible("some-new-dep", ["LGPL-3.0"]) is False
 
     def test_psf_allowed_only_for_defusedxml(self):
@@ -234,24 +225,8 @@ class TestMain:
         with patch.object(sys, "argv", ["x", "--metadata-json", path]):
             assert main() == 0
 
-    def test_pygithub_lgpl_fixture_passes(self, tmp_path):
-        path = self._fixture(
-            tmp_path,
-            {
-                "pygithub": {
-                    "Classifier": [
-                        "License :: OSI Approved :: GNU Library or "
-                        "Lesser General Public License (LGPL)"
-                    ]
-                }
-            },
-        )
-        with patch.object(sys, "argv", ["x", "--metadata-json", path]):
-            assert main() == 0
-
     def test_allowlist_covers_notice_extras(self):
-        assert "pygithub" in ALLOWED_EXTRA_COPYLEFT
-        assert "defusedxml" in ALLOWED_EXTRA_COPYLEFT
+        assert {"defusedxml": frozenset({"PSF-2.0", "Python-2.0"})} == ALLOWED_EXTRA_COPYLEFT
 
 
 class TestStaticFallback:
