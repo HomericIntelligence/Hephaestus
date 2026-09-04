@@ -980,12 +980,142 @@ def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path)
                 "issue_number": 7,
                 "expected_head": second,
                 "expected_detached": True,
+                "source_lane": SourceLane.REVIEW.value,
             },
         )
     )
 
     assert result.ok is True
     assert not binding.cwd.exists()
+    assert not manager._receipt_path(7, SourceLane.REVIEW).exists()
+
+
+def test_review_cleanup_reconciles_receipt_after_physical_cleanup(tmp_path: Path) -> None:
+    """A valid stale review receipt is removed after physical cleanup."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(7, SourceLane.REVIEW, second)
+    receipt_path = manager._receipt_path(7, SourceLane.REVIEW)
+    _git(repo, "worktree", "remove", str(binding.cwd))
+    _git(repo, "worktree", "prune")
+
+    result = run_cleanup_job(
+        GitJob(
+            repo="example/project",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(binding.cwd),
+                "repo_root": str(repo),
+                "issue_number": 7,
+                "expected_head": second,
+                "expected_detached": True,
+                "source_lane": SourceLane.REVIEW.value,
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert not binding.cwd.exists()
+    assert not receipt_path.exists()
+
+
+def test_review_cleanup_without_receipt_removes_worktree_idempotently(tmp_path: Path) -> None:
+    """A pre-binding review checkout can be removed twice without a receipt."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    path = manager.path_for(8, SourceLane.REVIEW)
+    _git(repo, "worktree", "add", "--detach", str(path), second)
+    assert not manager._receipt_path(8, SourceLane.REVIEW).exists()
+    job = GitJob(
+        repo="example/project",
+        op="remove_worktree",
+        timeout_s=60,
+        kwargs={
+            "worktree_path": str(path),
+            "repo_root": str(repo),
+            "issue_number": 8,
+            "expected_head": second,
+            "expected_detached": True,
+            "source_lane": SourceLane.REVIEW.value,
+        },
+    )
+
+    first = run_cleanup_job(job)
+    second_result = run_cleanup_job(job)
+
+    assert first.ok is True
+    assert second_result.ok is True
+    assert not path.exists()
+
+
+def test_review_cleanup_rejects_invalid_present_receipt(tmp_path: Path) -> None:
+    """A present receipt with a changed revision cannot use absent-receipt cleanup."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(9, SourceLane.REVIEW, second)
+    receipt_path = manager._receipt_path(9, SourceLane.REVIEW)
+
+    result = run_cleanup_job(
+        GitJob(
+            repo="example/project",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(binding.cwd),
+                "repo_root": str(repo),
+                "issue_number": 9,
+                "expected_head": first,
+                "expected_detached": True,
+                "source_lane": SourceLane.REVIEW.value,
+            },
+        )
+    )
+
+    assert result.ok is False
+    assert result.error == "source workspace receipt revision changed"
+    assert binding.cwd.exists()
+    assert receipt_path.exists()
+
+
+def test_review_cleanup_receipt_error_names_operation_path_and_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt-removal error preserves its exact metadata path and cause."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(10, SourceLane.REVIEW, second)
+    receipt_path = manager._receipt_path(10, SourceLane.REVIEW)
+    original_unlink = Path.unlink
+
+    def refuse_receipt_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == receipt_path:
+            raise OSError("receipt access denied")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_receipt_unlink)
+    result = run_cleanup_job(
+        GitJob(
+            repo="example/project",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(binding.cwd),
+                "repo_root": str(repo),
+                "issue_number": 10,
+                "expected_head": second,
+                "expected_detached": True,
+                "source_lane": SourceLane.REVIEW.value,
+            },
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert "source workspace receipt removal failed" in result.error
+    assert str(receipt_path) in result.error
+    assert "receipt access denied" in result.error
+    assert receipt_path.exists()
 
 
 def test_dirty_lane_is_preserved_and_rejected(tmp_path: Path) -> None:

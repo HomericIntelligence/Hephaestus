@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -390,28 +390,65 @@ class SourceWorkspaceManager:
                 )
             )
 
-    def cleanup(self, item_number: int, lane: SourceLane) -> None:
-        """Remove a clean terminal lane; preserve dirty or obligated state."""
+    def cleanup(
+        self,
+        item_number: int,
+        lane: SourceLane,
+        *,
+        expected_revision: str | None = None,
+        expected_detached: bool | None = None,
+        physical_cleanup: Callable[[], None] | None = None,
+    ) -> None:
+        """Remove one clean terminal lane and its receipt under the lane lock."""
         with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
-            receipt = self._require_receipt(item_number, lane)
+            receipt = self._read_receipt(item_number, lane)
+            if receipt is None:
+                if physical_cleanup is None:
+                    raise SourceWorkspaceError("source workspace receipt does not exist")
+                physical_cleanup()
+                return
             self._reject_foreign_owner(receipt, item_number, lane)
+            expected_path = self.path_for(item_number, lane).resolve()
+            if (
+                receipt.repository != self.repository
+                or receipt.repository_identity != self.repository_identity
+                or receipt.item_number != item_number
+                or receipt.lane is not lane
+                or receipt.path.resolve() != expected_path
+            ):
+                raise SourceWorkspaceError("source workspace receipt cleanup identity is invalid")
+            if expected_revision is not None and receipt.revision != expected_revision:
+                raise SourceWorkspaceError("source workspace receipt revision changed")
+            if expected_detached is not None and receipt.detached is not expected_detached:
+                raise SourceWorkspaceError("source workspace receipt checkout changed")
             if receipt.obligations:
                 raise SourceWorkspaceError("source workspace still has active obligations")
             if receipt.path.exists() and self._is_dirty(receipt.path):
                 raise SourceWorkspaceError(
                     f"source workspace is dirty and preserved: {receipt.path}"
                 )
-            with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
-                result = _git(
-                    self.repo_root,
-                    "worktree",
-                    "remove",
-                    str(receipt.path),
-                    check=False,
-                )
-                if result.returncode and receipt.path.exists():
-                    raise SourceWorkspaceError(result.stderr.strip() or "worktree cleanup failed")
-            self._receipt_path(item_number, lane).unlink(missing_ok=True)
+            if physical_cleanup is not None:
+                physical_cleanup()
+            else:
+                with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+                    result = _git(
+                        self.repo_root,
+                        "worktree",
+                        "remove",
+                        str(receipt.path),
+                        check=False,
+                    )
+                    if result.returncode and receipt.path.exists():
+                        raise SourceWorkspaceError(
+                            result.stderr.strip() or "worktree cleanup failed"
+                        )
+            receipt_path = self._receipt_path(item_number, lane)
+            try:
+                receipt_path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise SourceWorkspaceError(
+                    f"source workspace receipt removal failed at {receipt_path}: {exc}"
+                ) from exc
 
     def compare_and_swap_guard(
         self, item_number: int, *, expected: str | None, revision: str
