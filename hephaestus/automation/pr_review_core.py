@@ -188,7 +188,7 @@ def _invoke_and_parse_review_session(
             execution_request=ExecutionRequest(
                 AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
             ),
-            model=direct_agent_model(agent, model_value=reviewer_model()),
+            model=direct_agent_model(agent, model_value=reviewer_model(agent=agent)),
             sandbox="read-only",
         )
         write_secure(log_file, result.stdout or "")

@@ -142,7 +142,7 @@ def _run_classifier_session(
                     AgentOperation.COMMENT_CLASSIFY,
                     SessionLifecycle.ONE_SHOT,
                 ),
-                model=direct_agent_model(agent, model_value=advise_model()),
+                model=direct_agent_model(agent, model_value=advise_model(agent=agent)),
                 sandbox="read-only",
             )
             write_secure(log_file, result.stdout or "")

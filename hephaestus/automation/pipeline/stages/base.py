@@ -58,7 +58,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from hephaestus.agents.runtime import (
     DEFAULT_AGENT,
-    agent_supports_model_reasoning_effort,
+    agent_uses_configured_model_default,
+    apply_agent_model_reasoning_effort,
     direct_agent_model,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
@@ -724,15 +725,14 @@ def stage_model(
     selected_provider = provider or agent_provider(ctx)
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
-    configured_model = str(phase_value or catch_all or fallback())
+    configured_value = phase_value or catch_all
+    configured_model = str(
+        configured_value
+        or ("" if agent_uses_configured_model_default(selected_provider) else fallback())
+    )
     model = direct_agent_model(selected_provider, configured_model)
     reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
-    if reasoning_effort and agent_supports_model_reasoning_effort(selected_provider):
-        base_model, separator, current_effort = model.rpartition(":")
-        if separator and current_effort in {"default", "low", "medium", "high", "xhigh"}:
-            model = base_model
-        return f"{model}:{reasoning_effort}"
-    return model
+    return apply_agent_model_reasoning_effort(selected_provider, model, reasoning_effort)
 
 
 def stage_timeout(

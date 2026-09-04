@@ -24,16 +24,14 @@ Model overrides are resolved once by CLI entry points and passed explicitly.
 Unknown overrides emit a **warning** but are still accepted so operators can
 experiment with preview models without a code change.
 
-Codex reasoning overrides
--------------------------
-``hephaestus-automation-loop`` accepts explicit per-role Codex reasoning
-controls: ``--planner-reasoning-effort``, ``--implementer-reasoning-effort``,
-and ``--reviewer-reasoning-effort``. Each takes ``default``, ``low``,
-``medium``, ``high``, or ``xhigh``. A role-specific setting takes precedence
-over that role's model alias default; ``default`` deliberately omits Codex's
-``model_reasoning_effort`` option. When a setting is omitted, the selected
-model alias retains its existing default. These controls are applied only to
-the Codex provider and never modify Claude or Pi model IDs.
+Reasoning overrides
+-------------------
+``hephaestus-automation-loop`` accepts explicit per-role reasoning controls:
+``--planner-reasoning-effort``, ``--implementer-reasoning-effort``, and
+``--reviewer-reasoning-effort``. Each takes ``default``, ``low``, ``medium``,
+``high``, or ``xhigh``. A role-specific setting takes precedence over an
+inline IFM setting. The runtime sends the setting through each provider's
+native option. Claude does not use these controls.
 
 Timeouts
 --------
@@ -76,6 +74,18 @@ import uuid
 from hashlib import sha256
 from pathlib import Path
 
+from hephaestus.agents.model_selection import (
+    IFM_MODELS,
+    K2_HORIZON_09B,
+    K2_HORIZON_7B,
+    K2_HORIZON_32B,
+    K2_HORIZON_37B,
+    K2_HORIZON_375B_A23B,
+    K2_HORIZON_MOVA_36B_A4B,
+    normalize_model_reference,
+    parse_model_selection,
+)
+from hephaestus.agents.runtime import agent_uses_configured_model_default
 from hephaestus.constants import (
     AGENT_IMPL_TIMEOUT,
     AGENT_LEARN_TIMEOUT,
@@ -119,20 +129,23 @@ FABLE = FABLE_5
 # The set of model IDs the automation suite recognizes. Overrides to values
 # outside this set are still accepted (operators may have preview access) but
 # trigger a one-time warning so misconfigured/typo'd env vars are visible.
-_KNOWN_MODELS: frozenset[str] = frozenset(
-    {
-        OPUS_47,
-        SONNET_46,
-        SONNET_5,
-        HAIKU_45,
-        OPUS_48,
-        FABLE_5,
-        MYTHOS,
-        MUSE_SPARK_12,
-        MUSE_SPARK_12_HIGH,
-        MUSE_SPARK_12_MEDIUM,
-        MUSE_SPARK_12_LOW,
-    }
+_KNOWN_MODELS: frozenset[str] = (
+    frozenset(
+        {
+            OPUS_47,
+            SONNET_46,
+            SONNET_5,
+            HAIKU_45,
+            OPUS_48,
+            FABLE_5,
+            MYTHOS,
+            MUSE_SPARK_12,
+            MUSE_SPARK_12_HIGH,
+            MUSE_SPARK_12_MEDIUM,
+            MUSE_SPARK_12_LOW,
+        }
+    )
+    | IFM_MODELS
 )
 _MODEL_ALIASES: dict[str, str] = {
     "fable": FABLE,
@@ -145,10 +158,11 @@ def normalize_claude_model(model: str) -> str:
     value = model.strip()
     if not value:
         return ""
-    return _MODEL_ALIASES.get(value.lower(), value)
+    normalized = _MODEL_ALIASES.get(value.lower(), value)
+    return normalize_model_reference(normalized)
 
 
-def _resolve_model(value: str | None, default: str) -> str:
+def _resolve_model(value: str | None, default: str, *, agent: str = "claude") -> str:
     """Return an explicitly configured model ID or *default*.
 
     Args:
@@ -159,10 +173,13 @@ def _resolve_model(value: str | None, default: str) -> str:
         The resolved model ID string.
 
     """
+    if value is None and agent_uses_configured_model_default(agent):
+        return ""
     if value is None:
         return default
     resolved = normalize_claude_model(value)
-    if resolved not in _KNOWN_MODELS:
+    selection = parse_model_selection(resolved)
+    if selection.model not in _KNOWN_MODELS:
         logger.warning(
             "Unknown model %r (known: %s). Proceeding, but verify the model ID is correct.",
             resolved,
@@ -171,29 +188,29 @@ def _resolve_model(value: str | None, default: str) -> str:
     return resolved
 
 
-def planner_model(value: str | None = None) -> str:
+def planner_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model used to generate implementation plans from issue text."""
-    return _resolve_model(value, OPUS)
+    return _resolve_model(value, OPUS, agent=agent)
 
 
-def implementer_model(value: str | None = None) -> str:
+def implementer_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model used by the implementer worker that runs ``claude`` in a worktree.
 
     Also used for any phase that resumes the implementer's session
     (e.g. address-review, ci-driver), since ``claude --resume`` is locked
     to the model that created the session.
     """
-    return _resolve_model(value, HAIKU)
+    return _resolve_model(value, HAIKU, agent=agent)
 
 
-def reviewer_model(value: str | None = None) -> str:
+def reviewer_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model used by plan/PR reviewers and the review-fix loop."""
-    return _resolve_model(value, SONNET)
+    return _resolve_model(value, SONNET, agent=agent)
 
 
-def advise_model(value: str | None = None) -> str:
+def advise_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Claude model used by the advise skill-selection step."""
-    return _resolve_model(value, HAIKU)
+    return _resolve_model(value, HAIKU, agent=agent)
 
 
 def codex_advise_model() -> str:
@@ -201,9 +218,9 @@ def codex_advise_model() -> str:
     return CODEX_ADVISE
 
 
-def learn_model(value: str | None = None) -> str:
+def learn_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model used by /learn and follow-up issue filing."""
-    return _resolve_model(value, HAIKU)
+    return _resolve_model(value, HAIKU, agent=agent)
 
 
 def git_message_model() -> str:
@@ -215,14 +232,14 @@ def git_message_model() -> str:
     return HAIKU
 
 
-def fallback_model(value: str | None = None) -> str:
+def fallback_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model substituted when a model-specific usage cap is detected (#1793).
 
     A "reached your <model> limit … switch models with /model" 429 carries no
     reset epoch, so waiting cannot help — the invoke chokepoint retries on
     this model instead. Defaults to :data:`OPUS` (the current Opus).
     """
-    return _resolve_model(value, OPUS)
+    return _resolve_model(value, OPUS, agent=agent)
 
 
 # ── Subprocess timeouts ──────────────────────────────────────────────────────
@@ -680,6 +697,13 @@ __all__ = [
     "FABLE_5",
     "HAIKU",
     "HAIKU_45",
+    "IFM_MODELS",
+    "K2_HORIZON_09B",
+    "K2_HORIZON_7B",
+    "K2_HORIZON_32B",
+    "K2_HORIZON_37B",
+    "K2_HORIZON_375B_A23B",
+    "K2_HORIZON_MOVA_36B_A4B",
     "MYTHOS",
     "OPUS",
     "OPUS_47",
@@ -708,6 +732,8 @@ __all__ = [
     "learn_claude_timeout",
     "learn_model",
     "normalize_claude_model",
+    "normalize_model_reference",
+    "parse_model_selection",
     "plan_reviewer_claude_timeout",
     "plan_stage_timeout",
     "planner_claude_timeout",

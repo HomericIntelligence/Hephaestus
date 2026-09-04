@@ -9,6 +9,42 @@ import pytest
 
 from hephaestus.automation import agent_config
 
+EXPECTED_IFM_MODELS = frozenset(
+    {
+        "IFM/Amber",
+        "IFM/AmberChat",
+        "IFM/AmberSafe",
+        "IFM/Crystal",
+        "IFM/CrystalChat",
+        "IFM/CrystalChat-7B-Web2Code",
+        "IFM/K2",
+        "IFM/K2-Chat",
+        "IFM/K2-Horizon-0.9B",
+        "IFM/K2-Horizon-0.9B-Uno",
+        "IFM/K2-Horizon-3.7B",
+        "IFM/K2-Horizon-7B",
+        "IFM/K2-Horizon-7B-FP8",
+        "IFM/K2-Horizon-7B-Uno",
+        "IFM/K2-Horizon-32B",
+        "IFM/K2-Horizon-32B-FP8",
+        "IFM/K2-Horizon-375B-A23B",
+        "IFM/K2-Horizon-375B-A23B-FP8",
+        "IFM/K2-Horizon-MoVA-36B-A4B",
+        "IFM/K2-Horizon-MoVA-36B-A4B-FP8",
+        "IFM/K2-Spike-1",
+        "IFM/K2-Spike-2",
+        "IFM/K2-Think",
+        "IFM/K2-Think-V2",
+        "IFM/K2-V2",
+        "IFM/K2-V2-Instruct",
+        "IFM/MegaMath-Llama-3.2-1B",
+        "IFM/MegaMath-Llama-3.2-3B",
+        "IFM/guru-7B",
+        "IFM/guru-32B",
+        "IFM/k2-vision-65b",
+    }
+)
+
 
 def test_agent_config_exposes_all_three_domains(monkeypatch: pytest.MonkeyPatch) -> None:
     """The merged module answers model, timeout, and naming queries."""
@@ -16,6 +52,69 @@ def test_agent_config_exposes_all_three_domains(monkeypatch: pytest.MonkeyPatch)
     assert agent_config.planner_model() == agent_config.OPUS  # models
     assert agent_config.implementer_claude_timeout() == agent_config.AGENT_IMPL_TIMEOUT  # timeouts
     assert agent_config.session_name("R", 1, agent_config.AGENT_PLANNER)  # naming
+
+
+def test_ifm_registry_contains_each_non_gguf_model_repository() -> None:
+    """The public IFM registry is an exact reviewed model snapshot."""
+    assert agent_config.IFM_MODELS == EXPECTED_IFM_MODELS
+    assert len(agent_config.IFM_MODELS) == 31
+    assert not any(model.endswith("-GGUF") for model in agent_config.IFM_MODELS)
+    assert "IFM/eval-360-sources" not in agent_config.IFM_MODELS
+    assert "IFM/megamath_models" not in agent_config.IFM_MODELS
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("k2-horizon-0.9", "IFM/K2-Horizon-0.9B"),
+        ("K2-HORIZON-3.7", "IFM/K2-Horizon-3.7B"),
+        ("k2-horizon-7:high", "IFM/K2-Horizon-7B:high"),
+        (" k2-horizon-32:xhigh ", "IFM/K2-Horizon-32B:xhigh"),
+        ("k2-horizon-36", "IFM/K2-Horizon-MoVA-36B-A4B"),
+        ("k2-horizon-375", "IFM/K2-Horizon-375B-A23B"),
+    ],
+)
+def test_ifm_aliases_resolve_to_canonical_model_references(model: str, expected: str) -> None:
+    """IFM aliases retain a supported reasoning selector."""
+    assert agent_config.normalize_model_reference(model) == expected
+
+
+def test_model_reference_preserves_colon_for_an_unregistered_model() -> None:
+    """A colon in an unrelated provider model ID is not a reasoning selector."""
+    model = "ollama/qwen:high"
+
+    assert agent_config.normalize_model_reference(model) == model
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+@pytest.mark.parametrize(
+    "resolver",
+    [
+        agent_config.planner_model,
+        agent_config.implementer_model,
+        agent_config.reviewer_model,
+        agent_config.advise_model,
+        agent_config.learn_model,
+    ],
+)
+def test_direct_agent_role_model_uses_agent_config_default(agent: str, resolver: object) -> None:
+    """A direct agent receives no implicit Claude role model."""
+    assert callable(resolver)
+    assert resolver(agent=agent) == ""
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_direct_agent_fallback_model_uses_agent_config_default(agent: str) -> None:
+    """A direct agent receives no implicit Claude fallback model."""
+    assert agent_config.fallback_model(agent=agent) == ""
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_direct_agent_role_model_keeps_an_explicit_ifm_alias(agent: str) -> None:
+    """An explicit IFM alias overrides a direct agent's configured default."""
+    assert agent_config.reviewer_model("k2-horizon-0.9:high", agent=agent) == (
+        "IFM/K2-Horizon-0.9B:high"
+    )
 
 
 def test_canonical_jsonl_path_is_dot_safe() -> None:

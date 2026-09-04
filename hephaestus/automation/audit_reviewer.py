@@ -158,7 +158,7 @@ def run_audit_coordinator(
                 execution_request=ExecutionRequest(
                     AgentRole.PR_REVIEWER, AgentOperation.AUDIT_REVIEW, SessionLifecycle.ONE_SHOT
                 ),
-                model=direct_agent_model(agent, model_value=model or reviewer_model()),
+                model=direct_agent_model(agent, model_value=model or reviewer_model(agent=agent)),
                 sandbox="read-only",
             )
             response = result.stdout or ""
@@ -295,8 +295,10 @@ def main(argv: list[str] | None = None) -> int:
                 pr_numbers=args.pr_numbers,
                 dry_run=args.dry_run,
                 shutdown_event=shutdown,
-                model=reviewer_model(args.reviewer_model or args.model or None),
-                fallback_model=fallback_model(args.fallback_model or args.model or None),
+                model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),
+                fallback_model=fallback_model(
+                    args.fallback_model or args.model or None, agent=agent
+                ),
                 timeout=args.agent_timeout,
             )
             rc, audits = reviewer.run()

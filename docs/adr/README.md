@@ -47,3 +47,4 @@ numbered, and listed here.
 | [0032](0032-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |
 | [0033](0033-graphql-response-error-contract.md) | GraphQL response-error and mutation-proof contract | Accepted |
 | [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |
+| [0035](0035-provider-aware-ifm-model-selection.md) | Provider-aware IFM model selection | Accepted |

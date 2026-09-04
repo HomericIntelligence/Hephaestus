@@ -309,6 +309,25 @@ def test_build_pipeline_config_maps_per_role_reasoning_effort(
     assert config.implementer_reasoning_effort == "high"
 
 
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_build_pipeline_config_preserves_agent_model_default(
+    dispatch: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+) -> None:
+    """Direct agents do not receive an implicit Claude role model."""
+    monkeypatch.setattr(loop_runner, "resolve_agent", lambda selected, **_kwargs: agent)
+
+    loop_runner.main(["--agent", agent])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.model == ""
+    assert config.planner_model == ""
+    assert config.reviewer_model == ""
+    assert config.implementer_model == ""
+    assert config.fallback_model == ""
+
+
 @pytest.mark.parametrize(
     ("role", "model", "effort", "expected"),
     [
@@ -363,6 +382,36 @@ def test_stage_model_uses_the_explicit_pi_alias() -> None:
     assert stage_model(context, "reviewer", lambda: "claude-sonnet-4-6") == (
         "operator-local-pi-alias"
     )
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_stage_model_uses_agent_config_default_when_model_is_omitted(agent: str) -> None:
+    """OpenCode and Pi do not receive a Claude role default."""
+    config = SimpleNamespace(
+        agent=agent,
+        model="",
+        reviewer_model="",
+        reviewer_reasoning_effort="",
+    )
+
+    context = cast(StageContext, SimpleNamespace(config=config))
+
+    assert stage_model(context, "reviewer", lambda: "claude-sonnet-4-6") == ""
+
+
+@pytest.mark.parametrize("agent", ["opencode", "pi"])
+def test_stage_model_adds_reasoning_for_supported_direct_agents(agent: str) -> None:
+    """A role reasoning option applies to IFM models on direct agents."""
+    config = SimpleNamespace(
+        agent=agent,
+        model="",
+        reviewer_model="k2-horizon-7:low",
+        reviewer_reasoning_effort="high",
+    )
+
+    context = cast(StageContext, SimpleNamespace(config=config))
+
+    assert stage_model(context, "reviewer", lambda: "fallback") == ("IFM/K2-Horizon-7B:high")
 
 
 @pytest.mark.parametrize("model", ["terra:default", "gpt-5.6-terra:default"])

@@ -257,7 +257,7 @@ def run_learn(
                     prompt=build_learn_prompt(""),
                     cwd=worktree_path,
                     timeout=timeout,
-                    model=direct_agent_model(agent, model_value=learn_model(model)),
+                    model=direct_agent_model(agent, model_value=learn_model(model, agent=agent)),
                 ).stdout
                 or ""
             )

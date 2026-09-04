@@ -572,9 +572,11 @@ def main() -> int:
         disable_pi_automation=args.disable_pi_automation,
         auth_status_timeout=args.auth_status_timeout,
         model=args.model,
-        implementer_model=implementer_model(args.implementer_model or args.model or None),
-        reviewer_model=reviewer_model(args.reviewer_model or args.model or None),
-        fallback_model=fallback_model(args.fallback_model or args.model or None),
+        implementer_model=implementer_model(
+            args.implementer_model or args.model or None, agent=agent
+        ),
+        reviewer_model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),
+        fallback_model=fallback_model(args.fallback_model or args.model or None, agent=agent),
         implementer_timeout=args.agent_timeout,
         reviewer_timeout=args.reviewer_timeout,
         address_review_timeout=args.address_review_timeout,

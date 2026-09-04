@@ -32,6 +32,13 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.model_selection import (
+    IFM_MODELS,
+    MODEL_REASONING_EFFORTS,
+    PI_THINKING_LEVELS,
+    AgentModelSelection,
+    parse_model_selection,
+)
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     package_tree_digest,
@@ -86,6 +93,8 @@ CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
+PI_SETTINGS_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "settings.json"
+PI_CONFIG_MAX_BYTES = 1024 * 1024
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
 PI_PROJECT_DENYLIST_FILENAME = ".heph-project-denylist"
 PI_DENYLIST_FILENAMES = (PI_PROJECT_DENYLIST_FILENAME, PI_PRIVATE_DENYLIST_FILENAME)
@@ -612,6 +621,111 @@ def _pi_models_configured(pi_dir: Path | None = None) -> bool:
     return False
 
 
+def _read_pi_settings_payload(config_path: Path, *, required: bool) -> Any | None:
+    """Read one bounded regular Pi settings file without following a link."""
+    try:
+        initial = config_path.lstat()
+        if stat.S_ISLNK(initial.st_mode) or not stat.S_ISREG(initial.st_mode):
+            raise OSError
+        if initial.st_size > PI_CONFIG_MAX_BYTES:
+            raise OSError
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(config_path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                raise OSError
+            if opened.st_size > PI_CONFIG_MAX_BYTES:
+                raise OSError
+            if (initial.st_dev, initial.st_ino) != (opened.st_dev, opened.st_ino):
+                raise OSError
+            with os.fdopen(descriptor, "rb", closefd=False) as settings_file:
+                raw_settings = settings_file.read(PI_CONFIG_MAX_BYTES + 1)
+            if len(raw_settings) > PI_CONFIG_MAX_BYTES:
+                raise OSError
+            payload: Any = json.loads(raw_settings)
+        finally:
+            os.close(descriptor)
+    except FileNotFoundError as exc:
+        if not required:
+            return None
+        raise AgentExecutionError(
+            "Pi default model configuration is unavailable or invalid"
+        ) from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AgentExecutionError(
+            "Pi default model configuration is unavailable or invalid"
+        ) from exc
+    return payload
+
+
+def _load_pi_default_model_selection(
+    pi_dir: Path | None = None,
+    *,
+    required: bool = True,
+) -> AgentModelSelection | None:
+    """Load the operator-global Pi default through a bounded regular file."""
+    config_path = (
+        pi_dir.expanduser() / "settings.json"
+        if pi_dir is not None
+        else Path.home() / PI_SETTINGS_CONFIG_RELATIVE_PATH
+    )
+    payload = _read_pi_settings_payload(config_path, required=required)
+    if payload is None:
+        return None
+
+    if not isinstance(payload, dict):
+        raise AgentExecutionError("Pi default model configuration must be a JSON object")
+    provider = payload.get("defaultProvider")
+    model = payload.get("defaultModel")
+    thinking = payload.get("defaultThinkingLevel", "")
+    if (
+        not isinstance(provider, str)
+        or not provider
+        or provider.strip() != provider
+        or not isinstance(model, str)
+        or not model
+        or model.strip() != model
+    ):
+        raise AgentExecutionError(
+            "Pi default model configuration requires defaultProvider and defaultModel"
+        )
+    if not isinstance(thinking, str) or thinking not in PI_THINKING_LEVELS | {""}:
+        raise AgentExecutionError(
+            "Pi default model configuration has an invalid defaultThinkingLevel"
+        )
+    return AgentModelSelection(f"{provider}/{model}", thinking)
+
+
+def _resolve_pi_model_selection(
+    model: str,
+    *,
+    pi_dir: Path | None = None,
+) -> AgentModelSelection:
+    """Return the explicit Pi model and thinking selection."""
+    selection = parse_model_selection(model)
+    if selection.model and selection.reasoning_effort not in {"", "default"}:
+        return selection
+    if selection.model and selection.model not in IFM_MODELS:
+        return selection
+
+    configured = _load_pi_default_model_selection(pi_dir, required=not selection.model)
+    if configured is None:
+        return AgentModelSelection(selection.model)
+    selected_model = selection.model or configured.model
+    selected_effort = (
+        configured.reasoning_effort
+        if selection.reasoning_effort in {"", "default"}
+        else selection.reasoning_effort
+    )
+    return AgentModelSelection(selected_model, selected_effort)
+
+
+def resolve_pi_model_reference(model: str, *, pi_dir: Path | None = None) -> str:
+    """Return the Pi model reference used for a private session fingerprint."""
+    return _resolve_pi_model_selection(model, pi_dir=pi_dir).reference
+
+
 def _require_pi_automation_admission(
     cwd: Path,
     *,
@@ -745,8 +859,28 @@ def require_supported_direct_surface(
 
 
 def agent_supports_model_reasoning_effort(agent: str) -> bool:
-    """Return whether an agent accepts Codex-style model reasoning selectors."""
-    return is_codex(agent)
+    """Return whether an agent accepts a model reasoning selector."""
+    return is_codex(agent) or is_opencode(agent) or is_pi(agent)
+
+
+def agent_uses_configured_model_default(agent: str) -> bool:
+    """Return whether the provider owns its model default."""
+    return is_opencode(agent) or is_pi(agent)
+
+
+def apply_agent_model_reasoning_effort(agent: str, model: str, effort: str) -> str:
+    """Apply one role reasoning option to a provider model selection."""
+    if not effort or not agent_supports_model_reasoning_effort(agent):
+        return model
+    if is_codex(agent):
+        base_model, separator, current_effort = model.rpartition(":")
+        if separator and current_effort in MODEL_REASONING_EFFORTS:
+            model = base_model
+        return f"{model}:{effort}"
+    selection = parse_model_selection(model)
+    if not selection.model or selection.model in IFM_MODELS:
+        return AgentModelSelection(selection.model, effort).reference
+    return model
 
 
 def uses_direct_agent_runner(agent: str) -> bool:
@@ -767,8 +901,11 @@ def direct_agent_model(
     The caller resolves any provider-specific defaults at the explicit CLI
     boundary. Runtime execution never consults ambient model configuration.
     """
-    del agent
-    return codex_default if model_value is None else model_value
+    if model_value is not None:
+        return model_value
+    if is_opencode(agent) or is_pi(agent):
+        return ""
+    return codex_default
 
 
 def agent_cli_name(agent: str) -> str:
@@ -1937,9 +2074,12 @@ def _opencode_base_cmd(
     needs an interactive permission ask that headless runs auto-deny, so the
     model silently no-ops while claiming success (#2806 validation).
     """
+    selection = parse_model_selection(model)
     cmd = ["opencode", "run", "--dir", str(cwd), "--format", "json"]
-    if model:
-        cmd.extend(["--model", model])
+    if selection.model:
+        cmd.extend(["--model", selection.model])
+    if selection.reasoning_effort and selection.reasoning_effort != "default":
+        cmd.extend(["--variant", selection.reasoning_effort])
     if session_id:
         cmd.extend(["--session", session_id])
     cmd.extend(_opencode_sandbox_args(sandbox))
@@ -2067,12 +2207,13 @@ def _pi_automation_cmd(
     executable: Path,
     *,
     model: str,
+    thinking: str = "",
     lifecycle: SessionLifecycle,
     session_id: str | None = None,
 ) -> list[str]:
     """Build a non-interactive Pi command with explicit private selection."""
-    selected_model = model.strip()
-    if not selected_model:
+    selection = parse_model_selection(model)
+    if not selection.model:
         raise AgentExecutionError("Pi automation requires an explicit model selection")
     cmd = _pi_base_cmd(executable, lifecycle=lifecycle, session_id=session_id)
     cmd.extend(
@@ -2084,9 +2225,12 @@ def _pi_automation_cmd(
             "--no-prompt-templates",
             "--no-themes",
             "--model",
-            selected_model,
+            selection.model,
         ]
     )
+    effective_thinking = thinking or selection.reasoning_effort
+    if effective_thinking and effective_thinking != "default":
+        cmd.extend(["--thinking", effective_thinking])
     return cmd
 
 
@@ -2496,6 +2640,7 @@ def _run_pi_with_policy(
     cwd: Path,
     timeout: int,
     model: str,
+    thinking: str = "",
     policy: ExecutionPolicy,
     preflight: PiPreflightResult,
     lifecycle: SessionLifecycle,
@@ -2527,12 +2672,17 @@ def _run_pi_with_policy(
     fingerprint = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
     if fingerprint != preflight.executable_fingerprint:
         raise AgentExecutionError("Pi preflight-proven executable identity drifted")
-    tokens = pi_private_redaction_tokens(cwd, model)
+    command_model = model.removesuffix(f":{thinking}") if thinking else model
+    selection = parse_model_selection(command_model)
+    tokens = tuple(
+        dict.fromkeys((*pi_private_redaction_tokens(cwd, model), selection.model, command_model))
+    )
     try:
         with _pi_automation_profile(preflight, pi_dir=pi_dir) as (profile_dir, package_roots):
             command = _pi_automation_cmd(
                 executable,
-                model=model,
+                model=command_model,
+                thinking=thinking,
                 lifecycle=lifecycle,
                 session_id=session_id,
             )
@@ -2607,6 +2757,7 @@ def run_agent_text(
     pi_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
+    pi_thinking = ""
     if is_pi(agent):
         policy, preflight = _require_admitted_pi_policy(
             cwd,
@@ -2617,6 +2768,9 @@ def run_agent_text(
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is not SessionLifecycle.ONE_SHOT:
             raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
+        pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
+        model = pi_selection.reference
+        pi_thinking = pi_selection.reasoning_effort
     if is_codex(agent):
         return run_codex_text(
             prompt,
@@ -2643,6 +2797,7 @@ def run_agent_text(
             cwd=cwd,
             timeout=timeout,
             model=model,
+            thinking=pi_thinking,
             policy=policy,
             preflight=preflight,
             lifecycle=execution_request.lifecycle,
@@ -2670,6 +2825,7 @@ def run_agent_session(
     pi_dir: Path | None = None,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
+    pi_thinking = ""
     if is_pi(agent):
         policy, preflight = _require_admitted_pi_policy(
             cwd,
@@ -2678,6 +2834,9 @@ def run_agent_session(
             pi_dir=pi_dir,
         )
         pi_request = cast(ExecutionRequest, execution_request)
+        pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
+        model = pi_selection.reference
+        pi_thinking = pi_selection.reasoning_effort
         if pi_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
             if resume_binding is None:
                 raise PiSessionBindingError(
@@ -2716,6 +2875,7 @@ def run_agent_session(
             cwd=cwd,
             timeout=timeout,
             model=model,
+            thinking=pi_thinking,
             policy=policy,
             preflight=preflight,
             lifecycle=execution_request.lifecycle,
@@ -2763,6 +2923,7 @@ def resume_agent_session(
     pi_dir: Path | None = None,
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
+    pi_thinking = ""
     if is_pi(agent):
         policy, preflight = _require_admitted_pi_policy(
             cwd,
@@ -2771,6 +2932,9 @@ def resume_agent_session(
             pi_dir=pi_dir,
         )
         pi_request = cast(ExecutionRequest, execution_request)
+        pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
+        model = pi_selection.reference
+        pi_thinking = pi_selection.reasoning_effort
         if pi_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
             raise ExecutionPolicyError(
                 "Pi session resume requires a RESUME_REQUIRED ExecutionRequest"
@@ -2810,6 +2974,7 @@ def resume_agent_session(
             cwd=cwd,
             timeout=timeout,
             model=model,
+            thinking=pi_thinking,
             policy=policy,
             preflight=preflight,
             lifecycle=execution_request.lifecycle,
