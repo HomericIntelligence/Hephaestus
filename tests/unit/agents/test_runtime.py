@@ -1914,20 +1914,6 @@ def test_opencode_base_cmd_omits_an_explicit_default_variant(tmp_path: Path) -> 
     assert "--variant" not in command
 
 
-def test_opencode_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
-    """A programmatic override replaces the final selector only."""
-    selected = agent_runtime.apply_agent_model_reasoning_effort(
-        "opencode", "private/provider:model:low", "high"
-    )
-
-    assert agent_runtime._opencode_base_cmd(cwd=tmp_path, model=selected)[-4:] == [
-        "--model",
-        "private/provider:model",
-        "--variant",
-        "high",
-    ]
-
-
 def test_parse_opencode_json_events_extracts_session_id_and_final_text() -> None:
     """Every event carries sessionID; the last text part is the final message."""
     text = "\n".join(
@@ -3067,46 +3053,12 @@ def test_pi_command_keeps_a_native_configured_thinking_level_separate(tmp_path: 
     ]
 
 
-def test_pi_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
-    """A Pi programmatic override replaces the final selector only."""
-    selected = agent_runtime.apply_agent_model_reasoning_effort(
-        "pi", "private/provider:model:low", "high"
-    )
-
-    assert agent_runtime._pi_automation_cmd(
-        tmp_path / "pi",
-        model=selected,
-        lifecycle=SessionLifecycle.ONE_SHOT,
-    )[-4:] == [
-        "--model",
-        "private/provider:model",
-        "--thinking",
-        "high",
-    ]
-
-
-def test_pi_default_role_effort_uses_config_for_an_unknown_model(tmp_path: Path) -> None:
-    """The default programmatic value selects the global Pi thinking level."""
-    pi_dir = tmp_path / "pi-agent"
-    pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
-        '{"defaultProvider":"configured","defaultModel":"other","defaultThinkingLevel":"high"}',
-        encoding="utf-8",
-    )
-    selected = agent_runtime.apply_agent_model_reasoning_effort(
-        "pi", "private/provider:model:low", "default"
-    )
-
-    assert agent_runtime.resolve_pi_model_reference(selected, pi_dir=pi_dir) == (
-        "private/provider:model:high"
-    )
-
-
 def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> None:
     """An omitted Pi model becomes an explicit operator-global selection."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         json.dumps(
             {
                 "defaultProvider": "IFM",
@@ -3116,6 +3068,7 @@ def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    settings_path.chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-0.9B:high"
@@ -3126,10 +3079,12 @@ def test_pi_default_reasoning_replaces_an_inline_reasoning_value(tmp_path: Path)
     """The default selector removes an inline value and uses Pi settings."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-7B","defaultThinkingLevel":"medium"}',
         encoding="utf-8",
     )
+    settings_path.chmod(0o600)
 
     assert (
         agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-0.9B:default", pi_dir=pi_dir)
@@ -3141,11 +3096,13 @@ def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path) -> 
     """Pi fingerprints configured thinking when the model has no inline effort."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         '{"defaultProvider":"private","defaultModel":"operator-model",'
         '"defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    settings_path.chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-7B", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-7B:high"
@@ -3288,9 +3245,11 @@ def test_pi_default_model_does_not_read_project_settings(
     home_dir = tmp_path / "home"
     pi_dir = home_dir / ".pi" / "agent"
     pi_dir.mkdir(parents=True)
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         '{"defaultProvider":"global","defaultModel":"model"}', encoding="utf-8"
     )
+    settings_path.chmod(0o600)
     project_dir = tmp_path / "project"
     (project_dir / ".pi").mkdir(parents=True)
     (project_dir / ".pi" / "settings.json").write_text(
@@ -3371,10 +3330,10 @@ def test_pi_default_model_rejects_incomplete_operator_settings(
         agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
 
 
-def test_pi_default_model_accepts_an_arbitrary_configured_thinking_level(
+def test_pi_default_model_rejects_an_unknown_configured_thinking_level(
     tmp_path: Path,
 ) -> None:
-    """Pi configuration owns the set of valid thinking-level names."""
+    """Pi settings reject a thinking level outside the supported set."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
     (pi_dir / "settings.json").write_text(
@@ -3382,10 +3341,10 @@ def test_pi_default_model_accepts_an_arbitrary_configured_thinking_level(
         '"defaultThinkingLevel":"future-effort"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
 
-    assert agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir) == (
-        "private/model:future-effort"
-    )
+    with pytest.raises(agent_runtime.AgentExecutionError, match="defaultThinkingLevel"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
 
 
 def test_pi_private_redaction_tokens_fail_closed_on_broken_policy_link(tmp_path: Path) -> None:

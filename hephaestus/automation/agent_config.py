@@ -81,14 +81,12 @@ from hephaestus.agents.model_selection import (
     K2_HORIZON_37B,
     K2_HORIZON_375B_A23B,
     K2_HORIZON_MOVA_36B_A4B,
+    GPT_6_ASTRA,
     AgentModelSelection,
     normalize_model_reference,
     parse_model_selection,
 )
-from hephaestus.agents.runtime import (
-    CODEX_GPT_6_ASTRA_MODEL,
-    agent_uses_configured_model_default,
-)
+from hephaestus.agents.runtime import agent_uses_configured_model_default
 from hephaestus.constants import (
     AGENT_IMPL_TIMEOUT,
     AGENT_LEARN_TIMEOUT,
@@ -140,7 +138,7 @@ _KNOWN_MODELS: frozenset[str] = (
             OPUS_48,
             FABLE_5,
             MYTHOS,
-            CODEX_GPT_6_ASTRA_MODEL,
+            GPT_6_ASTRA,
             "astra",
             MUSE_SPARK_12,
             MUSE_SPARK_12_HIGH,

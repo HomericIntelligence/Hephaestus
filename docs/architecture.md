@@ -1719,6 +1719,11 @@ unsupported-effort error before model output or a work item, the runtime
 retries one time without an explicit effort. OpenCode and Pi apply their
 native fallback behavior. See [IFM Model Configuration](ifm-models.md) and
 [ADR-0036](adr/0036-free-form-model-effort-selection.md).
+The parser is [`parse_model_selection()`](../hephaestus/agents/model_selection.py).
+Provider argument construction and the bounded Codex retry are in
+[`runtime.py`](../hephaestus/agents/runtime.py). The loop option definitions
+are in [`loop_runner.py`](../hephaestus/automation/loop_runner.py).
+
 The default pipeline accepts `--loops`, `--parallel-repos`, and the staged
 `--issue-limit` selector, which advances 1 → 2 → 4 → 8 → all only after the
 repository checkpoint verifies the previous wave. It also accepts

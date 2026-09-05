@@ -158,6 +158,25 @@ class TestCreateThenResume:
         assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
         assert sid == session_uuid("R", 2, AGENT_PLANNER, "claude-sonnet-5", cwd=cwd)
 
+    def test_empty_model_base_omits_the_claude_model_option(
+        self, stub_run: MagicMock, fake_home: Path
+    ) -> None:
+        """An effort-only reference lets Claude select its provider default."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+
+        _, sid = invoke_claude_with_session(
+            repo="R",
+            issue=3,
+            agent=AGENT_PLANNER,
+            prompt="hi",
+            model=":provider-default",
+            cwd=cwd,
+        )
+
+        assert "--model" not in _argv(stub_run.call_args)
+        assert sid == session_uuid("R", 3, AGENT_PLANNER, "", cwd=cwd)
+
     def test_lossy_path_collision_does_not_resume_unregistered_checkout(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:

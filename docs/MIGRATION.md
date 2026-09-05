@@ -26,9 +26,15 @@ Programmatic `LoopConfig` and `PipelineConfig` callers must make the same
 change. Move each removed `*_reasoning_effort` field into the matching
 `*_model` value.
 
-The public `MODEL_REASONING_EFFORTS` and `PI_THINKING_LEVELS` fixed-list
-exports are removed. Use `parse_model_selection()` to separate a model and an
-effort. Let the selected provider validate the effort.
+The public `MODEL_REASONING_EFFORTS` export is removed. Use
+`parse_model_selection()` to separate the model and effort. The final nonempty
+colon segment is the effort. For a model ID that contains a colon, add
+`:default` to use the provider default.
+
+`PI_THINKING_LEVELS` remains available. Pi uses it to validate
+`defaultThinkingLevel` in its trusted settings file. Claude uses only the base
+model. Codex can retry one time without an unsupported effort before it starts
+work. OpenCode and Pi use their native error or fallback behavior.
 
 ## 0.x → 1.0 (forthcoming — not yet released)
 

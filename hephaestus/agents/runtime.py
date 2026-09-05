@@ -34,7 +34,9 @@ from hephaestus.agents.execution_policy import (
     resolve_policy,
 )
 from hephaestus.agents.model_selection import (
+    GPT_6_ASTRA,
     IFM_MODELS,
+    PI_THINKING_LEVELS,
     AgentModelSelection,
     parse_model_selection,
 )
@@ -79,7 +81,7 @@ CODEX_GPT_55_MODEL = "gpt-5.5"
 CODEX_GPT_56_SOL_MODEL = "gpt-5.6-sol"
 CODEX_GPT_56_TERRA_MODEL = "gpt-5.6-terra"
 CODEX_GPT_56_LUNA_MODEL = "gpt-5.6-luna"
-CODEX_GPT_6_ASTRA_MODEL = "gpt-6-astra"
+CODEX_GPT_6_ASTRA_MODEL = GPT_6_ASTRA
 # Preserve the established Claude-tier translation while exposing the GPT-5.6
 # Sol/Terra/Luna family as explicit capability-tier aliases below.
 CODEX_FABLE_MODEL = CODEX_GPT_55_MODEL
@@ -704,7 +706,7 @@ def _load_pi_default_model_selection(
         raise AgentExecutionError(
             "Pi default model configuration requires defaultProvider and defaultModel"
         )
-    if not isinstance(thinking, str) or (thinking and thinking.strip() != thinking):
+    if not isinstance(thinking, str) or thinking not in PI_THINKING_LEVELS | {""}:
         raise AgentExecutionError(
             "Pi default model configuration has an invalid defaultThinkingLevel"
         )
@@ -931,16 +933,6 @@ def agent_supports_model_reasoning_effort(agent: str) -> bool:
 def agent_uses_configured_model_default(agent: str) -> bool:
     """Return whether the provider owns its model default."""
     return is_opencode(agent) or is_pi(agent)
-
-
-def apply_agent_model_reasoning_effort(agent: str, model: str, effort: str) -> str:
-    """Apply one programmatic effort override to a provider model selection."""
-    selection = parse_model_selection(model)
-    if not agent_supports_model_reasoning_effort(agent):
-        return selection.model
-    if not effort:
-        return selection.reference
-    return AgentModelSelection(selection.model, effort)
 
 
 def uses_direct_agent_runner(agent: str) -> bool:

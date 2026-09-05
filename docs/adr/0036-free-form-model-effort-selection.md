@@ -68,6 +68,7 @@ the data type, not a Hephaestus value list.
   into the applicable model reference.
 - `LoopConfig` and `PipelineConfig` callers must move each removed
   `*_reasoning_effort` value into the matching `*_model` reference.
-- The public fixed-list exports `MODEL_REASONING_EFFORTS` and
-  `PI_THINKING_LEVELS` are removed. Callers must parse the model reference and
-  let the selected provider validate the effort.
+- The public fixed-list export `MODEL_REASONING_EFFORTS` is removed. Callers
+  parse the model reference and let the selected provider validate inline
+  effort values. `PI_THINKING_LEVELS` remains for validation of the Pi
+  `defaultThinkingLevel` settings value.

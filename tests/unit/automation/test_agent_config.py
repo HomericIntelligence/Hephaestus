@@ -135,14 +135,21 @@ def test_registered_ifm_model_does_not_warn(caplog: pytest.LogCaptureFixture) ->
     assert "Unknown model" not in caplog.text
 
 
-@pytest.mark.parametrize("model", ["astra:future-effort", "gpt-6-astra:future-effort"])
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("astra:future-effort", "gpt-6-astra:future-effort"),
+        ("gpt-6-astra:future-effort", "gpt-6-astra:future-effort"),
+    ],
+)
 def test_registered_astra_model_does_not_warn(
     model: str,
+    expected: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The supported Astra model does not produce an unknown-model warning."""
     with caplog.at_level(logging.WARNING, logger=agent_config.__name__):
-        assert agent_config.reviewer_model(model, agent="codex") == model
+        assert agent_config.reviewer_model(model, agent="codex") == expected
 
     assert "Unknown model" not in caplog.text
 

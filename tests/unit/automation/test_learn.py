@@ -291,6 +291,25 @@ class TestRunLearn:
         model_idx = cmd_args.index("--model")
         assert cmd_args[model_idx + 1] == "claude-opus-4-7"
 
+    def test_effort_only_model_omits_the_claude_model_option(self, tmp_path: Path) -> None:
+        """An effort-only model reference uses Claude's configured default model."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+        mock_result = MagicMock(stdout="done")
+
+        with patch("hephaestus.automation.learn.run", return_value=mock_result) as mock_run:
+            result = run_learn(
+                "session-abc",
+                worktree_path,
+                42,
+                tmp_path,
+                session_agent="claude",
+                model=":provider-default",
+            )
+
+        assert result is True
+        assert "--model" not in mock_run.call_args.args[0]
+
 
 class TestRunLearnRateLimitRetry:
     """Tests for the wait-and-retry behavior on a rate-limited /learn (#1331)."""

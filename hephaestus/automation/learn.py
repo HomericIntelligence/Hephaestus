@@ -284,13 +284,13 @@ def run_learn(
         session_id,
         build_learn_prompt(""),
         "--print",
-        "--model",
-        effective_model,
         "--permission-mode",
         "dontAsk",
         "--allowedTools",
         "Read,Write,Edit,Glob,Grep,Bash",
     ]
+    if effective_model:
+        learn_command.extend(["--model", effective_model])
 
     def _invoke_claude() -> str:
         return run(learn_command, cwd=worktree_path, timeout=timeout).stdout or ""

@@ -8,6 +8,8 @@ K2_HORIZON_7B = "IFM/K2-Horizon-7B"
 K2_HORIZON_32B = "IFM/K2-Horizon-32B"
 K2_HORIZON_MOVA_36B_A4B = "IFM/K2-Horizon-MoVA-36B-A4B"
 K2_HORIZON_375B_A23B = "IFM/K2-Horizon-375B-A23B"
+GPT_6_ASTRA = "gpt-6-astra"
+PI_THINKING_LEVELS: frozenset[str] = frozenset({"off", "minimal", "low", "medium", "high", "xhigh"})
 
 IFM_MODELS: frozenset[str] = frozenset(
     {
@@ -46,6 +48,7 @@ IFM_MODELS: frozenset[str] = frozenset(
 )
 
 _IFM_ALIASES: dict[str, str] = {
+    "astra": GPT_6_ASTRA,
     "k2-horizon-0.9": K2_HORIZON_09B,
     "k2-horizon-3.7": K2_HORIZON_37B,
     "k2-horizon-7": K2_HORIZON_7B,
@@ -88,8 +91,8 @@ def parse_model_selection(reference: str) -> AgentModelSelection:
     if not value:
         return AgentModelSelection("")
     base, separator, effort = value.rpartition(":")
-    if separator and effort:
-        return AgentModelSelection(_normalize_model_id(base), effort)
+    if separator and effort.strip():
+        return AgentModelSelection(_normalize_model_id(base.strip()), effort.strip())
     return AgentModelSelection(_normalize_model_id(value))
 
 
@@ -99,6 +102,7 @@ def normalize_model_reference(reference: str) -> str:
 
 
 __all__ = [
+    "GPT_6_ASTRA",
     "IFM_MODELS",
     "K2_HORIZON_09B",
     "K2_HORIZON_7B",
@@ -106,6 +110,7 @@ __all__ = [
     "K2_HORIZON_37B",
     "K2_HORIZON_375B_A23B",
     "K2_HORIZON_MOVA_36B_A4B",
+    "PI_THINKING_LEVELS",
     "AgentModelSelection",
     "normalize_model_reference",
     "parse_model_selection",

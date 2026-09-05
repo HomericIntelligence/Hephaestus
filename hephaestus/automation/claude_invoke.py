@@ -327,14 +327,10 @@ def _invoke_claude_once(
     if session_lifecycle == "start-new" and not create:
         raise AgentSessionLostError("new Claude review cycle collided with an existing session")
     mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
-    cmd: list[str] = [
-        "claude",
-        *mode_args,
-        "--model",
-        model,
-        "--output-format",
-        output_format,
-    ]
+    cmd: list[str] = ["claude", *mode_args]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.extend(["--output-format", output_format])
     if system_prompt_file is not None and system_prompt_file.exists():
         cmd += ["--system-prompt", str(system_prompt_file)]
     if allowed_tools is not None:
