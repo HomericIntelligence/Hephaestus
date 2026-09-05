@@ -79,8 +79,10 @@ def _post_review_rebase_reason(status: str, mergeable: str) -> str | None:
 _READINESS_WAIT_INITIAL_S = 5.0
 _READINESS_WAIT_TIMEOUT_S = 30 * 60.0
 _READINESS_WAIT_DELAY_CAP_S = 60.0
+_MERGE_CYCLE_OPERATION_TIMEOUT_S = 120.0
 _DECLINED_READINESS_FINGERPRINT = "merge_readiness_declined_fingerprint"
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
+_MERGE_CYCLE_DEADLINE_S = "_merge_cycle_deadline_s"
 _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
 
@@ -141,12 +143,18 @@ class MergeWaitStage(Stage):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
         try:
+            operation_deadline = item.payload.get(_MERGE_CYCLE_DEADLINE_S)
+            if operation_deadline is None:
+                operation_deadline = ctx.now() + _MERGE_CYCLE_OPERATION_TIMEOUT_S
+                item.payload[_MERGE_CYCLE_DEADLINE_S] = operation_deadline
             request = RunMergeWaitCycleRequest(
                 issue_number=item.issue,
                 pr_number=item.pr,
                 reviewed_head_sha=reviewed_head,
                 proof_generation=proof_generation,
                 declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),
+                deadline_s=operation_deadline,
+                cancellation=ctx.cancellation,
             )
         except ValueError:
             return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
@@ -170,6 +178,7 @@ class MergeWaitStage(Stage):
         error = item.payload.pop(_MERGE_CYCLE_RECEIPT_ERROR, None)
         if error is not None:
             item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+            item.payload.pop(_MERGE_CYCLE_DEADLINE_S, None)
             return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_failed")
         receipt = item.payload.pop(_MERGE_CYCLE_RECEIPT, None)
         if not isinstance(receipt, MergeWaitCycleCompleted) or receipt.request != item.payload.get(
@@ -177,6 +186,7 @@ class MergeWaitStage(Stage):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_receipt_invalid")
         item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+        item.payload.pop(_MERGE_CYCLE_DEADLINE_S, None)
         if receipt.attempted:
             item.attempts["merge"] += 1
         if receipt.readiness_fingerprint is not None:

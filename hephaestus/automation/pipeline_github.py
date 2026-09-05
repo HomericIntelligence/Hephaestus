@@ -82,6 +82,7 @@ from ._review_utils import (
 from .git_utils import issue_auto_impl_branch_name
 from .pipeline_github_audit import PipelineGitHubAuditReceipts
 from .pipeline_github_authorization import PipelineGitHubAuthorization
+from .pipeline_github_check_policy import PipelineGitHubCheckPolicy
 from .pipeline_github_mutations import PipelineGitHubMutations
 from .pipeline_github_queries import PipelineGitHubQueries
 from .pipeline_github_required_checks import PipelineGitHubRequiredChecks
@@ -237,6 +238,7 @@ def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
 class PipelineGitHub(
     PipelineGitHubTransport,
     PipelineGitHubQueries,
+    PipelineGitHubCheckPolicy,
     PipelineGitHubRequiredChecks,
     PipelineGitHubAuthorization,
     PipelineGitHubReviews,

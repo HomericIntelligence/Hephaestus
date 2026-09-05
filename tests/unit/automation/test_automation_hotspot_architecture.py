@@ -28,11 +28,12 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github_contract.py": 125,
     "hephaestus/automation/pipeline_github_transport.py": 425,
     "hephaestus/automation/pipeline_github_authorization.py": 300,
-    "hephaestus/automation/pipeline_github_queries.py": 800,
+    "hephaestus/automation/pipeline_github_queries.py": 650,
+    # Effective classic and ruleset policy reads form one stable snapshot.
+    "hephaestus/automation/pipeline_github_check_policy.py": 425,
     # Exact-head Check Runs use a complete paginated double-read. Keep this
-    # separate repository-scoped merge-gate collaborator bounded. The current
-    # measured size is 358 lines, so the cap must cover that source footprint.
-    "hephaestus/automation/pipeline_github_required_checks.py": 360,
+    # separate repository-scoped merge-gate collaborator bounded.
+    "hephaestus/automation/pipeline_github_required_checks.py": 425,
     "hephaestus/automation/pipeline_github_reviews.py": 1_475,
     "hephaestus/automation/pipeline_github_mutations.py": 475,
     "hephaestus/automation/pipeline/stages/pr_review.py": 550,
@@ -57,6 +58,7 @@ _COLLABORATOR_MODULES = frozenset(
         "pipeline_github_transport",
         "pipeline_github_authorization",
         "pipeline_github_contract",
+        "pipeline_github_check_policy",
         "pipeline_github_queries",
         "pipeline_github_required_checks",
         "pipeline_github_reviews",

@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -707,9 +708,20 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
 
-    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+    def effective_merge_policy(self, pr_number: int, base_branch: str, **_kwargs: Any) -> Any:
+        """Return the canned effective merge policy."""
+        return SimpleNamespace(
+            conversation_resolution_enforced=self.base_branch_requires_conversation_resolution(
+                pr_number, base_branch
+            ),
+            required_checks=(("required-ci", 1),),
+        )
+
+    def required_checks_pass_for_head(
+        self, head_sha: str, policy: Any = None, **_kwargs: Any
+    ) -> bool:
         """Return a green result for the requested exact head by default."""
-        del head_sha
+        del head_sha, policy
         return True
 
     @property
@@ -742,6 +754,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_number: int,
         reviewed_sha: str,
         authorization: MergeAuthorization | None = None,
+        **_kwargs: Any,
     ) -> ConditionalMergeResult:
         """Mirror one successful SHA-conditional normal merge request."""
         review_id = authorization.review_id if authorization is not None else "R1"

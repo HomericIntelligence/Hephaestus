@@ -50,6 +50,7 @@ Coordinator convention (binding for #1817, the coordinator slice):
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -557,7 +558,25 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness without granting authorization."""
         pass
 
-    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+    def effective_merge_policy(
+        self,
+        pr_number: int,
+        base_branch: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> Any:
+        """Return one stable classic-and-ruleset merge-policy snapshot."""
+        pass
+
+    def required_checks_pass_for_head(
+        self,
+        head_sha: str,
+        policy: Any = None,
+        *,
+        deadline_s: float | None = None,
+        cancellation: threading.Event | None = None,
+    ) -> bool:
         """Return whether complete successful Check Runs exist for ``head_sha``."""
         pass
 
@@ -588,6 +607,9 @@ class StageGitHub(Protocol):
         pr_number: int,
         reviewed_sha: str,
         authorization: MergeAuthorization | None = None,
+        *,
+        deadline_s: float | None = None,
+        cancellation: threading.Event | None = None,
     ) -> ConditionalMergeResult:
         """Perform one normal merge conditional on ``reviewed_sha``."""
         pass
@@ -677,6 +699,7 @@ class StageContext:
     event_fn: Callable[[StageEvent], None] | None = None
     learning_journal: Any = None
     plan_review_sessions: Any = None
+    cancellation: threading.Event = field(default_factory=threading.Event)
     # Per-Coordinator one-shot consumption state for plan-review session
     # resets. The coordinator copies this from the immutable
     # ``PipelineConfig.reset_plan_review_sessions`` frozenset so stages can

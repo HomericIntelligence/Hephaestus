@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -101,6 +102,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         pr_number: int,
         reviewed_sha: str,
         authorization: MergeAuthorization | None = None,
+        **_kwargs: Any,
     ) -> ConditionalMergeResult:
         self.events.append(f"merge:{reviewed_sha}")
         self.merge_attempts.append(
@@ -114,8 +116,20 @@ class _ConditionalGitHub(FakeStageGitHub):
             return dict(self._readiness.pop(0))
         return dict(self._readiness[0])
 
-    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+    def effective_merge_policy(self, pr_number: int, base_branch: str, **_kwargs: Any) -> Any:
+        """Return the scripted effective policy."""
+        return SimpleNamespace(
+            conversation_resolution_enforced=self.base_branch_requires_conversation_resolution(
+                pr_number, base_branch
+            ),
+            required_checks=(("required-ci", 1),),
+        )
+
+    def required_checks_pass_for_head(
+        self, head_sha: str, policy: Any = None, **_kwargs: Any
+    ) -> bool:
         """Return the scripted exact-head check result."""
+        del policy
         self.events.append(f"checks:{head_sha}")
         self.checked_heads.append(head_sha)
         return self._required_checks_green
@@ -229,6 +243,8 @@ def test_merge_cycle_dispatches_without_inline_github_calls(
     assert isinstance(result.job, GitHubJob)
     assert isinstance(result.job.request, RunMergeWaitCycleRequest)
     assert result.job.request.reviewed_head_sha == "a" * 40
+    assert result.job.request.deadline_s > 0
+    assert result.job.request.cancellation is ctx.cancellation
     assert elapsed < 0.25
 
 
@@ -450,6 +466,7 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
             pr_number: int,
             reviewed_sha: str,
             authorization: MergeAuthorization | None = None,
+            **_kwargs: Any,
         ) -> ConditionalMergeResult:
             self.merge_attempts.append(
                 (pr_number, reviewed_sha, authorization.review_id if authorization else "R1")
@@ -563,7 +580,7 @@ def test_unreadable_conversation_resolution_policy_blocks_merge_put(
         MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
     )
 
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_unavailable")
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_policy_unavailable")
     assert github.merge_attempts == []
 
 
@@ -598,6 +615,7 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
             pr_number: int,
             reviewed_sha: str,
             authorization: MergeAuthorization | None = None,
+            **_kwargs: Any,
         ) -> ConditionalMergeResult:
             assert self._thread_appeared_after_local_read
             self.merge_attempts.append(

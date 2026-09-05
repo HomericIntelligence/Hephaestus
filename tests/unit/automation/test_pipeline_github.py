@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -39,6 +41,10 @@ from hephaestus.automation.pipeline.stages.base import (
     ImplementationReplyProgress,
     StageGitHub,
 )
+from hephaestus.automation.pipeline_github_check_policy import (
+    EffectiveMergePolicy,
+    RequiredCheck,
+)
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
@@ -63,8 +69,8 @@ from hephaestus.utils.file_lock import LockUnavailableError
 _BATCH_NONCE = "b" * 32
 
 
-def test_merge_cycle_reads_checks_after_final_admission() -> None:
-    """The final Check Runs read follows all other admission reads."""
+def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
+    """The final admission directly follows all mutable policy reads."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
@@ -95,19 +101,40 @@ def test_merge_cycle_reads_checks_after_final_admission() -> None:
             events.append("threads")
             return []
 
-        def base_branch_requires_conversation_resolution(self, _pr: int, _base: str) -> bool:
-            events.append("conversation")
-            return True
+        def effective_merge_policy(
+            self,
+            _pr: int,
+            _base: str,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> SimpleNamespace:
+            del deadline_s, cancellation
+            events.append("policy")
+            return SimpleNamespace(
+                conversation_resolution_enforced=True,
+                required_checks=(("required-ci", 15368),),
+            )
 
         def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
             events.append("readiness")
             return {"headRefOid": head, "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}
 
-        def required_checks_pass_for_head(self, check_head: str) -> bool:
+        def required_checks_pass_for_head(
+            self,
+            check_head: str,
+            policy: object,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> bool:
+            del policy, deadline_s, cancellation
             events.append(f"checks:{check_head}")
             return check_head == head
 
-        def merge_pr_if_head(self, _pr: int, reviewed_head: str) -> SimpleNamespace:
+        def merge_pr_if_head(
+            self, _pr: int, reviewed_head: str, **_kwargs: object
+        ) -> SimpleNamespace:
             events.append(f"merge:{reviewed_head}")
             return SimpleNamespace(
                 dry_run=False,
@@ -122,6 +149,8 @@ def test_merge_cycle_reads_checks_after_final_admission() -> None:
         reviewed_head_sha=head,
         proof_generation=2,
         declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
     )
 
     receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, OrderedGitHub())
@@ -130,21 +159,20 @@ def test_merge_cycle_reads_checks_after_final_admission() -> None:
     assert events == [
         "state:1",
         "label",
+        "policy",
         "threads",
-        "conversation",
         "readiness",
+        f"checks:{head}",
         "threads",
-        "conversation",
         "state:2",
         "label",
-        f"checks:{head}",
         f"merge:{head}",
         "state:3",
     ]
 
 
-def test_changed_checks_after_final_admission_block_conditional_merge() -> None:
-    """A changed final Check Runs result prevents the conditional merge."""
+def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
+    """A failed complete Check Runs traversal prevents final admission."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
@@ -175,9 +203,20 @@ def test_changed_checks_after_final_admission_block_conditional_merge() -> None:
             events.append("threads")
             return []
 
-        def base_branch_requires_conversation_resolution(self, _pr: int, _base: str) -> bool:
-            events.append("conversation")
-            return True
+        def effective_merge_policy(
+            self,
+            _pr: int,
+            _base: str,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> SimpleNamespace:
+            del deadline_s, cancellation
+            events.append("policy")
+            return SimpleNamespace(
+                conversation_resolution_enforced=True,
+                required_checks=(("required-ci", 15368),),
+            )
 
         def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
             events.append("readiness")
@@ -187,11 +226,19 @@ def test_changed_checks_after_final_admission_block_conditional_merge() -> None:
                 "mergeable": "MERGEABLE",
             }
 
-        def required_checks_pass_for_head(self, _head: str) -> bool:
+        def required_checks_pass_for_head(
+            self,
+            _head: str,
+            policy: object,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> bool:
+            del policy, deadline_s, cancellation
             events.append("checks")
-            return self._state_reads < 2
+            return False
 
-        def merge_pr_if_head(self, _pr: int, _head: str) -> SimpleNamespace:
+        def merge_pr_if_head(self, _pr: int, _head: str, **_kwargs: object) -> SimpleNamespace:
             events.append("merge")
             return SimpleNamespace(
                 dry_run=False,
@@ -206,12 +253,98 @@ def test_changed_checks_after_final_admission_block_conditional_merge() -> None:
         reviewed_head_sha=head,
         proof_generation=2,
         declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
     )
 
     receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, ChangedChecksGitHub())
 
     assert receipt.outcome == "required_checks_not_green"
     assert "merge" not in events
+
+
+@pytest.mark.parametrize(
+    ("revocation", "expected"),
+    [
+        ("go-removed", "not_implementation_go"),
+        ("no-go-added", "not_implementation_go"),
+        ("auto-merge-armed", "auto_merge_already_armed"),
+        ("closed", "closed"),
+        ("head-drift", "reviewed_head_drift"),
+    ],
+)
+def test_merge_cycle_rechecks_authorization_after_check_traversal(
+    revocation: str,
+    expected: str,
+) -> None:
+    """A revocation during Check Runs traversal prevents the PUT."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    head = "a" * 40
+
+    class RevokedGitHub:
+        revoked = False
+
+        def gh_pr_state(self, _pr: int) -> dict[str, object]:
+            if self.revoked and revocation == "auto-merge-armed":
+                return {
+                    "state": "OPEN",
+                    "autoMergeRequest": {"enabledAt": "late"},
+                    "baseRefName": "main",
+                    "headRefOid": head,
+                }
+            if self.revoked and revocation == "closed":
+                return {"state": "CLOSED", "mergedAt": None}
+            return {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": "b" * 40 if self.revoked and revocation == "head-drift" else head,
+            }
+
+        def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+            return (
+                not (self.revoked and revocation == "go-removed"),
+                self.revoked and revocation == "no-go-added",
+            )
+
+        def effective_merge_policy(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                conversation_resolution_enforced=True,
+                required_checks=(("required-ci", 15368),),
+            )
+
+        def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+            return []
+
+        def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+            return {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            }
+
+        def required_checks_pass_for_head(self, *_args: object, **_kwargs: object) -> bool:
+            self.revoked = True
+            return True
+
+        def merge_pr_if_head(self, _pr: int, _head: str, **_kwargs: object) -> object:
+            raise AssertionError("revoked authorization reached the PUT")
+
+    request = RunMergeWaitCycleRequest(
+        pr_number=7,
+        reviewed_head_sha=head,
+        proof_generation=2,
+        declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, RevokedGitHub())
+
+    assert receipt.outcome == expected
+    assert receipt.attempted is False
 
 
 def _authorization(pr_number: int = 7, head_sha: str = "a" * 40) -> MergeAuthorization:
@@ -2619,7 +2752,7 @@ class TestExactHeadChecks:
         name: str = "required-ci",
         status: str = "completed",
         conclusion: str = "success",
-        app_id: int | None = None,
+        app_id: int = 1,
     ) -> dict[str, object]:
         """Build one exact-head Check Run response entry."""
         check_run: dict[str, object] = {
@@ -2629,8 +2762,7 @@ class TestExactHeadChecks:
             "status": status,
             "conclusion": conclusion,
         }
-        if app_id is not None:
-            check_run["app"] = {"id": app_id}
+        check_run["app"] = {"id": app_id}
         return check_run
 
     def test_ruleset_only_failed_required_run_blocks_merge(
@@ -2707,8 +2839,17 @@ class TestExactHeadChecks:
                 )
             raise AssertionError(args)
 
-        monkeypatch.setattr(transport_mod, "gh_call", gh_call)
-        monkeypatch.setattr(pg, "gh_call", gh_call)
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            required_checks=(
+                RequiredCheck("classic-ci", 1),
+                RequiredCheck("ruleset-ci", 1),
+            ),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+        monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
+        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
 
         receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
             RunMergeWaitCycleRequest(
@@ -2716,12 +2857,13 @@ class TestExactHeadChecks:
                 reviewed_head_sha=head,
                 proof_generation=2,
                 declined_readiness_fingerprint=None,
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
             ),
             adapter,
         )
 
         assert receipt.outcome == "required_checks_not_green"
-        assert any("/rules/branches/main" in call[3] for call in calls)
         assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
 
     def test_later_rules_page_failed_required_run_blocks_merge(
@@ -2872,6 +3014,13 @@ class TestExactHeadChecks:
                 "mergeable": "MERGEABLE",
             },
         )
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            required_checks=(RequiredCheck("required-ci", 17),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=((155,) if required_source == "ruleset" else ()),
+        )
+        monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
 
         def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(args)
@@ -2901,8 +3050,7 @@ class TestExactHeadChecks:
                 )
             raise AssertionError(args)
 
-        monkeypatch.setattr(transport_mod, "gh_call", gh_call)
-        monkeypatch.setattr(pg, "gh_call", gh_call)
+        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
 
         receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
             RunMergeWaitCycleRequest(
@@ -2910,6 +3058,8 @@ class TestExactHeadChecks:
                 reviewed_head_sha=head,
                 proof_generation=2,
                 declined_readiness_fingerprint=None,
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
             ),
             adapter,
         )
@@ -2924,7 +3074,7 @@ class TestExactHeadChecks:
         adapter.repo = "repo"
         head = "a" * 40
         monkeypatch.setattr(
-            transport_mod,
+            github_api_mod,
             "gh_call",
             MagicMock(
                 side_effect=[
@@ -3108,7 +3258,7 @@ class TestExactHeadChecks:
                 ),
             ]
         )
-        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
         assert adapter.required_checks_pass_for_head(head) is True
 
@@ -3128,7 +3278,7 @@ class TestExactHeadChecks:
                 ),
             ]
         )
-        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
         assert adapter.required_checks_pass_for_head(head) is True
         assert call_mock.call_args_list == [
@@ -3167,6 +3317,7 @@ class TestExactHeadChecks:
                 timeout=120,
             ),
         ]
+        assert all(0 < entry.kwargs["timeout"] <= 120 for entry in call_mock.call_args_list)
 
     @pytest.mark.parametrize(
         ("returned_head", "status", "conclusion"),
@@ -3188,7 +3339,7 @@ class TestExactHeadChecks:
         adapter.repo = "repo"
         head = "a" * 40
         monkeypatch.setattr(
-            transport_mod,
+            github_api_mod,
             "gh_call",
             MagicMock(
                 side_effect=[
@@ -3221,7 +3372,7 @@ class TestExactHeadChecks:
         """Missing Check Runs do not count as green required checks."""
         adapter.repo = "repo"
         monkeypatch.setattr(
-            transport_mod,
+            github_api_mod,
             "gh_call",
             MagicMock(
                 side_effect=[
@@ -3257,7 +3408,7 @@ class TestExactHeadChecks:
             self._check_run(head, check_run_id=second_id),
         ]
         monkeypatch.setattr(
-            transport_mod,
+            github_api_mod,
             "gh_call",
             MagicMock(
                 side_effect=[
@@ -3279,8 +3430,15 @@ class TestExactHeadChecks:
         """A large Check Runs response must be complete and stable."""
         adapter.repo = "repo"
         head = "a" * 40
-        first_page = [self._check_run(head, check_run_id=index) for index in range(1, 101)]
-        final_page = [self._check_run(head, check_run_id=101)]
+        first_page = [
+            self._check_run(
+                head,
+                check_run_id=index,
+                name="required-ci" if index == 1 else f"optional-ci-{index}",
+            )
+            for index in range(1, 101)
+        ]
+        final_page = [self._check_run(head, check_run_id=101, name="optional-ci-101")]
         page_responses = [
             {"total_count": 101, "check_runs": first_page},
             {"total_count": 101, "check_runs": final_page},
@@ -3297,7 +3455,7 @@ class TestExactHeadChecks:
                 ],
             ]
         )
-        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
         assert adapter.required_checks_pass_for_head(head) is True
         assert call_mock.call_count == 6
@@ -3338,7 +3496,7 @@ class TestExactHeadChecks:
             )
 
         call_mock = MagicMock(side_effect=fake_gh_call)
-        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
         assert adapter.required_checks_pass_for_head(head) is False
         assert call_mock.call_count == 3

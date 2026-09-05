@@ -33,16 +33,24 @@ exact-head Check Runs ────────► current CI merge gate
 1. The PR is open, targets `main`, has an explicitly absent
    `autoMergeRequest`, and has an exclusive `state:implementation-go` label.
 2. The current PR head equals the process-local reviewed head.
-3. No unresolved review thread exists, and the base branch has enforced
-   conversation resolution.
-4. The Check Runs endpoint is read for the reviewed commit. The complete
-   response must contain every effective required Check Run. Each required run
-   must identify the reviewed commit, have status `completed`, and have
-   conclusion `success`, `neutral`, or `skipped`. The required runs must
-   include at least one `success` conclusion. Empty, malformed, pending,
-   failed, stale, or changing required evidence fails closed. A non-required
-   Check Run does not decide this gate.
-5. The queue sends one normal REST merge request with `sha=<reviewed head>` and
+3. No unresolved review thread exists. A stable effective-policy read combines
+   classic branch protection with each applicable active ruleset. At least one
+   enforcement source must require review-thread resolution without a bypass
+   for the current repository actor. Classic administrator enforcement can
+   supply this protection when an applicable ruleset has a repository-role
+   bypass.
+4. The effective required-check inventory is the union of the classic and
+   ruleset inventories. Each required `(context, app_id)` must have a completed
+   Check Run for the reviewed commit with conclusion `success`, `neutral`, or
+   `skipped`. A requirement without an application binding can match the same
+   context from any identified GitHub App. Optional Check Runs do not grant or
+   revoke merge authority. Empty, malformed, pending, failed, stale, or changing
+   required evidence fails closed.
+5. Policy and Check Run pagination share one aggregate deadline and cancellation
+   signal. The queue completes all mutable traversals, reads unresolved threads,
+   and then repeats the open-head-label admission. It sends the conditional
+   request immediately after that admission, with no intervening mutable read.
+6. The queue sends one normal REST merge request with `sha=<reviewed head>` and
    `merge_method=squash`. The request is the only merge-state mutation owned by
    the queue. The queue does not enable or manage native auto-merge.
 

@@ -1,6 +1,8 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 import subprocess
+import time
+from threading import Event
 
 from hephaestus.automation.merge_authorization import MergeAuthorization
 
@@ -16,6 +18,9 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         pr_number: int,
         reviewed_sha: str,
         authorization: MergeAuthorization | None = None,
+        *,
+        deadline_s: float | None = None,
+        cancellation: Event | None = None,
     ) -> ConditionalMergeResult:
         """Attempt one immediate squash merge conditional on the reviewed SHA.
 
@@ -42,6 +47,13 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         owner, name = self._owner_name()
         if self._skip(f"conditionally squash merge PR #{pr_number} at {reviewed_sha}"):
             return ConditionalMergeResult(status=None, body=None, dry_run=True)
+        if cancellation is not None and cancellation.is_set():
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        timeout = float(self._gh_timeout)
+        if deadline_s is not None:
+            timeout = min(timeout, deadline_s - time.monotonic())
+            if timeout <= 0:
+                return ConditionalMergeResult(status=None, body=None, transport_error=True)
         try:
             result = gh_call(
                 [
@@ -58,7 +70,7 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
                 check=False,
                 retry_on_rate_limit=False,
                 max_retries=1,
-                timeout=self._gh_timeout,
+                timeout=timeout,
             )
         except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
             logger.warning("PR #%s: conditional merge transport failure: %s", pr_number, exc)

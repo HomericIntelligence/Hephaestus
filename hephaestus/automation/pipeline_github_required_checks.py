@@ -6,7 +6,13 @@ import json
 import logging
 import re
 import subprocess
+import time
+from threading import Event
+from typing import Any
 
+import hephaestus.automation.github_api as github_api
+
+from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_contract import _PipelineGitHubHost
 
 logger = logging.getLogger(__name__)
@@ -49,12 +55,8 @@ def _check_run_required_matches(
         return frozenset()
     if all(requirement[1] is None for requirement in named_requirements):
         return frozenset(named_requirements)
-    app = check_run.get("app")
-    if not isinstance(app, dict):
-        logger.warning("Check Run for %s has no valid app identity", head_sha)
-        return None
     try:
-        app_id = _valid_app_id(app.get("id"))
+        app_id = _check_run_app_id(check_run)
     except ValueError:
         logger.warning("Check Run for %s has no valid app identity", head_sha)
         return None
@@ -66,6 +68,17 @@ def _check_run_required_matches(
         for requirement in named_requirements
         if requirement[1] in (None, _ANY_APP_ID) or requirement[1] == app_id
     )
+
+
+def _check_run_app_id(check_run: dict[str, object]) -> int:
+    """Return the positive GitHub App identity for one Check Run."""
+    app = check_run.get("app")
+    if not isinstance(app, dict):
+        raise ValueError("Check Run has no application identity")
+    app_id = _valid_app_id(app.get("id"))
+    if app_id is None:
+        raise ValueError("Check Run has no application identity")
+    return app_id
 
 
 def _check_run_page(payload: object, head_sha: str) -> tuple[int, list[object]] | None:
@@ -92,10 +105,16 @@ def _check_run_snapshot(
     required_checks: frozenset[_RequiredCheck],
 ) -> tuple[object, ...] | None:
     """Return stable identity and status data for a Check Runs traversal."""
-    snapshot: list[tuple[int, str, str, str, object, frozenset[_RequiredCheck]]] = []
+    snapshot: list[tuple[int, str, int, str, str, object, frozenset[_RequiredCheck]]] = []
+    identities: set[tuple[str, int]] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
+            return None
+        try:
+            app_id = _check_run_app_id(check_run)
+        except ValueError:
+            logger.warning("Check Run for %s has no valid app identity", head_sha)
             return None
         matches = _check_run_required_matches(check_run, required_checks, head_sha)
         if matches is None:
@@ -110,10 +129,16 @@ def _check_run_snapshot(
         if not isinstance(name, str):
             logger.warning("Check Run for %s has no valid name", head_sha)
             return None
+        identity = (name, app_id)
+        if identity in identities:
+            logger.warning("Check Runs contain duplicate context and app identity for %s", head_sha)
+            return None
+        identities.add(identity)
         snapshot.append(
             (
                 check_run_id,
                 name,
+                app_id,
                 str(check_run.get("status") or "").lower(),
                 str(check_run.get("conclusion") or "").lower(),
                 check_run.get("head_sha"),
@@ -133,6 +158,10 @@ def _required_check_runs_pass(
     matched_checks: set[_RequiredCheck] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
+            return False
+        try:
+            _check_run_app_id(check_run)
+        except ValueError:
             return False
         matches = _check_run_required_matches(check_run, required_checks, head_sha)
         if matches is None:
@@ -154,13 +183,27 @@ def _required_check_runs_pass(
 class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
     """Read exact-head required Check Runs for the final merge gate."""
 
-    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+    def required_checks_pass_for_head(
+        self,
+        head_sha: str,
+        policy: EffectiveMergePolicy | None = None,
+        *,
+        deadline_s: float | None = None,
+        cancellation: Event | None = None,
+        **_kwargs: Any,
+    ) -> bool:
         """Return whether every effective required Check Run succeeds for ``head_sha``."""
         if self._repo_slug is None or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None:
             return False
+        signal = cancellation if cancellation is not None else Event()
+        deadline = deadline_s if deadline_s is not None else time.monotonic() + self._gh_timeout
         try:
-            required_checks = self._required_checks_for_main()
-            first = self._check_runs_for_head(head_sha)
+            required_checks = (
+                frozenset((check.context, check.app_id) for check in policy.required_checks)
+                if policy is not None
+                else self._required_checks_for_main()
+            )
+            first = self._check_runs_for_head(head_sha, deadline_s=deadline, cancellation=signal)
         except (
             AttributeError,
             TypeError,
@@ -173,12 +216,14 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if not required_checks or first is None or not first:
             return False
-        if len(first) > _CHECK_RUNS_PAGE_SIZE:
+        if policy is not None or len(first) > _CHECK_RUNS_PAGE_SIZE:
             first_snapshot = _check_run_snapshot(first, head_sha, required_checks)
             if first_snapshot is None:
                 return False
             try:
-                second = self._check_runs_for_head(head_sha)
+                second = self._check_runs_for_head(
+                    head_sha, deadline_s=deadline, cancellation=signal
+                )
             except (
                 AttributeError,
                 TypeError,
@@ -246,19 +291,35 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
                 return rules
             page += 1
 
-    def _check_runs_for_head(self, head_sha: str) -> list[object] | None:
+    def _check_runs_for_head(
+        self,
+        head_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: Event,
+    ) -> list[object] | None:
         """Read every Check Runs page for one exact commit."""
         owner, name = self._owner_name()
         endpoint = (
-            f"/repos/{owner}/{name}/commits/{head_sha}/check-runs?per_page={_CHECK_RUNS_PAGE_SIZE}"
+            f"/repos/{owner}/{name}/commits/{head_sha}/check-runs?filter=latest"
+            f"&per_page={_CHECK_RUNS_PAGE_SIZE}"
         )
         check_runs: list[object] = []
         expected_count: int | None = None
         check_run_ids: set[int] = set()
         page = 1
         while expected_count is None or len(check_runs) < expected_count:
+            if cancellation.is_set():
+                return None
+            remaining = deadline_s - time.monotonic()
+            if remaining <= 0:
+                return None
             page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
-            result = self._gh(["api", page_endpoint], check=False)
+            result = github_api.gh_call(
+                ["api", page_endpoint],
+                check=False,
+                timeout=min(float(self._gh_timeout), remaining),
+            )
             if result.returncode != 0:
                 raise RuntimeError("GitHub returned an error for Check Runs")
             payload = json.loads(result.stdout or "null")

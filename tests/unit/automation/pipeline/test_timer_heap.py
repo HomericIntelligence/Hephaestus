@@ -215,6 +215,7 @@ class TestRetryDelayConsumption:
                 pr_number: int,
                 reviewed_sha: str,
                 authorization: MergeAuthorization | None = None,
+                **_kwargs: Any,
             ) -> ConditionalMergeResult:
                 assert authorization is None
                 self.puts += 1
@@ -304,6 +305,7 @@ class TestRetryDelayConsumption:
                 pr_number: int,
                 reviewed_sha: str,
                 authorization: MergeAuthorization | None = None,
+                **_kwargs: Any,
             ) -> ConditionalMergeResult:
                 assert authorization is None
                 self.puts += 1

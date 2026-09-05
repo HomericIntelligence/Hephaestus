@@ -83,7 +83,7 @@ if TYPE_CHECKING:
         def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
             pass
 
-        def required_checks_pass_for_head(self, head_sha: str) -> bool:
+        def required_checks_pass_for_head(self, head_sha: str, **kwargs: Any) -> bool:
             pass
 
         def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
