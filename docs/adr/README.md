@@ -46,8 +46,8 @@ numbered, and listed here.
 | [0031](0031-bounded-recovery-artifact-roles.md) | Bounded recovery artifact roles on issue timelines | Accepted |
 | [0032](0032-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |
 | [0033](0033-graphql-response-error-contract.md) | GraphQL response-error and mutation-proof contract | Accepted |
-| [0035](0035-codex-implementation-process-boundary.md) | Codex implementation process boundary | Accepted |
 | [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |
 | [0035](0035-provider-aware-ifm-model-selection.md) | Provider-aware IFM model selection | Partly superseded by ADR-0036 |
 | [0036](0036-free-form-model-effort-selection.md) | Free-form model effort selection | Accepted |
 | [0037](0037-version-bound-mnemosyne-checkout.md) | Version-bound Mnemosyne checkout | Accepted |
+| [0038](0038-codex-implementation-process-boundary.md) | Codex implementation process boundary | Accepted |

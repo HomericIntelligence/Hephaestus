@@ -1,4 +1,4 @@
-# ADR-0035: Codex implementation process boundary
+# ADR-0038: Codex implementation process boundary
 
 - Status: Accepted
 - Date: 2026-09-04
