@@ -933,26 +933,26 @@ class TestWorkerPoolSubmitComplete:
         assert "Pi default model configuration" in (result.error or "")
         assert calls == []
 
-    def test_non_claude_agent_job_resumes_a_saved_session(
+    def test_codex_agent_job_ignores_a_legacy_saved_session(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """A later direct-agent turn resumes, rather than starts afresh."""
+        """Codex uses a new isolated session without a bound receipt."""
         job = _agent_job(agent="codex", resume_session_id="saved-codex-session")
         session_result = MagicMock(stdout="continued", session_id="saved-codex-session")
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
-            patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
-            patch(f"{_WP}.run_agent_session") as run,
+            patch(f"{_WP}.resume_agent_session") as resume,
+            patch(f"{_WP}.run_agent_session", return_value=session_result) as run,
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             _handle, result = completion_q.get(timeout=10)
 
-        resume.assert_called_once_with(
+        resume.assert_not_called()
+        run.assert_called_once_with(
             agent="codex",
-            session_id="saved-codex-session",
             prompt="test prompt",
             cwd=job.cwd,
             timeout=job.timeout_s,
@@ -965,7 +965,6 @@ class TestWorkerPoolSubmitComplete:
             disable_pi_automation=False,
             pi_dir=None,
         )
-        run.assert_not_called()
         assert result.ok is True
         assert result.value == "continued"
         assert result.session_id == "saved-codex-session"
@@ -2168,6 +2167,11 @@ class TestAgentErrorHandling:
                 return_value=[],
             ),
             patch(
+                "hephaestus.agents.runtime._codex_outer_isolated_command",
+                side_effect=lambda command, **_kwargs: command,
+            ),
+            patch("hephaestus.agents.runtime._materialize_codex_automation_profile"),
+            patch(
                 "hephaestus.agents.runtime.subprocess.Popen",
                 side_effect=fake_popen,
             ),
@@ -2532,6 +2536,56 @@ class TestGitOps:
             "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
         }
 
+    def test_create_worktree_returns_source_revision_when_requested(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A scoped publication job receives the immutable writer base SHA."""
+        worktree = tmp_path / "build" / ".worktrees" / "issue-2921"
+        head = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2921,
+                "branch_name": "2921-auto-impl",
+                "repo_root": str(tmp_path),
+                "capture_source_revision": True,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = worktree
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text("gitdir: fixture\n", encoding="utf-8")
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            assert args == ["git", "rev-parse", "HEAD"]
+            return subprocess.CompletedProcess(args, 0, stdout=f"{head}\n")
+
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        instance.create_worktree.assert_called_once_with(
+            issue_number=2921,
+            branch_name="2921-auto-impl",
+            timeout=60,
+        )
+        assert result.value == {
+            "path": str(worktree),
+            "dirty": False,
+            "status": "",
+            "diff": "",
+            "source_revision": head,
+        }
+
     @pytest.mark.parametrize("changed_kind", ["staged", "untracked", "untracked_newline"])
     def test_recover_dirty_worktree_rejects_byte_drift_with_unchanged_status(
         self,
@@ -2579,6 +2633,7 @@ class TestGitOps:
             repo_root=repo,
             repo="test/repo",
             sync_to_remote=False,
+            capture_source_revision=False,
             pr_number=None,
             timeout_s=60,
         )
@@ -2785,6 +2840,7 @@ class TestGitOps:
             repo_root=checkout,
             repo="test/repo",
             sync_to_remote=False,
+            capture_source_revision=False,
             pr_number=None,
             timeout_s=60,
         )
@@ -9463,6 +9519,11 @@ class TestShutdownReapsSubprocess:
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
             patch("hephaestus.agents.runtime._codex_base_cmd", return_value=sleeper),
+            patch(
+                "hephaestus.agents.runtime._codex_outer_isolated_command",
+                side_effect=lambda command, **_kwargs: command,
+            ),
+            patch("hephaestus.agents.runtime._materialize_codex_automation_profile"),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             deadline = time.monotonic() + 10
@@ -9649,3 +9710,83 @@ def test_sync_checkout_uses_explicit_gh_root_for_api_when_fixed_candidates_unava
         gh_command=expected_executable,
         timeout_s=120,
     )
+
+
+class TestCodexPublicationScope:
+    """Host checks that constrain Codex publication to its frozen manifest."""
+
+    @staticmethod
+    def _repository(tmp_path: Path) -> tuple[Path, str]:
+        """Create one committed repository for scope-boundary tests."""
+        repository = tmp_path / "repository"
+        repository.mkdir()
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        (repository / "allowed.py").write_text("base\n", encoding="utf-8")
+        git("add", "allowed.py")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        return repository, git("rev-parse", "HEAD").stdout.strip()
+
+    def test_scope_guard_rejects_untracked_path_outside_frozen_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        """An unrelated unstaged or untracked path blocks the host commit."""
+        repository, base = self._repository(tmp_path)
+        (repository / "allowed.py").write_text("changed\n", encoding="utf-8")
+        (repository / "unrelated.py").write_text("blocked\n", encoding="utf-8")
+
+        result = WorkerPool._verify_allowed_edit_scope(
+            repository,
+            allowed_paths=("allowed.py",),
+            history_base_sha=base,
+            timeout=30,
+        )
+
+        assert result == JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+        )
+
+    def test_scope_guard_rejects_precommitted_path_outside_frozen_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        """A clean worktree cannot hide an agent-created out-of-scope commit."""
+        repository, base = self._repository(tmp_path)
+        (repository / "unrelated.py").write_text("blocked\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "unrelated.py"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "--no-gpg-sign", "-m", "test: unsafe"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        result = WorkerPool._verify_allowed_edit_scope(
+            repository,
+            allowed_paths=("allowed.py",),
+            history_base_sha=base,
+            timeout=30,
+        )
+
+        assert result == JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+        )

@@ -108,10 +108,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.payload[_COMMENT_VALIDATION_ONLY] = True
             return None
 
-        # Scope-retraction remediation needs a base proof that only the
-        # detached checkout can derive.  Preserve the safe established path
-        # for this exceptional directive instead of sending an unprovable
-        # retraction to a writer.
         scope_retraction_paths = _scope_retraction_paths(remediation_threads)
         if scope_retraction_paths is None:
             return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
@@ -181,7 +177,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
             return None
         snapshots = _validation_thread_snapshots(live_threads, receipts)
-        remediation_threads = _normalize_remediation_threads(live_threads)
+        remediation_threads = _normalize_remediation_threads(
+            live_threads, reviewed_head_sha=reviewed_head
+        )
         if (
             snapshots is None
             or _validation_receipt_fingerprints(receipts) is None
@@ -450,7 +448,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 return self._cleanup_review_worktree_then(item, empty_diff)
             return self._submit_review_job(item, ctx)
         snapshots = _validation_thread_snapshots(live_threads, receipts)
-        remediation_threads = _normalize_remediation_threads(live_threads)
+        remediation_threads = _normalize_remediation_threads(
+            live_threads, reviewed_head_sha=reviewed_head
+        )
         if (
             snapshots is None
             or _validation_receipt_fingerprints(receipts) is None

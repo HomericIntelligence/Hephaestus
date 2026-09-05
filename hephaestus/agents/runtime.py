@@ -9,6 +9,8 @@ import inspect
 import json
 import logging
 import os
+import platform
+import re
 import shutil
 import signal
 import stat
@@ -33,6 +35,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.macos_sandbox import MacOSSandboxError, isolated_command
 from hephaestus.agents.model_selection import (
     GPT_6_ASTRA,
     IFM_MODELS,
@@ -54,7 +57,9 @@ from hephaestus.agents.pi_session import (
 )
 from hephaestus.config.child_environments import (
     build_claude_child_env,
+    build_codex_automation_env,
     build_codex_child_env,
+    build_git_child_env,
     build_pi_child_env,
     read_approved_parent_env,
 )
@@ -94,6 +99,13 @@ CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
+CODEX_AUTH_FILENAME = "auth.json"
+CODEX_ATHENA_VERSION = "0.5.0"
+CODEX_ATHENA_REVISION = "44a22b8dfab986f505a99ce52e8521f645da3e2b"
+CODEX_ATHENA_ARTIFACT_SHA256 = "2c301a67da91b1a5d87116441fc592fc39b9fb86d856fd13e1ef7697348dcac9"
+CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena" / "athena"
+CODEX_AUTOMATION_PERMISSION_PROFILE = "hephaestus-automation"
+CODEX_MIN_AUTOMATION_VERSION = (0, 138, 0)
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
@@ -218,6 +230,246 @@ def _codex_child_env() -> dict[str, str]:
     return build_codex_child_env()
 
 
+def requires_plan_scope_guard(agent: str) -> bool:
+    """Return whether host publication must enforce canonical plan paths."""
+    return is_codex(agent)
+
+
+def requires_fresh_agent_session(agent: str) -> bool:
+    """Return whether an agent must start a new isolated session."""
+    return is_codex(agent)
+
+
+def _verify_codex_automation_capability(executable: Path, *, cwd: Path) -> None:
+    """Prove the selected Codex CLI supports the isolated automation contract."""
+    try:
+        version_result = subprocess.run(
+            [str(executable), "--version"],
+            check=False,
+            cwd=cwd,
+            env=build_codex_child_env(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=CODEX_HELP_PROBE_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AgentExecutionError("Codex automation capability probe failed") from exc
+    version_output = version_result.stdout or ""
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version_output)
+    if (
+        version_result.returncode != 0
+        or match is None
+        or tuple(int(part) for part in match.groups()) < CODEX_MIN_AUTOMATION_VERSION
+    ):
+        raise AgentExecutionError("Codex automation capability is unsupported")
+    try:
+        help_result = subprocess.run(
+            [str(executable), "exec", "--help"],
+            check=False,
+            cwd=cwd,
+            env=build_codex_child_env(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=CODEX_HELP_PROBE_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AgentExecutionError("Codex automation capability probe failed") from exc
+    required_flags = ("--config", "--ephemeral", "--output-last-message")
+    help_text = help_result.stdout or ""
+    if help_result.returncode != 0 or any(flag not in help_text for flag in required_flags):
+        raise AgentExecutionError("Codex automation capability is unsupported")
+
+
+def _codex_outer_isolated_command(
+    command: list[str], *, cwd: Path, profile_root: Path
+) -> list[str]:
+    """Wrap one Codex command in the host read/write boundary.
+
+    Codex implementation is intentionally unavailable where Seatbelt cannot
+    prove the boundary.  The provider keeps network access for its own
+    transport; command-level network access is denied by its named profile.
+    """
+    if not command:
+        raise AgentExecutionError("Codex automation command is empty")
+    if platform.system() != "Darwin":
+        raise AgentExecutionError("Codex automation host isolation is unavailable")
+    executable = shutil.which(command[0])
+    if not executable:
+        raise AgentExecutionError("Codex automation executable is unavailable")
+    try:
+        wrapped = isolated_command(
+            command=(executable, *command[1:]),
+            read_roots=(cwd.resolve(strict=True), profile_root.resolve(strict=True)),
+            write_roots=(cwd.resolve(strict=True), profile_root.resolve(strict=True)),
+            allow_network=True,
+        )
+    except (MacOSSandboxError, OSError) as exc:
+        raise AgentExecutionError("Codex automation host isolation is unavailable") from exc
+    _verify_codex_automation_capability(Path(executable), cwd=cwd)
+    return list(wrapped)
+
+
+def _require_owner_regular_file(path: Path, *, label: str, mode: int | None = None) -> None:
+    """Reject a credential bridge that is not one owner-only regular file."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AgentExecutionError(f"Codex automation requires {label}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise AgentExecutionError(f"Codex automation requires a regular {label}")
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise AgentExecutionError(f"Codex automation requires an owner-controlled {label}")
+    if mode is not None and stat.S_IMODE(metadata.st_mode) != mode:
+        raise AgentExecutionError(f"Codex automation requires {label} mode {mode:04o}")
+
+
+def _validate_athena_plugin_metadata(root: Path) -> None:
+    """Reject cache artifacts that advertise an additional command surface."""
+    try:
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        plugin = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AgentExecutionError("Codex automation requires Athena plugin metadata") from exc
+    if not isinstance(package, dict) or not isinstance(plugin, dict):
+        raise AgentExecutionError("Codex automation Athena metadata is invalid")
+    if (
+        package.get("name") != "@homericintelligence/athena"
+        or package.get("version") != CODEX_ATHENA_VERSION
+    ):
+        raise AgentExecutionError("Codex automation Athena package is not admitted")
+    if plugin.get("name") != "athena" or plugin.get("version") != CODEX_ATHENA_VERSION:
+        raise AgentExecutionError("Codex automation Athena plugin is not admitted")
+
+    def keys(value: object) -> Iterator[str]:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if isinstance(key, str):
+                    yield key.casefold()
+                yield from keys(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from keys(child)
+
+    forbidden = {
+        "application",
+        "applications",
+        "command",
+        "commands",
+        "connector",
+        "connectors",
+        "env",
+        "environment",
+        "mcp",
+        "mcp_servers",
+    }
+    if forbidden & set(keys(plugin)):
+        raise AgentExecutionError("Codex automation Athena plugin adds an unadmitted surface")
+
+
+def _validated_athena_artifact(source_home: Path) -> Path:
+    """Return the exact Athena cache artifact admitted to Codex automation."""
+    artifact = source_home / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+    if not artifact.is_dir() or artifact.is_symlink():
+        raise AgentExecutionError("Codex automation requires the admitted Athena artifact")
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(artifact), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=GIT_COMMON_DIR_PROBE_SECONDS,
+            env=build_git_child_env(),
+        ).stdout.strip()
+        digest = package_tree_digest(artifact)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise AgentExecutionError("Codex automation Athena artifact cannot be verified") from exc
+    if revision != CODEX_ATHENA_REVISION or digest != CODEX_ATHENA_ARTIFACT_SHA256:
+        raise AgentExecutionError("Codex automation Athena artifact is not admitted")
+    _validate_athena_plugin_metadata(artifact)
+    return artifact
+
+
+def _materialize_codex_automation_profile(profile_root: Path) -> None:
+    """Copy only the authenticated, digest-pinned Athena Codex closure."""
+    source_home = Path(_codex_child_env()["CODEX_HOME"])
+    auth_source = source_home / CODEX_AUTH_FILENAME
+    _require_owner_regular_file(auth_source, label="auth.json bridge", mode=0o600)
+    artifact_source = _validated_athena_artifact(source_home)
+    codex_home = profile_root / "codex"
+    auth_destination = codex_home / CODEX_AUTH_FILENAME
+    shutil.copy2(auth_source, auth_destination)
+    auth_destination.chmod(0o600)
+    artifact_destination = codex_home / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+    shutil.copytree(
+        artifact_source,
+        artifact_destination,
+        ignore=shutil.ignore_patterns(".git"),
+    )
+    try:
+        copied_digest = package_tree_digest(artifact_destination)
+    except ValueError as exc:
+        raise AgentExecutionError("Codex automation Athena copy is invalid") from exc
+    if copied_digest != CODEX_ATHENA_ARTIFACT_SHA256:
+        raise AgentExecutionError("Codex automation Athena copy changed")
+    _validate_athena_plugin_metadata(artifact_destination)
+    write_secure(
+        codex_home / "config.toml",
+        "\n".join(
+            (
+                f'default_permissions = "{CODEX_AUTOMATION_PERMISSION_PROFILE}"',
+                "",
+                f"[permissions.{CODEX_AUTOMATION_PERMISSION_PROFILE}]",
+                'extends = ":workspace"',
+                "",
+                f"[permissions.{CODEX_AUTOMATION_PERMISSION_PROFILE}.filesystem]",
+                f'{json.dumps(str(artifact_destination))} = "read"',
+                f'{json.dumps(str(auth_destination))} = "deny"',
+                "",
+                f"[permissions.{CODEX_AUTOMATION_PERMISSION_PROFILE}.network]",
+                "enabled = false",
+                "",
+                "[marketplaces.athena]",
+                'source_type = "local"',
+                f"source = {json.dumps(str(artifact_destination))}",
+                "",
+                '[plugins."athena@athena"]',
+                "enabled = true",
+                "",
+            )
+        ),
+    )
+
+
+@contextlib.contextmanager
+def _codex_automation_execution_files() -> Iterator[tuple[dict[str, str], Path]]:
+    """Create one disposable state root and output file for an automation turn.
+
+    The caller owns the context lifetime.  All mutable Codex state, including
+    the final-message file, is below the private root and is removed after the
+    provider exits.  The isolated root has no link to an operator's shared
+    Codex history or configuration.
+    """
+    with tempfile.TemporaryDirectory(prefix="hephaestus-codex-") as raw_root:
+        profile_root = Path(raw_root)
+        env = build_codex_automation_env(profile_root=profile_root)
+        for name in (
+            "HOME",
+            "CODEX_HOME",
+            "TMPDIR",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+        ):
+            Path(env[name]).mkdir(mode=0o700, parents=True, exist_ok=False)
+        _materialize_codex_automation_profile(profile_root)
+        yield env, profile_root / "last-message.txt"
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
     """Text output plus optional provider session id."""
@@ -298,6 +550,10 @@ def agent_compaction_resume(
     execution_request: ExecutionRequest | None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Prepare a neutral resume id and provider-only compaction arguments."""
+    # A Codex automation turn always uses a fresh, disposable profile.  A
+    # resumed session would be outside that profile's verified authority.
+    if is_codex(agent):
+        return None
     if is_pi(agent):
         if session_binding is None:
             return None
@@ -2012,9 +2268,15 @@ def run_codex_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
+    isolate_automation_profile: bool = False,
     _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
-    """Run a new persisted Codex exec session and capture its UUID."""
+    """Run a new Codex exec session and capture its UUID.
+
+    ``isolate_automation_profile`` is an internal automation boundary.  It
+    gives the provider a new disposable state root for this turn.  The caller
+    must still apply the host process boundary before it enables this option.
+    """
     return _run_codex_session_with_effort_fallback(
         prompt=prompt,
         cwd=cwd,
@@ -2023,6 +2285,7 @@ def run_codex_session(
         sandbox=sandbox,
         approval=approval,
         process_tracker=process_tracker,
+        isolate_automation_profile=isolate_automation_profile,
         final_message_grace_seconds=_final_message_grace_seconds,
     )
 
@@ -2063,6 +2326,7 @@ def _run_codex_session_with_effort_fallback(
     approval: str,
     resume_id: str | None = None,
     process_tracker: ProcessTracker | None = None,
+    isolate_automation_profile: bool = False,
     final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Run Codex and retry one rejected explicit effort with its default."""
@@ -2075,7 +2339,7 @@ def _run_codex_session_with_effort_fallback(
         cmd = _codex_base_cmd(
             cwd=cwd,
             model=selected_model,
-            sandbox=sandbox,
+            sandbox=None if isolate_automation_profile else sandbox,
             approval=approval,
             resume_id=resume_id,
         )
@@ -2088,6 +2352,7 @@ def _run_codex_session_with_effort_fallback(
             cwd=cwd,
             timeout=min(float(timeout), remaining),
             process_tracker=process_tracker,
+            isolate_automation_profile=isolate_automation_profile,
             final_message_grace_seconds=final_message_grace_seconds,
         )
 
@@ -2112,12 +2377,27 @@ def _run_codex_command(
     cwd: Path,
     timeout: float,
     process_tracker: ProcessTracker | None = None,
+    isolate_automation_profile: bool = False,
     final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Execute Codex with JSON events and return final text plus session id."""
-    with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt") as output_file:
-        cmd.extend(["--output-last-message", output_file.name, "-"])
-        env = _codex_child_env()
+    output_path: Path
+    with contextlib.ExitStack() as resources:
+        if isolate_automation_profile:
+            env, output_path = resources.enter_context(_codex_automation_execution_files())
+            cmd.append("--ephemeral")
+            cmd = _codex_outer_isolated_command(
+                cmd,
+                cwd=cwd,
+                profile_root=Path(env["CODEX_HOME"]).parent,
+            )
+        else:
+            output_file = resources.enter_context(
+                tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt")
+            )
+            env = _codex_child_env()
+            output_path = Path(output_file.name)
+        cmd.extend(["--output-last-message", str(output_path), "-"])
         for key in CODEX_PARENT_CONTEXT_ENV_VARS:
             env.pop(key, None)
         try:
@@ -2127,14 +2407,14 @@ def _run_codex_command(
                 prompt=prompt,
                 timeout=timeout,
                 env=env,
-                output_path=Path(output_file.name),
+                output_path=output_path,
                 process_tracker=process_tracker,
                 final_message_grace_seconds=final_message_grace_seconds,
             )
         except subprocess.CalledProcessError as exc:
             stdout = _coerce_timeout_output(exc.stdout)
             stderr = _coerce_timeout_output(exc.stderr)
-            final_message = _read_text_file(Path(output_file.name)).strip()
+            final_message = _read_text_file(output_path).strip()
             effort_diagnostic = None if final_message else _codex_reasoning_effort_failure(stdout)
             if effort_diagnostic is not None:
                 raise _CodexReasoningEffortRejectedError(
@@ -2145,7 +2425,7 @@ def _run_codex_command(
                 raise AgentExecutionError(diagnostic) from exc
             raise
         except subprocess.TimeoutExpired as e:
-            last_message = Path(output_file.name).read_text(encoding="utf-8").strip()
+            last_message = output_path.read_text(encoding="utf-8").strip()
             stdout_text = _coerce_timeout_output(e.stdout)
             stderr_text = _coerce_timeout_output(e.stderr)
             diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)
@@ -2159,7 +2439,7 @@ def _run_codex_command(
                 stderr=stderr_text or f"Codex wrapper timed out after {timeout}s",
                 session_id=session_id,
             )
-        last_message = Path(output_file.name).read_text(encoding="utf-8")
+        last_message = output_path.read_text(encoding="utf-8")
 
     effort_diagnostic = (
         None if last_message.strip() else _codex_reasoning_effort_failure(stdout_text)
@@ -3126,6 +3406,14 @@ def run_agent_session(
                 "Pi start-new or one-shot execution must not receive a session binding"
             )
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
+    if (
+        is_codex(agent)
+        and execution_request is not None
+        and execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
+    ):
+        raise ExecutionPolicyError(
+            "Codex automation does not support session resume without a bound session receipt"
+        )
     if is_codex(agent):
         return run_codex_session(
             prompt,
@@ -3135,6 +3423,7 @@ def run_agent_session(
             sandbox=sandbox,
             approval=approval,
             process_tracker=process_tracker,
+            isolate_automation_profile=True,
         )
     if is_opencode(agent):
         return run_opencode_session(
@@ -3225,15 +3514,8 @@ def resume_agent_session(
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        return resume_codex_session(
-            session_id,
-            prompt,
-            cwd=cwd,
-            timeout=timeout,
-            model=model,
-            sandbox=sandbox,
-            approval=approval,
-            process_tracker=process_tracker,
+        raise ExecutionPolicyError(
+            "Codex automation does not support session resume without a bound session receipt"
         )
     if is_opencode(agent):
         return resume_opencode_session(

@@ -258,7 +258,18 @@ def _dependency_fake(  # noqa: C901
                         '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
                         "Remove the out-of-scope file."
                     ),
-                    "comments": [{"id": "comment-1", "body": "Remove it."}],
+                    "isResolved": False,
+                    "pr_state": {"state": "OPEN", "headRefOid": "a" * 40},
+                    "comments": [
+                        {
+                            "id": "comment-1",
+                            "body": "Remove it.",
+                            "viewer_did_author": True,
+                            "review_id": "review-1",
+                            "review_state": "COMMENTED",
+                            "review_commit_sha": "a" * 40,
+                        }
+                    ],
                 }
             ]
 
@@ -1056,7 +1067,18 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
     posted = {
         **finding,
         "id": "posted-thread",
-        "comments": [{"id": "posted-comment", "body": "guard None"}],
+        "isResolved": False,
+        "pr_state": {"state": "OPEN", "headRefOid": "a" * 40},
+        "comments": [
+            {
+                "id": "posted-comment",
+                "body": "guard None",
+                "viewer_did_author": True,
+                "review_id": "posted-review",
+                "review_state": "COMMENTED",
+                "review_commit_sha": "a" * 40,
+            }
+        ],
     }
     late = {
         "id": "late-thread",
@@ -1065,7 +1087,18 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         "side": "RIGHT",
         "severity": "major",
         "body": "late race",
-        "comments": [{"id": "late-comment", "body": "late race"}],
+        "isResolved": False,
+        "pr_state": {"state": "OPEN", "headRefOid": "a" * 40},
+        "comments": [
+            {
+                "id": "late-comment",
+                "body": "late race",
+                "viewer_did_author": True,
+                "review_id": "late-review",
+                "review_state": "COMMENTED",
+                "review_commit_sha": "a" * 40,
+            }
+        ],
     }
 
     class FakePipelineGitHub:

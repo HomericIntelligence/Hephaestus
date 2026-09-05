@@ -25,6 +25,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.pi_plugins import package_tree_digest
 
 PI_SMOKE_COMMAND_PREFIX = [
     "pi",
@@ -116,6 +117,31 @@ def test_parse_codex_json_events_extracts_session_id_and_messages() -> None:
 
     assert session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert output == "first\nsecond"
+
+
+def test_codex_outer_boundary_does_not_resolve_provider_links(tmp_path: Path) -> None:
+    """Seatbelt receives the discovered executable path for link validation."""
+    provider = tmp_path / "codex"
+    provider.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    provider.chmod(0o700)
+    provider_link = tmp_path / "codex-link"
+    provider_link.symlink_to(provider)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+
+    with (
+        patch("hephaestus.agents.runtime.platform.system", return_value="Darwin"),
+        patch("hephaestus.agents.runtime.shutil.which", return_value=str(provider_link)),
+        patch("hephaestus.agents.runtime._verify_codex_automation_capability"),
+        patch(
+            "hephaestus.agents.runtime.isolated_command", return_value=("sandbox-exec",)
+        ) as isolated,
+    ):
+        agent_runtime._codex_outer_isolated_command(
+            ["codex", "exec"], cwd=tmp_path, profile_root=profile
+        )
+
+    assert isolated.call_args.kwargs["command"][0] == str(provider_link)
 
 
 def test_parse_codex_json_events_extracts_nested_agent_message() -> None:
@@ -257,6 +283,11 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch(
+            "hephaestus.agents.runtime._codex_outer_isolated_command",
+            side_effect=lambda command, **_kwargs: command,
+        ),
+        patch("hephaestus.agents.runtime._materialize_codex_automation_profile"),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
         result = agent_runtime.run_codex_session(
@@ -268,6 +299,147 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
+
+
+def test_run_codex_session_uses_one_job_owned_profile(tmp_path: Path) -> None:
+    """A Codex session cannot inherit or persist operator state."""
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        captured["command"] = cmd
+        captured["env"] = kwargs["env"]
+        captured["output_path"] = Path(cmd[cmd.index("--output-last-message") + 1])
+        return _FakeCodexPopen(cmd, proc_stdout="", final_message="final answer", **kwargs)
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch(
+            "hephaestus.agents.runtime._codex_outer_isolated_command",
+            side_effect=lambda command, **_kwargs: command,
+        ),
+        patch("hephaestus.agents.runtime._materialize_codex_automation_profile"),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+            isolate_automation_profile=True,
+        )
+
+    env = captured["env"]
+    profile_root = Path(env["CODEX_HOME"]).parent
+    assert captured["output_path"].parent == profile_root
+    assert env["HOME"] == str(profile_root / "home")
+    assert env["TMPDIR"] == str(profile_root / "tmp")
+    assert env["CODEX_HOME"] != str(Path.home() / ".codex")
+    assert "--sandbox" not in captured["command"]
+    assert "--ephemeral" in captured["command"]
+    assert "--ignore-user-config" not in captured["command"]
+    assert not profile_root.exists()
+
+
+def test_isolated_codex_session_fails_closed_without_host_boundary(tmp_path: Path) -> None:
+    """Codex automation never substitutes a weaker Linux process boundary."""
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._materialize_codex_automation_profile"),
+        patch("subprocess.Popen") as popen,
+        pytest.raises(agent_runtime.AgentExecutionError, match="host isolation"),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            isolate_automation_profile=True,
+        )
+
+    popen.assert_not_called()
+
+
+def test_codex_automation_capability_rejects_an_unsupported_cli_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An isolated job rejects a provider that cannot prove its required CLI surface."""
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="codex-cli 0.137.9\n", stderr=""
+        ),
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="capability"):
+        agent_runtime._verify_codex_automation_capability(executable, cwd=tmp_path)
+
+
+def test_codex_profile_copies_only_the_auth_bridge_and_admitted_athena(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The isolated profile denies command access to its short-lived credential."""
+    source_home = tmp_path / "source-codex"
+    source_home.mkdir()
+    auth = source_home / "auth.json"
+    auth.write_text("fake-credential", encoding="utf-8")
+    auth.chmod(0o600)
+    artifact = source_home / "athena"
+    (artifact / ".codex-plugin").mkdir(parents=True)
+    (artifact / "package.json").write_text(
+        '{"name":"@homericintelligence/athena","version":"0.5.0"}', encoding="utf-8"
+    )
+    (artifact / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"athena","version":"0.5.0"}', encoding="utf-8"
+    )
+    digest = package_tree_digest(artifact)
+    monkeypatch.setattr(agent_runtime, "CODEX_ATHENA_ARTIFACT_SHA256", digest)
+    monkeypatch.setattr(agent_runtime, "_codex_child_env", lambda: {"CODEX_HOME": str(source_home)})
+    monkeypatch.setattr(agent_runtime, "_validated_athena_artifact", lambda _home: artifact)
+    profile_root = tmp_path / "profile"
+    (profile_root / "codex").mkdir(parents=True)
+
+    agent_runtime._materialize_codex_automation_profile(profile_root)
+
+    profile_home = profile_root / "codex"
+    copied_auth = profile_home / "auth.json"
+    config = (profile_home / "config.toml").read_text(encoding="utf-8")
+    assert copied_auth.read_text(encoding="utf-8") == "fake-credential"
+    assert copied_auth.stat().st_mode & 0o777 == 0o600
+    assert agent_runtime.CODEX_AUTOMATION_PERMISSION_PROFILE in config
+    assert f'{str(copied_auth)!r} = "deny"' not in config
+    assert json.dumps(str(copied_auth)) + ' = "deny"' in config
+    assert "sandbox_mode" not in config
+    assert "sandbox_workspace_write" not in config
+    assert (profile_home / agent_runtime.CODEX_ATHENA_CACHE_RELATIVE_PATH / "0.5.0").is_dir()
+
+
+@pytest.mark.parametrize("forbidden_key", ["command", "commands", "env", "environment"])
+def test_athena_metadata_rejects_plugin_launch_or_environment_surfaces(
+    tmp_path: Path, forbidden_key: str
+) -> None:
+    """An admitted plugin cannot add an executable or inherited environment surface."""
+    artifact = tmp_path / "athena"
+    (artifact / ".codex-plugin").mkdir(parents=True)
+    (artifact / "package.json").write_text(
+        '{"name":"@homericintelligence/athena","version":"0.5.0"}', encoding="utf-8"
+    )
+    (artifact / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "athena",
+                "version": "0.5.0",
+                forbidden_key: "untrusted-value",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="unadmitted surface"):
+        agent_runtime._validate_athena_plugin_metadata(artifact)
 
 
 def test_run_codex_session_tracks_a_dedicated_process_group(tmp_path: Path) -> None:
@@ -1840,6 +2012,74 @@ def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_pat
 
     assert 'sandbox_mode="read-only"' in captured_cmd
     assert 'approval_policy="never"' in captured_cmd
+
+
+def test_resume_agent_session_rejects_codex_before_process_start(tmp_path: Path) -> None:
+    """Automation must not resume an unbound Codex conversation."""
+    with (
+        patch("subprocess.Popen") as popen,
+        pytest.raises(
+            ExecutionPolicyError,
+            match="Codex automation does not support session resume",
+        ),
+    ):
+        agent_runtime.resume_agent_session(
+            "codex",
+            "session-123",
+            "feedback",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    popen.assert_not_called()
+
+
+def test_run_agent_session_rejects_resume_required_codex_before_process_start(
+    tmp_path: Path,
+) -> None:
+    """A missing raw session id cannot downgrade Codex resume into a fresh turn."""
+    with (
+        patch("subprocess.Popen") as popen,
+        pytest.raises(
+            ExecutionPolicyError,
+            match="Codex automation does not support session resume",
+        ),
+    ):
+        agent_runtime.run_agent_session(
+            "codex",
+            "feedback",
+            cwd=tmp_path,
+            timeout=30,
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+        )
+
+    popen.assert_not_called()
+
+
+def test_run_agent_session_uses_the_isolated_codex_boundary(tmp_path: Path) -> None:
+    """Every Codex automation turn requests the isolated execution path."""
+    with patch(
+        "hephaestus.agents.runtime.run_codex_session",
+        return_value=agent_runtime.AgentRunResult(stdout="done", stderr=""),
+    ) as run:
+        result = agent_runtime.run_agent_session(
+            "codex",
+            "implement the approved plan",
+            cwd=tmp_path,
+            timeout=30,
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT,
+                SessionLifecycle.START_NEW,
+            ),
+        )
+
+    assert result.stdout == "done"
+    assert run.call_args.kwargs["isolate_automation_profile"] is True
 
 
 class _FakeOpenCodePopen:

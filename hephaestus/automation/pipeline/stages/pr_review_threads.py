@@ -173,6 +173,7 @@ from .pr_review_repository import (
     _payload_host_verification_specs,
     _prepare_host_checks,
 )
+from .pr_review_thread_authority import _normalize_remediation_threads
 from .pr_review_verification import (
     HOST_VERIFICATION_DIAGNOSTIC_MAX,
     HOST_VERIFICATION_TIMEOUT_S,
@@ -484,56 +485,6 @@ def _without_duplicate_live_findings(
         if key is not None:
             existing.add(key)
     return retained
-
-
-def _normalize_remediation_threads(
-    threads: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Normalize every live review thread for implementation remediation.
-
-    The reviewer audit contains proposed findings, not durable GitHub thread
-    identities. Address jobs must instead consume the live post/read-back
-    snapshot so every open thread—regardless of author—is investigated.  The
-    implementation agent replies against the verified current head; the
-    reviewer later performs a fresh review and resolves or returns the exact
-    thread. No-commit replies are explicitly marked for thorough analysis.
-    """
-    normalized: list[dict[str, Any]] = []
-    for thread in threads:
-        thread_id = str(thread.get("id") or thread.get("thread_id") or "").strip()
-        if not thread_id:
-            continue
-        line = thread.get("line")
-        body = str(thread.get("body") or "")
-        comments = thread.get("comments")
-        # The first thread body is already supplied above.  Once a reviewer
-        # leaves a follow-up, retain the entire conversation in the next
-        # implementer prompt so the agent can act on the precise remaining
-        # defect rather than trying the original fix again.
-        if isinstance(comments, list) and len(comments) > 1:
-            rendered_comments: list[str] = []
-            for comment in comments[1:]:
-                if not isinstance(comment, dict):
-                    continue
-                author = str(comment.get("author") or "unknown reviewer").strip()
-                comment_body = str(comment.get("body") or "").strip()
-                if comment_body:
-                    rendered_comments.append(f"{author}: {comment_body}")
-            if rendered_comments:
-                body = f"{body}\n\nThread conversation:\n" + "\n\n".join(rendered_comments)
-        normalized.append(
-            {
-                "thread_id": thread_id,
-                "path": str(thread.get("path") or ""),
-                "line": (
-                    line
-                    if isinstance(line, int) and not isinstance(line, bool) and line > 0
-                    else None
-                ),
-                "body": body,
-            }
-        )
-    return normalized
 
 
 def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict[str, str] | None:

@@ -235,6 +235,9 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 "body": first_comment.get("body", ""),
                 "author": authors[0] if authors else "",
                 "author_type": comments[0].get("author_type", "") if comments else "",
+                "author_association": (
+                    comments[0].get("author_association", "") if comments else ""
+                ),
                 "authors": authors,
                 "comments": [dict(comment) for comment in comments],
                 "review_id": comments[0].get("review_id", "") if comments else "",

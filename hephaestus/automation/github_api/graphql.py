@@ -1307,7 +1307,8 @@ def pipeline_thread_snapshot_page_query(
         "id number state headRefOid autoMergeRequest{enabledAt}}}"
         "node(id:$threadId){... on PullRequestReviewThread{id isResolved path line side:diffSide "
         "pullRequest{id number repository{name owner{login}}} comments(first:100,after:$after){"
-        "pageInfo{hasNextPage endCursor} nodes{id body viewerDidAuthor author{login __typename} "
+        "pageInfo{hasNextPage endCursor} nodes{id body viewerDidAuthor authorAssociation "
+        "author{login __typename} "
         "pullRequestReview{id state body commit{oid}}}}}}}"
     )
 
@@ -1353,6 +1354,7 @@ def pipeline_thread_snapshot_page_query(
                 not isinstance(comment.get("id"), str)
                 or not isinstance(comment.get("body"), str)
                 or not isinstance(comment.get("viewerDidAuthor"), bool)
+                or not isinstance(comment.get("authorAssociation"), str)
             ):
                 raise ValueError("pipeline thread comment fields were malformed")
             comment_id = comment["id"]

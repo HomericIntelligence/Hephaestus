@@ -74,6 +74,29 @@ def test_pi_builder_uses_only_explicit_directory_and_temporary_paths(
     assert environment["PI_SKIP_VERSION_CHECK"] == "1"
 
 
+def test_codex_automation_builder_uses_only_job_owned_state_roots(
+    platform_env: dict[str, str], tmp_path: Path
+) -> None:
+    """Codex implementation does not inherit operator state directories."""
+    builder = getattr(child_environments, "build_codex_automation_env", None)
+
+    assert callable(builder)
+    environment = builder(profile_root=tmp_path / "job-profile")
+
+    root = tmp_path / "job-profile"
+    assert environment["HOME"] == str(root / "home")
+    assert environment["CODEX_HOME"] == str(root / "codex")
+    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {str(root / "tmp")}
+    assert environment["USERPROFILE"] == str(root / "home")
+    assert environment["APPDATA"] == str(root / "appdata")
+    assert environment["LOCALAPPDATA"] == str(root / "localappdata")
+    assert environment["XDG_CONFIG_HOME"] == str(root / "xdg-config")
+    assert environment["XDG_CACHE_HOME"] == str(root / "xdg-cache")
+    assert environment["XDG_DATA_HOME"] == str(root / "xdg-data")
+    assert environment["HOME"] != platform_env["HOME"]
+    assert environment["TMPDIR"] != platform_env["TMPDIR"]
+
+
 def test_auth_and_signing_bridges_are_boundary_specific(
     monkeypatch: pytest.MonkeyPatch,
     platform_env: dict[str, str],

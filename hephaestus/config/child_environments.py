@@ -75,6 +75,30 @@ def build_codex_child_env(*, codex_home: Path | None = None) -> dict[str, str]:
     return env
 
 
+def build_codex_automation_env(*, profile_root: Path) -> dict[str, str]:
+    """Build a Codex environment whose state is owned by one job profile."""
+    root = Path(_absolute_path(profile_root))
+    home = root / "home"
+    temporary = root / "tmp"
+    env = _platform_env()
+    env.update(
+        {
+            "HOME": str(home),
+            "CODEX_HOME": str(root / "codex"),
+            "TMPDIR": str(temporary),
+            "TMP": str(temporary),
+            "TEMP": str(temporary),
+            "USERPROFILE": str(home),
+            "APPDATA": str(root / "appdata"),
+            "LOCALAPPDATA": str(root / "localappdata"),
+            "XDG_CONFIG_HOME": str(root / "xdg-config"),
+            "XDG_CACHE_HOME": str(root / "xdg-cache"),
+            "XDG_DATA_HOME": str(root / "xdg-data"),
+        }
+    )
+    return env
+
+
 def build_pi_child_env(
     *, temp_dir: Path | None = None, pi_dir: Path | None = None
 ) -> dict[str, str]:
@@ -197,6 +221,7 @@ def with_correlation_id(environment: Mapping[str, str], trace_id: str | None) ->
 
 __all__ = [
     "build_claude_child_env",
+    "build_codex_automation_env",
     "build_codex_child_env",
     "build_gh_child_env",
     "build_git_child_env",

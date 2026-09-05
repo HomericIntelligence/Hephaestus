@@ -35,10 +35,14 @@ from typing import Any, TypeGuard, cast
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_policy
+from hephaestus.agents.execution_policy import (
+    ExecutionPolicyError,
+    resolve_policy,
+)
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
+    requires_fresh_agent_session,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
@@ -2241,7 +2245,22 @@ class WorkerPool:
                         ),
                     )
                     return stdout, claude_session_id, None, ()
-                if job.resume_binding is not None:
+                if requires_fresh_agent_session(agent):
+                    agent_result = run_agent_session(
+                        agent=agent,
+                        prompt=prompt,
+                        cwd=cwd,
+                        timeout=job.timeout_s,
+                        model=job.model,
+                        sandbox=job.sandbox,
+                        approval="never",
+                        process_tracker=subprocess_registry.track_process_group,
+                        execution_request=job.execution_request,
+                        resume_binding=None,
+                        disable_pi_automation=job.disable_pi_automation,
+                        pi_dir=job.pi_dir,
+                    )
+                elif job.resume_binding is not None:
                     agent_result = resume_agent_session(
                         agent=agent,
                         session_id=job.resume_binding.session_id,
@@ -3878,6 +3897,9 @@ class WorkerPool:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
+        capture_source_revision = kwargs.pop("capture_source_revision", False)
+        if not isinstance(capture_source_revision, bool):
+            return JobResult(ok=False, error="worktree source revision capture flag is invalid")
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
@@ -4012,6 +4034,7 @@ class WorkerPool:
             repo=job.transport_repository,
             source_repository=job.repo,
             sync_to_remote=sync_to_remote,
+            capture_source_revision=capture_source_revision,
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
             item_number=kwargs.get("issue_number"),
@@ -4164,6 +4187,7 @@ class WorkerPool:
         repo: str,
         source_repository: str | None = None,
         sync_to_remote: bool,
+        capture_source_revision: bool = False,
         pr_number: object,
         timeout_s: int,
         source_lane: object = None,
@@ -4312,7 +4336,7 @@ class WorkerPool:
                 error=f"worktree post-create preparation failed: {exc}",
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
-        if not dirty and not sync_to_remote and base_sha is None:
+        if not dirty and not sync_to_remote and base_sha is None and not capture_source_revision:
             if source_lane == "impl":
                 return JobResult(
                     ok=True,
@@ -4327,6 +4351,27 @@ class WorkerPool:
             value["impl_source_revision"] = binding.revision
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
+        if capture_source_revision:
+            try:
+                source_revision = git_utils.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout_s,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return JobResult(
+                    ok=False,
+                    error="worktree source revision is unavailable",
+                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
+                )
+            if not _is_full_commit_sha(source_revision):
+                return JobResult(
+                    ok=False,
+                    error="worktree source revision is invalid",
+                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
+                )
+            value.update(dirty=dirty, status=status, diff=diff, source_revision=source_revision)
         if dirty:
             observed_branch = git_utils.run(
                 ["git", "branch", "--show-current"],
@@ -4777,6 +4822,14 @@ class WorkerPool:
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
+        edit_scope = self._verify_allowed_edit_scope(
+            Path(worktree_path),
+            allowed_paths=allowed_paths,
+            history_base_sha=job.kwargs.get("scope_history_base_sha"),
+            timeout=job.timeout_s,
+        )
+        if edit_scope is not None:
+            return edit_scope
         changed = self._commit_if_changes_with_controlled_signing(
             job,
             commit_args,
@@ -4814,6 +4867,14 @@ class WorkerPool:
         scope_retraction = self._verify_scope_retraction(job, Path(worktree_path))
         if scope_retraction is not None:
             return scope_retraction
+        edit_scope = self._verify_allowed_edit_scope(
+            Path(worktree_path),
+            allowed_paths=allowed_paths,
+            history_base_sha=job.kwargs.get("scope_history_base_sha"),
+            timeout=job.timeout_s,
+        )
+        if edit_scope is not None:
+            return edit_scope
         return self._publish_commit_push(job, branch, Path(worktree_path))
 
     @staticmethod
@@ -4851,6 +4912,57 @@ class WorkerPool:
                 value={"failure_kind": "signing_configuration"},
                 error=str(exc),
             )
+
+    @staticmethod
+    def _verify_allowed_edit_scope(
+        worktree_path: Path,
+        *,
+        allowed_paths: Collection[str] | None,
+        history_base_sha: object,
+        timeout: int,
+    ) -> JobResult | None:
+        """Reject a publication that changes paths outside the approved plan."""
+        if allowed_paths is None:
+            return None
+        allowed = set(allowed_paths)
+        if not allowed:
+            return JobResult(ok=False, error="implementation approved scope is unavailable")
+        probes = (
+            ["git", "diff", "--no-renames", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        try:
+            changed: set[str] = set()
+            for argv in probes:
+                result = git_utils.run(
+                    argv,
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                changed.update(path for path in str(result.stdout or "").split("\0") if path)
+            if not _is_full_commit_sha(history_base_sha):
+                return JobResult(ok=False, error="cannot validate implementation edit scope")
+            history = git_utils.run(
+                [
+                    "git",
+                    "diff",
+                    "--no-renames",
+                    "--name-only",
+                    "-z",
+                    f"{history_base_sha}..HEAD",
+                ],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            )
+            changed.update(path for path in str(history.stdout or "").split("\0") if path)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        if not changed.issubset(allowed):
+            return JobResult(ok=False, error="implementation changed paths outside approved scope")
+        return None
 
     @staticmethod
     def _verify_scope_retraction(job: GitJob, worktree_path: Path) -> JobResult | None:
