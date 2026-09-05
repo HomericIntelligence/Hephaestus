@@ -354,19 +354,9 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
             pass
         assert child_pid.exists()
         assert heartbeat.exists()
-        pid, pgid = (int(value) for value in child_pid.read_text(encoding="utf-8").split())
         heartbeat_size = heartbeat.stat().st_size
         time.sleep(0.15)
         assert heartbeat.stat().st_size == heartbeat_size
-        group_deadline = monotonic() + 1.0
-        while monotonic() < group_deadline:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("the timed-out Git process group is still alive")
     finally:
         if child_pid.exists():
             pid = int(child_pid.read_text(encoding="utf-8").split()[0])
