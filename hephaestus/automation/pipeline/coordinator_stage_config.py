@@ -27,9 +27,6 @@ class _StageRunConfig:
     reviewer_model: str = ""
     implementer_model: str = ""
     fallback_model: str = ""
-    planner_reasoning_effort: str = ""
-    reviewer_reasoning_effort: str = ""
-    implementer_reasoning_effort: str = ""
     rate_guard_enabled: bool = True
     rate_guard_threshold: int = 200
     planner_timeout: int = 1200

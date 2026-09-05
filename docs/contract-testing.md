@@ -32,8 +32,8 @@ Pytest options:
 - `--contract-repo OWNER/REPOSITORY` pins GitHub calls to a target
   repository. If omitted, the repository is resolved once from the checkout
   root with an explicit working directory.
-- `--contract-model MODEL` selects the Claude model for the agent lane; the
-  default is `haiku`.
+- `--contract-model MODEL[:EFFORT]` selects the Claude model for the agent
+  lane. Claude ignores the optional effort. The default model is `haiku`.
 
 The GitHub lane only calls read endpoints (`rate_limit`, `repo view`, and
 `issue list`) through `gh_call`. Its negative case confirms a missing endpoint

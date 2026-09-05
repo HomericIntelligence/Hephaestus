@@ -11,9 +11,10 @@ existing callers keep working unchanged.
 
 Model selection
 ---------------
-Each Claude automation phase calls the ``claude`` CLI with ``--model <id>`` so
-the chosen model is pinned regardless of the user's CLI default. The mapping
-reflects the cost/quality tradeoff for each phase:
+Each nonempty Claude base model adds ``--model <id>`` to the ``claude`` CLI
+call. Thus, the selected model does not depend on the user's CLI default. An
+empty base model omits ``--model`` and uses the Claude provider default. The
+default mapping reflects the cost/quality tradeoff for each phase:
 
 - Planning needs reasoning quality but few tokens overall → Opus
 - Implementation is a long mechanical tool-use loop → Haiku
@@ -24,14 +25,13 @@ Model overrides are resolved once by CLI entry points and passed explicitly.
 Unknown overrides emit a **warning** but are still accepted so operators can
 experiment with preview models without a code change.
 
-Reasoning overrides
--------------------
-``hephaestus-automation-loop`` accepts explicit per-role reasoning controls:
-``--planner-reasoning-effort``, ``--implementer-reasoning-effort``, and
-``--reviewer-reasoning-effort``. Each takes ``default``, ``low``, ``medium``,
-``high``, or ``xhigh``. A role-specific setting takes precedence over an
-inline IFM setting. The runtime sends the setting through each provider's
-native option. Claude does not use these controls.
+Reasoning effort
+----------------
+Each model option accepts ``MODEL[:EFFORT]``. The final nonempty colon segment
+is a free-form provider effort. Codex receives ``model_reasoning_effort``.
+OpenCode receives ``--variant``. Pi receives ``--thinking``. The value
+``default`` selects the applicable provider default. Claude uses the base model
+and its default effort.
 
 Timeouts
 --------
@@ -75,6 +75,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from hephaestus.agents.model_selection import (
+    GPT_6_ASTRA,
     IFM_MODELS,
     K2_HORIZON_09B,
     K2_HORIZON_7B,
@@ -82,6 +83,7 @@ from hephaestus.agents.model_selection import (
     K2_HORIZON_37B,
     K2_HORIZON_375B_A23B,
     K2_HORIZON_MOVA_36B_A4B,
+    AgentModelSelection,
     normalize_model_reference,
     parse_model_selection,
 )
@@ -104,7 +106,7 @@ CODEX_ADVISE = "gpt-5.4-mini"
 
 # OpenCode provider — Muse Spark 1.2 (opencode.ai/zen). It supports reasoning
 # variants through provider model options. Hephaestus passes a selected role
-# effort through ``--variant``. Reviewer effort must be medium or higher.
+# effort through ``--variant``.
 MUSE_SPARK_12 = "opencode/muse-spark-1.2-contributor-free"
 MUSE_SPARK_12_HIGH = "opencode/muse-spark-1.2-high"
 MUSE_SPARK_12_MEDIUM = "opencode/muse-spark-1.2-medium"
@@ -137,6 +139,8 @@ _KNOWN_MODELS: frozenset[str] = (
             OPUS_48,
             FABLE_5,
             MYTHOS,
+            GPT_6_ASTRA,
+            "astra",
             MUSE_SPARK_12,
             MUSE_SPARK_12_HIGH,
             MUSE_SPARK_12_MEDIUM,
@@ -151,39 +155,45 @@ _MODEL_ALIASES: dict[str, str] = {
 }
 
 
-def normalize_claude_model(model: str) -> str:
-    """Return the Claude CLI model ID for a full model ID or supported shorthand."""
+def _normalize_configured_model(model: str) -> AgentModelSelection:
+    """Normalize a model selection while preserving its free-form effort."""
     value = model.strip()
     if not value:
-        return ""
-    normalized = _MODEL_ALIASES.get(value.lower(), value)
-    return normalize_model_reference(normalized)
+        return AgentModelSelection("")
+    selection = parse_model_selection(value)
+    normalized_model = _MODEL_ALIASES.get(selection.model.lower(), selection.model)
+    return AgentModelSelection(normalized_model, selection.reasoning_effort)
+
+
+def normalize_claude_model(model: str) -> str:
+    """Return the Claude model ID without an unsupported effort suffix."""
+    return _normalize_configured_model(model).model
 
 
 def _resolve_model(value: str | None, default: str, *, agent: str = "claude") -> str:
-    """Return an explicitly configured model ID or *default*.
+    """Return an explicit compact model selection or *default*.
 
     Args:
-        value: Explicit model value, or ``None`` to use the default.
-        default: Default model ID to use when the variable is unset.
+        value: Explicit model selection, or ``None`` to use the default.
+        default: Default model ID to use when the value is unset.
 
     Returns:
-        The resolved model ID string.
+        The resolved compact model selection.
 
     """
     if value is None and agent_uses_configured_model_default(agent):
         return ""
     if value is None:
         return default
-    resolved = normalize_claude_model(value)
+    resolved = _normalize_configured_model(value)
     selection = parse_model_selection(resolved)
-    if selection.model not in _KNOWN_MODELS:
+    if selection.model and selection.model not in _KNOWN_MODELS:
         logger.warning(
             "Unknown model %r (known: %s). Proceeding, but verify the model ID is correct.",
             resolved,
             ", ".join(sorted(_KNOWN_MODELS)),
         )
-    return resolved
+    return selection.reference
 
 
 def planner_model(value: str | None = None, *, agent: str = "claude") -> str:

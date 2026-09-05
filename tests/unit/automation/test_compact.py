@@ -56,6 +56,28 @@ class TestCompactSession:
             expected_uuid = session_uuid(repo, issue, agent, cwd=tmp_path)
             assert actual_uuid == expected_uuid
 
+    def test_inline_effort_uses_the_base_claude_session(self, tmp_path: Path) -> None:
+        """Claude compaction strips the effort before it resolves the session key."""
+        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stderr="")
+
+            compact_session(
+                "Hephaestus",
+                842,
+                AGENT_CI_DRIVER,
+                tmp_path,
+                model="claude-sonnet-5:future-effort",
+            )
+
+        command = mock_run.call_args.args[0]
+        assert command[command.index("--resume") + 1] == session_uuid(
+            "Hephaestus",
+            842,
+            AGENT_CI_DRIVER,
+            "claude-sonnet-5",
+            cwd=tmp_path,
+        )
+
     def test_compact_session_forwards_cwd(self, tmp_path: Path) -> None:
         """Verify compact_session passes cwd to subprocess.run."""
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:

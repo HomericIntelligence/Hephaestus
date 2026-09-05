@@ -32,7 +32,7 @@ numbered, and listed here.
 | [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
-| [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Accepted |
+| [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Partly superseded by ADR-0025, ADR-0035, and ADR-0036 |
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Superseded by ADR-0031 |
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
@@ -47,4 +47,5 @@ numbered, and listed here.
 | [0032](0032-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |
 | [0033](0033-graphql-response-error-contract.md) | GraphQL response-error and mutation-proof contract | Accepted |
 | [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |
-| [0035](0035-provider-aware-ifm-model-selection.md) | Provider-aware IFM model selection | Accepted |
+| [0035](0035-provider-aware-ifm-model-selection.md) | Provider-aware IFM model selection | Partly superseded by ADR-0036 |
+| [0036](0036-free-form-model-effort-selection.md) | Free-form model effort selection | Accepted |

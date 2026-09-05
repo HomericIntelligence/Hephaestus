@@ -727,9 +727,9 @@ Examples:
         help="Issue numbers whose plans should be reviewed",
     )
     add_agent_timeout_arg(parser, default=1200)
-    parser.add_argument("--model", default="", metavar="MODEL")
-    parser.add_argument("--reviewer-model", default="", metavar="MODEL")
-    parser.add_argument("--fallback-model", default="", metavar="MODEL")
+    parser.add_argument("--model", default="", metavar="MODEL[:EFFORT]")
+    parser.add_argument("--reviewer-model", default="", metavar="MODEL[:EFFORT]")
+    parser.add_argument("--fallback-model", default="", metavar="MODEL[:EFFORT]")
     parser.add_argument(
         "--work-report",
         type=Path,

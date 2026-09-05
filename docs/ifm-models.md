@@ -29,9 +29,19 @@ The available aliases are:
 | `k2-horizon-36` | `IFM/K2-Horizon-MoVA-36B-A4B` |
 | `k2-horizon-375` | `IFM/K2-Horizon-375B-A23B` |
 
-The reasoning values are `default`, `low`, `medium`, `high`, and `xhigh`.
-A role option has priority over an inline value. For example,
-`--reviewer-reasoning-effort high` replaces `:low` in the reviewer model.
+The effort value is free-form. Hephaestus does not keep a fixed list. The
+provider decides which values it supports. Use `:default` to select the
+provider default. The final nonempty colon segment is always the effort, so a
+model ID that contains a colon is ambiguous under this compact format.
+
+For Codex, `astra` and `gpt-6-astra` select the official
+[`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra)
+model. Both forms use `xhigh` when no effort is present. For example:
+
+```text
+--reviewer-model astra:max
+--reviewer-model gpt-6-astra:future-effort
+```
 
 ## OpenCode
 
@@ -67,7 +77,10 @@ placeholders with private operator values.
 ```
 
 If you omit all Hephaestus model options, OpenCode uses its configured model.
-Hephaestus passes an explicit reasoning value through `--variant`.
+Hephaestus passes an explicit effort through `--variant`. OpenCode v1 applies
+the variant only when its resolved model configuration defines that name. For
+another value, OpenCode uses the base model options. Add a model variant to
+`opencode.json` before you use a new provider effort through OpenCode.
 
 ## Pi
 
@@ -116,6 +129,9 @@ If you omit all Hephaestus model options, Hephaestus reads these three fields.
 It passes an explicit `IFM/K2-Horizon-0.9B` model and `high` thinking level to
 Pi. It also binds both values to the private session fingerprint. Hephaestus
 does not read project `.pi/settings.json` files.
+
+Hephaestus passes an inline effort through `--thinking`. Pi owns validation,
+fallback, and clamping for this value.
 
 Pi automation still requires its package preflight and an external isolation
 adapter. See [Private Pi Provider Setup](pi-private-provider.md).

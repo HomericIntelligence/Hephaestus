@@ -126,6 +126,30 @@ def test_provider_owned_defaults_remain_empty(tmp_path: Path, agent: str) -> Non
     assert (config.implementer_model, config.reviewer_model, config.fallback_model) == ("", "", "")
 
 
+def test_claude_provider_default_model_options_remain_explicit(tmp_path: Path) -> None:
+    """The standalone CLI keeps an explicit Claude provider default."""
+    captured = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--implementer-model",
+            ":provider-default",
+            "--reviewer-model",
+            ":provider-default",
+            "--fallback-model",
+            ":provider-default",
+        ],
+        tmp_path,
+    )
+
+    config = captured["config"]
+    assert (
+        config.implementer_model,
+        config.reviewer_model,
+        config.fallback_model,
+    ) == (":provider-default", ":provider-default", ":provider-default")
+
+
 def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None:
     """--issues N builds an (implementation, pr_review) scoped config and returns rc."""
     captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], tmp_path, rc=0)

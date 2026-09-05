@@ -7,6 +7,7 @@ import contextlib
 import errno
 import inspect
 import json
+import logging
 import os
 import shutil
 import signal
@@ -33,8 +34,8 @@ from hephaestus.agents.execution_policy import (
     resolve_policy,
 )
 from hephaestus.agents.model_selection import (
+    GPT_6_ASTRA,
     IFM_MODELS,
-    MODEL_REASONING_EFFORTS,
     PI_THINKING_LEVELS,
     AgentModelSelection,
     parse_model_selection,
@@ -63,6 +64,8 @@ from hephaestus.constants import (
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import strip_null_bytes
 
+LOG = logging.getLogger(__name__)
+
 AgentName = Literal["claude", "codex", "pi", "opencode"]
 ProcessTracker = Callable[[int], contextlib.AbstractContextManager[None]]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
@@ -78,6 +81,7 @@ CODEX_GPT_55_MODEL = "gpt-5.5"
 CODEX_GPT_56_SOL_MODEL = "gpt-5.6-sol"
 CODEX_GPT_56_TERRA_MODEL = "gpt-5.6-terra"
 CODEX_GPT_56_LUNA_MODEL = "gpt-5.6-luna"
+CODEX_GPT_6_ASTRA_MODEL = GPT_6_ASTRA
 # Preserve the established Claude-tier translation while exposing the GPT-5.6
 # Sol/Terra/Luna family as explicit capability-tier aliases below.
 CODEX_FABLE_MODEL = CODEX_GPT_55_MODEL
@@ -227,6 +231,10 @@ class AgentRunResult:
 
 class AgentExecutionError(RuntimeError):
     """An agent CLI reported a fatal provider, sandbox, or tool failure."""
+
+
+class _CodexReasoningEffortRejectedError(AgentExecutionError):
+    """Codex rejected the reasoning effort before it emitted output or work."""
 
 
 class PiAutomationDisabledError(AgentExecutionError):
@@ -927,19 +935,6 @@ def agent_uses_configured_model_default(agent: str) -> bool:
     return is_opencode(agent) or is_pi(agent)
 
 
-def apply_agent_model_reasoning_effort(agent: str, model: str, effort: str) -> str:
-    """Apply one role reasoning option to a provider model selection."""
-    if not effort or not agent_supports_model_reasoning_effort(agent):
-        return model
-    if is_codex(agent):
-        base_model, separator, current_effort = model.rpartition(":")
-        if separator and current_effort in MODEL_REASONING_EFFORTS:
-            model = base_model
-        return f"{model}:{effort}"
-    selection = parse_model_selection(model)
-    return AgentModelSelection(selection.model, effort)
-
-
 def uses_direct_agent_runner(agent: str) -> bool:
     """Return True when the provider is invoked through runtime text/session helpers."""
     if agent not in AGENT_CAPABILITIES:
@@ -959,7 +954,10 @@ def direct_agent_model(
     read only its trusted operator-global settings at that boundary.
     """
     if model_value is not None:
-        return model_value
+        selection = parse_model_selection(model_value)
+        if not agent_supports_model_reasoning_effort(agent):
+            return selection.model
+        return selection.reference
     if is_opencode(agent) or is_pi(agent):
         return ""
     return codex_default
@@ -1418,8 +1416,9 @@ def run_claude_text(
 ) -> subprocess.CompletedProcess[str]:
     """Run Claude Code with an explicit tool policy for read-only calls."""
     cmd = ["claude", "--print", "--output-format", "text"]
-    if model:
-        cmd.extend(["--model", model])
+    selection = parse_model_selection(model)
+    if selection.model:
+        cmd.extend(["--model", selection.model])
 
     if sandbox == "read-only":
         # --allowedTools only pre-approves tools; --tools fixes the model-visible
@@ -1495,35 +1494,21 @@ def codex_approval_args(approval: str) -> list[str]:
 
 
 def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelConfig:
-    """Translate legacy and GPT-5.6 tier IDs into Codex model settings."""
-    normalized = model.strip()
-    if not normalized:
-        if use_default:
-            return CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
-        return CodexModelConfig("")
-    lower_model = normalized.lower()
-    base_model, separator, requested_effort = lower_model.rpartition(":")
-    original_base_model = normalized.rpartition(":")[0]
-    explicit_effort = (
-        requested_effort
-        if separator
-        and requested_effort
-        in {
-            "default",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        }
-        else ""
-    )
-    alias_model = base_model if explicit_effort else lower_model
-    if alias_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
+    """Translate legacy tier IDs and split a free-form Codex effort."""
+    selection = parse_model_selection(model)
+    lower_model = selection.model.lower()
+    explicit_effort = selection.reasoning_effort
+    alias_model = lower_model
+    if not selection.model and use_default:
+        config = CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
+    elif alias_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
         config = CodexModelConfig(CODEX_GPT_56_SOL_MODEL, CODEX_FABLE_REASONING_EFFORT)
     elif alias_model in {"terra", CODEX_GPT_56_TERRA_MODEL}:
         config = CodexModelConfig(CODEX_GPT_56_TERRA_MODEL, CODEX_OPUS_REASONING_EFFORT)
     elif alias_model in {"luna", CODEX_GPT_56_LUNA_MODEL}:
         config = CodexModelConfig(CODEX_GPT_56_LUNA_MODEL, CODEX_SONNET_REASONING_EFFORT)
+    elif alias_model in {"astra", CODEX_GPT_6_ASTRA_MODEL}:
+        config = CodexModelConfig(CODEX_GPT_6_ASTRA_MODEL, CODEX_FABLE_REASONING_EFFORT)
     elif lower_model == "fable" or lower_model.startswith("claude-fable-"):
         config = CodexModelConfig(CODEX_FABLE_MODEL, CODEX_FABLE_REASONING_EFFORT)
     elif lower_model == "opus" or lower_model.startswith("claude-opus-"):
@@ -1533,7 +1518,7 @@ def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelC
     elif lower_model == "haiku" or lower_model.startswith("claude-haiku-"):
         config = CodexModelConfig(CODEX_HAIKU_MODEL)
     else:
-        config = CodexModelConfig(original_base_model if explicit_effort else normalized)
+        config = CodexModelConfig(selection.model)
     if explicit_effort:
         reasoning_effort = "" if explicit_effort == "default" else explicit_effort
         return CodexModelConfig(config.model, reasoning_effort)
@@ -1675,6 +1660,21 @@ _CODEX_SKILLS_BUDGET_PLAIN_NOTICE = (
     "Disable unused skills or plugins to leave more room for the rest."
 )
 _CODEX_SKILLS_BUDGET_MARKER = "% skills context budget."
+_CODEX_REASONING_EFFORT_PARAMS = frozenset({"reasoning.effort", "reasoning_effort"})
+_CODEX_REASONING_EFFORT_CODES = frozenset(
+    {"invalid_enum_value", "unsupported_parameter", "unsupported_value"}
+)
+_CODEX_REASONING_EFFORT_PARAM_TAGS = (
+    "[ReasoningEffortParam]",
+    "[reasoning.effort]",
+)
+_CODEX_REASONING_EFFORT_CODE_TAGS = tuple(f"[{code}]" for code in _CODEX_REASONING_EFFORT_CODES)
+_CODEX_PRE_WORK_EVENT_TYPES = frozenset({"session_meta", "thread.started", "turn.started"})
+_CODEX_ERROR_SCAN_MAX_VALUES = 4_096
+
+
+class _CodexErrorScanLimitError(ValueError):
+    """A Codex error value exceeds the bounded diagnostic scan."""
 
 
 def _codex_json_objects(text: str) -> Iterable[dict[str, Any]]:
@@ -1684,24 +1684,167 @@ def _codex_json_objects(text: str) -> Iterable[dict[str, Any]]:
             continue
         try:
             event: Any = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(event, dict):
             yield event
 
 
+def _codex_json_object_stream_is_well_formed(text: str) -> bool:
+    """Return whether each nonblank JSONL line is one object."""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except (ValueError, RecursionError):
+            return False
+        if not isinstance(event, dict):
+            return False
+    return True
+
+
 def _codex_error_message(value: object) -> str | None:
     """Extract a short message from a structured Codex failure payload."""
-    if isinstance(value, str):
-        text = value.strip()
-        return text or None
-    if not isinstance(value, dict):
-        return None
-    for key in ("message", "error", "detail", "reason"):
-        nested_message = _codex_error_message(value.get(key))
-        if nested_message is not None:
-            return nested_message
+    stack = [value]
+    scanned = 0
+    seen_containers: set[int] = set()
+    while stack:
+        scanned += 1
+        if scanned > _CODEX_ERROR_SCAN_MAX_VALUES:
+            return None
+        current = stack.pop()
+        if isinstance(current, str):
+            text = current.strip()
+            if text:
+                return text
+            continue
+        if not isinstance(current, dict):
+            continue
+        identity = id(current)
+        if identity in seen_containers:
+            continue
+        seen_containers.add(identity)
+        stack.extend(current.get(key) for key in reversed(("message", "error", "detail", "reason")))
     return None
+
+
+def _codex_nested_error_values(value: object) -> Iterator[dict[str, Any] | str]:
+    """Yield error objects and decode JSON objects embedded in messages."""
+    decoder = json.JSONDecoder()
+    stack = [value]
+    scanned = 0
+    seen_containers: set[int] = set()
+    while stack:
+        scanned += 1
+        if scanned > _CODEX_ERROR_SCAN_MAX_VALUES:
+            raise _CodexErrorScanLimitError
+        current = stack.pop()
+        if isinstance(current, dict):
+            identity = id(current)
+            if identity in seen_containers:
+                continue
+            seen_containers.add(identity)
+            yield current
+            stack.extend(reversed(tuple(current.values())))
+            continue
+        if isinstance(current, list):
+            identity = id(current)
+            if identity in seen_containers:
+                continue
+            seen_containers.add(identity)
+            stack.extend(reversed(current))
+            continue
+        if not isinstance(current, str):
+            continue
+        yield current
+        decoded_values: list[object] = []
+        cursor = 0
+        while (start := current.find("{", cursor)) >= 0:
+            scanned += 1
+            if scanned > _CODEX_ERROR_SCAN_MAX_VALUES:
+                raise _CodexErrorScanLimitError
+            try:
+                nested, length = decoder.raw_decode(current[start:])
+            except (ValueError, RecursionError):
+                cursor = start + 1
+                continue
+            decoded_values.append(nested)
+            cursor = start + max(length, 1)
+        stack.extend(reversed(decoded_values))
+
+
+def _codex_reasoning_effort_rejection(event: dict[str, Any]) -> str | None:
+    """Return a diagnostic for one exact unsupported-effort error shape."""
+    event_type = event.get("type")
+    if not isinstance(event_type, str) or event_type not in ("error", "turn.failed"):
+        return None
+    try:
+        values = tuple(_codex_nested_error_values(event))
+    except _CodexErrorScanLimitError:
+        return None
+    mappings = tuple(value for value in values if isinstance(value, dict))
+    messages = tuple(value for value in values if isinstance(value, str))
+    has_status_400 = any(
+        mapping.get(key) == 400 or mapping.get(key) == "400"
+        for mapping in mappings
+        for key in ("status", "status_code", "http_status")
+    ) or any(
+        "status 400" in message.casefold() or "400 bad request" in message.casefold()
+        for message in messages
+    )
+    structured_rejection = False
+    for mapping in mappings:
+        parameter = mapping.get("param")
+        code = mapping.get("code")
+        if (
+            mapping.get("type") == "invalid_request_error"
+            and isinstance(parameter, str)
+            and parameter in _CODEX_REASONING_EFFORT_PARAMS
+            and isinstance(code, str)
+            and code in _CODEX_REASONING_EFFORT_CODES
+        ):
+            structured_rejection = True
+            break
+    if structured_rejection:
+        return _codex_structured_failure(event) or "Codex rejected the reasoning effort"
+    if not has_status_400:
+        return None
+    tagged_rejection = any(
+        all(tag in message for tag in _CODEX_REASONING_EFFORT_PARAM_TAGS)
+        and any(tag in message for tag in _CODEX_REASONING_EFFORT_CODE_TAGS)
+        for message in messages
+    ) and any(mapping.get("type") == "invalid_request_error" for mapping in mappings)
+    if not tagged_rejection:
+        return None
+    return _codex_structured_failure(event) or "Codex rejected the reasoning effort"
+
+
+def _codex_reasoning_effort_failure(stdout: str) -> str | None:
+    """Find a classified reasoning-effort rejection in Codex stdout JSONL."""
+    if not _codex_json_object_stream_is_well_formed(stdout):
+        return None
+    events = tuple(_codex_json_objects(stdout))
+    diagnostic = next(
+        (
+            result
+            for event in events
+            if (result := _codex_reasoning_effort_rejection(event)) is not None
+        ),
+        None,
+    )
+    if diagnostic is None:
+        return None
+    if any(
+        _codex_reasoning_effort_rejection(event) is None
+        and (
+            not isinstance(event.get("type"), str)
+            or event.get("type") not in _CODEX_PRE_WORK_EVENT_TYPES
+        )
+        for event in events
+    ):
+        return None
+    return diagnostic
 
 
 def _is_codex_app_server_stream_lag(message: str) -> bool:
@@ -1872,12 +2015,13 @@ def run_codex_session(
     _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Run a new persisted Codex exec session and capture its UUID."""
-    cmd = _codex_base_cmd(cwd=cwd, model=model, sandbox=sandbox, approval=approval)
-    return _run_codex_command(
-        cmd,
+    return _run_codex_session_with_effort_fallback(
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
+        model=model,
+        sandbox=sandbox,
+        approval=approval,
         process_tracker=process_tracker,
         final_message_grace_seconds=_final_message_grace_seconds,
     )
@@ -1896,20 +2040,69 @@ def resume_codex_session(
     _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Resume a persisted Codex exec session and capture its latest output."""
-    cmd = _codex_base_cmd(
+    return _run_codex_session_with_effort_fallback(
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
         model=model,
         sandbox=sandbox,
         approval=approval,
         resume_id=session_id,
-    )
-    return _run_codex_command(
-        cmd,
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
         process_tracker=process_tracker,
         final_message_grace_seconds=_final_message_grace_seconds,
     )
+
+
+def _run_codex_session_with_effort_fallback(
+    *,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    model: str,
+    sandbox: str,
+    approval: str,
+    resume_id: str | None = None,
+    process_tracker: ProcessTracker | None = None,
+    final_message_grace_seconds: float | None = None,
+) -> AgentRunResult:
+    """Run Codex and retry one rejected explicit effort with its default."""
+    deadline = time.monotonic() + timeout
+
+    def execute(selected_model: str) -> AgentRunResult:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(["codex", "exec"], timeout)
+        cmd = _codex_base_cmd(
+            cwd=cwd,
+            model=selected_model,
+            sandbox=sandbox,
+            approval=approval,
+            resume_id=resume_id,
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return _run_codex_command(
+            cmd,
+            prompt=prompt,
+            cwd=cwd,
+            timeout=min(float(timeout), remaining),
+            process_tracker=process_tracker,
+            final_message_grace_seconds=final_message_grace_seconds,
+        )
+
+    selection = parse_model_selection(model)
+    effective_config = _codex_model_config(
+        selection.reference,
+        use_default=resume_id is None,
+    )
+    try:
+        return execute(selection.reference)
+    except _CodexReasoningEffortRejectedError:
+        if not effective_config.reasoning_effort:
+            raise
+    LOG.warning("Codex rejected the selected reasoning effort. Retrying with the model default.")
+    return execute(AgentModelSelection(effective_config.model, "default"))
 
 
 def _run_codex_command(
@@ -1917,7 +2110,7 @@ def _run_codex_command(
     *,
     prompt: str,
     cwd: Path,
-    timeout: int,
+    timeout: float,
     process_tracker: ProcessTracker | None = None,
     final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
@@ -1939,10 +2132,15 @@ def _run_codex_command(
                 final_message_grace_seconds=final_message_grace_seconds,
             )
         except subprocess.CalledProcessError as exc:
-            diagnostic = _codex_failure_diagnostic(
-                _coerce_timeout_output(exc.stdout),
-                _coerce_timeout_output(exc.stderr),
-            )
+            stdout = _coerce_timeout_output(exc.stdout)
+            stderr = _coerce_timeout_output(exc.stderr)
+            final_message = _read_text_file(Path(output_file.name)).strip()
+            effort_diagnostic = None if final_message else _codex_reasoning_effort_failure(stdout)
+            if effort_diagnostic is not None:
+                raise _CodexReasoningEffortRejectedError(
+                    f"codex_unsupported_reasoning_effort: {effort_diagnostic[:300]}"
+                ) from exc
+            diagnostic = _codex_failure_diagnostic(stdout, stderr)
             if diagnostic is not None:
                 raise AgentExecutionError(diagnostic) from exc
             raise
@@ -1963,6 +2161,13 @@ def _run_codex_command(
             )
         last_message = Path(output_file.name).read_text(encoding="utf-8")
 
+    effort_diagnostic = (
+        None if last_message.strip() else _codex_reasoning_effort_failure(stdout_text)
+    )
+    if effort_diagnostic is not None:
+        raise _CodexReasoningEffortRejectedError(
+            f"codex_unsupported_reasoning_effort: {effort_diagnostic[:300]}"
+        )
     diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)
     if diagnostic is not None:
         raise AgentExecutionError(diagnostic)
@@ -2174,7 +2379,7 @@ def run_opencode_session(
 ) -> AgentRunResult:
     """Run a new OpenCode JSON-event session and capture its id.
 
-    Model values pass through verbatim in ``provider/model`` form; when empty
+    Model selections pass through in ``provider/model[:effort]`` form. When empty,
     OpenCode applies its own configured default. The CLI exposes no approval
     flag, so that compatibility input is accepted but unused. ``read-only``
     is enforced via the built-in ``plan`` agent (verified edit-deny).
@@ -2726,15 +2931,20 @@ def _run_pi_with_policy(
     fingerprint = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
     if fingerprint != preflight.executable_fingerprint:
         raise AgentExecutionError("Pi preflight-proven executable identity drifted")
-    command_model = model.removesuffix(f":{thinking}") if thinking else model
-    selection = parse_model_selection(command_model)
+    selection = (
+        model
+        if isinstance(model, AgentModelSelection)
+        else AgentModelSelection(model, thinking)
+        if thinking
+        else parse_model_selection(model)
+    )
     model_components = selection.model.split("/", 1)
     tokens = tuple(
         dict.fromkeys(
             (
                 *pi_private_redaction_tokens(cwd, model),
                 selection.model,
-                command_model,
+                selection.reference,
                 *model_components,
             )
         )
@@ -2745,8 +2955,7 @@ def _run_pi_with_policy(
         with _pi_automation_profile(preflight, pi_dir=pi_dir) as (profile_dir, package_roots):
             command = _pi_automation_cmd(
                 executable,
-                model=command_model,
-                thinking=thinking,
+                model=selection,
                 lifecycle=lifecycle,
                 session_id=session_id,
             )
@@ -2758,7 +2967,7 @@ def _run_pi_with_policy(
                 prompt=prompt,
                 cwd=cwd,
                 timeout=timeout,
-                model=model,
+                model=selection.reference,
                 session_id=session_id,
                 process_tracker=process_tracker,
             )
@@ -2826,6 +3035,7 @@ def run_agent_text(
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
     pi_thinking = ""
+    pi_command_model = model
     if is_pi(agent):
         policy = _require_pi_execution_policy(
             execution_request,
@@ -2836,6 +3046,7 @@ def run_agent_text(
             raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
         pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
         model = pi_selection.reference
+        pi_command_model = pi_selection
         pi_thinking = pi_selection.reasoning_effort
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
@@ -2863,7 +3074,7 @@ def run_agent_text(
             prompt=prompt,
             cwd=cwd,
             timeout=timeout,
-            model=model,
+            model=pi_command_model,
             thinking=pi_thinking,
             policy=policy,
             preflight=preflight,
@@ -2893,6 +3104,7 @@ def run_agent_session(
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     pi_thinking = ""
+    pi_command_model = model
     if is_pi(agent):
         policy = _require_pi_execution_policy(
             execution_request,
@@ -2901,6 +3113,7 @@ def run_agent_session(
         pi_request = cast(ExecutionRequest, execution_request)
         pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
         model = pi_selection.reference
+        pi_command_model = pi_selection
         pi_thinking = pi_selection.reasoning_effort
         if pi_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
             if resume_binding is None:
@@ -2940,7 +3153,7 @@ def run_agent_session(
             prompt=prompt,
             cwd=cwd,
             timeout=timeout,
-            model=model,
+            model=pi_command_model,
             thinking=pi_thinking,
             policy=policy,
             preflight=preflight,
@@ -2990,6 +3203,7 @@ def resume_agent_session(
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     pi_thinking = ""
+    pi_command_model = model
     if is_pi(agent):
         policy = _require_pi_execution_policy(
             execution_request,
@@ -3002,6 +3216,7 @@ def resume_agent_session(
             )
         pi_selection = _resolve_pi_model_selection(model, pi_dir=pi_dir)
         model = pi_selection.reference
+        pi_command_model = pi_selection
         pi_thinking = pi_selection.reasoning_effort
         if resume_binding is None:
             raise PiSessionBindingError("Pi session resume requires a complete session binding")
@@ -3038,7 +3253,7 @@ def resume_agent_session(
             prompt=prompt,
             cwd=cwd,
             timeout=timeout,
-            model=model,
+            model=pi_command_model,
             thinking=pi_thinking,
             policy=policy,
             preflight=preflight,
@@ -3068,7 +3283,7 @@ def _communicate_codex_process(
     *,
     cwd: Path,
     prompt: str,
-    timeout: int,
+    timeout: float,
     env: dict[str, str],
     output_path: Path,
     process_tracker: ProcessTracker | None = None,

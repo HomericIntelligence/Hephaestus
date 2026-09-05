@@ -168,8 +168,10 @@ class TestNewerModelsRecognized:
         [
             ("", ""),
             (" fable ", "claude-fable-5"),
+            ("fable:future-effort", "claude-fable-5"),
             ("MYTHOS", "claude-mythos-5"),
             ("claude-sonnet-5", "claude-sonnet-5"),
+            ("claude-sonnet-5:future-effort", "claude-sonnet-5"),
             ("claude-preview-99-99", "claude-preview-99-99"),
         ],
     )

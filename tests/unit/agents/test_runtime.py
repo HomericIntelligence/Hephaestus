@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -895,6 +896,8 @@ def test_codex_approval_args_preserves_legacy_flag() -> None:
         ("gpt-5.6-sol", "gpt-5.6-sol", "xhigh"),
         ("gpt-5.6-terra", "gpt-5.6-terra", "xhigh"),
         ("gpt-5.6-luna", "gpt-5.6-luna", "medium"),
+        ("astra", "gpt-6-astra", "xhigh"),
+        ("gpt-6-astra", "gpt-6-astra", "xhigh"),
     ],
 )
 def test_codex_base_cmd_maps_claude_reasoning_tiers(
@@ -908,7 +911,8 @@ def test_codex_base_cmd_maps_claude_reasoning_tiers(
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=model)
 
     assert cmd[cmd.index("--model") + 1] == expected_model
-    assert cmd[cmd.index("-c") + 1] == (f"model_reasoning_effort={json.dumps(expected_reasoning)}")
+    reasoning_args = [arg for arg in cmd if arg.startswith("model_reasoning_effort=")]
+    assert reasoning_args == [f"model_reasoning_effort={json.dumps(expected_reasoning)}"]
 
 
 def test_codex_base_cmd_maps_haiku_to_mini_without_reasoning_override(
@@ -940,6 +944,7 @@ def test_codex_base_cmd_allows_terra_default_reasoning(model: str, tmp_path: Pat
         ("gpt-5.6-luna", "gpt-5.6-luna", "default", ""),
         ("gpt-5.6", "gpt-5.6", "default", ""),
         ("gpt-5.6", "gpt-5.6", "high", "high"),
+        ("gpt-6-astra", "gpt-6-astra", "future-effort", "future-effort"),
     ],
 )
 def test_codex_base_cmd_honors_explicit_reasoning_override(
@@ -954,6 +959,29 @@ def test_codex_base_cmd_honors_explicit_reasoning_override(
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=f"{model}:{reasoning_effort}")
 
     assert cmd[cmd.index("--model") + 1] == expected_model
+    reasoning_args = [arg for arg in cmd if arg.startswith("model_reasoning_effort=")]
+    assert bool(reasoning_args) is bool(expected_reasoning)
+    if expected_reasoning:
+        assert reasoning_args == [f"model_reasoning_effort={json.dumps(expected_reasoning)}"]
+
+
+@pytest.mark.parametrize(
+    ("reference", "expected_reasoning"),
+    [
+        (":future-effort", "future-effort"),
+        (":default", ""),
+    ],
+)
+def test_codex_base_cmd_pins_default_model_for_effort_only_selection(
+    reference: str,
+    expected_reasoning: str,
+    tmp_path: Path,
+) -> None:
+    """An effort-only selection keeps the pinned model for a new session."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=reference)
+
+    assert cmd[cmd.index("--model") + 1] == agent_runtime.CODEX_DEFAULT_MODEL
     reasoning_args = [arg for arg in cmd if arg.startswith("model_reasoning_effort=")]
     assert bool(reasoning_args) is bool(expected_reasoning)
     if expected_reasoning:
@@ -983,6 +1011,683 @@ def test_codex_base_cmd_defaults_new_sessions_to_gpt_55_xhigh(tmp_path: Path) ->
 
     assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
     assert cmd[cmd.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+
+
+def test_claude_uses_the_model_without_an_inline_effort() -> None:
+    """Claude has no effort transport, so it uses the selected model default."""
+    assert (
+        agent_runtime.direct_agent_model("claude", "claude-sonnet-4-6:future-effort")
+        == "claude-sonnet-4-6"
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_model", "expected_effort"),
+    [
+        ("gpt-6-astra:future-effort", "gpt-6-astra", "future-effort"),
+        ("astra", "gpt-6-astra", "xhigh"),
+        ("", "gpt-5.5", "xhigh"),
+    ],
+)
+def test_run_codex_session_retries_an_unsupported_effective_effort_with_default(
+    tmp_path: Path,
+    model: str,
+    expected_model: str,
+    expected_effort: str,
+) -> None:
+    """An exact pre-work effort rejection causes one run without the override."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        if len(commands) == 1:
+            provider_error = {
+                "error": {
+                    "message": (
+                        "[ReasoningEffortParam] [reasoning.effort] "
+                        "[invalid_enum_value] Invalid value: 'future-effort'."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": None,
+                },
+                "status": 400,
+            }
+            event = {
+                "type": "error",
+                "message": f"unexpected status 400 Bad Request: {json.dumps(provider_error)}",
+            }
+            return _FakeCodexPopen(
+                cmd,
+                proc_stdout="\n".join(
+                    [
+                        json.dumps({"type": "session_meta", "payload": {"id": "session-astra"}}),
+                        json.dumps({"type": "thread.started", "thread_id": "session-astra"}),
+                        json.dumps({"type": "turn.started"}),
+                        json.dumps(event),
+                    ]
+                ),
+                returncode=1,
+                final_message="",
+                **kwargs,
+            )
+        stdout = '{"type":"session_meta","payload":{"id":"session-astra"}}\n'
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="used default",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model=model,
+        )
+
+    assert result.stdout == "used default"
+    assert len(commands) == 2
+    assert all(command[command.index("--model") + 1] == expected_model for command in commands)
+    assert f"model_reasoning_effort={json.dumps(expected_effort)}" in commands[0]
+    assert not any(part.startswith("model_reasoning_effort=") for part in commands[1])
+
+
+def test_run_codex_session_retries_effort_rejection_with_plain_stderr(
+    tmp_path: Path,
+) -> None:
+    """Normal stderr diagnostics do not make a safe stdout rejection ambiguous."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        if len(commands) == 1:
+            event = {
+                "type": "turn.failed",
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "reasoning.effort",
+                    "code": "unsupported_value",
+                    "message": "The model does not accept this effort.",
+                },
+            }
+            return _FakeCodexPopen(
+                cmd,
+                proc_stdout=json.dumps(event),
+                proc_stderr="provider emitted a normal diagnostic\n",
+                returncode=1,
+                final_message="",
+                **kwargs,
+            )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout='{"type":"session_meta","payload":{"id":"session-astra"}}\n',
+            final_message="used default",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+        )
+
+    assert result.stdout == "used default"
+    assert len(commands) == 2
+    assert 'model_reasoning_effort="future-effort"' in commands[0]
+    assert not any(part.startswith("model_reasoning_effort=") for part in commands[1])
+
+
+def test_run_codex_session_does_not_retry_an_unrelated_provider_error(
+    tmp_path: Path,
+) -> None:
+    """A model rejection is not an effort rejection and stays a single run."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        event = {
+            "type": "error",
+            "error": {
+                "status": 400,
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "invalid_enum_value",
+                "message": "Invalid model.",
+            },
+        }
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=json.dumps(event),
+            returncode=1,
+            final_message="",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(agent_runtime.AgentExecutionError, match="Invalid model"),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+        )
+
+    assert len(commands) == 1
+
+
+def test_run_codex_session_retries_an_exit_zero_effort_error(tmp_path: Path) -> None:
+    """A structured error event is authoritative when the wrapper exits zero."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        if len(commands) == 1:
+            event = {
+                "type": "turn.failed",
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "reasoning.effort",
+                    "code": "unsupported_value",
+                    "message": "The model does not accept this effort.",
+                },
+            }
+            return _FakeCodexPopen(
+                cmd,
+                proc_stdout=json.dumps(event),
+                returncode=0,
+                final_message="",
+                **kwargs,
+            )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout="",
+            final_message="used default",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+        )
+
+    assert result.stdout == "used default"
+    assert len(commands) == 2
+
+
+def test_run_codex_session_does_not_retry_without_an_effective_effort(
+    tmp_path: Path,
+) -> None:
+    """An explicit provider default cannot cause an effort-removal retry."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        event = {
+            "type": "turn.failed",
+            "error": {
+                "type": "invalid_request_error",
+                "param": "reasoning.effort",
+                "code": "unsupported_value",
+                "message": "Unexpected effort diagnostic.",
+            },
+        }
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=json.dumps(event),
+            returncode=1,
+            final_message="",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(agent_runtime.AgentExecutionError, match="Unexpected effort diagnostic"),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:default",
+        )
+
+    assert len(commands) == 1
+
+
+@pytest.mark.parametrize(
+    "rejection_code",
+    ["invalid_enum_value", "unsupported_value", "unsupported_parameter"],
+)
+def test_resume_codex_session_retries_structured_effort_rejection_once(
+    tmp_path: Path,
+    rejection_code: str,
+) -> None:
+    """Resume keeps its session and policy when it removes a rejected effort."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        if len(commands) == 1:
+            event = {
+                "type": "turn.failed",
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "reasoning.effort",
+                    "code": rejection_code,
+                    "message": "The model does not accept this effort.",
+                },
+            }
+            return _FakeCodexPopen(
+                cmd,
+                proc_stdout=json.dumps(event),
+                returncode=1,
+                final_message="",
+                **kwargs,
+            )
+        stdout = '{"type":"session_meta","payload":{"id":"session-astra"}}\n'
+        return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="resumed", **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.resume_codex_session(
+            "session-astra",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+            sandbox="read-only",
+        )
+
+    assert result.stdout == "resumed"
+    assert len(commands) == 2
+    assert all(command[:4] == ["codex", "exec", "resume", "session-astra"] for command in commands)
+    assert all('sandbox_mode="read-only"' in command for command in commands)
+    assert 'model_reasoning_effort="future-effort"' in commands[0]
+    assert not any(part.startswith("model_reasoning_effort=") for part in commands[1])
+
+
+def test_codex_effort_rejection_after_a_work_event_does_not_retry(tmp_path: Path) -> None:
+    """An effort error cannot replay a turn after Codex reports work."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "session-astra"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "file_change",
+                            "status": "completed",
+                            "changes": [{"path": "changed.py", "kind": "update"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn.failed",
+                        "error": {
+                            "status": 400,
+                            "type": "invalid_request_error",
+                            "param": "reasoning.effort",
+                            "code": "invalid_enum_value",
+                            "message": "The model rejected the effort after work.",
+                        },
+                    }
+                ),
+            ]
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            returncode=1,
+            final_message="",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(
+            agent_runtime.AgentExecutionError,
+            match="rejected the effort after work",
+        ),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+        )
+
+    assert len(commands) == 1
+
+
+def test_codex_effort_rejection_after_a_final_message_does_not_retry(tmp_path: Path) -> None:
+    """A completed response file prevents replay when JSON events are incomplete."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        event = {
+            "type": "turn.failed",
+            "error": {
+                "status": 400,
+                "type": "invalid_request_error",
+                "param": "reasoning.effort",
+                "code": "invalid_enum_value",
+                "message": "The model rejected the effort after its response.",
+            },
+        }
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=json.dumps(event),
+            returncode=1,
+            final_message="work completed",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(agent_runtime.AgentExecutionError, match="after its response"),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+        )
+
+    assert len(commands) == 1
+
+
+def test_codex_effort_fallback_does_not_repeat_a_second_rejection(tmp_path: Path) -> None:
+    """The fallback has one attempt and cannot start a retry loop."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        event = {
+            "type": "error",
+            "error": {
+                "status_code": 400,
+                "type": "invalid_request_error",
+                "param": "reasoning_effort",
+                "code": "unsupported_value",
+                "message": "Unsupported effort.",
+            },
+        }
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=json.dumps(event),
+            returncode=1,
+            final_message="",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(agent_runtime.AgentExecutionError, match="unsupported_reasoning_effort"),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+        )
+
+    assert len(commands) == 2
+
+
+def test_codex_effort_fallback_does_not_chain_the_rejected_selection(
+    tmp_path: Path,
+) -> None:
+    """A fallback failure does not retain the rejected provider diagnostic."""
+    rejected = agent_runtime._CodexReasoningEffortRejectedError("private-model:private-effort")
+    fallback_failure = agent_runtime.AgentExecutionError("fallback failed")
+    with (
+        patch("hephaestus.agents.runtime.time.monotonic", return_value=100.0),
+        patch("hephaestus.agents.runtime._codex_base_cmd", return_value=["codex", "exec"]),
+        patch(
+            "hephaestus.agents.runtime._run_codex_command",
+            side_effect=[rejected, fallback_failure],
+        ),
+        pytest.raises(agent_runtime.AgentExecutionError) as exc_info,
+    ):
+        agent_runtime._run_codex_session_with_effort_fallback(
+            prompt="prompt",
+            cwd=tmp_path,
+            timeout=10,
+            model="private-model:private-effort",
+            sandbox="workspace-write",
+            approval="never",
+        )
+
+    assert exc_info.value is fallback_failure
+    assert exc_info.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": []},
+        {"type": "error", "status": []},
+        {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "param": [],
+                "code": "invalid_enum_value",
+            },
+        },
+    ],
+)
+def test_codex_effort_classifier_ignores_malformed_json_values(
+    event: dict[str, Any],
+) -> None:
+    """Malformed provider values use the normal bounded failure path."""
+    assert agent_runtime._codex_reasoning_effort_rejection(event) is None
+
+
+def test_codex_effort_classifier_ignores_excessively_nested_values() -> None:
+    """Deep provider values cannot fail the rejection classifier."""
+    nested: object = "not a rejection"
+    for _ in range(1_200):
+        nested = [nested]
+
+    assert (
+        agent_runtime._codex_reasoning_effort_rejection({"type": "error", "error": nested}) is None
+    )
+
+
+def test_codex_effort_classifier_ignores_an_oversized_json_integer() -> None:
+    """A provider integer outside the JSON parser limit is malformed input."""
+    stdout = '{"type":"error","status":' + ("9" * 5_000) + "}"
+
+    assert agent_runtime._codex_reasoning_effort_failure(stdout) is None
+    assert agent_runtime._codex_failure_diagnostic(stdout, "") is None
+
+
+def test_codex_effort_classifier_bounds_embedded_json_scans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One provider message cannot bypass the diagnostic scan bound."""
+    scan_limit = 8
+    decode_calls = 0
+    raw_decode = json.JSONDecoder.raw_decode
+
+    def counted_raw_decode(
+        decoder: json.JSONDecoder,
+        text: str,
+        index: int = 0,
+    ) -> tuple[Any, int]:
+        nonlocal decode_calls
+        decode_calls += 1
+        return raw_decode(decoder, text, index)
+
+    monkeypatch.setattr(agent_runtime, "_CODEX_ERROR_SCAN_MAX_VALUES", scan_limit)
+    monkeypatch.setattr(json.JSONDecoder, "raw_decode", counted_raw_decode)
+
+    assert (
+        agent_runtime._codex_reasoning_effort_rejection({"type": "error", "message": "{}" * 100})
+        is None
+    )
+    assert decode_calls <= scan_limit
+
+
+def test_codex_tagged_effort_rejection_requires_status_400() -> None:
+    """A tag-only compatibility diagnostic is not sufficient without status 400."""
+    event = {
+        "type": "error",
+        "message": json.dumps(
+            {
+                "error": {
+                    "message": (
+                        "[ReasoningEffortParam] [reasoning.effort] "
+                        "[invalid_enum_value] Invalid value."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": None,
+                }
+            }
+        ),
+    }
+
+    assert agent_runtime._codex_reasoning_effort_rejection(event) is None
+
+
+def test_codex_effort_classifier_allows_a_lifecycle_only_turn_start() -> None:
+    """The Codex lifecycle event precedes the first provider request."""
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "session-astra"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {
+                    "type": "turn.failed",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "param": "reasoning.effort",
+                        "code": "invalid_enum_value",
+                    },
+                }
+            ),
+        ]
+    )
+
+    assert agent_runtime._codex_reasoning_effort_failure(stdout) is not None
+
+
+@pytest.mark.parametrize("unexpected_line", ["not-json", "[]", "{malformed"])
+def test_codex_effort_classifier_does_not_retry_a_malformed_event_stream(
+    unexpected_line: str,
+) -> None:
+    """An incomplete provider event stream cannot prove that replay is safe."""
+    rejection = json.dumps(
+        {
+            "type": "turn.failed",
+            "error": {
+                "type": "invalid_request_error",
+                "param": "reasoning.effort",
+                "code": "invalid_enum_value",
+            },
+        }
+    )
+
+    assert agent_runtime._codex_reasoning_effort_failure(f"{unexpected_line}\n{rejection}") is None
+
+
+def test_codex_effort_fallback_shares_one_timeout_and_redacts_the_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Both attempts share one deadline and logs omit free-form selections."""
+    success = agent_runtime.AgentRunResult(stdout="ok", stderr="", session_id="session")
+    with (
+        patch(
+            "hephaestus.agents.runtime.time.monotonic",
+            side_effect=[100.0, 100.0, 100.0, 105.2, 105.2],
+        ),
+        patch("hephaestus.agents.runtime._codex_base_cmd", return_value=["codex", "exec"]),
+        patch(
+            "hephaestus.agents.runtime._run_codex_command",
+            side_effect=[
+                agent_runtime._CodexReasoningEffortRejectedError("rejected"),
+                success,
+            ],
+        ) as run_command,
+        caplog.at_level(logging.WARNING, logger=agent_runtime.__name__),
+    ):
+        result = agent_runtime._run_codex_session_with_effort_fallback(
+            prompt="prompt",
+            cwd=tmp_path,
+            timeout=10,
+            model="private-model:private-effort",
+            sandbox="workspace-write",
+            approval="never",
+        )
+
+    assert result is success
+    assert [call.kwargs["timeout"] for call in run_command.call_args_list] == [
+        10,
+        pytest.approx(4.8),
+    ]
+    assert "private-model" not in caplog.text
+    assert "private-effort" not in caplog.text
+
+
+def test_codex_effort_fallback_counts_command_construction_in_the_deadline(
+    tmp_path: Path,
+) -> None:
+    """Codex does not launch after command construction exhausts the budget."""
+    with (
+        patch("hephaestus.agents.runtime.time.monotonic", side_effect=[100.0, 100.0, 111.0]),
+        patch("hephaestus.agents.runtime._codex_base_cmd", return_value=["codex", "exec"]),
+        patch("hephaestus.agents.runtime._run_codex_command") as run_command,
+        pytest.raises(subprocess.TimeoutExpired),
+    ):
+        agent_runtime._run_codex_session_with_effort_fallback(
+            prompt="prompt",
+            cwd=tmp_path,
+            timeout=10,
+            model="private-model:private-effort",
+            sandbox="workspace-write",
+            approval="never",
+        )
+
+    run_command.assert_not_called()
 
 
 def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> None:
@@ -1190,7 +1895,7 @@ def test_opencode_registry_contract() -> None:
 
 
 def test_opencode_base_cmd_passes_model_through_and_omits_empty(tmp_path: Path) -> None:
-    """Model values pass through verbatim; --dir pins the project anchor."""
+    """Model selections pass through; --dir pins the project anchor."""
     assert agent_runtime._opencode_base_cmd(cwd=tmp_path) == [
         "opencode",
         "run",
@@ -1251,6 +1956,19 @@ def test_opencode_base_cmd_translates_ifm_reasoning_to_variant(tmp_path: Path) -
     ]
 
 
+def test_opencode_base_cmd_passes_an_arbitrary_effort_to_variant(tmp_path: Path) -> None:
+    """OpenCode receives an arbitrary provider variant."""
+    assert agent_runtime._opencode_base_cmd(
+        cwd=tmp_path,
+        model="private/provider:model:future-effort",
+    )[-4:] == [
+        "--model",
+        "private/provider:model",
+        "--variant",
+        "future-effort",
+    ]
+
+
 def test_opencode_base_cmd_applies_variant_to_configured_default(tmp_path: Path) -> None:
     """OpenCode can apply a role variant without an explicit model."""
     command = agent_runtime._opencode_base_cmd(cwd=tmp_path, model=":high")
@@ -1259,18 +1977,15 @@ def test_opencode_base_cmd_applies_variant_to_configured_default(tmp_path: Path)
     assert command[-2:] == ["--variant", "high"]
 
 
-def test_opencode_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
-    """A role option must not change an unrelated provider model identifier."""
-    selected = agent_runtime.apply_agent_model_reasoning_effort(
-        "opencode", "private/provider:model", "high"
+def test_opencode_base_cmd_omits_an_explicit_default_variant(tmp_path: Path) -> None:
+    """The default suffix selects the OpenCode model default."""
+    command = agent_runtime._opencode_base_cmd(
+        cwd=tmp_path,
+        model="private/provider:model:default",
     )
 
-    assert agent_runtime._opencode_base_cmd(cwd=tmp_path, model=selected)[-4:] == [
-        "--model",
-        "private/provider:model",
-        "--variant",
-        "high",
-    ]
+    assert command[command.index("--model") + 1] == "private/provider:model"
+    assert "--variant" not in command
 
 
 def test_parse_opencode_json_events_extracts_session_id_and_final_text() -> None:
@@ -2283,6 +2998,118 @@ def test_pi_automation_command_translates_ifm_reasoning_to_thinking(tmp_path: Pa
     ]
 
 
+def test_pi_automation_command_passes_an_arbitrary_thinking_level(tmp_path: Path) -> None:
+    """Pi receives an arbitrary provider thinking level."""
+    command = agent_runtime._pi_automation_cmd(
+        tmp_path / "pi",
+        model="private/provider:model:future-effort",
+        lifecycle=SessionLifecycle.ONE_SHOT,
+    )
+
+    assert command[-4:] == [
+        "--model",
+        "private/provider:model",
+        "--thinking",
+        "future-effort",
+    ]
+
+
+def test_run_agent_text_keeps_a_colon_bearing_pi_model_separate(
+    tmp_path: Path,
+) -> None:
+    """The public Pi path does not parse the model again after effort resolution."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+    commands: list[list[str]] = []
+
+    class CapturingAdapter:
+        def invoke(self, **kwargs: Any) -> agent_runtime.AgentRunResult:
+            commands.append(list(kwargs["command"]))
+            return agent_runtime.AgentRunResult(stdout="done", stderr="")
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    )
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", CapturingAdapter()),
+        patch(
+            "hephaestus.agents.runtime._require_pi_automation_admission",
+            return_value=PiPreflightResult.ready_result(executable=executable),
+        ),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+    ):
+        result = agent_runtime.run_agent_text(
+            "pi",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="private/provider:model:future-effort",
+            execution_request=request,
+        )
+
+    assert result.stdout == "done"
+    assert commands[0][commands[0].index("--model") + 1] == "private/provider:model"
+    assert commands[0][commands[0].index("--thinking") + 1] == "future-effort"
+
+
+def test_run_agent_text_preserves_ordinary_effort_words_in_pi_output(
+    tmp_path: Path,
+) -> None:
+    """Pi output keeps ordinary text that matches the selected effort."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    class OutputAdapter:
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            return agent_runtime.AgentRunResult(
+                stdout="Review result: GO with high confidence.",
+                stderr="The high-effort request completed.",
+            )
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    )
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", OutputAdapter()),
+        patch(
+            "hephaestus.agents.runtime._require_pi_automation_admission",
+            return_value=PiPreflightResult.ready_result(executable=executable),
+        ),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+    ):
+        result = agent_runtime.run_agent_text(
+            "pi",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="private/provider-model:high",
+            execution_request=request,
+        )
+
+    assert result.stdout == "Review result: GO with high confidence."
+    assert result.stderr == "The high-effort request completed."
+
+
 def test_pi_command_keeps_a_native_configured_thinking_level_separate(tmp_path: Path) -> None:
     """A Pi-native thinking level does not become part of the model ID."""
     command = agent_runtime._pi_automation_cmd(
@@ -2300,46 +3127,12 @@ def test_pi_command_keeps_a_native_configured_thinking_level_separate(tmp_path: 
     ]
 
 
-def test_pi_role_effort_applies_to_an_unknown_model_with_colons(tmp_path: Path) -> None:
-    """A Pi role option must not change an unrelated provider model identifier."""
-    selected = agent_runtime.apply_agent_model_reasoning_effort(
-        "pi", "private/provider:model", "high"
-    )
-
-    assert agent_runtime._pi_automation_cmd(
-        tmp_path / "pi",
-        model=selected,
-        lifecycle=SessionLifecycle.ONE_SHOT,
-    )[-4:] == [
-        "--model",
-        "private/provider:model",
-        "--thinking",
-        "high",
-    ]
-
-
-def test_pi_default_role_effort_uses_config_for_an_unknown_model(tmp_path: Path) -> None:
-    """The default role value must select the global Pi thinking level."""
-    pi_dir = tmp_path / "pi-agent"
-    pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
-        '{"defaultProvider":"configured","defaultModel":"other","defaultThinkingLevel":"high"}',
-        encoding="utf-8",
-    )
-    selected = agent_runtime.apply_agent_model_reasoning_effort(
-        "pi", "private/provider:model", "default"
-    )
-
-    assert agent_runtime.resolve_pi_model_reference(selected, pi_dir=pi_dir) == (
-        "private/provider:model:high"
-    )
-
-
 def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> None:
     """An omitted Pi model becomes an explicit operator-global selection."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         json.dumps(
             {
                 "defaultProvider": "IFM",
@@ -2349,6 +3142,7 @@ def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    settings_path.chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-0.9B:high"
@@ -2359,10 +3153,12 @@ def test_pi_default_reasoning_replaces_an_inline_reasoning_value(tmp_path: Path)
     """The default selector removes an inline value and uses Pi settings."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-7B","defaultThinkingLevel":"medium"}',
         encoding="utf-8",
     )
+    settings_path.chmod(0o600)
 
     assert (
         agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-0.9B:default", pi_dir=pi_dir)
@@ -2374,11 +3170,13 @@ def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path) -> 
     """Pi fingerprints configured thinking when the model has no inline effort."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         '{"defaultProvider":"private","defaultModel":"operator-model",'
         '"defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    settings_path.chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-7B", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-7B:high"
@@ -2521,9 +3319,11 @@ def test_pi_default_model_does_not_read_project_settings(
     home_dir = tmp_path / "home"
     pi_dir = home_dir / ".pi" / "agent"
     pi_dir.mkdir(parents=True)
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         '{"defaultProvider":"global","defaultModel":"model"}', encoding="utf-8"
     )
+    settings_path.chmod(0o600)
     project_dir = tmp_path / "project"
     (project_dir / ".pi").mkdir(parents=True)
     (project_dir / ".pi" / "settings.json").write_text(
@@ -2589,11 +3389,6 @@ def test_pi_adapter_failure_redacts_default_provider_and_model_components(
         {},
         {"defaultProvider": "IFM"},
         {"defaultModel": "K2-Horizon-0.9B"},
-        {
-            "defaultProvider": "IFM",
-            "defaultModel": "K2-Horizon-0.9B",
-            "defaultThinkingLevel": "invalid",
-        },
     ],
 )
 def test_pi_default_model_rejects_incomplete_operator_settings(
@@ -2606,6 +3401,23 @@ def test_pi_default_model_rejects_incomplete_operator_settings(
     (pi_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
 
     with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
+        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+
+
+def test_pi_default_model_rejects_an_unknown_configured_thinking_level(
+    tmp_path: Path,
+) -> None:
+    """Pi settings reject a thinking level outside the supported set."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        '{"defaultProvider":"private","defaultModel":"model",'
+        '"defaultThinkingLevel":"future-effort"}',
+        encoding="utf-8",
+    )
+    (pi_dir / "settings.json").chmod(0o600)
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="defaultThinkingLevel"):
         agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
 
 
@@ -2924,7 +3736,7 @@ def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
             "prompt",
             cwd=tmp_path,
             timeout=30,
-            model="sonnet",
+            model="sonnet:future-effort",
             sandbox="workspace-write",
         )
 

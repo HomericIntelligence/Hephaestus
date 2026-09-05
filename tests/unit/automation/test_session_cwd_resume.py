@@ -51,8 +51,8 @@ def test_plan_reviewer_then_pipeline_worker_resumes_same_transcript(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(agent_config, "_checkout_identity", lambda _cwd: "checkout-family")
 
-    model = "fable"
-    sid = session_uuid("Hephaestus", 2284, "plan-reviewer", model, cwd=repo_root)
+    model = "fable:future-effort"
+    sid = session_uuid("Hephaestus", 2284, "plan-reviewer", "fable", cwd=repo_root)
     calls: list[list[str]] = []
 
     def fake_run_tracked(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -115,3 +115,4 @@ def test_plan_reviewer_then_pipeline_worker_resumes_same_transcript(
     assert "--resume" in calls[1]
     assert "--session-id" not in calls[1]
     assert sid in calls[0] and sid in calls[1]
+    assert all("future-effort" not in part for call in calls for part in call)

@@ -162,7 +162,7 @@ Examples:
         help="Write private typed queue-job receipts beneath PATH (disabled by default).",
     )
     add_agent_timeout_arg(parser, default=1200)
-    parser.add_argument("--reviewer-model", default="", metavar="MODEL")
+    parser.add_argument("--reviewer-model", default="", metavar="MODEL[:EFFORT]")
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
     add_pipeline_runtime_args(parser, role="planner", timeouts=("gh", "metadata"))
     return parser

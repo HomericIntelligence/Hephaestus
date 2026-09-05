@@ -444,6 +444,36 @@ class TestPlanReviewStageOnEnter:
 class TestPlanReviewStageStep:
     """step state machine: ENTER -> REVIEW_WAIT -> EVAL -> AMEND/LEARN."""
 
+    def test_claude_empty_base_selection_survives_the_review_journal(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """A Claude provider-default selection remains durable and resumable."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[642] = [render_current_plan("Plan v1")]
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(
+            github=github,
+            plan_review_sessions=store,
+            config_overrides={"agent": "claude", "reviewer_model": ":provider-default"},
+        )
+        item = make_work_item(issue=642, state="ENTER")
+        stage = PlanReviewStage()
+
+        assert stage.on_enter(item, ctx) is None
+        active = store.recover_active(repo=item.repo, issue=642)
+        assert active is not None
+        assert active.reviewer_model == ":provider-default"
+
+        item.state = "REVIEW_WAIT"
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.model == ":provider-default"
+
     @pytest.mark.parametrize("provider", ["opencode", "pi"])
     def test_provider_native_default_survives_the_review_journal(
         self,
@@ -485,8 +515,7 @@ class TestPlanReviewStageStep:
             plan_review_sessions=store,
             config_overrides={
                 "agent": provider,
-                "reviewer_model": "private/provider:model",
-                "reviewer_reasoning_effort": "high",
+                "reviewer_model": "private/provider:model:future-effort",
             },
         )
         item = make_work_item(issue=641, state="ENTER")
@@ -500,7 +529,7 @@ class TestPlanReviewStageStep:
         assert isinstance(request.job, AgentJob)
         assert isinstance(request.job.model, AgentModelSelection)
         assert request.job.model.model == "private/provider:model"
-        assert request.job.model.reasoning_effort == "high"
+        assert request.job.model.reasoning_effort == "future-effort"
 
     def test_multi_round_cycle_resumes_one_durable_reviewer_session(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path

@@ -45,7 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_agent_argument(parser)
     add_prompt_dir_argument(parser)
-    parser.add_argument("--model", default="", help="Optional agent model override")
+    parser.add_argument(
+        "--model",
+        default="",
+        metavar="MODEL[:EFFORT]",
+        help="Optional agent model and effort override",
+    )
     parser.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],

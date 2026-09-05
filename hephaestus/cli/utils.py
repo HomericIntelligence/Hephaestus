@@ -686,7 +686,7 @@ def add_pipeline_runtime_args(
 ) -> None:
     """Add shared explicit configuration for a standalone pipeline wrapper."""
     for flag in ("model", f"{role}-model", "fallback-model"):
-        parser.add_argument(f"--{flag}", default="", metavar="MODEL")
+        parser.add_argument(f"--{flag}", default="", metavar="MODEL[:EFFORT]")
     parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
     parser.add_argument(
         "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True

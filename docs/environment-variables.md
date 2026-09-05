@@ -89,7 +89,7 @@ different child.
 
 | Removed surface | Explicit replacement |
 | --- | --- |
-| Planner, implementer, reviewer, and fallback model variables | `--planner-model`, `--implementer-model`, `--reviewer-model`, and `--fallback-model`; role option → `--model` → fixed role default |
+| Planner, implementer, reviewer, and fallback model variables | `--planner-model MODEL[:EFFORT]`, `--implementer-model MODEL[:EFFORT]`, `--reviewer-model MODEL[:EFFORT]`, and `--fallback-model MODEL[:EFFORT]`; role option → `--model` → fixed Claude or Codex role default, or configured OpenCode or Pi default |
 | Advise and learn model variables | Retired without a CLI replacement: modern advise/learn work is deterministic, host-owned Mnemosyne execution and does not select an agent provider model |
 | Pi provider/model variables | `--pi-alias-config PATH` pointing to an owner-only, non-symlink, mode-`0600` TOML file with exactly `provider` and `model` |
 | Pi automation kill switch | `--disable-pi-automation` in the typed runtime policy |

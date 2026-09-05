@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.execution_policy import ExecutionRequest
+from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.runtime import (
     agent_compaction_resume,
@@ -220,7 +221,8 @@ def run_learn(
         model: Override the model used for /learn. When ``None`` (default)
             :func:`learn_model` default is used.
             Pass ``implementer_model()`` so the implementer's /learn turn runs
-            on the same model tier the session was created with.
+            on the same model tier the session was created with. Claude ignores
+            an inline effort and uses its default effort.
 
     Returns:
         True if learn completed successfully, False otherwise
@@ -275,20 +277,20 @@ def run_learn(
     # run /learn on the same model tier as the session (e.g. implementer_model()).
     # We can't route through `call_claude` here because we need `--resume`
     # semantics with full Bash/Edit tools; instead we add the model flag directly.
-    effective_model = model if model is not None else learn_model()
+    effective_model = parse_model_selection(model if model is not None else learn_model()).model
     learn_command = [
         "claude",
         "--resume",
         session_id,
         build_learn_prompt(""),
         "--print",
-        "--model",
-        effective_model,
         "--permission-mode",
         "dontAsk",
         "--allowedTools",
         "Read,Write,Edit,Glob,Grep,Bash",
     ]
+    if effective_model:
+        learn_command.extend(["--model", effective_model])
 
     def _invoke_claude() -> str:
         return run(learn_command, cwd=worktree_path, timeout=timeout).stdout or ""
@@ -418,13 +420,16 @@ def compact_session(
         agent: Agent identifier
         cwd: Working directory for session lookup
         timeout: Subprocess timeout in seconds.
+        model: Optional ``MODEL[:EFFORT]`` selection. Claude uses the base
+            model to find the session.
 
     Returns:
         True on a zero-exit subprocess call, False on any failure including
         a non-zero exit code (e.g. /compact skill not registered).
 
     """
-    sid = session_uuid(repo, issue, agent, model, cwd=cwd)
+    effective_model = parse_model_selection(model).model if model is not None else None
+    sid = session_uuid(repo, issue, agent, effective_model, cwd=cwd)
     timeout_s = learn_claude_timeout() if timeout is None else timeout
     try:
         result = subprocess.run(

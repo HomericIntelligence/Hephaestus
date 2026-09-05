@@ -138,6 +138,45 @@ class TestCreateThenResume:
         assert "--session-id" not in argv
         assert "--name" not in argv
 
+    def test_inline_effort_uses_the_claude_model_default(
+        self, stub_run: MagicMock, fake_home: Path
+    ) -> None:
+        """Claude strips the effort before it builds the command and session key."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+
+        _, sid = invoke_claude_with_session(
+            repo="R",
+            issue=2,
+            agent=AGENT_PLANNER,
+            prompt="hi",
+            model="claude-sonnet-5:future-effort",
+            cwd=cwd,
+        )
+
+        argv = _argv(stub_run.call_args)
+        assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
+        assert sid == session_uuid("R", 2, AGENT_PLANNER, "claude-sonnet-5", cwd=cwd)
+
+    def test_empty_model_base_omits_the_claude_model_option(
+        self, stub_run: MagicMock, fake_home: Path
+    ) -> None:
+        """An effort-only reference lets Claude select its provider default."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+
+        _, sid = invoke_claude_with_session(
+            repo="R",
+            issue=3,
+            agent=AGENT_PLANNER,
+            prompt="hi",
+            model=":provider-default",
+            cwd=cwd,
+        )
+
+        assert "--model" not in _argv(stub_run.call_args)
+        assert sid == session_uuid("R", 3, AGENT_PLANNER, "", cwd=cwd)
+
     def test_lossy_path_collision_does_not_resume_unregistered_checkout(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:
@@ -578,6 +617,7 @@ class TestModelCapFallback:
                     agent=AGENT_PLANNER,
                     prompt="hi",
                     model="claude-fable-5",
+                    fallback_model_value="claude-opus-4-8:future-effort",
                     cwd=cwd,
                 )
         assert out == "fallback-ok"

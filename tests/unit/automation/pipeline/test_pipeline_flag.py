@@ -285,29 +285,30 @@ def test_build_pipeline_config_maps_agent_and_models(
     assert config.implementer_model == "gpt-impl"
 
 
-def test_build_pipeline_config_maps_per_role_reasoning_effort(
+def test_build_pipeline_config_keeps_per_role_inline_reasoning_effort(
     dispatch: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The loop forwards each role's explicit reasoning setting to stages."""
+    """The loop keeps each role effort in its model reference."""
     monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent, **_kwargs: "codex")
 
     loop_runner.main(
         [
             "--agent",
             "codex",
-            "--planner-reasoning-effort",
-            "xhigh",
-            "--reviewer-reasoning-effort",
-            "default",
-            "--implementer-reasoning-effort",
-            "high",
+            "--planner-model",
+            "sol:xhigh",
+            "--reviewer-model",
+            "terra:default",
+            "--implementer-model",
+            "gpt-6-astra:future-effort",
         ]
     )
 
     (config,) = dispatch["run_pipeline"].call_args.args
-    assert config.planner_reasoning_effort == "xhigh"
-    assert config.reviewer_reasoning_effort == "default"
-    assert config.implementer_reasoning_effort == "high"
+    assert config.planner_model == "sol:xhigh"
+    assert config.reviewer_model == "terra:default"
+    assert config.implementer_model == "gpt-6-astra:future-effort"
+    assert not hasattr(config, "planner_reasoning_effort")
 
 
 @pytest.mark.parametrize("agent", ["opencode", "pi"])
@@ -330,43 +331,43 @@ def test_build_pipeline_config_preserves_agent_model_default(
 
 
 @pytest.mark.parametrize(
-    ("role", "model", "effort", "expected"),
+    ("role", "model", "expected"),
     [
-        ("planner", "sol", "xhigh", "sol:xhigh"),
-        ("implementer", "terra", "high", "terra:high"),
-        ("reviewer", "terra", "default", "terra:default"),
+        ("planner", "sol:xhigh", "sol:xhigh"),
+        ("implementer", "terra:high", "terra:high"),
+        ("reviewer", "terra:default", "terra:default"),
     ],
 )
-def test_stage_model_propagates_per_role_reasoning_effort(
-    role: str, model: str, effort: str, expected: str
+def test_stage_model_propagates_inline_reasoning_effort(
+    role: str, model: str, expected: str
 ) -> None:
-    """Every pipeline role transports its own reasoning setting to the runtime."""
+    """Every pipeline role transports its model reference to the runtime."""
     config = SimpleNamespace(
         agent="codex",
         model="",
-        planner_model="sol" if role == "planner" else "",
-        implementer_model="terra" if role == "implementer" else "",
-        reviewer_model="terra" if role == "reviewer" else "",
-        planner_reasoning_effort="xhigh" if role == "planner" else "",
-        implementer_reasoning_effort="high" if role == "implementer" else "",
-        reviewer_reasoning_effort="default" if role == "reviewer" else "",
+        planner_model=model if role == "planner" else "",
+        implementer_model=model if role == "implementer" else "",
+        reviewer_model=model if role == "reviewer" else "",
     )
 
     context = cast(StageContext, SimpleNamespace(config=config))
     assert stage_model(context, role, lambda: model) == expected
 
 
-def test_stage_model_does_not_append_codex_reasoning_to_claude_model() -> None:
-    """A Codex-only reasoning flag cannot corrupt another provider's model selection."""
+@pytest.mark.parametrize(
+    "model",
+    ["claude-sonnet-4-6:future-effort", ":provider-default"],
+)
+def test_stage_model_preserves_claude_selection_until_invocation(model: str) -> None:
+    """The pipeline keeps the compact selection until Claude starts."""
     config = SimpleNamespace(
         agent="claude",
         model="",
-        reviewer_model="claude-sonnet-4-6",
-        reviewer_reasoning_effort="default",
+        reviewer_model=model,
     )
 
     context = cast(StageContext, SimpleNamespace(config=config))
-    assert stage_model(context, "reviewer", lambda: "fallback") == ("claude-sonnet-4-6")
+    assert stage_model(context, "reviewer", lambda: "fallback") == model
 
 
 def test_stage_model_uses_the_explicit_pi_alias() -> None:
@@ -374,8 +375,7 @@ def test_stage_model_uses_the_explicit_pi_alias() -> None:
     config = SimpleNamespace(
         agent="pi",
         model="",
-        reviewer_model="operator-local-pi-alias",
-        reviewer_reasoning_effort="default",
+        reviewer_model="operator-local-pi-alias:default",
     )
 
     context = cast(StageContext, SimpleNamespace(config=config))
@@ -393,7 +393,6 @@ def test_stage_model_uses_agent_config_default_when_model_is_omitted(agent: str)
         agent=agent,
         model="",
         reviewer_model="",
-        reviewer_reasoning_effort="",
     )
 
     context = cast(StageContext, SimpleNamespace(config=config))
@@ -403,33 +402,31 @@ def test_stage_model_uses_agent_config_default_when_model_is_omitted(agent: str)
 
 @pytest.mark.parametrize("agent", ["opencode", "pi"])
 def test_stage_model_adds_reasoning_for_supported_direct_agents(agent: str) -> None:
-    """A role reasoning option applies to IFM models on direct agents."""
+    """An inline free-form effort applies to a direct-agent model."""
     config = SimpleNamespace(
         agent=agent,
         model="",
-        reviewer_model="k2-horizon-7:low",
-        reviewer_reasoning_effort="high",
+        reviewer_model="k2-horizon-7:future-effort",
     )
 
     context = cast(StageContext, SimpleNamespace(config=config))
 
-    assert stage_model(context, "reviewer", lambda: "fallback") == ("IFM/K2-Horizon-7B:high")
+    assert stage_model(context, "reviewer", lambda: "fallback") == (
+        "IFM/K2-Horizon-7B:future-effort"
+    )
 
 
 @pytest.mark.parametrize("model", ["terra:default", "gpt-5.6-terra:default"])
-def test_stage_model_replaces_existing_codex_reasoning_selector(model: str) -> None:
-    """An explicit role override replaces, rather than stacks on, a model selector."""
+def test_stage_model_preserves_existing_codex_reasoning_selector(model: str) -> None:
+    """The model reference is the single reasoning-selection source."""
     config = SimpleNamespace(
         agent="codex",
         model="",
         reviewer_model=model,
-        reviewer_reasoning_effort="xhigh",
     )
 
     context = cast(StageContext, SimpleNamespace(config=config))
-    assert stage_model(context, "reviewer", lambda: "fallback") == (
-        model.removesuffix(":default") + ":xhigh"
-    )
+    assert stage_model(context, "reviewer", lambda: "fallback") == model
 
 
 def test_phase_timeout_help_documents_agent_job_scope() -> None:
