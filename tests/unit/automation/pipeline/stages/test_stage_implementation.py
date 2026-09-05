@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
@@ -1684,6 +1685,63 @@ class TestGitErrorRetryCap:
 
 class TestWorktreeAndAdvise:
     """WORKTREE_WAIT / DIRTY_DECISION_WAIT / ADVISE_WAIT."""
+
+    def test_promoted_direct_writer_result_binds_the_implementer_workspace(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The worktree receipt carries its promoted revision into implementation."""
+        stage = ImplementationStage()
+        promoted_path = Path("/tmp/promoted-direct-writer")
+        source_revision = "b" * 40
+        branch = "1-auto-impl-direct-abcdef"
+        prepared: list[tuple[int, SourceLane, str, str | None]] = []
+
+        def prepare(
+            item_number: int,
+            lane: SourceLane,
+            revision: str,
+            *,
+            branch: str | None = None,
+        ) -> SimpleNamespace:
+            prepared.append((item_number, lane, revision, branch))
+            return SimpleNamespace(cwd=promoted_path, revision=revision)
+
+        paths = SimpleNamespace(
+            repo_root="/tmp/repo",
+            worktree="/tmp/repo/worktree",
+            source_workspaces=SimpleNamespace(prepare=prepare),
+        )
+        ctx = make_ctx(paths=paths)
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = branch
+        item.payload["_direct_scope_base_sha"] = source_revision
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": str(promoted_path),
+                    "impl_source_revision": source_revision,
+                    "direct_scope_reservation": {
+                        "branch": branch,
+                        "base_sha": source_revision,
+                    },
+                },
+            ),
+            ctx,
+        )
+        item.state = "IMPLEMENT_WAIT"
+
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.cwd == promoted_path
+        assert request.job.workspace is not None
+        assert request.job.workspace.revision == source_revision
+        assert prepared == [(1, SourceLane.IMPLEMENTATION, source_revision, branch)]
+        assert item.payload["_impl_source_revision"] == source_revision
 
     def test_worktree_wait_dispatches_to_handler(self, make_ctx: Any, make_work_item: Any) -> None:
         """WORKTREE_WAIT routes through the dedicated state handler."""
