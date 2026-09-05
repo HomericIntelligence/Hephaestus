@@ -99,6 +99,7 @@ HOST_VERIFICATION_CATALOG: HostVerificationPlan = (
     ),
     HostVerificationSpec(
         descr="review_full_unit_coverage",
+        changed_path="coverage.toml",
         argv=(
             "uv",
             "run",
@@ -111,6 +112,7 @@ HOST_VERIFICATION_CATALOG: HostVerificationPlan = (
     ),
     HostVerificationSpec(
         descr="review_migration_version_currency",
+        changed_path="docs/MIGRATION.md",
         argv=(
             "uv",
             "run",
@@ -126,6 +128,7 @@ HOST_VERIFICATION_CATALOG: HostVerificationPlan = (
     ),
     HostVerificationSpec(
         descr="review_worker_pool_agent_execution_error",
+        changed_path="tests/unit/automation/pipeline/test_worker_pool.py",
         argv=(
             "uv",
             "run",
@@ -142,6 +145,7 @@ HOST_VERIFICATION_CATALOG: HostVerificationPlan = (
     ),
     HostVerificationSpec(
         descr="review_stalled_consumer_verification",
+        changed_path="tests/performance/test_worker_pool_load.py",
         argv=(
             "uv",
             "run",

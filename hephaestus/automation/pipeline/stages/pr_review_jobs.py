@@ -993,15 +993,27 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload.pop("review_status_manifest", None)
         if ready and isinstance(value, dict) and isinstance(value.get("status_manifest"), tuple):
             item.payload["review_status_manifest"] = value["status_manifest"]
-        if ready and not isinstance(review_diff, str):
-            item.payload["review_checkout_error"] = "checkout job returned no bound diff"
-            ready = False
+        valid_changed_paths = (
+            isinstance(changed_paths, list)
+            and bool(changed_paths)
+            and all(
+                isinstance(path, str) and bool(path) and "\x00" not in path
+                for path in changed_paths
+            )
+        )
+        if ready:
+            if not isinstance(review_diff, str):
+                item.payload["review_checkout_error"] = "checkout job returned no bound diff"
+                ready = False
+            elif not valid_changed_paths:
+                item.payload["review_checkout_error"] = (
+                    "checkout job returned invalid changed paths"
+                )
+                ready = False
         if ready:
             item.payload["pr_diff"] = review_diff
-            if isinstance(changed_paths, list) and all(
-                isinstance(path, str) and bool(path) for path in changed_paths
-            ):
-                item.payload["review_changed_paths"] = list(changed_paths)
+            checkout_changed_paths = changed_paths if isinstance(changed_paths, list) else []
+            item.payload["review_changed_paths"] = list(checkout_changed_paths)
             if is_full_commit_sha(review_base):
                 item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready
