@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     class ImplementationWriterHandoff:
         """Static type for the opaque implementation-writer capability."""
 
-        def _validate(self, repo_root: Path, item_number: int, lock_path: Path) -> None: ...
+        def _validate(self, repo_root: Path, item_number: int, lock_path: Path) -> None:
+            raise NotImplementedError
 
         def _arm_direct_transition(
             self,
@@ -24,7 +25,8 @@ if TYPE_CHECKING:
             predecessor_revision: str,
             branch: str,
             base_sha: str,
-        ) -> None: ...
+        ) -> None:
+            raise NotImplementedError
 
         def _validate_direct_transition(
             self,
@@ -33,7 +35,8 @@ if TYPE_CHECKING:
             predecessor_revision: str,
             branch: str,
             base_sha: str,
-        ) -> None: ...
+        ) -> None:
+            raise NotImplementedError
 
         def _consume_direct_transition(
             self,
@@ -42,7 +45,8 @@ if TYPE_CHECKING:
             predecessor_revision: str,
             branch: str,
             base_sha: str,
-        ) -> object: ...
+        ) -> object:
+            raise NotImplementedError
 
         def _validate_consumed_direct_transition(
             self,
@@ -52,7 +56,8 @@ if TYPE_CHECKING:
             predecessor_generation: int,
             predecessor_revision: str,
             branch: str,
-        ) -> None: ...
+        ) -> None:
+            raise NotImplementedError
 
 
 def _build_implementation_writer_api() -> tuple[  # noqa: C901
