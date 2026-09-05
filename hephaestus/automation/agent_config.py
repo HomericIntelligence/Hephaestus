@@ -11,9 +11,10 @@ existing callers keep working unchanged.
 
 Model selection
 ---------------
-Each Claude automation phase calls the ``claude`` CLI with ``--model <id>`` so
-the chosen model is pinned regardless of the user's CLI default. The mapping
-reflects the cost/quality tradeoff for each phase:
+Each nonempty Claude base model adds ``--model <id>`` to the ``claude`` CLI
+call. Thus, the selected model does not depend on the user's CLI default. An
+empty base model omits ``--model`` and uses the Claude provider default. The
+default mapping reflects the cost/quality tradeoff for each phase:
 
 - Planning needs reasoning quality but few tokens overall → Opus
 - Implementation is a long mechanical tool-use loop → Haiku
