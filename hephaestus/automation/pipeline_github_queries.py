@@ -320,7 +320,12 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
 
     def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
         """Authenticate the body editor before trusting a finalized-plan seal."""
-        if isinstance(issue_number, bool) or not isinstance(issue_number, int) or issue_number <= 0:
+        if (
+            isinstance(issue_number, bool)
+            or not isinstance(issue_number, int)
+            or issue_number <= 0
+            or issue_number > 2_147_483_647
+        ):
             raise ValueError("issue_number must be a positive integer")
         try:
             if self._repo_slug is None:
