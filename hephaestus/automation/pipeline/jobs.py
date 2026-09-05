@@ -128,6 +128,9 @@ class BuildTestJob:
     # from the reviewer worktree.
     expected_head_sha: str = ""
     immutable_source: bool = False
+    # A non-None value tells the worker to run ``argv`` through the host-owned
+    # descriptor snapshot launcher. An empty value keeps fallback untrusted.
+    verified_runner_source_revision: str | None = None
     descr: str = ""
 
     def __post_init__(self) -> None:

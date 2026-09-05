@@ -1541,7 +1541,9 @@ The exhaustive classification is maintained in the
  coordinator constructs them from vetted templates
  (`HEPHAESTUS_REQUIRED_CHECK_ARGV` for Hephaestus's automatic required-check
  gate, `PRE_PR_TEST_ARGV` for other repositories' opt-in fallback, and the
- fixed host-review verification registry).
+ fixed host-review verification registry). A non-null
+ `verified_runner_source_revision` keeps launcher construction in the closed
+ worker boundary.
 - [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
  sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
  rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
@@ -1687,11 +1689,14 @@ worktree's shared Git metadata is mounted read-only at its original absolute
 path so hatch-vcs, tests, and scanners resolve the candidate commit without
 granting container write access to repository metadata.
 
-The host launcher opens the runner and its sourced shell helper with a
-no-follow path walk. It limits each read to 1 MiB. It compares the bytes and
-file modes with the immutable implementation-source tree. The launcher then
-executes anonymous snapshots of those exact bytes and closes all descriptors.
-A changed or unsafe candidate runner cannot authorize native fallback.
+The implementation stage submits only the fixed command and the source
+revision in a `BuildTestJob`. The closed worker resolves the system
+executables and starts the host launcher. The launcher opens the runner and
+its sourced shell helper with a no-follow path walk. It limits each read to 1
+MiB. It compares the bytes and file modes with the immutable
+implementation-source tree. The launcher then executes anonymous snapshots of
+those exact bytes and closes all descriptors. A changed or unsafe candidate
+runner cannot authorize native fallback.
 
 `--run-pre-pr-tests` remains an opt-in fallback for repositories without an
 automatic profile. Its vetted default is

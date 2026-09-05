@@ -8,7 +8,6 @@ import queue
 import shlex
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
@@ -2864,8 +2863,8 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv[:3] == (str(Path(sys.executable).resolve()), "-I", "-c")
-        assert result.job.argv[-4:] == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.verified_runner_source_revision == ""
         assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
 
@@ -2891,8 +2890,8 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv[:3] == (str(Path(sys.executable).resolve()), "-I", "-c")
-        assert result.job.argv[-4:] == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.verified_runner_source_revision == ""
 
     @pytest.mark.parametrize("candidate_kind", ["modified", "symlink"])
     @patch(_IMPLEMENTATION_PLATFORM, "darwin")
@@ -2944,6 +2943,7 @@ class TestTestsAndFix:
 
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
+        assert request.job.verified_runner_source_revision == trusted_revision
         pool = WorkerPool(
             size=1,
             shutdown=threading.Event(),
@@ -3009,12 +3009,7 @@ class TestTestsAndFix:
         def host_executable(name: str) -> str:
             return str(fake_bin / "git") if name == "git" else host_bash
 
-        with patch.object(
-            implementation_module,
-            "_trusted_host_executable",
-            side_effect=host_executable,
-        ):
-            request = stage.step(item, ctx)
+        request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
         pool = WorkerPool(
             size=1,
@@ -3023,7 +3018,11 @@ class TestTestsAndFix:
             lock_dir=tmp_path / "locks",
         )
         try:
-            result = pool._run(request.job)
+            with patch(
+                "hephaestus.automation.verified_runner._trusted_host_executable",
+                side_effect=host_executable,
+            ):
+                result = pool._run(request.job)
         finally:
             pool.shutdown(mark_interrupted=False)
 
@@ -4878,12 +4877,8 @@ class TestFullWalks:
             "pre_pr_tests_native_fallback",
             "commit_push",
         ]
-        assert pool.submitted[2].job.argv[:3] == (
-            str(Path(sys.executable).resolve()),
-            "-I",
-            "-c",
-        )
-        assert pool.submitted[2].job.argv[-4:] == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[2].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[2].job.verified_runner_source_revision == ""
         assert pool.submitted[3].job.argv == PRE_PR_TEST_ARGV
         assert item.pr == 1001
         assert (
