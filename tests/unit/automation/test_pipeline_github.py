@@ -219,12 +219,16 @@ def test_issue_body_editor_must_match_authenticated_viewer(
 
     assert adapter.issue_body_edited_by_viewer(2795) is expected
 
-    variables = dict(
-        argument.split("=", 1)
-        for argument in calls[0]
-        if argument.startswith(("owner=", "name=", "number="))
-    )
-    assert variables == {"owner": "org", "name": "repo", "number": "2795"}
+    graphql_variables = [
+        (option, argument)
+        for option, argument in zip(calls[0], calls[0][1:], strict=False)
+        if option in {"-f", "-F"} and not argument.startswith("query=")
+    ]
+    assert graphql_variables == [
+        ("-f", "owner=org"),
+        ("-f", "name=repo"),
+        ("-F", "number=2795"),
+    ]
 
 
 @pytest.mark.parametrize("issue_number", [0, -1, True, 1.5, "2795"])
