@@ -16,14 +16,18 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock, call
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.admission import PlanFileClaim
+from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
     PipelineConfig,
@@ -52,6 +56,10 @@ from hephaestus.automation.pipeline.routing import (
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
+from hephaestus.automation.pipeline.stages.repo import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+)
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.resilience import (
@@ -1543,6 +1551,104 @@ class TestFailBackRouting:
 
 class TestImplementationAdmission:
     """Topological order + file-overlap reuse for the implementation queue."""
+
+    def test_direct_writer_completion_dispatches_implementation_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A promoted direct writer reaches the bound implementation agent."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            serialize_file_overlap=False,
+        )
+        base_revision = "a" * 40
+        nonce = "b" * 32
+        branch = f"7-auto-impl-direct-{nonce}"
+        writer_path = tmp_path / "repo-a" / "build" / ".worktrees" / "source" / "issue-7-impl"
+        writer_path.mkdir(parents=True)
+        binding = WorkspaceBinding.source(
+            cwd=writer_path,
+            reusable_root=tmp_path / "repo-a",
+            repository="repo-a",
+            ownership_key="repo-a:7:impl",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision=base_revision,
+            generation=2,
+            detached=False,
+        )
+        prepare_source = MagicMock(return_value=binding)
+        source_manager = SimpleNamespace(prepare=prepare_source)
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=7,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=branch,
+            payload={
+                DIRECT_SCOPE_BASE_SHA_KEY: base_revision,
+                "issue_title": "Promote the direct writer",
+                "issue_body": "Dispatch from the promoted workspace.",
+            },
+        )
+        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        worktree_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 7, "branch_name": branch},
+        )
+        worktree_handle = JobHandle(
+            job=worktree_job,
+            on_done_state="DIRTY_DECISION_WAIT",
+        )
+        coordinator.in_flight[worktree_handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+
+        coordinator._handle_completion(
+            worktree_handle,
+            JobResult(
+                ok=True,
+                value={
+                    "path": str(writer_path),
+                    "impl_source_revision": base_revision,
+                    "direct_scope_reservation": {
+                        "branch": branch,
+                        "base_sha": base_revision,
+                    },
+                },
+            ),
+        )
+
+        assert item.worktree == str(writer_path)
+        assert item.payload["_impl_source_revision"] == base_revision
+        assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == {
+            "branch": branch,
+            "base_sha": base_revision,
+        }
+        advice_handle, advice_result = coordinator.completion_q.get_nowait()
+        assert coordinator.in_flight[advice_handle] is item
+        assert isinstance(advice_handle.job, AthenaSkillJob)
+
+        coordinator._handle_completion(advice_handle, advice_result)
+
+        implementation_handle = next(iter(coordinator.in_flight))
+        assert isinstance(implementation_handle.job, AgentJob)
+        assert implementation_handle.job.descr == "implement"
+        assert implementation_handle.job.issue == 7
+        assert implementation_handle.job.cwd == writer_path
+        assert implementation_handle.job.workspace == binding
+        assert implementation_handle.job.workspace.revision == base_revision
+        expected_prepare = call(
+            7,
+            SourceLane.IMPLEMENTATION,
+            base_revision,
+            branch=branch,
+        )
+        assert prepare_source.call_args_list == [expected_prepare, expected_prepare]
+        assert item.state == "IMPLEMENT_WAIT"
+        assert item.result is None
 
     def test_relative_writer_path_matches_an_absolute_git_holder(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
