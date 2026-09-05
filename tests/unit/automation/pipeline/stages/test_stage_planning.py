@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 import hephaestus.automation.github_api as github_api_mod
-import hephaestus.automation.pipeline.stages.planning as planning_mod
 import hephaestus.automation.pipeline_github as pg
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
@@ -23,6 +22,7 @@ from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, Ath
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stage_results import Continue, JobRequest
+from hephaestus.automation.pipeline.stages import planning as planning_mod
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     _mark_published_plan_pending_review,
