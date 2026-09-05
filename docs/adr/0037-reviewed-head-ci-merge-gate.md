@@ -36,10 +36,12 @@ exact-head Check Runs ────────► current CI merge gate
 3. No unresolved review thread exists, and the base branch has enforced
    conversation resolution.
 4. The Check Runs endpoint is read for the reviewed commit. The complete
-   response must contain at least one successful run. Every run must identify
-   the reviewed commit, have status `completed`, and have conclusion `success`,
-   `neutral`, or `skipped`. Empty, malformed, pending, failed, stale, or
-   changing evidence fails closed.
+   response must contain every effective required Check Run. Each required run
+   must identify the reviewed commit, have status `completed`, and have
+   conclusion `success`, `neutral`, or `skipped`. The required runs must
+   include at least one `success` conclusion. Empty, malformed, pending,
+   failed, stale, or changing required evidence fails closed. A non-required
+   Check Run does not decide this gate.
 5. The queue sends one normal REST merge request with `sha=<reviewed head>` and
    `merge_method=squash`. The request is the only merge-state mutation owned by
    the queue. The queue does not enable or manage native auto-merge.
@@ -63,10 +65,12 @@ thread and scope processing.
 
 ## Consequences
 
-The single-maintainer workflow can merge a reviewed green head without a second
-GitHub user. Head drift, missing or failed Check Runs, unresolved threads,
-untrusted PR state, and incomplete reads still stop the merge path. A process
-restart still loses the process-local proof and sends the PR through fresh
-review. The existing explicit operator-authorization implementation remains
-available only to compatibility and review-data callers; it is not part of
-the queue merge decision.
+The single-maintainer workflow can merge a reviewed head with green required
+checks without a second GitHub user. Head drift, missing or failed required
+Check Runs, unresolved threads, untrusted PR state, and incomplete reads still
+stop the merge path. A non-required failed Check Run can produce an `UNSTABLE`
+merge state, but does not stop this gate. A process restart still loses the
+process-local proof and sends the PR through fresh review. The existing
+explicit operator-authorization implementation remains available only to
+compatibility and review-data callers; it is not part of the queue merge
+decision.
