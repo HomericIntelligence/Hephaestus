@@ -25,8 +25,19 @@ SHA = "a" * 40
 UPSTREAM_METADATA = RepositoryMetadata(
     slug=UPSTREAM_SLUG,
     default_branch="main",
-    head_sha=SHA,
 )
+
+
+def test_target_head_sha_remains_optional_informational_provenance() -> None:
+    target = MnemosyneTarget(
+        owner="HomericIntelligence",
+        slug=UPSTREAM_SLUG,
+        is_fork_of_upstream=False,
+        default_branch="main",
+        head_sha=SHA,
+    )
+
+    assert target.head_sha == SHA
 
 
 def _repo_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
@@ -36,7 +47,6 @@ def _repo_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata
     return RepositoryMetadata(
         slug=slug,
         default_branch="trunk",
-        head_sha="b" * 40,
         is_fork=True,
         parent_full_name=UPSTREAM_SLUG,
     )
@@ -75,7 +85,7 @@ def test_current_repository_metadata_reads_owner_type_when_repo_view_omits_it() 
     gh_json.assert_called_once_with(["api", "users/HomericIntelligence"])
 
 
-def test_repository_metadata_reads_default_head_ref_when_repo_view_omits_oid() -> None:
+def test_repository_metadata_only_requires_the_default_branch() -> None:
     with (
         patch.object(
             mnemosyne_repo,
@@ -89,13 +99,29 @@ def test_repository_metadata_reads_default_head_ref_when_repo_view_omits_oid() -
         patch.object(
             mnemosyne_repo,
             "_gh_json",
-            return_value={"object": {"sha": SHA}},
+            side_effect=AssertionError("a commit lookup is not permitted"),
         ) as gh_json,
     ):
         metadata = fetch_repository_metadata(UPSTREAM_SLUG)
 
     assert metadata == UPSTREAM_METADATA
-    gh_json.assert_called_once_with(["api", f"repos/{UPSTREAM_SLUG}/git/ref/heads/main"])
+    gh_json.assert_not_called()
+
+
+def test_repository_metadata_retains_an_included_head_as_provenance() -> None:
+    with patch.object(
+        mnemosyne_repo,
+        "_repo_view_json",
+        return_value={
+            "defaultBranchRef": {"name": "main", "target": {"oid": SHA}},
+            "isFork": False,
+            "parent": None,
+        },
+    ):
+        metadata = fetch_repository_metadata(UPSTREAM_SLUG)
+
+    assert metadata is not None
+    assert metadata.head_sha == SHA
 
 
 def test_explicit_owner_argument_skips_current_repo_probe(
@@ -115,7 +141,6 @@ def test_explicit_owner_argument_skips_current_repo_probe(
         slug="acme/Mnemosyne",
         is_fork_of_upstream=True,
         default_branch="trunk",
-        head_sha="b" * 40,
         trust_basis=MnemosyneTrustBasis.EXPLICIT_OVERRIDE,
     )
     current.assert_not_called()
@@ -142,7 +167,6 @@ def test_maintained_organization_fork_wins_before_canonical_upstream() -> None:
     assert target.slug == "HomericLab/Mnemosyne"
     assert target.trust_basis == MnemosyneTrustBasis.MAINTAINED_ORGANIZATION_FORK
     assert target.default_branch == "trunk"
-    assert target.head_sha == "b" * 40
 
 
 @pytest.mark.parametrize(
@@ -163,7 +187,6 @@ def test_ineligible_current_owner_falls_back_to_canonical_upstream(
 
     assert target.slug == UPSTREAM_SLUG
     assert target.trust_basis == MnemosyneTrustBasis.CANONICAL_UPSTREAM
-    assert target.head_sha == SHA
 
 
 def test_missing_or_unproven_organization_fork_falls_back_to_canonical_upstream() -> None:

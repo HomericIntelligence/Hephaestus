@@ -1723,11 +1723,16 @@ exception through `PATH`.
 
 The loop passes this admitted executable to its worker Git operations and its
 host-owned Mnemosyne binding. Each remote Git command uses an isolated child
-environment and a command-scoped `gh auth git-credential` helper. A missing
-helper or a failed fetch stops the operation. The loop does not continue with a
-stale remote-tracking ref, and its diagnostic does not copy remote command
-output. The summary retains only an allowed remote authentication, identity, or
-transport failure class.
+environment and a command-scoped `gh auth git-credential` helper. The binding
+tries to fast-forward the clean checkout to the trusted default branch. A
+missing helper or an update failure does not block an available local release.
+The binding reads the release version from committed project metadata and
+records the local commit only as provenance. It does not require that commit to
+match a remote branch head. If repository resolution is unavailable, an
+existing clean checkout with the exact canonical origin remains usable. An
+unverified fork does not use this fallback. A missing checkout still requires
+a successful clone. See
+[ADR-0037](adr/0037-version-bound-mnemosyne-checkout.md).
 
 All model options accept `MODEL[:EFFORT]`. The final nonempty colon segment is
 a free-form effort value. The runtime maps it to Codex
