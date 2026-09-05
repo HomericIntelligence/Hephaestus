@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
+import shlex
+import shutil
+import subprocess
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -48,11 +54,13 @@ from hephaestus.automation.pipeline.stages import (
 from hephaestus.automation.pipeline.stages.implementation import (
     BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
     GIT_ERROR_RETRY_CAP,
+    HEPHAESTUS_REQUIRED_CHECK_ARGV,
     PRE_PR_TEST_ARGV,
     ImplementationStage,
     build_implementation_prompt,
     build_test_fix_prompt,
 )
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
@@ -71,6 +79,114 @@ _DIRTY_CONTENT_SNAPSHOT = {
     "worktree_sha256": "2" * 64,
     "untracked_sha256": "3" * 64,
 }
+_IMPLEMENTATION_PLATFORM = "hephaestus.automation.pipeline.stages.implementation.sys.platform"
+
+
+def _committed_runner_fixture(tmp_path: Path, source: str) -> tuple[Path, str]:
+    """Create a repository with one executable runner at its trusted base."""
+    repo = tmp_path / "candidate"
+    runner = repo / "scripts" / "run_ci_local.sh"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(source, encoding="utf-8")
+    runner.chmod(0o755)
+    install_helpers = repo / "scripts" / "shell" / "lib" / "install_helpers.sh"
+    install_helpers.parent.mkdir(parents=True)
+    install_helpers.write_text("#!/bin/bash\n", encoding="utf-8")
+    install_helpers.chmod(0o644)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "scripts"], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=CI Test",
+            "-c",
+            "user.email=ci@example.invalid",
+            "commit",
+            "--no-gpg-sign",
+            "-q",
+            "-m",
+            "test: seed trusted runner",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    trusted_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return repo, trusted_revision
+
+
+def _write_runner_swap_git(
+    tmp_path: Path,
+    repo: Path,
+    *,
+    swap_kind: str,
+) -> tuple[Path, Path]:
+    """Write a Git proxy that replaces the runner after the tree lookup."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    swap_marker = tmp_path / "runner-swapped"
+    scripts = repo / "scripts"
+    runner = scripts / "run_ci_local.sh"
+    attack_source = (
+        "#!/bin/bash\n"
+        "printf '%s\\n' "
+        "'HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent' >&2\n"
+        "exit 75\n"
+    )
+    if swap_kind == "rename":
+        attack = repo / "attack-runner.sh"
+        attack.write_text(attack_source, encoding="utf-8")
+        attack.chmod(0o755)
+        swap_command = (
+            f"mv -- {shlex.quote(str(runner))} {shlex.quote(str(repo / 'trusted-runner.sh'))}\n"
+            f"mv -- {shlex.quote(str(attack))} {shlex.quote(str(runner))}\n"
+        )
+    elif swap_kind == "ancestor-symlink":
+        attack_scripts = repo / "attack-scripts"
+        attack_scripts.mkdir()
+        attack = attack_scripts / "run_ci_local.sh"
+        attack.write_text(attack_source, encoding="utf-8")
+        attack.chmod(0o755)
+        swap_command = (
+            f"mv -- {shlex.quote(str(scripts))} {shlex.quote(str(repo / 'trusted-scripts'))}\n"
+            f"ln -s -- {shlex.quote(str(attack_scripts))} {shlex.quote(str(scripts))}\n"
+        )
+    else:
+        attack_shell = repo / "attack-shell"
+        (attack_shell / "lib").mkdir(parents=True)
+        attack = attack_shell / "lib" / "install_helpers.sh"
+        attack.write_text(attack_source, encoding="utf-8")
+        attack.chmod(0o644)
+        shell = scripts / "shell"
+        swap_command = (
+            f"mv -- {shlex.quote(str(shell))} {shlex.quote(str(scripts / 'trusted-shell'))}\n"
+            f"ln -s -- {shlex.quote(str(attack_shell))} {shlex.quote(str(shell))}\n"
+        )
+
+    proxy = fake_bin / "git"
+    proxy.write_text(
+        "#!/bin/bash\n"
+        "set -uo pipefail\n"
+        f'{shlex.quote(real_git)} "$@"\n'
+        "status=$?\n"
+        f"if [[ \"${{1:-}}\" == 'ls-tree' && ! -e {shlex.quote(str(swap_marker))} ]]; then\n"
+        f"  touch -- {shlex.quote(str(swap_marker))}\n"
+        + "  "
+        + swap_command.replace("\n", "\n  ").rstrip()
+        + "\nfi\n"
+        'exit "${status}"\n',
+        encoding="utf-8",
+    )
+    proxy.chmod(0o755)
+    return fake_bin, swap_marker
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
@@ -2747,12 +2863,8 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == (
-            "bash",
-            "scripts/run_ci_local.sh",
-            "all",
-            "--rebuild",
-        )
+        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.verified_runner_source_revision == ""
         assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
 
@@ -2778,12 +2890,249 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == (
-            "bash",
-            "scripts/run_ci_local.sh",
-            "all",
-            "--rebuild",
+        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.verified_runner_source_revision == ""
+
+    @pytest.mark.parametrize("candidate_kind", ["modified", "symlink"])
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_candidate_runner_protocol_cannot_authorize_native_fallback(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        candidate_kind: str,
+    ) -> None:
+        """Candidate runner bytes cannot authorize the Darwin fallback."""
+        repo, trusted_revision = _committed_runner_fixture(
+            tmp_path,
+            "#!/bin/bash\nexit 0\n",
         )
+        runner = repo / "scripts" / "run_ci_local.sh"
+        candidate_source = (
+            "#!/bin/bash\n"
+            "printf '%s\\n' "
+            "'HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent' >&2\n"
+            "exit 75\n"
+        )
+        if candidate_kind == "modified":
+            runner.write_text(candidate_source, encoding="utf-8")
+            runner.chmod(0o755)
+        else:
+            candidate_runner = repo / "candidate-runner.sh"
+            candidate_runner.write_text(candidate_source, encoding="utf-8")
+            candidate_runner.chmod(0o755)
+            runner.unlink()
+            runner.symlink_to(candidate_runner)
+
+        direct = subprocess.run(
+            ["bash", str(runner)],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert direct.returncode == 75
+        assert direct.stderr == ("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n")
+
+        github = FakeStageGitHub(labels=["state:plan-go"])
+        ctx = make_ctx(org="HomericIntelligence", github=github)
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.worktree = str(repo)
+        item.payload["_impl_source_revision"] = trusted_revision
+        stage = ImplementationStage()
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.job.verified_runner_source_revision == trusted_revision
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert result.error == "rc=1"
+        assert result.stderr_tail.endswith(
+            "The candidate CI runner cannot authorize native fallback.\n"
+        )
+        stage.on_job_done(item, result, ctx)
+        item.state = "COMMIT_PUSH_WAIT"
+
+        assert stage.step(item, ctx) == Continue(next_state="TESTFIX_WAIT")
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
+        assert github.mutation_log == []
+
+    @pytest.mark.parametrize(
+        "swap_kind",
+        ["rename", "ancestor-symlink", "helper-ancestor-symlink"],
+    )
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_runner_swap_cannot_authorize_or_publish(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        swap_kind: str,
+    ) -> None:
+        """A runner path swap cannot authorize fallback or publication."""
+        trusted_source = "#!/bin/bash\nexit 23\n"
+        if swap_kind == "helper-ancestor-symlink":
+            trusted_source = (
+                "#!/bin/bash\n"
+                'if [[ -n "${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD:-}" ]]; then\n'
+                '  source "/dev/fd/${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD}"\n'
+                "else\n"
+                "  source scripts/shell/lib/install_helpers.sh\n"
+                "fi\n"
+                "exit 23\n"
+            )
+        repo, trusted_revision = _committed_runner_fixture(tmp_path, trusted_source)
+        fake_bin, swap_marker = _write_runner_swap_git(
+            tmp_path,
+            repo,
+            swap_kind=swap_kind,
+        )
+        github = FakeStageGitHub(labels=["state:plan-go"])
+        ctx = make_ctx(org="HomericIntelligence", github=github)
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.worktree = str(repo)
+        item.payload["_impl_source_revision"] = trusted_revision
+        stage = ImplementationStage()
+        host_bash = shutil.which("bash", path=os.defpath)
+        assert host_bash is not None
+
+        def host_executable(name: str) -> str:
+            return str(fake_bin / "git") if name == "git" else host_bash
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            with patch(
+                "hephaestus.automation.verified_runner._trusted_host_executable",
+                side_effect=host_executable,
+            ):
+                result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert swap_marker.is_file()
+        assert result.error == "rc=23"
+        assert "HEPHAESTUS_CI_RUNNER_FAILURE" not in result.stderr_tail
+        stage.on_job_done(item, result, ctx)
+        item.state = "COMMIT_PUSH_WAIT"
+
+        next_step = stage.step(item, ctx)
+        assert next_step == Continue(next_state="TESTFIX_WAIT")
+        assert not isinstance(next_step, JobRequest)
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
+        assert item.payload.get("pre_pr_fallback_reason") is None
+        assert item.pr is None
+        assert github.mutation_log == []
+
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_candidate_python_module_cannot_bypass_runner_snapshot(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """Candidate Python imports cannot bypass the trusted launcher."""
+        repo, trusted_revision = _committed_runner_fixture(
+            tmp_path,
+            "#!/bin/bash\nexit 23\n",
+        )
+        (repo / "hashlib.py").write_text(
+            (
+                "import sys\n"
+                'print("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent", '
+                "file=sys.stderr)\n"
+                "raise SystemExit(75)\n"
+            ),
+            encoding="utf-8",
+        )
+        github = FakeStageGitHub(labels=["state:plan-go"])
+        ctx = make_ctx(org="HomericIntelligence", github=github)
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.worktree = str(repo)
+        item.payload["_impl_source_revision"] = trusted_revision
+        stage = ImplementationStage()
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert result.error == "rc=23"
+        assert "HEPHAESTUS_CI_RUNNER_FAILURE" not in result.stderr_tail
+        stage.on_job_done(item, result, ctx)
+        item.state = "COMMIT_PUSH_WAIT"
+
+        next_step = stage.step(item, ctx)
+        assert next_step == Continue(next_state="TESTFIX_WAIT")
+        assert not isinstance(next_step, JobRequest)
+        assert item.payload["pre_pr_runner_mode"] == "container"
+        assert item.pr is None
+        assert github.mutation_log == []
+
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_trusted_runner_protocol_preserves_native_fallback(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """An unchanged trusted runner can request the Darwin fallback."""
+        repo, trusted_revision = _committed_runner_fixture(
+            tmp_path,
+            (
+                "#!/bin/bash\n"
+                "printf '%s\\n' "
+                "'HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent' >&2\n"
+                "exit 75\n"
+            ),
+        )
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.worktree = str(repo)
+        item.payload["_impl_source_revision"] = trusted_revision
+        stage = ImplementationStage()
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert result.error == "rc=75", (result.stdout_tail, result.stderr_tail)
+        stage.on_job_done(item, result, ctx)
+        item.state = "COMMIT_PUSH_WAIT"
+
+        assert stage.step(item, ctx) == Continue(next_state="TEST_WAIT")
+        assert item.payload["pre_pr_runner_mode"] == "native"
 
     def test_hephaestus_required_checks_honor_explicit_timeout_override(
         self, make_ctx: Any, make_work_item: Any
@@ -2907,30 +3256,347 @@ class TestTestsAndFix:
         assert isinstance(result, Continue)
         assert result.next_state == "TESTFIX_WAIT"
 
-    def test_runner_failure_ends_without_testfix(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A marked host runner failure fails closed without an agent repair attempt."""
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "container-engine-absent",
+            "container-engine-unavailable",
+            "container-start-failed",
+        ],
+    )
+    def test_exact_container_handoff_uses_fixed_native_command(
+        self, make_ctx: Any, make_work_item: Any, reason: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The exact Darwin protocol selects and reports the fixed native command."""
         stage = ImplementationStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, state="TEST_WAIT")
+        ctx = make_ctx(
+            org="HomericIntelligence",
+            config_overrides={"pre_pr_test_argv": ("pytest", "tests/custom", "-q")},
+        )
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
 
+        initial = stage.step(item, ctx)
+        assert isinstance(initial, JobRequest)
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=(
+                        "[CI] Container engine is unavailable.\n"
+                        f"HEPHAESTUS_CI_RUNNER_FAILURE: {reason}\n"
+                    ),
+                    error="rc=75",
+                ),
+                ctx,
+            )
+            item.state = "COMMIT_PUSH_WAIT"
+            transition = stage.step(item, ctx)
+            assert transition == Continue(next_state="TEST_WAIT")
+            item.state = transition.next_state
+            native = stage.step(item, ctx)
+
+        assert isinstance(native, JobRequest)
+        assert isinstance(native.job, BuildTestJob)
+        assert native.job.argv == PRE_PR_TEST_ARGV
+        assert native.job.descr == "pre_pr_tests_native_fallback"
+        assert item.payload["pre_pr_runner_mode"] == "native"
+        assert item.payload["pre_pr_fallback_reason"] == reason
+        assert f"runner failure={reason}" in caplog.text
+        assert "platform=darwin" in caplog.text
+        assert f"command={shlex.join(PRE_PR_TEST_ARGV)}" in caplog.text
+
+    def test_native_mode_remains_transition_authority_after_restart(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Durable native mode requests its test after a process restart."""
+        item = make_work_item(issue=1, repo="Hephaestus", state="COMMIT_PUSH_WAIT")
+        item.payload["pre_pr_runner_mode"] = "native"
+        item.payload["pre_pr_fallback_reason"] = "container-start-failed"
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            result = ImplementationStage().step(item, make_ctx(org="HomericIntelligence"))
+
+        assert result == Continue(next_state="TEST_WAIT")
+
+    @pytest.mark.parametrize("state", ["COMMIT_PUSH_WAIT", "TEST_WAIT"])
+    def test_persisted_native_mode_is_rejected_on_non_darwin(
+        self, make_ctx: Any, make_work_item: Any, state: str
+    ) -> None:
+        """A different platform cannot reuse a Darwin fallback decision."""
+        item = make_work_item(issue=1, repo="Hephaestus", state=state)
+        item.payload["pre_pr_runner_mode"] = "native"
+        item.payload["pre_pr_fallback_reason"] = "container-start-failed"
+
+        with patch(_IMPLEMENTATION_PLATFORM, "linux"):
+            result = ImplementationStage().step(item, make_ctx(org="HomericIntelligence"))
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "pre_pr_runner_unavailable",
+        )
+
+    @pytest.mark.parametrize(
+        ("stderr_tail", "error", "value"),
+        [
+            ("", "rc=75", None),
+            ("HEPHAESTUS_CI_RUNNER_FAILURE: unknown\n", "rc=75", None),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n"
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n",
+                "rc=75",
+                None,
+            ),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent",
+                "rc=75",
+                None,
+            ),
+            ("HEPHAESTUS_CI_RUNNER_FAIL", "rc=75", None),
+            (
+                "embedded HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n",
+                "rc=75",
+                None,
+            ),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\nlater diagnostic\n",
+                "rc=75",
+                None,
+            ),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n",
+                "rc=1",
+                None,
+            ),
+            ("", "timeout", None),
+            ("", "FileNotFoundError: runner executable is absent", None),
+            ("", "host_verification_failed", {"failure_kind": "runner"}),
+        ],
+    )
+    def test_malformed_and_worker_failures_cannot_authorize_native_mode(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        stderr_tail: str,
+        error: str,
+        value: object,
+    ) -> None:
+        """Malformed output, timeouts, and worker errors stay blocking."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(ok=False, value=value, stderr_tail=stderr_tail, error=error),
+                ctx,
+            )
+        item.state = "COMMIT_PUSH_WAIT"
+
+        assert stage.step(item, ctx) == Continue(next_state="TESTFIX_WAIT")
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
+
+    def test_stdout_marker_cannot_authorize_or_forge_a_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Process output cannot create a transition or receipt."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        marker = "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent"
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stdout_tail=marker,
+                    stderr_tail=f"{marker}\n",
+                    error="rc=75",
+                ),
+                ctx,
+            )
+
+        assert item.payload["tests_failed"] is True
+
+        item = make_work_item(issue=2, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        item.payload["test_command"] = "attacker-controlled command"
         stage.on_job_done(
             item,
-            JobResult(
-                ok=False,
-                value=1,
-                stderr_tail="HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable",
-                error="rc=1",
-            ),
+            JobResult(ok=True, stdout_tail=f"HEPHAESTUS_CI_RUNNER_FALLBACK: {marker}"),
+            ctx,
+        )
+        assert item.payload["test_receipt"] == (
+            "`bash scripts/run_ci_local.sh all --rebuild` — passed"
+        )
+
+    @pytest.mark.parametrize("platform", ["linux", "win32"])
+    def test_non_darwin_exact_handoff_finishes_runner_unavailable(
+        self, make_ctx: Any, make_work_item: Any, platform: str
+    ) -> None:
+        """A valid non-Darwin signal fails closed without a test-fix run."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        with patch(_IMPLEMENTATION_PLATFORM, platform):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n"),
+                    error="rc=75",
+                ),
+                ctx,
+            )
+
+        item.state = "COMMIT_PUSH_WAIT"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "pre_pr_runner_unavailable",
+        )
+        assert "tests_failed" not in item.payload
+        assert item.payload["pre_pr_runner_mode"] == "container"
+
+    def test_configured_non_container_command_cannot_authorize_native_mode(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only the canonical container command can request native mode."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
+        item = make_work_item(issue=1, state="TEST_WAIT")
+        stage.step(item, ctx)
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n"),
+                    error="rc=75",
+                ),
+                ctx,
+            )
+
+        assert item.payload["tests_failed"] is True
+
+    def test_worker_subprocess_start_failure_is_blocking(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """The production worker start-error result cannot authorize native mode."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path,
+        )
+        try:
+            with patch(
+                "hephaestus.automation.pipeline.worker_pool.subprocess.run",
+                side_effect=FileNotFoundError("runner executable is absent"),
+            ):
+                result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert result.error == "FileNotFoundError: runner executable is absent"
+        stage.on_job_done(item, result, ctx)
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
+
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_native_fallback_failure_blocks_commit_and_pr(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A native fallback failure still routes to test repair."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+
+        initial = stage.step(item, ctx)
+        assert isinstance(initial, JobRequest)
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable\n"),
+                    error="rc=75",
+                ),
+                ctx,
+            )
+        item.state = "COMMIT_PUSH_WAIT"
+        transition = stage.step(item, ctx)
+        assert transition == Continue(next_state="TEST_WAIT")
+        item.state = "TEST_WAIT"
+        fallback = stage.step(item, ctx)
+        assert isinstance(fallback, JobRequest)
+
+        item.state = "TEST_WAIT"
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, value=23, stdout_tail="FAILED native check"),
             ctx,
         )
         item.state = "COMMIT_PUSH_WAIT"
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
-        assert result.note == "pre_pr_runner_unavailable"
-        assert "tests_failed" not in item.payload
-        assert "container-engine-unavailable" in item.payload["pre_pr_runner_error"]
+        assert isinstance(result, Continue)
+        assert result.next_state == "TESTFIX_WAIT"
+        assert item.payload["tests_failed"] is True
+
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_native_mode_persists_through_test_fix_rerun(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A test fix reruns the fixed native command, not the container command."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-start-failed\n"),
+                    error="rc=75",
+                ),
+                ctx,
+            )
+        item.state = "COMMIT_PUSH_WAIT"
+        assert stage.step(item, ctx) == Continue(next_state="TEST_WAIT")
+        item.state = "TEST_WAIT"
+        first_native = stage.step(item, ctx)
+        assert isinstance(first_native, JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, stdout_tail="FAILED native verification", error="rc=23"),
+            ctx,
+        )
+        item.state = "COMMIT_PUSH_WAIT"
+        assert stage.step(item, ctx) == Continue(next_state="TESTFIX_WAIT")
+        item.state = "TESTFIX_WAIT"
+        fix = stage.step(item, ctx)
+        assert isinstance(fix, JobRequest)
+        stage.on_job_done(item, JobResult(ok=True, value="fixed"), ctx)
+        item.state = "TEST_WAIT"
+
+        second_native = stage.step(item, ctx)
+        assert isinstance(second_native, JobRequest)
+        assert second_native.job.argv == PRE_PR_TEST_ARGV
+        assert second_native.job.descr == "pre_pr_tests_native_fallback"
 
     def test_green_tests_clear_failure_state(self, make_ctx: Any, make_work_item: Any) -> None:
         """A green run clears any prior failure payload."""
@@ -4167,6 +4833,58 @@ class TestFullWalks:
             "commit_push",
         ]
         assert item.attempts["test_fix"] == 1
+
+    def test_macos_handoff_walk_publishes_host_owned_native_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A complete handoff uses native checks before commit and PR creation."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=["state:plan-go"])
+        ctx = make_ctx(
+            org="HomericIntelligence",
+            github=github,
+            config_overrides={
+                "no_advise": True,
+                "pre_pr_test_argv": ("pytest", "tests/unsafe-override", "-q"),
+            },
+        )
+        item = make_work_item(issue=7, repo="Hephaestus", state="ENTER")
+        pool = FakeWorkerPool()
+        pool.script(
+            JobResult(ok=True, value={"path": "/tmp/wt7", "dirty": False}),
+            JobResult(ok=True, value="implemented"),
+            JobResult(
+                ok=False,
+                stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-start-failed\n"),
+                error="rc=75",
+            ),
+            JobResult(
+                ok=True,
+                stdout_tail=("HEPHAESTUS_CI_RUNNER_FALLBACK: attacker-controlled-reason"),
+            ),
+            JobResult(ok=True, value=True),
+        )
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            outcome = _drive(stage, item, ctx, pool)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+        assert [handle.job.descr for handle in pool.submitted] == [
+            "create_worktree",
+            "implement",
+            "pre_pr_tests",
+            "pre_pr_tests_native_fallback",
+            "commit_push",
+        ]
+        assert pool.submitted[2].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[2].job.verified_runner_source_revision == ""
+        assert pool.submitted[3].job.argv == PRE_PR_TEST_ARGV
+        assert item.pr == 1001
+        assert (
+            "`uv run pytest tests -q --tb=short` — passed "
+            "(native fallback after container-start-failed)" in github.prs[1001]["body"]
+        )
 
     def test_walk_agent_error_retry_then_exhaustion(
         self, make_ctx: Any, make_work_item: Any

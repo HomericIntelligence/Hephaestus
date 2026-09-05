@@ -86,6 +86,7 @@ from hephaestus.automation.remote_git import (
 )
 from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -2105,6 +2106,7 @@ class WorkerPool:
                         json.dumps(job.argv, separators=(",", ":")).encode()
                     ).hexdigest(),
                     "expected_head_sha": job.expected_head_sha,
+                    "verified_runner_source_revision": job.verified_runner_source_revision,
                     "succeeded": result.ok,
                     "tested_patch_sha256": (
                         _evidence_patch_digest(job.cwd)
@@ -2415,9 +2417,15 @@ class WorkerPool:
             if not _is_full_commit_sha(job.expected_head_sha):
                 return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
             return self._run_immutable_build_test(job)
+        argv = job.argv
+        if job.verified_runner_source_revision is not None:
+            argv = build_verified_runner_argv(
+                job.argv,
+                job.verified_runner_source_revision,
+            )
         try:
             result = subprocess.run(
-                job.argv,
+                argv,
                 cwd=str(job.cwd),
                 capture_output=True,
                 text=True,
