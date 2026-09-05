@@ -449,7 +449,7 @@ class SourceWorkspaceManager:
         receipt_path = self._receipt_path(item_number, lane)
         try:
             old = self._read_receipt(item_number, lane)
-        except SourceWorkspaceError as exc:
+        except (OSError, UnicodeError, subprocess.SubprocessError, SourceWorkspaceError) as exc:
             raise SourceWorkspaceError(
                 "implementation writer predecessor is unproven",
                 recovery=self._unproven_recovery(
@@ -538,7 +538,7 @@ class SourceWorkspaceManager:
             is_dirty = self._is_dirty(expected_path)
             physical_revision = self._head_revision(expected_path)
             physical_branch = self._head_branch(expected_path)
-        except SourceWorkspaceError as exc:
+        except (OSError, UnicodeError, subprocess.SubprocessError, SourceWorkspaceError) as exc:
             raise SourceWorkspaceError(
                 "implementation writer predecessor is unproven",
                 recovery=self._unproven_recovery(
@@ -632,7 +632,7 @@ class SourceWorkspaceManager:
             kind=kind,
             item_number=item_number,
             path=path.resolve(),
-            receipt_path=receipt_path.resolve(),
+            receipt_path=receipt_path.absolute(),
             manual_action=manual_action,
         )
 
@@ -862,13 +862,13 @@ class SourceWorkspaceManager:
 
     def _read_receipt(self, item_number: int, lane: SourceLane) -> SourceWorkspaceReceipt | None:
         path = self._receipt_path(item_number, lane)
-        if not path.exists():
-            return None
         if path.is_symlink():
             raise SourceWorkspaceError(f"refusing symlinked source receipt: {path}")
+        if not path.exists():
+            return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise SourceWorkspaceError(f"cannot read source workspace receipt: {path}") from exc
         if not isinstance(payload, dict):
             raise SourceWorkspaceError("source workspace receipt must be an object")

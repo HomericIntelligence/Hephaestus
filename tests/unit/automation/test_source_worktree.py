@@ -7,17 +7,26 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import implementation_writer, worktree_manager
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.stages import (
+    Disposition,
+    ImplementationStage,
+    StageContext,
+    StageOutcome,
+)
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
@@ -436,7 +445,7 @@ def test_direct_worker_preserves_existing_writer_without_receipt(tmp_path: Path)
     assert _git(writer, "branch", "--show-current") == ""
 
 
-@pytest.mark.parametrize("receipt_kind", ["malformed", "symlink"])
+@pytest.mark.parametrize("receipt_kind", ["malformed", "unreadable", "symlink"])
 def test_direct_writer_receipt_read_failure_has_unproven_recovery(
     tmp_path: Path, receipt_kind: str
 ) -> None:
@@ -452,6 +461,8 @@ def test_direct_writer_receipt_read_failure_has_unproven_recovery(
     receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
     if receipt_kind == "malformed":
         receipt_path.write_text("not-json\n", encoding="utf-8")
+    elif receipt_kind == "unreadable":
+        receipt_path.write_bytes(b"\xff\n")
     else:
         replacement = tmp_path / "replacement-receipt.json"
         replacement.write_text("{}\n", encoding="utf-8")
@@ -472,13 +483,24 @@ def test_direct_writer_receipt_read_failure_has_unproven_recovery(
     assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
     assert recovery.item_number == 9
     assert recovery.path == predecessor.cwd.resolve()
-    assert recovery.receipt_path == receipt_path.resolve()
+    assert recovery.receipt_path == receipt_path.absolute()
     assert "Inspect and preserve" in recovery.manual_action
     assert predecessor.cwd.exists()
     assert _git(predecessor.cwd, "symbolic-ref", "HEAD") == "refs/heads/old-writer-branch"
 
 
-def test_direct_writer_probe_failure_has_unproven_recovery(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        SourceWorkspaceError("probe failed"),
+        OSError("probe failed"),
+        subprocess.SubprocessError("probe failed"),
+    ],
+    ids=["workspace-error", "os-error", "subprocess-error"],
+)
+def test_direct_writer_probe_failure_has_unproven_recovery(
+    tmp_path: Path, probe_error: Exception
+) -> None:
     """A failed physical predecessor probe preserves the writer with recovery guidance."""
     repo, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
@@ -495,7 +517,7 @@ def test_direct_writer_probe_failure_has_unproven_recovery(tmp_path: Path) -> No
             patch.object(
                 manager,
                 "_is_dirty",
-                side_effect=SourceWorkspaceError("probe failed"),
+                side_effect=probe_error,
             ),
             pytest.raises(SourceWorkspaceError) as captured,
         ):
@@ -516,10 +538,11 @@ def test_direct_writer_probe_failure_has_unproven_recovery(tmp_path: Path) -> No
     assert predecessor.cwd.exists()
 
 
-def test_direct_worker_serializes_unproven_recovery_for_malformed_receipt(
-    tmp_path: Path,
+@pytest.mark.parametrize("receipt_kind", ["malformed", "unreadable", "symlink"])
+def test_direct_worker_serializes_unproven_recovery_for_unreadable_receipt(
+    tmp_path: Path, receipt_kind: str
 ) -> None:
-    """A direct worker returns durable recovery when its predecessor receipt is malformed."""
+    """A direct worker returns durable recovery when its predecessor receipt cannot be read."""
     repo, first, second = _repository(tmp_path)
     source_manager = SourceWorkspaceManager(repo, repository="example/project")
     predecessor = source_manager.prepare(
@@ -529,7 +552,15 @@ def test_direct_worker_serializes_unproven_recovery_for_malformed_receipt(
         branch="old-writer-branch",
     )
     receipt_path = source_manager._receipt_path(9, SourceLane.IMPLEMENTATION)
-    receipt_path.write_text("not-json\n", encoding="utf-8")
+    if receipt_kind == "malformed":
+        receipt_path.write_text("not-json\n", encoding="utf-8")
+    elif receipt_kind == "unreadable":
+        receipt_path.write_bytes(b"\xff\n")
+    else:
+        replacement = tmp_path / "replacement-receipt.json"
+        replacement.write_text("{}\n", encoding="utf-8")
+        receipt_path.unlink()
+        receipt_path.symlink_to(replacement)
 
     completion_q: CompletionQueue = queue.Queue()
     pool = WorkerPool(
@@ -580,6 +611,33 @@ def test_direct_worker_serializes_unproven_recovery_for_malformed_receipt(
     assert recovery["receipt_path"] == str(receipt_path)
     assert "Inspect and preserve" in recovery["manual_action"]
     assert predecessor.cwd.exists()
+
+    item = WorkItem(
+        repo="example/project",
+        kind=ItemKind.ISSUE,
+        issue=9,
+        stage=StageName.IMPLEMENTATION,
+        state="WORKTREE_WAIT",
+        branch="writer-branch",
+    )
+    context = StageContext(
+        config=PipelineConfig(org="example", repos=["project"]),
+        org="example",
+        dry_run=False,
+        github=cast(Any, MagicMock()),
+        paths=SimpleNamespace(repo_root=repo),
+    )
+    stage = ImplementationStage()
+    stage.on_job_done(item, result, context)
+    item.state = "DIRTY_DECISION_WAIT"
+
+    outcome = stage.step(item, context)
+
+    assert outcome == StageOutcome(
+        Disposition.FINISH_FAIL,
+        f"source_workspace_ownership:unproven_predecessor: {recovery['manual_action']}",
+    )
+    assert item.payload["source_workspace_recovery"] == recovery
 
 
 def test_direct_writer_preserves_attached_source_with_durable_obligations(
