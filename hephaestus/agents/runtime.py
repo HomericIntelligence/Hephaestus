@@ -35,6 +35,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.macos_sandbox import MacOSSandboxError, isolated_command
 from hephaestus.agents.model_selection import (
     CODEX_ROLE_MODEL_ALIASES,
     GPT_6_ASTRA,
@@ -45,7 +46,6 @@ from hephaestus.agents.model_selection import (
     resolve_codex_model_selection,
     validate_codex_role_model_reference,
 )
-from hephaestus.agents.macos_sandbox import MacOSSandboxError, isolated_command
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     package_tree_digest,
