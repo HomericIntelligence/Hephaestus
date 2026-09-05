@@ -436,6 +436,152 @@ def test_direct_worker_preserves_existing_writer_without_receipt(tmp_path: Path)
     assert _git(writer, "branch", "--show-current") == ""
 
 
+@pytest.mark.parametrize("receipt_kind", ["malformed", "symlink"])
+def test_direct_writer_receipt_read_failure_has_unproven_recovery(
+    tmp_path: Path, receipt_kind: str
+) -> None:
+    """A receipt that cannot be read preserves the writer with recovery guidance."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+    if receipt_kind == "malformed":
+        receipt_path.write_text("not-json\n", encoding="utf-8")
+    else:
+        replacement = tmp_path / "replacement-receipt.json"
+        replacement.write_text("{}\n", encoding="utf-8")
+        receipt_path.unlink()
+        receipt_path.symlink_to(replacement)
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            manager.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+    assert recovery.item_number == 9
+    assert recovery.path == predecessor.cwd.resolve()
+    assert recovery.receipt_path == receipt_path.resolve()
+    assert "Inspect and preserve" in recovery.manual_action
+    assert predecessor.cwd.exists()
+    assert _git(predecessor.cwd, "symbolic-ref", "HEAD") == "refs/heads/old-writer-branch"
+
+
+def test_direct_writer_probe_failure_has_unproven_recovery(tmp_path: Path) -> None:
+    """A failed physical predecessor probe preserves the writer with recovery guidance."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with (
+            patch.object(
+                manager,
+                "_is_dirty",
+                side_effect=SourceWorkspaceError("probe failed"),
+            ),
+            pytest.raises(SourceWorkspaceError) as captured,
+        ):
+            manager.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR
+    assert recovery.item_number == 9
+    assert recovery.path == predecessor.cwd.resolve()
+    assert recovery.receipt_path == receipt_path.resolve()
+    assert "Inspect and preserve" in recovery.manual_action
+    assert predecessor.cwd.exists()
+
+
+def test_direct_worker_serializes_unproven_recovery_for_malformed_receipt(
+    tmp_path: Path,
+) -> None:
+    """A direct worker returns durable recovery when its predecessor receipt is malformed."""
+    repo, first, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    receipt_path = source_manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+    receipt_path.write_text("not-json\n", encoding="utf-8")
+
+    completion_q: CompletionQueue = queue.Queue()
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+    )
+    job = GitJob(
+        repo="example/project",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 9,
+            "branch_name": "writer-branch",
+            "repo_root": str(repo),
+            "source_lane": SourceLane.IMPLEMENTATION.value,
+            "base_sha": second,
+        },
+    )
+
+    with (
+        patch.object(
+            pool,
+            "_prepare_direct_scope_worktree",
+            return_value=(second, "writer-branch"),
+        ),
+        patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ()),
+        ),
+        patch.object(WorktreeManager, "create_worktree", autospec=True) as create_worktree,
+    ):
+        pool.submit(job, StageName.REPO)
+        _, result = completion_q.get(timeout=10)
+
+    create_worktree.assert_not_called()
+    assert result.ok is False
+    assert result.error == (
+        "source_workspace_ownership_unavailable: implementation writer predecessor is unproven"
+    )
+    assert isinstance(result.value, dict)
+    recovery = result.value["source_workspace_recovery"]
+    assert recovery["kind"] == "unproven_predecessor"
+    assert recovery["item_number"] == 9
+    assert recovery["path"] == str(predecessor.cwd)
+    assert recovery["receipt_path"] == str(receipt_path)
+    assert "Inspect and preserve" in recovery["manual_action"]
+    assert predecessor.cwd.exists()
+
+
 def test_direct_writer_preserves_attached_source_with_durable_obligations(
     tmp_path: Path,
 ) -> None:

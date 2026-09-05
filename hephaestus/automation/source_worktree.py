@@ -446,12 +446,22 @@ class SourceWorkspaceManager:
             )
         except RuntimeError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
-        old = self._read_receipt(item_number, lane)
+        receipt_path = self._receipt_path(item_number, lane)
+        try:
+            old = self._read_receipt(item_number, lane)
+        except SourceWorkspaceError as exc:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is unproven",
+                recovery=self._unproven_recovery(
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            ) from exc
         self._reject_foreign_owner(old, item_number, lane)
         target = _git(self.repo_root, "rev-parse", f"{base_sha}^{{commit}}").stdout.strip()
         if target != base_sha:
             raise SourceWorkspaceError("direct implementation writer base is invalid")
-        receipt_path = self._receipt_path(item_number, lane)
         if old is None:
             if expected_path.exists():
                 raise SourceWorkspaceError(
@@ -524,7 +534,20 @@ class SourceWorkspaceManager:
                     ),
                 ),
             )
-        if self._is_dirty(expected_path):
+        try:
+            is_dirty = self._is_dirty(expected_path)
+            physical_revision = self._head_revision(expected_path)
+            physical_branch = self._head_branch(expected_path)
+        except SourceWorkspaceError as exc:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is unproven",
+                recovery=self._unproven_recovery(
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            ) from exc
+        if is_dirty:
             raise SourceWorkspaceError(
                 "implementation writer predecessor is invalid because source workspace is "
                 f"dirty and preserved: {expected_path}",
@@ -539,7 +562,6 @@ class SourceWorkspaceManager:
                     ),
                 ),
             )
-        physical_revision = self._head_revision(expected_path)
         if physical_revision != old.revision:
             raise SourceWorkspaceError(
                 "implementation writer predecessor is invalid because source workspace "
@@ -556,7 +578,6 @@ class SourceWorkspaceManager:
                     ),
                 ),
             )
-        physical_branch = self._head_branch(expected_path)
         expected_predecessor_branch = (
             None if old.detached else f"refs/heads/{old.branch}" if old.branch else "invalid"
         )
