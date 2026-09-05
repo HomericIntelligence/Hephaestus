@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, RunMergeWaitCycleRequest
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
@@ -57,14 +56,12 @@ class _ConditionalGitHub(FakeStageGitHub):
         readiness: dict[str, object] | list[dict[str, object]] | None = None,
         conversation_resolution: bool = True,
         required_checks_green: bool = True,
-        authorization_reviews: tuple[dict[str, object], ...] | None = None,
     ) -> None:
         scripted_states = states or [_open_pr()]
         super().__init__(
             pr_impl_state=labels,
             pr_state=scripted_states[0],
             conversation_resolution=conversation_resolution,
-            authorization_reviews=authorization_reviews,
         )
         self._states = list(scripted_states)
         self._merge_results = list(
@@ -90,7 +87,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         self._readiness = (
             list(readiness) if isinstance(readiness, list) else [readiness or default_readiness]
         )
-        self.merge_attempts: list[tuple[int, str, str]] = []
+        self.merge_attempts: list[tuple[int, str]] = []
         self._required_checks_green = required_checks_green
         self.checked_heads: list[str] = []
         self.events: list[str] = []
@@ -105,13 +102,10 @@ class _ConditionalGitHub(FakeStageGitHub):
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization | None = None,
         **_kwargs: Any,
     ) -> ConditionalMergeResult:
         self.events.append(f"merge:{reviewed_sha}")
-        self.merge_attempts.append(
-            (pr_number, reviewed_sha, authorization.review_id if authorization else "R1")
-        )
+        self.merge_attempts.append((pr_number, reviewed_sha))
         return self._merge_results.pop(0)
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
@@ -127,9 +121,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         return EffectiveMergePolicy(
             base_branch=base_branch,
             default_branch="main",
-            conversation_resolution_enforced=self.base_branch_requires_conversation_resolution(
-                pr_number, base_branch
-            ),
+            conversation_resolution_enforced=self._conversation_resolution,
             required_checks=(RequiredCheck("required-ci", 1),),
             bypassable_ruleset_ids=(),
         )
@@ -199,7 +191,6 @@ def test_green_exact_head_checks_allow_merge_without_operator_review(
     head = "a" * 40
     github = _ConditionalGitHub(
         states=[_open_pr(head), _open_pr(head), {"state": "MERGED"}],
-        authorization_reviews=(),
     )
     ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
 
@@ -238,7 +229,7 @@ def test_merge_cycle_dispatches_without_inline_github_calls(
                 "gh_pr_state",
                 "pr_has_implementation_state_label",
                 "list_unresolved_review_threads",
-                "base_branch_requires_conversation_resolution",
+                "effective_merge_policy",
                 "gh_pr_merge_readiness",
                 "merge_pr_if_head",
             }:
@@ -272,7 +263,7 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
 
 @pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS"])
@@ -294,7 +285,7 @@ def test_mergeable_requestable_readiness_merges_successfully(
     result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert "merge_readiness_deadline_s" not in item.payload
     assert "merge_readiness_polls" not in item.payload
 
@@ -317,7 +308,7 @@ def test_optional_failure_unstable_readiness_attempts_conditional_merge(
     result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert "merge_readiness_deadline_s" not in item.payload
     assert "merge_readiness_polls" not in item.payload
 
@@ -352,7 +343,7 @@ def test_blocked_readiness_waits_before_the_first_conditional_merge(
     second = _complete_merge_cycle(MergeWaitStage(), item, ctx)
 
     assert second == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
 
 def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
@@ -433,12 +424,18 @@ def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
             )
             self.policy_reads = 0
 
-        def base_branch_requires_conversation_resolution(
-            self, pr_number: int, base_branch: str
-        ) -> bool:
+        def effective_merge_policy(
+            self, pr_number: int, base_branch: str, **kwargs: Any
+        ) -> EffectiveMergePolicy:
             self.policy_reads += 1
-            assert super().base_branch_requires_conversation_resolution(pr_number, base_branch)
-            return self.policy_reads == 1
+            policy = super().effective_merge_policy(pr_number, base_branch, **kwargs)
+            return EffectiveMergePolicy(
+                base_branch=policy.base_branch,
+                default_branch=policy.default_branch,
+                required_checks=policy.required_checks,
+                conversation_resolution_enforced=self.policy_reads == 1,
+                bypassable_ruleset_ids=policy.bypassable_ruleset_ids,
+            )
 
     github = ProtectionRemovedDuringReadinessWaitGitHub()
     item = _reviewed_item(make_work_item)
@@ -479,12 +476,9 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
             self,
             pr_number: int,
             reviewed_sha: str,
-            authorization: MergeAuthorization | None = None,
             **_kwargs: Any,
         ) -> ConditionalMergeResult:
-            self.merge_attempts.append(
-                (pr_number, reviewed_sha, authorization.review_id if authorization else "R1")
-            )
+            self.merge_attempts.append((pr_number, reviewed_sha))
             self.merged = True
             return ConditionalMergeResult(
                 status=200,
@@ -513,7 +507,7 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
 
     assert now[0] >= 10 * 60
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
 
 def test_open_thread_immediately_before_merge_fails_back_without_put(
@@ -550,7 +544,6 @@ def test_missing_conversation_resolution_policy_blocks_merge_put(
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
     assert github.merge_attempts == []
-    assert github.conversation_resolution_checks == [(12, "main")]
 
 
 def test_missing_admin_enforcement_policy_blocks_merge_put(
@@ -559,11 +552,17 @@ def test_missing_admin_enforcement_policy_blocks_merge_put(
     """The combined server-policy admission also rejects an admin bypass risk."""
 
     class NoAdminEnforcementGitHub(_ConditionalGitHub):
-        def base_branch_requires_conversation_resolution(
-            self, pr_number: int, base_branch: str
-        ) -> bool:
-            super().base_branch_requires_conversation_resolution(pr_number, base_branch)
-            return False
+        def effective_merge_policy(
+            self, pr_number: int, base_branch: str, **kwargs: Any
+        ) -> EffectiveMergePolicy:
+            policy = super().effective_merge_policy(pr_number, base_branch, **kwargs)
+            return EffectiveMergePolicy(
+                base_branch=policy.base_branch,
+                default_branch=policy.default_branch,
+                required_checks=policy.required_checks,
+                conversation_resolution_enforced=False,
+                bypassable_ruleset_ids=policy.bypassable_ruleset_ids,
+            )
 
     github = NoAdminEnforcementGitHub()
 
@@ -573,7 +572,6 @@ def test_missing_admin_enforcement_policy_blocks_merge_put(
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
     assert github.merge_attempts == []
-    assert github.conversation_resolution_checks == [(12, "main")]
 
 
 def test_unreadable_conversation_resolution_policy_blocks_merge_put(
@@ -582,10 +580,10 @@ def test_unreadable_conversation_resolution_policy_blocks_merge_put(
     """An unavailable server gate fails closed before the conditional PUT."""
 
     class UnreadablePolicyGitHub(_ConditionalGitHub):
-        def base_branch_requires_conversation_resolution(
-            self, pr_number: int, base_branch: str
-        ) -> bool:
-            del pr_number, base_branch
+        def effective_merge_policy(
+            self, pr_number: int, base_branch: str, **kwargs: Any
+        ) -> EffectiveMergePolicy:
+            del pr_number, base_branch, kwargs
             raise RuntimeError("protection read failed")
 
     github = UnreadablePolicyGitHub()
@@ -646,24 +644,21 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
             del pr_number
             return []
 
-        def base_branch_requires_conversation_resolution(
-            self, pr_number: int, base_branch: str
-        ) -> bool:
-            assert super().base_branch_requires_conversation_resolution(pr_number, base_branch)
+        def effective_merge_policy(
+            self, pr_number: int, base_branch: str, **kwargs: Any
+        ) -> EffectiveMergePolicy:
+            policy = super().effective_merge_policy(pr_number, base_branch, **kwargs)
             self._thread_appeared_after_local_read = True
-            return True
+            return policy
 
         def merge_pr_if_head(
             self,
             pr_number: int,
             reviewed_sha: str,
-            authorization: MergeAuthorization | None = None,
             **_kwargs: Any,
         ) -> ConditionalMergeResult:
             assert self._thread_appeared_after_local_read
-            self.merge_attempts.append(
-                (pr_number, reviewed_sha, authorization.review_id if authorization else "R1")
-            )
+            self.merge_attempts.append((pr_number, reviewed_sha))
             return ConditionalMergeResult(
                 status=405,
                 body={"message": "review conversations must be resolved"},
@@ -676,7 +671,7 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
 
 def test_external_arm_blocks_conditional_merge_without_any_mutation(
@@ -814,7 +809,7 @@ def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
 
 def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
@@ -839,7 +834,7 @@ def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
     )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert github.mutation_log == []
 
 
@@ -868,7 +863,7 @@ def test_ambiguous_transport_retries_only_after_delayed_same_head_read(
     assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
     assert item.attempts["merge"] == 1
     assert item.payload["retry_delay_s"] == 1.0
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert github.mutation_log == []
 
 
@@ -894,7 +889,7 @@ def test_ambiguous_transport_with_unreadable_reconciliation_is_terminal(
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert github.mutation_log == []
 
 
@@ -934,7 +929,7 @@ def test_409_head_drift_fails_back_without_label_mutation(
     )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert github.mutation_log == []
 
 
@@ -967,7 +962,7 @@ def test_405_reenters_readiness_wait_without_a_second_conditional_put(
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
 
 @pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS", "UNSTABLE"])
@@ -1002,14 +997,14 @@ def test_persistent_405_unchanged_readiness_does_not_duplicate_the_put(
     assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
     assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
     second = _complete_merge_cycle(stage, item, ctx)
 
     assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 10.0
     assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
 
 def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
@@ -1060,13 +1055,13 @@ def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
         Disposition.RETRY, "merge_readiness_wait"
     )
     assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"
     )
     assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
     # A second unchanged HAS_HOOKS wake must remain non-mutating. This makes
     # the regression independent of the one-step in-call 405 reconciliation.
@@ -1074,13 +1069,13 @@ def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
         Disposition.RETRY, "merge_readiness_wait"
     )
     assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.FINISH_PASS, "merged"
     )
     assert item.attempts["merge"] == 2
-    assert github.merge_attempts == [(12, "a" * 40, "R1"), (12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
 
 
 def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
@@ -1134,7 +1129,7 @@ def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.FINISH_PASS, "merged"
     )
-    assert github.merge_attempts == [(12, "a" * 40, "R1"), (12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
 
 
 @pytest.mark.parametrize("merge_state_status", ["CONFLICTING", "DIRTY"])
@@ -1168,7 +1163,7 @@ def test_405_conflicting_or_dirty_readiness_returns_to_implementer(
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "merge_conflicting")
     assert item.payload["post_review_rebase_required"] is True
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert github.mutation_log == []
 
 
@@ -1214,14 +1209,14 @@ def test_409_reconciliation_external_arm_blocks_without_label_mutation(
     )
 
     assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.merge_attempts == [(12, "a" * 40)]
     assert github.mutation_log == []
 
 
 def test_label_loss_or_non_main_base_prevents_the_conditional_request(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """Final authorization facts are all required immediately before the PUT."""
+    """Final admission facts are all required immediately before the PUT."""
     label_lost = _ConditionalGitHub(labels=(False, False), states=[_open_pr()])
     wrong_base = _ConditionalGitHub(states=[_open_pr(base="release")])
 

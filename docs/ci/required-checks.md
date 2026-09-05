@@ -21,11 +21,14 @@ the process-local proof is not durable. A required Check Run must have the
 required commit status must have the `success` state. An unbound required
 context can use either source. A positive GitHub App binding requires a Check
 Run from that exact application; a commit status cannot satisfy it. If both
-sources use the same required context, both sources must pass. Required status
-evidence does not create review authorization or replace the structural
-review. The merge gate does not require a second GitHub user or a marked
-`APPROVED` review. It rejects a direct merge when the current actor can bypass
-an applicable active ruleset.
+sources use the same required context, both sources must pass. Each required
+Check Run uses its completion time. Each required commit status uses its update
+time. The time must be in the inclusive seven-day period before the controlled
+UTC read time. A missing, malformed, future, or expired time fails closed.
+Required status evidence does not create review authorization or replace the
+structural review. The merge gate does not require a second GitHub user or a
+marked `APPROVED` review. It rejects a direct merge when the current actor can
+bypass an applicable active ruleset.
 
 ## Queue pre-PR source checks
 

@@ -27,10 +27,11 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github.py": 500,
     "hephaestus/automation/pipeline_github_contract.py": 125,
     "hephaestus/automation/pipeline_github_transport.py": 425,
-    "hephaestus/automation/pipeline_github_authorization.py": 300,
+    "hephaestus/automation/pipeline_github_review_queries.py": 150,
     "hephaestus/automation/pipeline_github_queries.py": 650,
-    # Effective classic and ruleset policy reads form one stable snapshot.
-    "hephaestus/automation/pipeline_github_check_policy.py": 425,
+    # Effective classic and ruleset policy reads form one stable snapshot. The
+    # bound includes the authenticated absent-classic-protection parser.
+    "hephaestus/automation/pipeline_github_check_policy.py": 450,
     # Parent-ruleset selectors and branch matching are one bounded concern.
     "hephaestus/automation/pipeline_github_ruleset_conditions.py": 200,
     # GitHub branch patterns use Ruby's path-separator-aware wildcard rules.
@@ -62,7 +63,7 @@ _COLLABORATOR_MODULES = frozenset(
         "coordinator_sources",
         "coordinator_dispatch",
         "pipeline_github_transport",
-        "pipeline_github_authorization",
+        "pipeline_github_review_queries",
         "pipeline_github_contract",
         "pipeline_github_check_policy",
         "pipeline_github_commit_statuses",

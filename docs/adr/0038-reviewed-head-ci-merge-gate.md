@@ -46,8 +46,11 @@ exact-head status evidence ─────► current CI merge gate
    `state=success`. A commit status can satisfy only an unbound required context.
    A positive application binding requires a Check Run from that application.
    When both sources have the same required context, both sources must pass.
-   Optional evidence does not grant or revoke merge authority. Empty, malformed,
-   pending, failed, stale, or changing required evidence fails closed.
+   A Check Run uses its completion time. A commit status uses its update time.
+   Each required time must be in the inclusive seven-day period before the
+   controlled UTC read time. Optional evidence does not grant or revoke merge
+   authority. Empty, malformed, pending, failed, stale, future, or changing
+   required evidence fails closed.
 5. Each source uses complete, bounded, exact-head, stable double reads. Policy,
    Check Run, and commit-status pagination share one aggregate deadline and
    cancellation signal. After the status evidence passes, the queue repeats the
@@ -85,7 +88,6 @@ status evidence without a second GitHub user. Head drift, missing or failed
 required status evidence, unresolved threads, untrusted PR state, and
 incomplete reads still stop the merge path. A non-required failed Check Run can
 produce an `UNSTABLE` merge state, but does not stop this gate. A process restart
-still loses the process-local proof and sends the PR through fresh review. The existing
-explicit operator-authorization implementation remains available only to
-compatibility and review-data callers; it is not part of the queue merge
-decision.
+still loses the process-local proof and sends the PR through fresh review.
+Scope-expansion publication uses a generic stable review-list query. No
+queue-owned operator-authorization implementation remains.

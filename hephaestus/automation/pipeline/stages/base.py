@@ -63,7 +63,6 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
 from hephaestus.automation.state_labels import STATE_SKIP
 
@@ -580,38 +579,15 @@ class StageGitHub(Protocol):
         """Return whether required status evidence passes for ``head_sha``."""
         pass
 
-    def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
-        """Return one stable native-review snapshot for review-data callers."""
-        pass
-
-    def repository_permission_for_actor(self, login: str) -> str:
-        """Return the actor's current repository permission."""
-        pass
-
-    def base_branch_requires_conversation_resolution(
-        self, pr_number: int, base_branch: str
-    ) -> bool:
-        """Return whether this PR base branch has server-enforced conversation resolution.
-
-        The read is scoped to the accessor's explicit repository and the exact
-        base branch admitted for ``pr_number``. Admission requires enforced
-        conversation resolution and administrator enforcement, with no
-        explicit PR-bypass allowances. ``False`` includes an absent,
-        unreadable, or malformed branch-protection response and must prevent a
-        normal merge request.
-        """
-        ...
-
     def merge_pr_if_head(
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization | None = None,
         *,
         deadline_s: float | None = None,
         cancellation: threading.Event | None = None,
     ) -> ConditionalMergeResult:
-        """Perform one normal merge conditional on ``reviewed_sha``."""
+        """Perform one normal merge after exact-head admission succeeds."""
         pass
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:

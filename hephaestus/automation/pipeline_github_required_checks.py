@@ -7,12 +7,16 @@ import logging
 import re
 import subprocess
 import time
+from datetime import UTC, datetime
 from threading import Event
 
 import hephaestus.automation.github_api as github_api
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
-from .pipeline_github_commit_statuses import stable_passing_commit_status_requirements
+from .pipeline_github_commit_statuses import (
+    _current_evidence_timestamp,
+    stable_passing_commit_status_requirements,
+)
 from .pipeline_github_contract import _PipelineGitHubHost
 
 logger = logging.getLogger(__name__)
@@ -23,6 +27,11 @@ _CHECK_RUNS_PAGE_SIZE = 100
 _CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 _RequiredCheck = tuple[str, int | None]
+
+
+def _status_evidence_now_utc() -> datetime:
+    """Return the current UTC time through a test-controlled seam."""
+    return datetime.now(UTC)
 
 
 def _valid_app_id(value: object) -> int | None:
@@ -94,9 +103,10 @@ def _check_run_snapshot(
     check_runs: list[object],
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
+    now_utc: datetime,
 ) -> tuple[object, ...] | None:
     """Return stable identity and status data for a Check Runs traversal."""
-    snapshot: list[tuple[int, str, int, str, str, object, frozenset[_RequiredCheck]]] = []
+    snapshot: list[tuple[int, str, int, str, str, object, str, frozenset[_RequiredCheck]]] = []
     identities: set[tuple[str, int]] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
@@ -125,6 +135,10 @@ def _check_run_snapshot(
             logger.warning("Check Runs contain duplicate context and app identity for %s", head_sha)
             return None
         identities.add(identity)
+        completed_at = _current_evidence_timestamp(check_run.get("completed_at"), now_utc)
+        if completed_at is None:
+            logger.warning("Check Run for %s has no current completion time", head_sha)
+            return None
         snapshot.append(
             (
                 check_run_id,
@@ -133,6 +147,7 @@ def _check_run_snapshot(
                 str(check_run.get("status") or "").lower(),
                 str(check_run.get("conclusion") or "").lower(),
                 check_run.get("head_sha"),
+                completed_at,
                 matches,
             )
         )
@@ -143,6 +158,7 @@ def _passing_check_run_requirements(
     check_runs: list[object],
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
+    now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return requirements proved by passing exact-head Check Runs."""
     matched_checks: set[_RequiredCheck] = set()
@@ -163,7 +179,11 @@ def _passing_check_run_requirements(
             return None
         status = str(check_run.get("status") or "").lower()
         conclusion = str(check_run.get("conclusion") or "").lower()
-        if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
+        if (
+            status != "completed"
+            or conclusion not in _CHECK_SUCCESS_CONCLUSIONS
+            or _current_evidence_timestamp(check_run.get("completed_at"), now_utc) is None
+        ):
             return None
         matched_checks.update(matches)
     return frozenset(matched_checks)
@@ -189,6 +209,10 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         ):
             return False
         try:
+            now_utc = _status_evidence_now_utc()
+            if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+                raise ValueError("required status-evidence clock is not timezone-aware")
+            now_utc = now_utc.astimezone(UTC)
             required_checks = frozenset(
                 (check.context, check.app_id) for check in policy.required_checks
             )
@@ -207,7 +231,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if not required_checks or first is None:
             return False
-        first_snapshot = _check_run_snapshot(first, head_sha, required_checks)
+        first_snapshot = _check_run_snapshot(first, head_sha, required_checks, now_utc)
         if first_snapshot is None:
             return False
         try:
@@ -226,7 +250,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if (
             second is None
-            or _check_run_snapshot(second, head_sha, required_checks) != first_snapshot
+            or _check_run_snapshot(second, head_sha, required_checks, now_utc) != first_snapshot
         ):
             logger.warning("Check Runs changed while reading %s", head_sha)
             return False
@@ -234,6 +258,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             second,
             head_sha,
             required_checks,
+            now_utc,
         )
         if run_requirements is None:
             return False
@@ -244,6 +269,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
                 required_checks,
                 deadline_s=deadline_s,
                 cancellation=cancellation,
+                now_utc=now_utc,
             )
         except (
             AttributeError,

@@ -1093,10 +1093,9 @@ the current open, unarmed PR head.
 For the registered host-verification plan, the reviewed execution boundary
 currently requires macOS `sandbox-exec` plus disposable, quota-backed disk
 images. Other platforms record an exact-head, platform-bound `skipped` receipt
-before resolving tools, archiving source, or executing PR code. That receipt is
-N/A rather than passing execution evidence, and it does not independently grant
-implementation authority; head-bound CI and the remaining review gates retain
-their separate authority. A Linux or Windows backend must be added as a
+before they resolve tools, archive source, or execute PR code. That receipt is
+a blocking host-verification gap. It is not passing execution evidence, and it
+cannot grant implementation authority. Add a Linux or Windows backend as a
 separately reviewed isolation implementation; there is no unsandboxed fallback.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
@@ -1490,13 +1489,13 @@ continues.
 
 ### Merge-wait restart semantics
 
-The queue is in-memory: a restart re-seeds normally through the ordinary
+The queue is in-memory. A restart re-seeds normally through the ordinary
 [`classifier`](../hephaestus/automation/pipeline/seeding.py) and does not recover
-the process-local reviewed-head proof. A marked exact-head GitHub approval
-survives that restart, but it is not sufficient by itself: the loop still
-requires fresh automated review to recreate the process-local proof before
+the process-local reviewed-head proof. The implementation-GO label and native
+review records survive the restart only as non-authoritative context. The loop
+requires a fresh automated review to recreate the process-local proof before
 merge admission. A direct PR seed or restart therefore cannot use a durable
-implementation-GO label by itself: merge wait first requires a
+implementation-GO label by itself. Merge wait first requires a
 confirmed-unarmed read, then returns the PR to review without mutating its
 labels. Other-run auto-merge requests are
 [blocked without adoption or mutation](../hephaestus/automation/pipeline/stages/merge_wait.py)

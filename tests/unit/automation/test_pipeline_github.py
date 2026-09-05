@@ -12,10 +12,9 @@ import json
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from itertools import repeat
+from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
 from time import sleep
@@ -27,15 +26,10 @@ import pytest
 
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
-import hephaestus.automation.pipeline_github_authorization as authorization_mod
+import hephaestus.automation.pipeline_github_required_checks as required_checks_mod
 import hephaestus.automation.pipeline_github_transport as transport_mod
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
-)
-from hephaestus.automation.merge_authorization import (
-    MERGE_AUTHORIZATION_MARKER,
-    MergeAuthorization,
-    canonical_body_digest,
 )
 from hephaestus.automation.pipeline.stages.base import (
     ImplementationReplyProgress,
@@ -468,7 +462,7 @@ def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
         ("head-drift", "reviewed_head_drift"),
     ],
 )
-def test_merge_cycle_rechecks_authorization_after_check_traversal(
+def test_merge_cycle_rechecks_final_admission_after_check_traversal(
     revocation: str,
     expected: str,
 ) -> None:
@@ -528,7 +522,7 @@ def test_merge_cycle_rechecks_authorization_after_check_traversal(
             return True
 
         def merge_pr_if_head(self, _pr: int, _head: str, **_kwargs: object) -> object:
-            raise AssertionError("revoked authorization reached the PUT")
+            raise AssertionError("revoked admission reached the PUT")
 
     request = RunMergeWaitCycleRequest(
         pr_number=7,
@@ -543,24 +537,6 @@ def test_merge_cycle_rechecks_authorization_after_check_traversal(
 
     assert receipt.outcome == expected
     assert receipt.attempted is False
-
-
-def _authorization(pr_number: int = 7, head_sha: str = "a" * 40) -> MergeAuthorization:
-    """Return a valid test-only exact-head merge capability."""
-    return MergeAuthorization(
-        repository="org/repo",
-        pr_number=pr_number,
-        head_sha=head_sha,
-        review_id="R1",
-        review_database_id=1,
-        author_login="operator",
-        author_permission="WRITE",
-        submitted_at="2026-08-08T00:00:00Z",
-        updated_at="2026-08-08T00:00:00Z",
-        includes_created_edit=False,
-        last_edited_at=None,
-        body_digest=canonical_body_digest(MERGE_AUTHORIZATION_MARKER),
-    )
 
 
 class PipelineGitHubForTest(pg.PipelineGitHub):
@@ -622,39 +598,6 @@ def adapter(tmp_path: Path) -> PipelineGitHubForTest:
 def dry_adapter(tmp_path: Path) -> PipelineGitHubForTest:
     """Dry-run adapter: every mutator must log-and-skip."""
     return PipelineGitHubForTest("org", dry_run=True, repo_root=tmp_path)
-
-
-@pytest.fixture
-def fully_enforced_branch_protection() -> str:
-    """Return a protection response safe for the automation merge actor."""
-    return json.dumps(
-        {
-            "required_conversation_resolution": {"enabled": True},
-            "enforce_admins": {"enabled": True},
-            "required_pull_request_reviews": {
-                "bypass_pull_request_allowances": {
-                    "users": [],
-                    "teams": [],
-                    "apps": [],
-                }
-            },
-        }
-    )
-
-
-@pytest.fixture
-def fully_enforced_protection_without_bypass_allowances() -> str:
-    """Mirror GitHub's valid full response when no PR bypass is configured."""
-    return json.dumps(
-        {
-            "required_conversation_resolution": {"enabled": True},
-            "enforce_admins": {"enabled": True},
-            "required_pull_request_reviews": {
-                "dismiss_stale_reviews": True,
-                "required_approving_review_count": 1,
-            },
-        }
-    )
 
 
 def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> None:
@@ -2859,7 +2802,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.status == 200
         assert result.body == {"merged": True}
@@ -2880,6 +2823,28 @@ class TestConditionalMerge:
             max_retries=1,
             timeout=120,
         )
+
+    @pytest.mark.parametrize(
+        ("pr_number", "head_sha"),
+        [(0, "a" * 40), (-1, "a" * 40), (7, "short"), (7, "g" * 40)],
+        ids=("zero-pr", "negative-pr", "short-sha", "nonhex-sha"),
+    )
+    def test_invalid_identity_is_rejected_before_transport(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        pr_number: int,
+        head_sha: str,
+    ) -> None:
+        """An invalid PR or SHA cannot reach the merge transport."""
+        adapter.repo = "repo"
+        call_mock = MagicMock()
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        result = adapter.merge_pr_if_head(pr_number, head_sha)
+
+        assert result.malformed is True
+        call_mock.assert_not_called()
 
     def test_preserves_a_409_response_for_stage_level_head_drift_handling(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -2902,7 +2867,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
-        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.status == 409
         assert result.body == {"message": "head changed"}
@@ -2911,7 +2876,7 @@ class TestConditionalMerge:
     def test_conditional_put_does_not_require_a_native_review_capability(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The stage, not the mutation adapter, owns review authorization."""
+        """The stage, not the mutation adapter, owns merge admission."""
         adapter.repo = "repo"
         call_mock = MagicMock(
             return_value=SimpleNamespace(
@@ -2934,7 +2899,7 @@ class TestConditionalMerge:
         call_mock = MagicMock(side_effect=OSError("connection reset"))
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.transport_error is True
         assert result.status is None
@@ -2948,7 +2913,7 @@ class TestConditionalMerge:
         call_mock = MagicMock()
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = dry_adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = dry_adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.dry_run is True
         call_mock.assert_not_called()
@@ -2985,12 +2950,17 @@ class TestExactHeadChecks:
         policy: EffectiveMergePolicy,
     ) -> bool:
         """Run the exact-head gate with its required bounded inputs."""
-        return adapter.required_checks_pass_for_head(
-            head,
-            policy,
-            deadline_s=time.monotonic() + 30.0,
-            cancellation=threading.Event(),
-        )
+        with patch.object(
+            required_checks_mod,
+            "_status_evidence_now_utc",
+            return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+        ):
+            return adapter.required_checks_pass_for_head(
+                head,
+                policy,
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
 
     @staticmethod
     def _check_run(
@@ -3001,6 +2971,7 @@ class TestExactHeadChecks:
         status: str = "completed",
         conclusion: str = "success",
         app_id: int = 1,
+        completed_at: object = "2026-09-05T12:00:00Z",
     ) -> dict[str, object]:
         """Build one exact-head Check Run response entry."""
         check_run: dict[str, object] = {
@@ -3009,6 +2980,7 @@ class TestExactHeadChecks:
             "head_sha": head_sha,
             "status": status,
             "conclusion": conclusion,
+            "completed_at": completed_at,
         }
         check_run["app"] = {"id": app_id}
         return check_run
@@ -3020,6 +2992,7 @@ class TestExactHeadChecks:
         status_id: int = 11,
         context: str = "required-ci",
         state: str = "success",
+        updated_at: object = "2026-09-05T12:00:00Z",
     ) -> dict[str, object]:
         """Build one exact-head commit-status response entry."""
         return {
@@ -3027,7 +3000,51 @@ class TestExactHeadChecks:
             "context": context,
             "state": state,
             "sha": head_sha,
+            "updated_at": updated_at,
         }
+
+    @pytest.mark.parametrize(
+        ("updated_at", "expected"),
+        [
+            ("2026-09-05T12:00:00Z", True),
+            ("2026-08-29T12:00:00Z", True),
+            ("2026-08-29T11:59:59Z", False),
+            ("2026-09-05T12:00:01Z", False),
+            ("not-a-timestamp", False),
+            (None, False),
+        ],
+        ids=("inside", "boundary", "expired", "future", "malformed", "missing"),
+    )
+    def test_required_commit_status_enforces_seven_day_freshness(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        updated_at: object,
+        expected: bool,
+    ) -> None:
+        """A required commit status is current only in the seven-day window."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head, updated_at=updated_at)],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is expected
 
     def test_required_context_can_be_satisfied_by_commit_status_only(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3118,7 +3135,7 @@ class TestExactHeadChecks:
     def test_later_commit_status_page_failure_fails_closed(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed required status on a later page prevents authorization."""
+        """A failed required status on a later page prevents merge admission."""
         adapter.repo = "repo"
         head = "a" * 40
         runs = {"total_count": 1, "check_runs": [self._check_run(head)]}
@@ -3204,11 +3221,6 @@ class TestExactHeadChecks:
             lambda _pr: (True, False),
         )
         monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
-        monkeypatch.setattr(
-            adapter,
-            "base_branch_requires_conversation_resolution",
-            lambda _pr, _base: True,
-        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_merge_readiness",
@@ -3300,11 +3312,6 @@ class TestExactHeadChecks:
         )
         monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: (True, False))
         monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
-        monkeypatch.setattr(
-            adapter,
-            "base_branch_requires_conversation_resolution",
-            lambda _pr, _base: True,
-        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_merge_readiness",
@@ -3648,505 +3655,6 @@ class TestExactHeadChecks:
         assert self._passes(adapter, head, self._policy("required-ci")) is False
         assert call_mock.call_count == 1
         assert f"Check Runs response exceeds the 2000-run safety ceiling for {head}" in caplog.text
-
-
-def _authorization_review_node(
-    review_id: str = "R1",
-    *,
-    database_id: int | str | None = 1,
-    body: str = MERGE_AUTHORIZATION_MARKER,
-) -> dict[str, object]:
-    """Build one GraphQL PullRequestReview node for adapter tests."""
-    return {
-        "id": review_id,
-        "fullDatabaseId": database_id,
-        "body": body,
-        "state": "APPROVED",
-        "submittedAt": "2026-08-08T00:00:00Z",
-        "updatedAt": "2026-08-08T00:00:00Z",
-        "includesCreatedEdit": False,
-        "lastEditedAt": None,
-        "viewerDidAuthor": False,
-        "author": {"login": "operator", "__typename": "User"},
-        "commit": {"oid": "a" * 40},
-    }
-
-
-def _authorization_review_page(
-    nodes: list[dict[str, object]],
-    *,
-    total_count: int,
-    has_next_page: bool = False,
-    end_cursor: str | None = None,
-) -> dict[str, object]:
-    """Build one complete repository-scoped review page."""
-    return {
-        "data": {
-            "repository": {
-                "id": "repo-node",
-                "name": "repo",
-                "owner": {"login": "org"},
-                "pullRequest": {
-                    "id": "pr-node",
-                    "number": 7,
-                    "headRefOid": "a" * 40,
-                    "reviews": {
-                        "totalCount": total_count,
-                        "pageInfo": {
-                            "hasNextPage": has_next_page,
-                            "endCursor": end_cursor,
-                        },
-                        "nodes": nodes,
-                    },
-                },
-            }
-        }
-    }
-
-
-def _bind_authorization_review_commits(
-    adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Keep GraphQL pagination tests focused on their transport boundary."""
-    monkeypatch.setattr(adapter, "_review_commit_id", lambda _pr, _review: "a" * 40)
-
-
-def _authorization_graphql_pages(
-    adapter: pg.PipelineGitHub,
-    monkeypatch: pytest.MonkeyPatch,
-    responses: Iterator[dict[str, object]],
-    calls: list[dict[str, str | int]] | None = None,
-) -> None:
-    """Feed raw GraphQL envelopes through the real merge-authorization validator."""
-    spec = github_api_mod.merge_authorization_reviews_page_query("org", "repo", 7)
-
-    def graphql(_spec: object, **fields: str | int) -> dict[str, object]:
-        if calls is not None:
-            calls.append(fields)
-        envelope = next(responses)
-        data = envelope.get("data")
-        assert isinstance(data, dict)
-        return spec.validate(data)
-
-    monkeypatch.setattr(adapter, "_graphql", graphql)
-
-
-class TestMergeAuthorizationQueries:
-    """Repository-scoped review pagination and permission reads fail closed."""
-
-    def test_complete_pagination_is_read_twice_and_normalizes_bigint(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        page_one = _authorization_review_page(
-            [_authorization_review_node()],
-            total_count=2,
-            has_next_page=True,
-            end_cursor="cursor-1",
-        )
-        page_two = _authorization_review_page(
-            [_authorization_review_node("R2", database_id="2")], total_count=2
-        )
-        responses = iter([page_one, page_two, page_one, page_two])
-        calls: list[dict[str, str | int]] = []
-
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, responses, calls)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        reviews = adapter.merge_authorization_reviews(7)
-
-        assert [review["id"] for review in reviews] == ["R1", "R2"]
-        assert reviews[1]["fullDatabaseId"] == 2
-        assert calls[1]["after"] == "cursor-1"
-        assert len(calls) == 4
-
-    def test_duplicate_review_ids_across_mixed_body_pages_are_rejected(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A page overlap cannot pair a marked approval with an unmarked duplicate."""
-        page_one = _authorization_review_page(
-            [_authorization_review_node("R1")],
-            total_count=2,
-            has_next_page=True,
-            end_cursor="cursor-1",
-        )
-        page_two = _authorization_review_page(
-            [_authorization_review_node("R1", body="ordinary review body")],
-            total_count=2,
-        )
-        responses = iter([page_one, page_two])
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, responses)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        with pytest.raises(RuntimeError, match="duplicated"):
-            adapter.merge_authorization_reviews(7)
-
-    def test_stable_read_drift_is_unavailable(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        first = _authorization_review_page([_authorization_review_node()], total_count=1)
-        changed = _authorization_review_page(
-            [_authorization_review_node(body="changed")], total_count=1
-        )
-        responses = iter([first, changed])
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, responses)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        with pytest.raises(RuntimeError, match="snapshot changed"):
-            adapter.merge_authorization_reviews(7)
-
-    @pytest.mark.parametrize(
-        ("page", "message"),
-        [
-            (
-                _authorization_review_page([_authorization_review_node()], total_count=2),
-                "truncated",
-            ),
-            (
-                _authorization_review_page(
-                    [_authorization_review_node()],
-                    total_count=1,
-                    has_next_page=True,
-                    end_cursor="cursor-1",
-                ),
-                "cursor loop",
-            ),
-        ],
-    )
-    def test_incomplete_pagination_is_rejected(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        page: dict[str, object],
-        message: str,
-    ) -> None:
-        adapter.repo = "repo"
-        if message == "truncated":
-            responses = iter([page])
-        else:
-            repeated = _authorization_review_page(
-                [_authorization_review_node("R2")],
-                total_count=1,
-                has_next_page=True,
-                end_cursor="cursor-1",
-            )
-            responses = iter([page, repeated])
-        _authorization_graphql_pages(adapter, monkeypatch, responses)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        with pytest.raises(RuntimeError, match=message):
-            adapter.merge_authorization_reviews(7)
-
-    def test_rest_review_commit_must_match_graphql_snapshot(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The authorization head is bound to the reviews API commit_id."""
-        page = _authorization_review_page([_authorization_review_node()], total_count=1)
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({"id": 1, "commit_id": "b" * 40}),
-            )
-        )
-        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
-
-        with pytest.raises(RuntimeError, match="commit changed"):
-            adapter.merge_authorization_reviews(7)
-        call_mock.assert_called_once_with(
-            ["api", "--method", "GET", "repos/org/repo/pulls/7/reviews/1"], check=False
-        )
-
-    def test_nullable_database_id_binds_through_matching_rest_node_id(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A nullable GraphQL database ID uses the REST collection node-ID binding."""
-        page = _authorization_review_page(
-            [_authorization_review_node(database_id=None)], total_count=1
-        )
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps(
-                    [
-                        {
-                            "node_id": "R1",
-                            "commit_id": "a" * 40,
-                        }
-                    ]
-                ),
-            )
-        )
-        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
-
-        reviews = adapter.merge_authorization_reviews(7)
-
-        assert reviews[0]["fullDatabaseId"] is None
-        assert call_mock.call_count == 2
-        call_mock.assert_called_with(
-            [
-                "api",
-                "--method",
-                "GET",
-                "repos/org/repo/pulls/7/reviews?per_page=100&page=1",
-            ],
-            check=False,
-        )
-
-    def test_nullable_database_id_requires_rest_node_commit_agreement(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A node-ID match alone cannot bind a different REST review head."""
-        page = _authorization_review_page(
-            [_authorization_review_node(database_id=None)], total_count=1
-        )
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
-        monkeypatch.setattr(
-            authorization_mod,
-            "gh_call",
-            MagicMock(
-                return_value=SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps([{"node_id": "R1", "commit_id": "b" * 40}]),
-                )
-            ),
-        )
-
-        with pytest.raises(RuntimeError, match="commit changed"):
-            adapter.merge_authorization_reviews(7)
-
-
-class TestMergeAuthorizationPermissions:
-    """Collaborator permissions are parsed separately from review resolution."""
-
-    @pytest.mark.parametrize(
-        ("status", "body", "expected"),
-        [
-            (200, {"permission": "write"}, "WRITE"),
-            (200, {"permission": "maintain"}, "WRITE"),
-            (200, {"permission": "admin"}, "ADMIN"),
-            (404, None, "NONE"),
-        ],
-    )
-    def test_permission_response_normalization(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        status: int,
-        body: dict[str, object] | None,
-        expected: str,
-    ) -> None:
-        adapter.repo = "repo"
-        monkeypatch.setattr(
-            adapter,
-            "_collaborator_permission_response",
-            lambda _login: (status, body),
-        )
-
-        assert adapter.repository_permission_for_actor("operator") == expected
-
-    def test_malformed_permission_response_is_unavailable(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        adapter.repo = "repo"
-        monkeypatch.setattr(
-            adapter,
-            "_collaborator_permission_response",
-            lambda _login: (200, {"permission": "owner"}),
-        )
-
-        with pytest.raises(RuntimeError, match="permission"):
-            adapter.repository_permission_for_actor("operator")
-
-    @pytest.mark.parametrize(
-        ("returncode", "stdout", "expected"),
-        [
-            (0, 'HTTP/2 200 OK\n\n{"permission":"write"}', (200, {"permission": "write"})),
-            (1, 'HTTP/2 404 Not Found\n\n{"message":"Not Found"}', (404, None)),
-        ],
-    )
-    def test_permission_uses_repository_qualified_direct_api_call(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        returncode: int,
-        stdout: str,
-        expected: tuple[int, dict[str, object] | None],
-    ) -> None:
-        """Permission reads cannot inherit the adapter's PR-scoped argv policy."""
-        adapter.repo = "repo"
-        call_mock = MagicMock(return_value=SimpleNamespace(returncode=returncode, stdout=stdout))
-        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
-
-        assert adapter._collaborator_permission_response("Operator Name") == expected
-        call_mock.assert_called_once_with(
-            [
-                "api",
-                "--method",
-                "GET",
-                "--include",
-                "repos/org/repo/collaborators/Operator%20Name/permission",
-            ],
-            check=False,
-        )
-
-    def test_permission_transport_error_is_unavailable(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A direct transport failure remains unavailable rather than no permission."""
-        adapter.repo = "repo"
-        monkeypatch.setattr(authorization_mod, "gh_call", MagicMock(side_effect=OSError("down")))
-
-        with pytest.raises(OSError, match="down"):
-            adapter._collaborator_permission_response("operator")
-
-
-def test_mismatched_authorization_is_rejected_before_transport(
-    adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The irreversible boundary accepts only a capability for its request."""
-    adapter.repo = "repo"
-    call_mock = MagicMock()
-    monkeypatch.setattr(pg, "gh_call", call_mock)
-
-    result = adapter.merge_pr_if_head(7, "a" * 40, replace(_authorization(), head_sha="b" * 40))
-
-    assert result.malformed is True
-    call_mock.assert_not_called()
-
-
-class TestConversationResolutionAdmission:
-    """The base-branch protection read is narrow, repo-scoped, and fail closed."""
-
-    def test_reads_exact_base_branch_protection_and_accepts_enabled(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        fully_enforced_branch_protection: str,
-    ) -> None:
-        adapter.repo = "repo"
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                stdout=fully_enforced_branch_protection,
-                returncode=0,
-            )
-        )
-        monkeypatch.setattr(pg, "gh_call", call_mock)
-
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
-        call_mock.assert_called_once_with(
-            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
-            check=False,
-            timeout=120,
-        )
-
-    def test_accepts_valid_protection_without_a_bypass_allowance_field(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        fully_enforced_protection_without_bypass_allowances: str,
-    ) -> None:
-        """An omitted allowance field represents no configured PR bypass."""
-        adapter.repo = "repo"
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                stdout=fully_enforced_protection_without_bypass_allowances,
-                returncode=0,
-            )
-        )
-        monkeypatch.setattr(pg, "gh_call", call_mock)
-
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
-        call_mock.assert_called_once_with(
-            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
-            check=False,
-            timeout=120,
-        )
-
-    @pytest.mark.parametrize(
-        "protection",
-        [
-            {},
-            {
-                "required_conversation_resolution": {"enabled": False},
-                "enforce_admins": {"enabled": True},
-            },
-            {
-                "required_conversation_resolution": {"enabled": True},
-                "enforce_admins": {"enabled": False},
-            },
-            {"required_conversation_resolution": {"enabled": True}},
-            {
-                "required_conversation_resolution": {"enabled": True},
-                "enforce_admins": {"enabled": "true"},
-            },
-            "not-json",
-        ],
-    )
-    def test_absent_false_or_malformed_protection_flags_fail_closed(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        protection: dict[str, object] | str,
-    ) -> None:
-        adapter.repo = "repo"
-        stdout = protection if isinstance(protection, str) else json.dumps(protection)
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0)),
-        )
-
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
-
-    @pytest.mark.parametrize(
-        "bypass_allowances",
-        [
-            {"users": [{"login": "release-admin"}], "teams": [], "apps": []},
-            {"users": [], "teams": [{"slug": "maintainers"}], "apps": []},
-            {"users": [], "teams": [], "apps": [{"slug": "merge-bot"}]},
-            {"users": "not-a-list", "teams": [], "apps": []},
-            None,
-            [],
-        ],
-    )
-    def test_explicit_or_malformed_bypass_allowances_fail_closed(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        bypass_allowances: object,
-    ) -> None:
-        """Any listed PR-requirement bypass can also evade conversation safety."""
-        adapter.repo = "repo"
-        stdout = json.dumps(
-            {
-                "required_conversation_resolution": {"enabled": True},
-                "enforce_admins": {"enabled": True},
-                "required_pull_request_reviews": {
-                    "bypass_pull_request_allowances": bypass_allowances,
-                },
-            }
-        )
-        call_mock = MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0))
-        monkeypatch.setattr(pg, "gh_call", call_mock)
-
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
-        assert call_mock.call_args.args[0][2] == "GET"
-
-    def test_protection_read_is_unavailable_without_a_repo_scope(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        call_mock = MagicMock()
-        monkeypatch.setattr(pg, "gh_call", call_mock)
-
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
-        call_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

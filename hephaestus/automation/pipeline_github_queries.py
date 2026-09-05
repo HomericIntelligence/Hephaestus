@@ -2,7 +2,6 @@
 # ruff: noqa: F403, F405
 import json
 import subprocess
-from urllib.parse import quote
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
@@ -557,60 +556,3 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: merge readiness read failed: %s", pr_number, exc)
             return None
-
-    def base_branch_requires_conversation_resolution(
-        self, pr_number: int, base_branch: str
-    ) -> bool:
-        """Read the exact base branch's classic REST protection contract.
-
-        This capability has no organization-wide fallback: merge_wait can only
-        admit a normal merge when this accessor is bound to the PR's repository
-        and GitHub confirms all of the following for the exact admitted base
-        branch: ``required_conversation_resolution.enabled``,
-        ``enforce_admins.enabled``, and no explicit pull-request bypass
-        allowances. GitHub then enforces that policy on the server at merge
-        time, including for administrators, covering a thread that appears
-        after the local read.
-        """
-        if (
-            pr_number <= 0
-            or self._repo_slug is None
-            or not isinstance(base_branch, str)
-            or not base_branch
-        ):
-            return False
-        try:
-            owner, name = self._owner_name()
-            branch = quote(base_branch, safe="")
-            result = gh_call(
-                [
-                    "api",
-                    "--method",
-                    "GET",
-                    f"/repos/{owner}/{name}/branches/{branch}/protection",
-                ],
-                check=False,
-                timeout=self._gh_timeout,
-            )
-            if result.returncode != 0:
-                return False
-            data = json.loads(result.stdout or "{}")
-        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "PR #%s: failed to read protection for base branch %r: %s",
-                pr_number,
-                base_branch,
-                exc,
-            )
-            return False
-        if not isinstance(data, dict):
-            return False
-        conversation_resolution = data.get("required_conversation_resolution")
-        enforce_admins = data.get("enforce_admins")
-        return (
-            isinstance(conversation_resolution, dict)
-            and conversation_resolution.get("enabled") is True
-            and isinstance(enforce_admins, dict)
-            and enforce_admins.get("enabled") is True
-            and _has_no_explicit_pull_request_bypasses(data)
-        )

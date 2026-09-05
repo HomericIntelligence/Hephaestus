@@ -21,7 +21,6 @@ from typing import Any, cast
 import pytest
 
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
-from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.coordinator import (
@@ -74,23 +73,6 @@ def _agent_job(repo: str = "repo-a", issue: int = 1) -> AgentJob:
         timeout_s=10,
         descr="stub agent job",
     )
-
-
-def _authorization_review(review_id: str, head_sha: str = "a" * 40) -> dict[str, object]:
-    """Build one durable exact-head operator approval for coordinator tests."""
-    return {
-        "id": review_id,
-        "fullDatabaseId": 1,
-        "body": MERGE_AUTHORIZATION_MARKER,
-        "state": "APPROVED",
-        "submittedAt": "2026-08-08T00:00:00Z",
-        "updatedAt": "2026-08-08T00:00:00Z",
-        "includesCreatedEdit": False,
-        "lastEditedAt": None,
-        "viewerDidAuthor": False,
-        "author": {"login": "operator", "__typename": "User"},
-        "commit": {"oid": head_sha},
-    }
 
 
 class StubStage:
@@ -1145,13 +1127,13 @@ class TestAdmission:
         assert coordinator.queues[StageName.PR_REVIEW].snapshot() == []
 
 
-class TestMergeAuthorizationRestart:
-    """Durable operator reviews survive restart without reviving local proof."""
+class TestReviewedHeadRestart:
+    """A restart removes local proof and requires a fresh review."""
 
-    def test_restart_reuses_durable_authorization_after_fresh_review_proof(
+    def test_restart_requires_fresh_review_proof_before_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A restarted coordinator needs fresh review proof, not a new approval."""
+        """A restarted coordinator needs fresh process-local review proof."""
         github = FakeStageGitHub(
             pr_impl_state=(True, False),
             pr_state={
@@ -1162,7 +1144,6 @@ class TestMergeAuthorizationRestart:
                 "mergeStateStatus": "CLEAN",
                 "mergeable": "MERGEABLE",
             },
-            authorization_reviews=(_authorization_review("R1"),),
         )
         first, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
         first.stages[StageName.PR_REVIEW] = StubStage(
@@ -1198,7 +1179,7 @@ class TestMergeAuthorizationRestart:
         restarted._drain_queues()
         restarted._drain_completions()
 
-        assert github.merge_attempts == [(12, "a" * 40, "R1")]
+        assert github.merge_attempts == [(12, "a" * 40)]
         assert reviewed.result is not None
         assert reviewed.result.passed is True
 
@@ -1237,7 +1218,7 @@ class TestMergeAuthorizationRestart:
         coordinator._drain_queues()
         coordinator._drain_completions()
 
-        assert github.merge_attempts == [(12, "b" * 40, "R1")]
+        assert github.merge_attempts == [(12, "b" * 40)]
         assert item.result is not None
         assert item.result.passed is True
 

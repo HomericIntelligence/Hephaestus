@@ -4,8 +4,6 @@ import subprocess
 import time
 from threading import Event
 
-from hephaestus.automation.merge_authorization import MergeAuthorization
-
 from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
 
@@ -17,7 +15,6 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization | None = None,
         *,
         deadline_s: float | None = None,
         cancellation: Event | None = None,
@@ -31,13 +28,6 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         stage-owned lifecycle read decides whether an ambiguous request may be
         retried later.
         """
-        if authorization is not None and (
-            not isinstance(authorization, MergeAuthorization)
-            or authorization.repository != self._repo_slug
-            or authorization.pr_number != pr_number
-            or authorization.head_sha != reviewed_sha
-        ):
-            return ConditionalMergeResult(status=None, body=None, malformed=True)
         if (
             pr_number <= 0
             or not isinstance(reviewed_sha, str)

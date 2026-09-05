@@ -15,6 +15,7 @@ import hephaestus.automation.github_api as github_api
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_ruleset_conditions import required_app_id, ruleset_applies
+from .pipeline_github_transport import _parse_included_http_response
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,28 @@ def _classic_policy(payload: object) -> tuple[set[RequiredCheck], bool]:
         and _has_no_explicit_pull_request_bypasses(payload)
     )
     return checks, resolution_safe
+
+
+def _classic_policy_response(
+    result: subprocess.CompletedProcess[str],
+) -> tuple[set[RequiredCheck], bool]:
+    """Parse classic protection or one exact absent-protection response."""
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    status, body, malformed = _parse_included_http_response(stdout)
+    if result.returncode == 0:
+        if status is None:
+            return _classic_policy(json.loads(stdout or "null"))
+        if status == 200 and not malformed:
+            return _classic_policy(body)
+        raise RuntimeError("GitHub returned a malformed classic branch-protection response")
+    if (
+        status == 404
+        and not malformed
+        and isinstance(body, dict)
+        and body.get("message") == "Branch not protected"
+    ):
+        return set(), False
+    raise RuntimeError("GitHub returned an error for classic branch protection")
 
 
 def _validate_bypass(ruleset: dict[str, object]) -> bool:
@@ -338,15 +361,17 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
         branch = quote(base_branch, safe="")
         classic_result = _request(
             self,
-            ["api", "--method", "GET", f"/repos/{owner}/{name}/branches/{branch}/protection"],
+            [
+                "api",
+                "--method",
+                "GET",
+                "--include",
+                f"/repos/{owner}/{name}/branches/{branch}/protection",
+            ],
             deadline_s=deadline_s,
             cancellation=cancellation,
         )
-        if classic_result.returncode != 0:
-            raise RuntimeError("GitHub returned an error for classic branch protection")
-        classic_checks, classic_resolution = _classic_policy(
-            json.loads(classic_result.stdout or "null")
-        )
+        classic_checks, classic_resolution = _classic_policy_response(classic_result)
         details = self._active_rulesets(
             deadline_s=deadline_s,
             cancellation=cancellation,

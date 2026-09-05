@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from threading import Event
 
 import hephaestus.automation.github_api as github_api
@@ -17,7 +18,24 @@ _STATUS_PAGE_SIZE = 100
 _STATUS_MAX_TOTAL_COUNT = 2_000
 _STATUS_STATES = frozenset({"error", "failure", "pending", "success"})
 _RequiredCheck = tuple[str, int | None]
-_StatusSnapshot = tuple[tuple[int, str, str], ...]
+_StatusSnapshot = tuple[tuple[int, str, str, str], ...]
+_MAX_STATUS_AGE = timedelta(days=7)
+
+
+def _current_evidence_timestamp(value: object, now_utc: datetime) -> str | None:
+    """Return one current aware timestamp, or ``None`` if it is not valid."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    normalized = parsed.astimezone(UTC)
+    if normalized > now_utc or normalized < now_utc - _MAX_STATUS_AGE:
+        return None
+    return value
 
 
 def _status_page(payload: object, head_sha: str) -> tuple[int, list[object]] | None:
@@ -106,11 +124,12 @@ def _status_snapshot(
     statuses: list[object],
     required_checks: frozenset[_RequiredCheck],
     head_sha: str,
+    now_utc: datetime,
 ) -> tuple[_StatusSnapshot, frozenset[_RequiredCheck]] | None:
     """Return required commit-status evidence and its stable identity."""
     required_names = {context for context, _app_id in required_checks}
     seen_contexts: set[str] = set()
-    snapshot: list[tuple[int, str, str]] = []
+    snapshot: list[tuple[int, str, str, str]] = []
     matched: set[_RequiredCheck] = set()
     for status in statuses:
         if not isinstance(status, dict):
@@ -118,6 +137,7 @@ def _status_snapshot(
         status_id = status.get("id")
         context = status.get("context")
         state = status.get("state")
+        updated_at = _current_evidence_timestamp(status.get("updated_at"), now_utc)
         if (
             not isinstance(status_id, int)
             or isinstance(status_id, bool)
@@ -125,6 +145,7 @@ def _status_snapshot(
             or not isinstance(context, str)
             or not context
             or state not in _STATUS_STATES
+            or updated_at is None
         ):
             logger.warning("Commit status for %s is malformed", head_sha)
             return None
@@ -135,7 +156,7 @@ def _status_snapshot(
             return None
         seen_contexts.add(context)
         normalized_state = str(state)
-        snapshot.append((status_id, context, normalized_state))
+        snapshot.append((status_id, context, normalized_state, updated_at))
         if normalized_state != "success":
             return None
         matched.update(
@@ -151,6 +172,7 @@ def stable_passing_commit_status_requirements(
     *,
     deadline_s: float,
     cancellation: Event,
+    now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return requirements proved by two identical passing status reads."""
     first = _statuses_for_head(
@@ -161,7 +183,7 @@ def stable_passing_commit_status_requirements(
     )
     if first is None:
         return None
-    first_result = _status_snapshot(first, required_checks, head_sha)
+    first_result = _status_snapshot(first, required_checks, head_sha, now_utc)
     if first_result is None:
         return None
     second = _statuses_for_head(
@@ -172,7 +194,7 @@ def stable_passing_commit_status_requirements(
     )
     if second is None:
         return None
-    second_result = _status_snapshot(second, required_checks, head_sha)
+    second_result = _status_snapshot(second, required_checks, head_sha, now_utc)
     if second_result is None or second_result[0] != first_result[0]:
         logger.warning("Commit statuses changed while reading %s", head_sha)
         return None

@@ -93,7 +93,7 @@ if TYPE_CHECKING:
         ) -> bool:
             pass
 
-        def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
+        def pull_request_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
             pass
 
         @staticmethod
