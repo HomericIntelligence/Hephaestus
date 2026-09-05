@@ -14,6 +14,11 @@ from urllib.parse import quote
 import hephaestus.automation.github_api as github_api
 
 from .pipeline_github_contract import _PipelineGitHubHost
+from .pipeline_github_merge_rules import (
+    RequiredCheck as RequiredCheck,
+    required_check_sort_key,
+    ruleset_rule_facts,
+)
 from .pipeline_github_ruleset_conditions import required_app_id, ruleset_applies
 from .pipeline_github_transport import _parse_included_http_response
 
@@ -38,27 +43,25 @@ _BYPASS_ACTOR_TYPES = frozenset(
 
 
 @dataclass(frozen=True)
-class RequiredCheck:
-    """One required status context and its optional GitHub App identity."""
-
-    context: str
-    app_id: int | None
-
-
-@dataclass(frozen=True)
 class EffectiveMergePolicy:
-    """Stable effective merge policy for one exact repository base branch."""
+    """Stable effective merge policy for one exact repository base branch.
+
+    ``strict_update_enforced`` is true only when at least one applicable policy
+    source enforces strict updates for the current actor.
+    """
 
     base_branch: str
     default_branch: str
     required_checks: tuple[RequiredCheck, ...]
     conversation_resolution_enforced: bool
     bypassable_ruleset_ids: tuple[int, ...]
+    strict_update_enforced: bool = False
+    merge_queue_method: str | None = None
 
-
-def _required_check_sort_key(check: RequiredCheck) -> tuple[str, int, int]:
-    """Return a total order for unbound and app-bound check identities."""
-    return (check.context, check.app_id is not None, check.app_id or 0)
+    @property
+    def merge_queue_required(self) -> bool:
+        """Return whether server policy requires the merge queue."""
+        return self.merge_queue_method is not None
 
 
 def _request(
@@ -135,26 +138,32 @@ def _classic_check_inventory(status_checks: object) -> set[RequiredCheck]:
     return checks
 
 
-def _classic_policy(payload: object) -> tuple[set[RequiredCheck], bool]:
-    """Parse classic protection checks and conversation enforcement."""
+def _classic_policy(payload: object) -> tuple[set[RequiredCheck], bool, bool]:
+    """Parse classic checks, conversation enforcement, and strict update."""
     if not isinstance(payload, dict):
         raise ValueError("classic branch protection is not an object")
-    checks = _classic_check_inventory(payload.get("required_status_checks"))
-    resolution = payload.get("required_conversation_resolution")
+    status_checks = payload.get("required_status_checks")
+    checks = _classic_check_inventory(status_checks)
     admins = payload.get("enforce_admins")
+    admins_enforced = bool(isinstance(admins, dict) and admins.get("enabled") is True)
+    strict_update = False
+    if status_checks is not None:
+        if not isinstance(status_checks, dict) or not isinstance(status_checks.get("strict"), bool):
+            raise ValueError("classic required status-check strictness is malformed")
+        strict_update = status_checks["strict"] and admins_enforced
+    resolution = payload.get("required_conversation_resolution")
     resolution_safe = bool(
         isinstance(resolution, dict)
         and resolution.get("enabled") is True
-        and isinstance(admins, dict)
-        and admins.get("enabled") is True
+        and admins_enforced
         and _has_no_explicit_pull_request_bypasses(payload)
     )
-    return checks, resolution_safe
+    return checks, resolution_safe, strict_update
 
 
 def _classic_policy_response(
     result: subprocess.CompletedProcess[str],
-) -> tuple[set[RequiredCheck], bool]:
+) -> tuple[set[RequiredCheck], bool, bool]:
     """Parse classic protection or one exact absent-protection response."""
     stdout = result.stdout if isinstance(result.stdout, str) else ""
     status, body, malformed = _parse_included_http_response(stdout)
@@ -170,7 +179,7 @@ def _classic_policy_response(
         and isinstance(body, dict)
         and body.get("message") == "Branch not protected"
     ):
-        return set(), False
+        return set(), False, False
     raise RuntimeError("GitHub returned an error for classic branch protection")
 
 
@@ -197,64 +206,12 @@ def _validate_bypass(ruleset: dict[str, object]) -> bool:
     return bypass != "never"
 
 
-def _required_checks_from_parameters(parameters: dict[str, object]) -> set[RequiredCheck]:
-    """Parse one ruleset required-status-check parameter object."""
-    required = parameters.get("required_status_checks")
-    if not isinstance(required, list):
-        raise ValueError("ruleset required status checks are malformed")
-    checks: set[RequiredCheck] = set()
-    for entry in required:
-        if not isinstance(entry, dict):
-            raise ValueError("ruleset required status-check binding is malformed")
-        context = entry.get("context")
-        if not isinstance(context, str) or not context:
-            raise ValueError("ruleset required status-check context is malformed")
-        check = RequiredCheck(context, required_app_id(entry.get("integration_id")))
-        if check in checks:
-            raise ValueError("ruleset required checks contain duplicates")
-        checks.add(check)
-    return checks
-
-
-def _ruleset_rules(rules: object) -> tuple[set[RequiredCheck], bool]:
-    """Parse required checks and thread resolution from a rules array."""
-    if not isinstance(rules, list):
-        raise ValueError("ruleset rules are malformed")
-    checks: set[RequiredCheck] = set()
-    requires_resolution = False
-    seen_status_rule = False
-    seen_pull_request_rule = False
-    for rule in rules:
-        if not isinstance(rule, dict) or not isinstance(rule.get("type"), str):
-            raise ValueError("ruleset rule is malformed")
-        rule_type = rule["type"]
-        if rule_type not in {"required_status_checks", "pull_request"}:
-            continue
-        parameters = rule.get("parameters")
-        if not isinstance(parameters, dict):
-            raise ValueError("ruleset rule parameters are malformed")
-        if rule_type == "pull_request":
-            if seen_pull_request_rule:
-                raise ValueError("ruleset has duplicate pull-request rules")
-            seen_pull_request_rule = True
-            resolution = parameters.get("required_review_thread_resolution")
-            if not isinstance(resolution, bool):
-                raise ValueError("ruleset thread-resolution policy is malformed")
-            requires_resolution = resolution
-            continue
-        if seen_status_rule:
-            raise ValueError("ruleset has duplicate required-status-check rules")
-        seen_status_rule = True
-        checks.update(_required_checks_from_parameters(parameters))
-    return checks, requires_resolution
-
-
 def _ruleset_policy(
     ruleset: object,
     base_branch: str,
     default_branch: str,
-) -> tuple[set[RequiredCheck], bool, bool]:
-    """Parse one active ruleset into checks, resolution, and live bypass facts."""
+) -> tuple[set[RequiredCheck], bool, bool, bool, str | None]:
+    """Parse one active ruleset into actor-bound policy facts."""
     if not isinstance(ruleset, dict):
         raise ValueError("ruleset detail is not an object")
     ruleset_id = ruleset.get("id")
@@ -263,10 +220,18 @@ def _ruleset_policy(
     if ruleset.get("target") != "branch" or ruleset.get("enforcement") != "active":
         raise ValueError("active branch ruleset identity is malformed")
     if not ruleset_applies(ruleset, base_branch, default_branch):
-        return set(), False, False
+        return set(), False, False, False, None
     bypassable = _validate_bypass(ruleset)
-    checks, requires_resolution = _ruleset_rules(ruleset.get("rules"))
-    return checks, requires_resolution and not bypassable, bypassable
+    checks, requires_resolution, strict_update, merge_queue_method = ruleset_rule_facts(
+        ruleset.get("rules")
+    )
+    return (
+        checks,
+        requires_resolution and not bypassable,
+        bypassable,
+        strict_update and not bypassable,
+        merge_queue_method,
+    )
 
 
 def _active_summary_id(summary: object, seen_ids: set[int]) -> int | None:
@@ -371,7 +336,9 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
             deadline_s=deadline_s,
             cancellation=cancellation,
         )
-        classic_checks, classic_resolution = _classic_policy_response(classic_result)
+        classic_checks, classic_resolution, classic_strict = _classic_policy_response(
+            classic_result
+        )
         details = self._active_rulesets(
             deadline_s=deadline_s,
             cancellation=cancellation,
@@ -379,20 +346,33 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
         checks = set(classic_checks)
         ruleset_resolution = False
         bypassable: list[int] = []
+        strict_update = classic_strict
+        merge_queue_method: str | None = None
         for detail in details:
-            ruleset_checks, safe_resolution, can_bypass = _ruleset_policy(
-                detail, base_branch, default_branch
-            )
+            (
+                ruleset_checks,
+                safe_resolution,
+                can_bypass,
+                ruleset_strict,
+                ruleset_queue_method,
+            ) = _ruleset_policy(detail, base_branch, default_branch)
             checks.update(ruleset_checks)
             ruleset_resolution = ruleset_resolution or safe_resolution
             if can_bypass:
                 bypassable.append(cast(int, detail["id"]))
+            strict_update = strict_update or ruleset_strict
+            if ruleset_queue_method is not None:
+                if merge_queue_method not in {None, ruleset_queue_method}:
+                    raise ValueError("applicable merge-queue methods disagree")
+                merge_queue_method = ruleset_queue_method
         return EffectiveMergePolicy(
             base_branch=base_branch,
             default_branch=default_branch,
-            required_checks=tuple(sorted(checks, key=_required_check_sort_key)),
+            required_checks=tuple(sorted(checks, key=required_check_sort_key)),
             conversation_resolution_enforced=classic_resolution or ruleset_resolution,
             bypassable_ruleset_ids=tuple(sorted(bypassable)),
+            strict_update_enforced=strict_update,
+            merge_queue_method=merge_queue_method,
         )
 
     def _active_rulesets(

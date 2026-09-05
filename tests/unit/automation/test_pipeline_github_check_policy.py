@@ -41,9 +41,11 @@ def _classic_policy(
     *,
     conversation_resolution: bool = True,
     enforce_admins: bool = True,
+    strict: bool = False,
 ) -> dict[str, object]:
     return {
         "required_status_checks": {
+            "strict": strict,
             "contexts": ["classic-ci"],
             "checks": [{"context": "classic-ci", "app_id": 15368}],
         },
@@ -62,7 +64,40 @@ def _ruleset(
     conversation_resolution: bool = True,
     context: str = "ruleset-ci",
     app_id: int | None = 15368,
+    strict: bool = False,
+    merge_queue: bool = False,
 ) -> dict[str, object]:
+    rules: list[dict[str, object]] = [
+        {
+            "type": "pull_request",
+            "parameters": {
+                "required_review_thread_resolution": conversation_resolution,
+            },
+        },
+        {
+            "type": "required_status_checks",
+            "parameters": {
+                "strict_required_status_checks_policy": strict,
+                "do_not_enforce_on_create": False,
+                "required_status_checks": [{"context": context, "integration_id": app_id}],
+            },
+        },
+    ]
+    if merge_queue:
+        rules.append(
+            {
+                "type": "merge_queue",
+                "parameters": {
+                    "merge_method": "SQUASH",
+                    "max_entries_to_build": 2,
+                    "min_entries_to_merge": 1,
+                    "max_entries_to_merge": 5,
+                    "min_entries_to_merge_wait_minutes": 5,
+                    "grouping_strategy": "HEADGREEN",
+                    "check_response_timeout_minutes": 180,
+                },
+            }
+        )
     return {
         "id": ruleset_id,
         "name": "main policy",
@@ -76,22 +111,7 @@ def _ruleset(
                 "exclude": [],
             }
         },
-        "rules": [
-            {
-                "type": "pull_request",
-                "parameters": {
-                    "required_review_thread_resolution": conversation_resolution,
-                },
-            },
-            {
-                "type": "required_status_checks",
-                "parameters": {
-                    "strict_required_status_checks_policy": False,
-                    "do_not_enforce_on_create": False,
-                    "required_status_checks": [{"context": context, "integration_id": app_id}],
-                },
-            },
-        ],
+        "rules": rules,
         "bypass_actors": [
             {
                 "actor_id": 5,
@@ -156,8 +176,157 @@ def test_effective_policy_combines_classic_and_applicable_ruleset_checks(
     ]
     assert policy.conversation_resolution_enforced is True
     assert policy.bypassable_ruleset_ids == (155,)
+    assert policy.strict_update_enforced is False
+    assert policy.merge_queue_required is False
     # Classic protection plus one ruleset list and detail are stable-read twice.
     assert call_mock.call_count == 8
+
+
+@pytest.mark.parametrize(
+    ("classic_strict", "ruleset_strict", "expected"),
+    [(False, False, False), (True, False, True), (False, True, True)],
+)
+def test_effective_policy_combines_classic_and_ruleset_strict_update(
+    monkeypatch: pytest.MonkeyPatch,
+    classic_strict: bool,
+    ruleset_strict: bool,
+    expected: bool,
+) -> None:
+    """Either applicable server policy can require an up-to-date branch."""
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        _policy_transport(
+            _classic_policy(strict=classic_strict),
+            [_ruleset(strict=ruleset_strict)],
+        ),
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo")
+
+    policy = adapter.effective_merge_policy(
+        7,
+        "main",
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    assert policy is not None
+    assert policy.strict_update_enforced is expected
+
+
+def test_bypassable_classic_strictness_cannot_authorize_a_direct_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct merge rejects strictness that does not apply to the actor."""
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        _policy_transport(
+            _classic_policy(strict=True, enforce_admins=False),
+            [_ruleset(strict=False, can_bypass="never")],
+        ),
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    policy = adapter.effective_merge_policy(
+        7,
+        "main",
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+    rest_call = MagicMock(
+        return_value=SimpleNamespace(returncode=0, stdout='HTTP/2 409\n\n{"merged":false}')
+    )
+    monkeypatch.setattr(mutations_mod, "gh_call", rest_call)
+
+    assert policy is not None
+    assert policy.conversation_resolution_enforced is True
+    assert policy.strict_update_enforced is False
+    result = adapter.merge_pr_if_head(7, "a" * 40, policy=policy)
+
+    assert result.malformed is True
+    rest_call.assert_not_called()
+
+
+def test_non_bypassable_ruleset_strictness_authorizes_a_direct_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct merge accepts strictness that applies to the actor."""
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        _policy_transport(
+            _classic_policy(strict=False, enforce_admins=False),
+            [_ruleset(strict=True, can_bypass="never")],
+        ),
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    policy = adapter.effective_merge_policy(
+        7,
+        "main",
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+    rest_call = MagicMock(
+        return_value=SimpleNamespace(returncode=0, stdout='HTTP/2 409\n\n{"merged":false}')
+    )
+    monkeypatch.setattr(mutations_mod, "gh_call", rest_call)
+
+    assert policy is not None
+    assert policy.conversation_resolution_enforced is True
+    assert policy.strict_update_enforced is True
+    result = adapter.merge_pr_if_head(7, "a" * 40, policy=policy)
+
+    assert result.status == 409
+    assert result.malformed is False
+    rest_call.assert_called_once()
+
+
+def test_bypassable_ruleset_strictness_is_not_direct_merge_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ruleset that this actor can bypass cannot supply direct-route safety."""
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        _policy_transport(
+            _classic_policy(strict=False),
+            [_ruleset(strict=True, can_bypass="pull_requests_only")],
+        ),
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo")
+
+    policy = adapter.effective_merge_policy(
+        7,
+        "main",
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    assert policy is not None
+    assert policy.strict_update_enforced is False
+
+
+def test_effective_policy_records_an_applicable_required_merge_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An active applicable merge-queue rule selects queue admission."""
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        _policy_transport(_classic_policy(), [_ruleset(merge_queue=True)]),
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo")
+
+    policy = adapter.effective_merge_policy(
+        7,
+        "main",
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    assert policy is not None
+    assert policy.merge_queue_required is True
+    assert policy.merge_queue_method == "SQUASH"
 
 
 @pytest.mark.parametrize(
@@ -840,6 +1009,48 @@ def test_check_runs_reject_missing_or_malformed_application_identity(
     )
 
 
+def test_optional_check_run_with_null_app_does_not_revoke_required_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schema-valid optional run with no app cannot change merge authority."""
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    head = "a" * 40
+    policy = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(RequiredCheck("required-ci", 15368),),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(),
+    )
+    payload = {
+        "total_count": 2,
+        "check_runs": [
+            _check_run(head, run_id=1, context="required-ci", app_id=15368),
+            _check_run(head, run_id=2, context="optional-ci", app_id=None),
+        ],
+    }
+    empty_statuses = {"sha": head, "total_count": 0, "statuses": []}
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        MagicMock(
+            side_effect=[
+                _response(payload),
+                _response(payload),
+                _response(empty_statuses),
+                _response(empty_statuses),
+            ]
+        ),
+    )
+
+    assert adapter.required_checks_pass_for_head(
+        head,
+        policy,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+
 def test_check_traversal_honors_cancellation_between_pages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -945,6 +1156,15 @@ def test_conditional_put_uses_remaining_aggregate_deadline(
     result = adapter.merge_pr_if_head(
         7,
         "a" * 40,
+        policy=EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+            strict_update_enforced=True,
+            merge_queue_method=None,
+        ),
         deadline_s=time.monotonic() + 2.0,
         cancellation=threading.Event(),
     )
@@ -966,9 +1186,57 @@ def test_conditional_put_honors_cancellation_without_a_request(
     result = adapter.merge_pr_if_head(
         7,
         "a" * 40,
+        policy=EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+            strict_update_enforced=True,
+            merge_queue_method=None,
+        ),
         deadline_s=time.monotonic() + 2.0,
         cancellation=cancellation,
     )
 
     assert result.transport_error is True
     call_mock.assert_not_called()
+
+
+def test_required_queue_uses_exact_head_graphql_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queue mode uses the node ID and reviewed head without native auto-merge."""
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    graphql_mock = MagicMock(
+        return_value={"id": "MQE_node", "state": "QUEUED", "baseCommit": {"oid": "b" * 40}}
+    )
+    monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql_mock)
+    policy = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(RequiredCheck("required-ci", 15368),),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(15556494,),
+        strict_update_enforced=False,
+        merge_queue_method="SQUASH",
+    )
+
+    result = adapter.merge_pr_if_head(
+        7,
+        "a" * 40,
+        policy=policy,
+        pull_request_id="PR_node",
+        deadline_s=time.monotonic() + 2.0,
+        cancellation=threading.Event(),
+    )
+
+    assert result.queued is True
+    assert result.body == {"merged": False, "queue_entry_id": "MQE_node"}
+    spec = graphql_mock.call_args.args[0]
+    assert spec.operation == "enqueuePullRequest"
+    assert spec.variables == {
+        "pullRequestId": "PR_node",
+        "expectedHeadOid": "a" * 40,
+    }
+    assert "enablePullRequestAutoMerge" not in spec.query

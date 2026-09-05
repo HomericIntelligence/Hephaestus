@@ -68,6 +68,8 @@ _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _MERGE_CYCLE_DEADLINE_S = "_merge_cycle_deadline_s"
 _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
+_QUEUE_ADMITTED_HEAD = "merge_queue_admitted_head_sha"
+_QUEUE_ADMITTED_PROOF_GENERATION = "merge_queue_admitted_proof_generation"
 
 
 class MergeWaitStage(Stage):
@@ -138,6 +140,10 @@ class MergeWaitStage(Stage):
                 declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),
                 deadline_s=operation_deadline,
                 cancellation=ctx.cancellation,
+                queue_admitted=(
+                    item.payload.get(_QUEUE_ADMITTED_HEAD) == reviewed_head
+                    and item.payload.get(_QUEUE_ADMITTED_PROOF_GENERATION) == proof_generation
+                ),
             )
         except ValueError:
             return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
@@ -206,6 +212,14 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.BLOCKED, outcome)
         if outcome == "required_checks_not_green":
             return StageOutcome(Disposition.BLOCKED, outcome)
+        if outcome == "merge_queued":
+            item.payload[_QUEUE_ADMITTED_HEAD] = receipt.request.reviewed_head_sha
+            item.payload[_QUEUE_ADMITTED_PROOF_GENERATION] = receipt.request.proof_generation
+            item.state = MERGE
+            return self._park_for_readiness(item, ctx)
+        if outcome == "merge_queue_wait":
+            item.state = MERGE
+            return self._park_for_readiness(item, ctx)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome in {"merge_conflicting", "post_review_rebase_required"}:

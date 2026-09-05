@@ -1427,6 +1427,50 @@ def resolve_thread_mutation(thread_id: str) -> GraphQLMutationSpec[dict[str, Any
     )
 
 
+def enqueue_pull_request_mutation(
+    pull_request_id: str, expected_head_oid: str
+) -> GraphQLMutationSpec[dict[str, Any]]:
+    """Build an exact-head merge-queue admission mutation."""
+    document = (
+        "mutation EnqueuePullRequest($pullRequestId:ID!,$expectedHeadOid:GitObjectID!,"
+        "$clientMutationId:String!){enqueuePullRequest(input:{pullRequestId:$pullRequestId,"
+        "expectedHeadOid:$expectedHeadOid,clientMutationId:$clientMutationId}){clientMutationId "
+        "mergeQueueEntry{id state baseCommit{oid} pullRequest{id headRefOid}}}}"
+    )
+
+    def required(
+        payload: dict[str, Any], intent: GraphQLMutationIntent, _: dict[str, Any]
+    ) -> dict[str, Any]:
+        entry = payload.get("mergeQueueEntry")
+        pull_request = entry.get("pullRequest") if isinstance(entry, dict) else None
+        base_commit = entry.get("baseCommit") if isinstance(entry, dict) else None
+        queue_states = {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"}
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"]
+            or entry.get("state") not in queue_states
+            or not isinstance(pull_request, dict)
+            or pull_request.get("id") != pull_request_id
+            or pull_request.get("headRefOid") != expected_head_oid
+            or not isinstance(base_commit, dict)
+            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", str(base_commit.get("oid") or ""))
+            is None
+        ):
+            raise ValueError("merge-queue admission receipt was incomplete")
+        return {"clientMutationId": intent.client_mutation_id, **entry}
+
+    return _receipt_mutation(
+        "enqueuePullRequest",
+        document,
+        {"pullRequestId": pull_request_id, "expectedHeadOid": expected_head_oid},
+        ("pullRequestId", "expectedHeadOid"),
+        (),
+        "enqueuePullRequest",
+        required,
+    )
+
+
 def github_schema_contract_query() -> GraphQLQuerySpec[dict[str, Any]]:
     """Build a read-only introspection query for the live schema contract lane."""
     document = (
@@ -1456,6 +1500,7 @@ __all__ = [
     "batch_issue_states_query",
     "batch_issue_titles_query",
     "create_pending_review_mutation",
+    "enqueue_pull_request_mutation",
     "gh_call",
     "gh_cli_timeout",
     "github_schema_contract_query",

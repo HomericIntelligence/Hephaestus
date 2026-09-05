@@ -32,6 +32,7 @@ _FILE_BUDGETS = {
     # Effective classic and ruleset policy reads form one stable snapshot. The
     # bound includes the authenticated absent-classic-protection parser.
     "hephaestus/automation/pipeline_github_check_policy.py": 450,
+    "hephaestus/automation/pipeline_github_merge_rules.py": 125,
     # Parent-ruleset selectors and branch matching are one bounded concern.
     "hephaestus/automation/pipeline_github_ruleset_conditions.py": 200,
     # GitHub branch patterns use Ruby's path-separator-aware wildcard rules.
@@ -66,6 +67,7 @@ _COLLABORATOR_MODULES = frozenset(
         "pipeline_github_review_queries",
         "pipeline_github_contract",
         "pipeline_github_check_policy",
+        "pipeline_github_merge_rules",
         "pipeline_github_commit_statuses",
         "pipeline_github_ref_patterns",
         "pipeline_github_ruleset_conditions",

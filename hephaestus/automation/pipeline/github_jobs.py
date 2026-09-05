@@ -192,6 +192,7 @@ class RunMergeWaitCycleRequest:
     deadline_s: float
     cancellation: threading.Event
     issue_number: int | None = None
+    queue_admitted: bool = False
 
     def __post_init__(self) -> None:
         """Validate the exact-head merge proof and readiness fingerprint."""
@@ -220,6 +221,8 @@ class RunMergeWaitCycleRequest:
             raise ValueError("declined_readiness_fingerprint must be a tuple of strings or None")
         if self.issue_number is not None:
             _positive_identifier(self.issue_number, "issue_number")
+        if not isinstance(self.queue_admitted, bool):
+            raise ValueError("queue_admitted must be a Boolean")
 
 
 @dataclass(frozen=True)

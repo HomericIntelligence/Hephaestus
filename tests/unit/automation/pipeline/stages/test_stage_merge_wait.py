@@ -37,8 +37,10 @@ def _open_pr(
 ) -> dict[str, object]:
     """Return a complete open lifecycle record for a merge admission test."""
     return {
+        "id": "PR_node",
         "state": "OPEN",
         "headRefOid": head,
+        "baseRefOid": "b" * 40,
         "autoMergeRequest": auto_merge_request,
         "baseRefName": base,
     }
@@ -56,6 +58,8 @@ class _ConditionalGitHub(FakeStageGitHub):
         readiness: dict[str, object] | list[dict[str, object]] | None = None,
         conversation_resolution: bool = True,
         required_checks_green: bool = True,
+        merge_queue_method: str | None = None,
+        strict_update_enforced: bool = True,
     ) -> None:
         scripted_states = states or [_open_pr()]
         super().__init__(
@@ -89,6 +93,8 @@ class _ConditionalGitHub(FakeStageGitHub):
         )
         self.merge_attempts: list[tuple[int, str]] = []
         self._required_checks_green = required_checks_green
+        self._merge_queue_method = merge_queue_method
+        self._strict_update_enforced = strict_update_enforced
         self.checked_heads: list[str] = []
         self.events: list[str] = []
 
@@ -124,6 +130,8 @@ class _ConditionalGitHub(FakeStageGitHub):
             conversation_resolution_enforced=self._conversation_resolution,
             required_checks=(RequiredCheck("required-ci", 1),),
             bypassable_ruleset_ids=(),
+            strict_update_enforced=self._strict_update_enforced,
+            merge_queue_method=self._merge_queue_method,
         )
 
     def required_checks_pass_for_head(
@@ -200,6 +208,34 @@ def test_green_exact_head_checks_allow_merge_without_operator_review(
     assert github.checked_heads == [head]
     assert github.events == [f"checks:{head}", f"merge:{head}"]
     assert len(github.merge_attempts) == 1
+
+
+def test_queue_admission_polls_without_repeating_the_mutation(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A verified queue entry changes later cycles into read-only waits."""
+    queued = ConditionalMergeResult(
+        status=200,
+        body={"merged": False, "queue_entry_id": "MQE_node"},
+        queued=True,
+    )
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr(), _open_pr()],
+        merge_results=[queued],
+        merge_queue_method="SQUASH",
+        strict_update_enforced=False,
+    )
+    ctx = make_ctx(github=github)
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+
+    first = _complete_merge_cycle(stage, item, ctx)
+    second = _complete_merge_cycle(stage, item, ctx)
+
+    assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert item.payload["merge_queue_admitted_head_sha"] == "a" * 40
 
 
 def test_failed_exact_head_checks_block_merge_without_operator_review(
@@ -435,6 +471,8 @@ def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
                 required_checks=policy.required_checks,
                 conversation_resolution_enforced=self.policy_reads == 1,
                 bypassable_ruleset_ids=policy.bypassable_ruleset_ids,
+                strict_update_enforced=policy.strict_update_enforced,
+                merge_queue_method=policy.merge_queue_method,
             )
 
     github = ProtectionRemovedDuringReadinessWaitGitHub()
@@ -562,6 +600,8 @@ def test_missing_admin_enforcement_policy_blocks_merge_put(
                 required_checks=policy.required_checks,
                 conversation_resolution_enforced=False,
                 bypassable_ruleset_ids=policy.bypassable_ruleset_ids,
+                strict_update_enforced=policy.strict_update_enforced,
+                merge_queue_method=policy.merge_queue_method,
             )
 
     github = NoAdminEnforcementGitHub()

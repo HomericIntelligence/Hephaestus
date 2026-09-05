@@ -387,10 +387,13 @@ grades, and decision-shaped output are audit evidence, not authorization.
 `pr_review` applies `state:implementation-go` only after its structural audit
 and fresh live GitHub facts confirm the reviewed open, unarmed head, complete
 thread state, and an exclusive label transition by readback. That GitHub label
-is automated implementation eligibility. Before each SHA-conditional merge
-request, `merge_wait` requires the current-process reviewed-head proof and
-complete passing required status evidence for that exact head. No queue stage
-mutates native auto-merge.
+is automated implementation eligibility. Before each server merge request,
+`merge_wait` requires the current-process reviewed-head proof and complete
+passing required status evidence for that exact head. It reads the effective
+classic and ruleset policy. A required merge queue uses exact-head GraphQL
+admission. A direct SHA-conditional merge is available only when one policy
+source applies strict-update protection that the current actor cannot bypass.
+No queue stage mutates native auto-merge.
 Normal review may collect CI/CD evidence as context, but `merge_wait` uses
 complete passing required status evidence for the exact reviewed head as a
 separate merge gate. CI workflows and external artifacts never independently
@@ -418,7 +421,7 @@ gh pr create \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
 # 5. Do not use --admin or bypass branch protection. Queue stages do not mutate
-#    native auto-merge; merge_wait uses a SHA-conditional normal merge.
+#    native auto-merge. merge_wait uses the server route that policy requires.
 ```
 
 ### Commit Message Format
@@ -591,7 +594,10 @@ output do not authorize it. Normal review may collect CI/CD evidence as
 context, but the loop does not change CI/CD and no workflow, status, artifact,
 or lease independently authorizes it. `merge_wait` additionally requires
 complete passing required status evidence for the exact reviewed head before
-the conditional merge. No queue stage mutates native auto-merge.
+the server merge request. It uses exact-head queue admission when the effective
+ruleset requires a merge queue. Otherwise, direct merge requires strict-update
+protection from a source that the current actor cannot bypass. No queue stage
+mutates native auto-merge.
 
 A reviewer can report a required scope expansion in its structural audit. The
 host creates one deterministic child issue and keeps the source PR in the

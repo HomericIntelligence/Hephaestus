@@ -63,6 +63,19 @@ from hephaestus.utils.file_lock import LockUnavailableError
 _BATCH_NONCE = "b" * 32
 
 
+def _direct_merge_policy() -> EffectiveMergePolicy:
+    """Return a minimal policy with safe server-enforced direct merge."""
+    return EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(RequiredCheck("required-ci", 15368),),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(),
+        strict_update_enforced=True,
+        merge_queue_method=None,
+    )
+
+
 def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
     """The final admission directly follows all mutable policy reads."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
@@ -111,6 +124,8 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
                 conversation_resolution_enforced=True,
                 required_checks=(RequiredCheck("required-ci", 15368),),
                 bypassable_ruleset_ids=(),
+                strict_update_enforced=True,
+                merge_queue_method=None,
             )
 
         def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
@@ -177,10 +192,14 @@ class _RulesetBypassGitHub:
         *,
         bypassable_ruleset_ids: tuple[int, ...],
         conversation_resolution_enforced: bool,
+        merge_queue_method: str | None = None,
+        strict_update_enforced: bool = True,
     ) -> None:
         self.events: list[str] = []
         self._bypassable_ruleset_ids = bypassable_ruleset_ids
         self._conversation_resolution_enforced = conversation_resolution_enforced
+        self._merge_queue_method = merge_queue_method
+        self._strict_update_enforced = strict_update_enforced
         self._merged = False
 
     def gh_pr_state(self, _pr: int) -> dict[str, object]:
@@ -188,9 +207,11 @@ class _RulesetBypassGitHub:
         if self._merged:
             return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
         return {
+            "id": "PR_node",
             "state": "OPEN",
             "autoMergeRequest": None,
             "baseRefName": "main",
+            "baseRefOid": "b" * 40,
             "headRefOid": "a" * 40,
         }
 
@@ -206,6 +227,8 @@ class _RulesetBypassGitHub:
             required_checks=(RequiredCheck("required-ci", 15368),),
             conversation_resolution_enforced=self._conversation_resolution_enforced,
             bypassable_ruleset_ids=self._bypassable_ruleset_ids,
+            strict_update_enforced=self._strict_update_enforced,
+            merge_queue_method=self._merge_queue_method,
         )
 
     def list_unresolved_review_threads(self, _pr: int) -> list[object]:
@@ -224,15 +247,18 @@ class _RulesetBypassGitHub:
         self.events.append("checks")
         return True
 
-    def merge_pr_if_head(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+    def merge_pr_if_head(self, *_args: object, **kwargs: object) -> SimpleNamespace:
         self.events.append("merge")
-        self._merged = True
+        policy = kwargs.get("policy")
+        assert isinstance(policy, EffectiveMergePolicy)
+        self._merged = not policy.merge_queue_required
         return SimpleNamespace(
             dry_run=False,
             malformed=False,
             transport_error=False,
             status=200,
             body={"merged": True, "sha": "b" * 40},
+            queued=policy.merge_queue_required,
         )
 
 
@@ -280,9 +306,107 @@ def test_bypassable_ruleset_with_required_signatures_cannot_reach_merge_put() ->
     _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=True)
 
 
-def test_bypassable_ruleset_with_merge_queue_cannot_reach_merge_put() -> None:
-    """A green required-check inventory cannot make a bypass identity safe."""
-    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=True)
+@pytest.mark.parametrize("bypassable", [(), (15556494,)], ids=("subject", "bypass-actor"))
+def test_required_merge_queue_uses_exact_head_queue_admission(
+    bypassable: tuple[int, ...],
+) -> None:
+    """Both actor types use queue admission when server policy requires it."""
+    github = _RulesetBypassGitHub(
+        bypassable_ruleset_ids=bypassable,
+        conversation_resolution_enforced=True,
+        merge_queue_method="SQUASH",
+        strict_update_enforced=False,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merge_queued"
+    assert receipt.attempted is True
+    assert github.events == [
+        "state",
+        "label",
+        "policy",
+        "threads",
+        "readiness",
+        "checks",
+        "policy",
+        "threads",
+        "state",
+        "label",
+        "merge",
+    ]
+
+
+def test_non_strict_direct_mode_stops_before_merge_request() -> None:
+    """A direct merge needs server-enforced protection from base advances."""
+    github = _RulesetBypassGitHub(
+        bypassable_ruleset_ids=(),
+        conversation_resolution_enforced=True,
+        strict_update_enforced=False,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merge_policy_not_strict"
+    assert receipt.attempted is False
+    assert github.events == ["state", "label", "policy"]
+
+
+def test_base_advance_before_request_remains_safe_with_required_queue() -> None:
+    """Queue admission lets the server test the reviewed head on the new base."""
+
+    class AdvancingBaseGitHub(_RulesetBypassGitHub):
+        state_reads = 0
+
+        def gh_pr_state(self, pr_number: int) -> dict[str, object]:
+            state = super().gh_pr_state(pr_number)
+            self.state_reads += 1
+            state["id"] = "PR_node"
+            state["baseRefOid"] = ("b" if self.state_reads == 1 else "c") * 40
+            return state
+
+    github = AdvancingBaseGitHub(
+        bypassable_ruleset_ids=(15556494,),
+        conversation_resolution_enforced=True,
+        merge_queue_method="SQUASH",
+        strict_update_enforced=False,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merge_queued"
+    assert github.state_reads == 2
+    assert github.events[-1] == "merge"
+
+
+def test_admitted_queue_completion_returns_the_server_merge_receipt() -> None:
+    """A later queue lifecycle read supplies the merge SHA for wave durability."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    class MergedQueueGitHub:
+        def gh_pr_state(self, _pr_number: int) -> dict[str, object]:
+            return {
+                "state": "MERGED",
+                "mergedAt": "2026-09-05T00:00:00Z",
+                "mergeCommit": {"oid": "d" * 40},
+            }
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+        RunMergeWaitCycleRequest(
+            pr_number=7,
+            reviewed_head_sha="a" * 40,
+            proof_generation=2,
+            declined_readiness_fingerprint=None,
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=threading.Event(),
+            queue_admitted=True,
+        ),
+        MergedQueueGitHub(),
+    )
+
+    assert receipt.outcome == "merged"
+    assert receipt.merge_sha == "d" * 40
 
 
 def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> None:
@@ -405,6 +529,8 @@ def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
                 conversation_resolution_enforced=True,
                 required_checks=(RequiredCheck("required-ci", 15368),),
                 bypassable_ruleset_ids=(),
+                strict_update_enforced=True,
+                merge_queue_method=None,
             )
 
         def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
@@ -505,6 +631,8 @@ def test_merge_cycle_rechecks_final_admission_after_check_traversal(
                 conversation_resolution_enforced=True,
                 required_checks=(RequiredCheck("required-ci", 15368),),
                 bypassable_ruleset_ids=(),
+                strict_update_enforced=True,
+                merge_queue_method=None,
             )
 
         def list_unresolved_review_threads(self, _pr: int) -> list[object]:
@@ -2802,7 +2930,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40)
+        result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
         assert result.status == 200
         assert result.body == {"merged": True}
@@ -2841,7 +2969,7 @@ class TestConditionalMerge:
         call_mock = MagicMock()
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(pr_number, head_sha)
+        result = adapter.merge_pr_if_head(pr_number, head_sha, policy=_direct_merge_policy())
 
         assert result.malformed is True
         call_mock.assert_not_called()
@@ -2867,7 +2995,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
-        result = adapter.merge_pr_if_head(7, "a" * 40)
+        result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
         assert result.status == 409
         assert result.body == {"message": "head changed"}
@@ -2886,7 +3014,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40)
+        result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
         assert result.status == 200
         call_mock.assert_called_once()
@@ -2899,11 +3027,49 @@ class TestConditionalMerge:
         call_mock = MagicMock(side_effect=OSError("connection reset"))
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40)
+        result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
         assert result.transport_error is True
         assert result.status is None
         call_mock.assert_called_once()
+
+    def test_unknown_queue_mutation_outcome_is_terminal_and_not_retryable(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An uncertain queue admission cannot become a replayable transport error."""
+        adapter.repo = "repo"
+        intent = github_api_mod.GraphQLMutationIntent(
+            operation="enqueuePullRequest",
+            client_mutation_id="queue-id",
+            targets=(("pullRequestId", "PR_node"),),
+            content_hashes=(),
+        )
+        graphql = MagicMock(
+            side_effect=github_api_mod.GraphQLMutationOutcomeUnknownError(
+                "response was lost",
+                intent=intent,
+            )
+        )
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql)
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(15556494,),
+            merge_queue_method="SQUASH",
+        )
+
+        result = adapter.merge_pr_if_head(
+            7,
+            "a" * 40,
+            policy=policy,
+            pull_request_id="PR_node",
+        )
+
+        assert result.malformed is True
+        assert result.transport_error is False
+        graphql.assert_called_once()
 
     def test_dry_run_returns_a_non_mutating_result_without_calling_github(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -2913,7 +3079,7 @@ class TestConditionalMerge:
         call_mock = MagicMock()
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = dry_adapter.merge_pr_if_head(7, "a" * 40)
+        result = dry_adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
         assert result.dry_run is True
         call_mock.assert_not_called()
@@ -2941,6 +3107,8 @@ class TestExactHeadChecks:
             required_checks=tuple(RequiredCheck(context, app_id) for context in contexts),
             conversation_resolution_enforced=True,
             bypassable_ruleset_ids=(),
+            strict_update_enforced=True,
+            merge_queue_method=None,
         )
 
     @staticmethod
@@ -3340,6 +3508,8 @@ class TestExactHeadChecks:
             ),
             conversation_resolution_enforced=True,
             bypassable_ruleset_ids=(),
+            strict_update_enforced=True,
+            merge_queue_method=None,
         )
         monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
         monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
@@ -3399,6 +3569,8 @@ class TestExactHeadChecks:
             required_checks=(RequiredCheck("required-ci", 17),),
             conversation_resolution_enforced=True,
             bypassable_ruleset_ids=(),
+            strict_update_enforced=True,
+            merge_queue_method=None,
         )
         monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
 
@@ -6896,7 +7068,7 @@ class TestGhPrState:
                 "view",
                 "7",
                 "--json",
-                "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
+                "id,state,headRefOid,baseRefOid,mergedAt,mergeCommit,baseRefName,autoMergeRequest",
             ]
         ]
 

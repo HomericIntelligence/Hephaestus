@@ -689,6 +689,8 @@ class FakeStageGitHub(FakeGitHub):
             conversation_resolution_enforced=self._conversation_resolution,
             required_checks=(RequiredCheck("required-ci", 1),),
             bypassable_ruleset_ids=(),
+            strict_update_enforced=True,
+            merge_queue_method=None,
         )
 
     def required_checks_pass_for_head(

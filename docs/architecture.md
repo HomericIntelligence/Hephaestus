@@ -78,7 +78,7 @@ neither writes `state:skip` during seeding.
  exact SHA. The resulting in-memory proof is rechecked against a confirmed,
  unarmed live PR before the label is written. `merge_wait` uses that same
  active-run proof before every request in a bounded sequence (default: five)
- of SHA-conditional ordinary REST squash merges. Each request also requires
+ of policy-selected server merge requests. Each request also requires
  complete passing required status evidence for that exact head. The evidence
  is an independent merge gate, not a substitute for the structural review proof.
  After the evidence passes, `merge_wait` reads the stable effective policy again.
@@ -89,9 +89,11 @@ neither writes `state:skip` during seeding.
  default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof.
  Readiness is not authorization, and each request
  still has fresh open/`main`/unarmed/exclusive-GO admission.
- The direct adapter makes one request per call and never retries. No queue
- stage invokes `gh pr merge`, creates, disables, adopts, or polls native
- auto-merge, manages a merge queue, or uses an administrator bypass
+ The adapter makes one request per call and never retries. A required merge
+ queue uses exact-head GraphQL admission. Otherwise, direct REST merge requires
+ strict-update protection from a source that the current actor cannot bypass.
+ No queue stage invokes `gh pr merge`, creates, disables, adopts, or polls
+ native auto-merge, or uses an administrator bypass
  ([`pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py),
  [`worker_pool.py`](../hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
@@ -316,7 +318,8 @@ restarts from the same state.
 Implementation: coordinator-local writes use the single-owner
 [`ctx.github`](../hephaestus/automation/pipeline/stages/base.py) accessor. Reply
 journal recovery/append and delivery, PR-review reconciliation, and merge-wait
-admission/conditional merge instead submit a closed `GitHubJob`. Its receipt
+admission and the policy-selected merge request instead submit a closed
+`GitHubJob`. Its receipt
 embeds the exact immutable request and is accepted only when it equals the
 item's pending request. The coordinator invokes `on_job_done()` while the item
 is still in its submitting state, so the receipt is applied before installing
@@ -681,8 +684,10 @@ exclusive GO label, no unresolved review threads, and complete passing required
 status evidence for that head. A missing or drifted proof,
 failed or missing required status evidence, or untrusted merge state blocks
 without a label mutation. A matching set
-permits a bounded sequence (default: five) of individual SHA-conditional
-ordinary REST squash-merge requests. A read-only readiness wait may park for
+permits a bounded sequence (default: five) of policy-selected server requests.
+A required merge queue uses exact-head GraphQL admission. Otherwise, a direct
+SHA-conditional REST squash merge requires strict-update protection from a
+source that the current actor cannot bypass. A read-only readiness wait may park for
 the `--poll-max-wait` period. Its default is 1,200 seconds (20 minutes) for each
 fresh proof. Readiness and review prose never authorize
 merging, and fresh admission precedes every request
@@ -1241,8 +1246,8 @@ Architectural contract:
 
 Merge wait verifies a still-valid implementation review against its
 in-memory reviewed-head proof before each request. It may issue a bounded
-sequence (default: five) of individual ordinary REST squash-merge requests,
-each conditional on that SHA. Admission for every request requires an open
+sequence (default: five) of policy-selected server merge requests. Admission
+for every request requires an open
 `main` PR, an explicitly unarmed record, an exclusive implementation-GO
 label, the current-process reviewed-head proof, no unresolved review threads,
 and complete passing required status evidence for that head. A read-only
@@ -1252,18 +1257,20 @@ consume the merge budget or authorize a merge. After status evidence
 passes, merge wait reads the stable effective policy again. The new typed policy
 must equal the policy that supplied the required-check inventory. The stage
 applies bypass and conversation safety to the new policy before final admission.
-The direct adapter performs one request per call and never retries.
-Merge wait does not invoke `gh pr merge`,
-create, disable, adopt, or poll native auto-merge, manage a merge queue, or use
-an administrator bypass; an existing request is external ownership and is left
-untouched.
+The adapter performs one request per call and never retries. A required merge
+queue uses exact-head GraphQL admission and then lifecycle polling without a
+mutation replay. Otherwise, direct REST merge requires strict-update protection
+from a source that the current actor cannot bypass. Merge wait does not invoke `gh pr merge`,
+create, disable, adopt, or poll native auto-merge, or use an administrator
+bypass. An existing native auto-merge request is external ownership and is
+left untouched.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
     Approved["GO label + reviewed-head proof + passing exact-head status evidence"] --> Verify
-    Verify --> Merge["Conditional SHA squash merge"]
+    Verify --> Merge["Policy-selected server merge request"]
     Verify --> Review["Missing or drifted proof"]
     Verify --> Operator["External or ambiguous ownership"]
     Merge --> Merged --> Learn["Optional learning"] --> Finished
@@ -1285,6 +1292,9 @@ stateDiagram-v2
     Verify --> Failed: required status evidence missing or failed
     Verify --> Failed: incomplete or unavailable state
     Merge --> Complete: 200 merged and lifecycle confirms
+    Merge --> QueueWait: exact-head queue admission succeeds
+    QueueWait --> Complete: server lifecycle confirms merged
+    QueueWait --> Retry: timer wait
     Merge --> PRReview: 409 or ambiguous lifecycle head drift
     Verify --> Retry: readiness pending
     Merge --> Retry: 405 race or safe ambiguous retry
@@ -1303,8 +1313,10 @@ Architectural contract:
 - Existing external merge ownership is preserved.
 - Missing or drifted proof returns approval to PR review with zero label writes.
 - A matching eligibility label, current-process proof, and passing exact-head
-  required status evidence can submit a bounded sequence of individual
-  SHA-conditional normal REST merge requests, each only after fresh admission.
+  required status evidence can submit a bounded sequence of policy-selected
+  server merge requests, each only after fresh admission.
+- A required merge queue uses exact-head queue admission. Direct merge requires
+  strict-update protection from a source that the current actor cannot bypass.
 - Read-only readiness polling may wait for the `--poll-max-wait` period. Its
   default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof. The
   wait does not spend the request budget or authorize a merge. HTTP 409,
@@ -1985,8 +1997,8 @@ Exit-code priority is:
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
   compares the proof with the confirmed-unarmed live PR, reads complete passing
-  required status evidence for that SHA, and issues a normal SHA-conditional
-  merge rather than arming or polling auto-merge.
+  required status evidence for that SHA, and issues the server route that the
+  effective policy requires. It does not arm or poll native auto-merge.
 - **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New tracker reasons are recorded in run logs; a confirmed obsolete disposition uses its distinct bounded actor-owned explanation role under ADR-0031.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).

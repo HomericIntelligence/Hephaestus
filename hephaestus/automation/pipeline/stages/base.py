@@ -159,6 +159,7 @@ class ConditionalMergeResult:
     transport_error: bool = False
     malformed: bool = False
     dry_run: bool = False
+    queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -584,10 +585,12 @@ class StageGitHub(Protocol):
         pr_number: int,
         reviewed_sha: str,
         *,
+        policy: Any,
+        pull_request_id: str | None = None,
         deadline_s: float | None = None,
         cancellation: threading.Event | None = None,
     ) -> ConditionalMergeResult:
-        """Perform one normal merge after exact-head admission succeeds."""
+        """Request one server-enforced merge route for the reviewed head."""
         pass
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:

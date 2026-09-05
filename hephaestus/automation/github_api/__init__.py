@@ -77,6 +77,7 @@ from .graphql import (  # noqa: E402
     batch_issue_states_query as batch_issue_states_query,
     batch_issue_titles_query as batch_issue_titles_query,
     create_pending_review_mutation as create_pending_review_mutation,
+    enqueue_pull_request_mutation as enqueue_pull_request_mutation,
     gh_call as gh_call,
     gh_cli_timeout as gh_cli_timeout,
     github_schema_contract_query as github_schema_contract_query,

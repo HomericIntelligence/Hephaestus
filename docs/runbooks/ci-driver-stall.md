@@ -4,17 +4,19 @@ Use this runbook when a PR carries loop-owned `state:implementation-go` and
 remains blocked. The label is automated implementation eligibility. The current
 queue verifies it with its current-process reviewed-head proof, no unresolved
 review threads, and complete passing required status evidence for the exact
-head before every attempt. By default, `merge_wait` can make five ordinary
-SHA-conditional REST squash-merge requests. Every request has fresh open-`main`,
+head before every attempt. By default, `merge_wait` can make five
+policy-selected server merge requests. Every request has fresh open-`main`,
 unarmed, exclusive-label, and reviewed-head admission.
 Before a request, it makes a bounded, read-only operational readiness wait
 without spending a merge attempt. The `--poll-max-wait` option controls this
 wait. Its default is 1,200 seconds (20 minutes) for each fresh reviewed-head
 proof.
 Readiness is not authorization: every actual request repeats the label, head,
-thread, protection, and exact-head required-status gates. It does not invoke
-`gh pr merge`, create, disable, adopt, or poll native auto-merge, manage a
-merge queue, or use an administrator bypass.
+thread, protection, and exact-head required-status gates. A required merge
+queue uses exact-head GraphQL admission. Otherwise, direct REST merge requires
+strict-update protection from a source that the current actor cannot bypass.
+The loop does not invoke `gh pr merge`, change native auto-merge, or use an
+administrator bypass.
 
 ## Containment
 
@@ -70,12 +72,14 @@ If unresolved threads remain, resolve them through the normal review process.
 If an existing `autoMergeRequest` is present, treat it as external ownership
 and do not change it. If the PR state, label read, thread read, protection
 read, or required status read is incomplete, stop and repair the source
-condition. If the current actor can bypass an applicable active ruleset, the
-queue rejects the direct merge. Use a production credential that cannot bypass
-the applicable rulesets before you rerun the queue.
+condition. If the effective ruleset requires a merge queue, the loop submits
+the PR with its exact reviewed head and then waits for server lifecycle state.
+This route is valid for bypass and non-bypass actors because the request
+explicitly joins the queue. If no merge queue applies, direct merge requires a
+strict-update source that the current actor cannot bypass.
 
-The bounded sequence of individually admitted SHA-conditional normal REST
-merge requests is driven by:
+The bounded sequence of individually admitted server merge requests is driven
+by:
 
 ```bash
 uv run hephaestus-automation-loop --prs <N> --loops 1 --max-workers 1
@@ -90,7 +94,7 @@ For PRs already carrying implementation eligibility during rollout, no label
 or merge mutation occurs until the current-process reviewed-head proof and
 passing exact-head required status evidence exists. If either read is
 unavailable or defective, stop queue-driven merging and use the normal
-branch-protected manual process; do not restore label-only merging or manage
+branch-protected manual process; do not restore label-only merging or change
 native auto-merge.
 
 ## See Also

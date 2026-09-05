@@ -112,16 +112,16 @@ def _check_run_snapshot(
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
             return None
-        try:
-            app_id = _check_run_app_id(check_run)
-        except ValueError:
-            logger.warning("Check Run for %s has no valid app identity", head_sha)
-            return None
         matches = _check_run_required_matches(check_run, required_checks, head_sha)
         if matches is None:
             return None
         if not matches:
             continue
+        try:
+            app_id = _check_run_app_id(check_run)
+        except ValueError:
+            logger.warning("Check Run for %s has no valid app identity", head_sha)
+            return None
         check_run_id = check_run.get("id")
         if not isinstance(check_run_id, int) or isinstance(check_run_id, bool) or check_run_id <= 0:
             logger.warning("Check Run for %s has no valid identity", head_sha)
@@ -165,15 +165,15 @@ def _passing_check_run_requirements(
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             return None
-        try:
-            _check_run_app_id(check_run)
-        except ValueError:
-            return None
         matches = _check_run_required_matches(check_run, required_checks, head_sha)
         if matches is None:
             return None
         if not matches:
             continue
+        try:
+            _check_run_app_id(check_run)
+        except ValueError:
+            return None
         if check_run.get("head_sha") != head_sha:
             logger.warning("Check Run does not match reviewed head %s", head_sha)
             return None

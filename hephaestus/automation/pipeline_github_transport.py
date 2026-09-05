@@ -303,6 +303,21 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
             call=_run_internal_graphql,
         )
 
+    def _graphql_with_timeout(self, spec: GraphQLMutationSpec[T], operation_timeout_s: float) -> T:
+        """Run one typed mutation within an aggregate operation deadline."""
+
+        def _run_internal_graphql(
+            argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            return gh_call(
+                argv,
+                _graphql_internal=True,
+                timeout=operation_timeout_s,
+                **kwargs,
+            )
+
+        return run_graphql(spec, call=_run_internal_graphql)
+
     def _with_repo(self, argv: list[str]) -> list[str]:
         """Append an explicit repo selector when this accessor is repo-scoped."""
         if self._repo_slug is None:

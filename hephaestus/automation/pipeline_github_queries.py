@@ -507,8 +507,9 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, implementation, and merge_wait.
 
-        One ``gh pr view`` returns ``{state, headRefOid, mergedAt,
-        baseRefName, autoMergeRequest}``; ``None`` signals a read failure.
+        One ``gh pr view`` returns the PR node ID, head and base OIDs,
+        lifecycle state, base name, and native auto-merge state. ``None``
+        signals a read failure.
         Seed and implementation paths use the result for terminal-state
         checks before branch adoption or label routing, while pr_review and
         merge_wait use it to bind and verify a reviewed head on a confirmed,
@@ -525,7 +526,8 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                     "view",
                     str(pr_number),
                     "--json",
-                    "state,headRefOid,mergedAt,baseRefName,autoMergeRequest",
+                    "id,state,headRefOid,baseRefOid,mergedAt,mergeCommit,baseRefName,"
+                    "autoMergeRequest",
                 ]
             )
             data = json.loads(result.stdout or "{}")

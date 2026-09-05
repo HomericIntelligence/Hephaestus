@@ -4,6 +4,14 @@ import subprocess
 import time
 from threading import Event
 
+from hephaestus.automation.github_api import (
+    GraphQLDeterministicError,
+    GraphQLMutationOutcomeUnknownError,
+    GraphQLResponseError,
+    GraphQLRetryableError,
+)
+
+from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
 
@@ -11,31 +19,63 @@ from .pipeline_github_transport import *
 class PipelineGitHubMutations(PipelineGitHubIssueComments):
     """Own coordinator-approved non-review GitHub mutations."""
 
+    def _enqueue_pr_if_head(
+        self,
+        pr_number: int,
+        pull_request_id: str | None,
+        reviewed_sha: str,
+        timeout: float,
+    ) -> ConditionalMergeResult:
+        """Request one exact-head queue admission without internal replay."""
+        if not isinstance(pull_request_id, str) or not pull_request_id:
+            return ConditionalMergeResult(status=None, body=None, malformed=True)
+        try:
+            receipt = self._graphql_with_timeout(
+                github_api.enqueue_pull_request_mutation(pull_request_id, reviewed_sha),
+                timeout,
+            )
+        except GraphQLMutationOutcomeUnknownError as exc:
+            logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
+            return ConditionalMergeResult(status=None, body=None, malformed=True)
+        except GraphQLRetryableError as exc:
+            logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        except (GraphQLDeterministicError, GraphQLResponseError) as exc:
+            logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
+            return ConditionalMergeResult(status=None, body=None, malformed=True)
+        return ConditionalMergeResult(
+            status=200,
+            body={"merged": False, "queue_entry_id": receipt["id"]},
+            queued=True,
+        )
+
     def merge_pr_if_head(
         self,
         pr_number: int,
         reviewed_sha: str,
         *,
+        policy: EffectiveMergePolicy,
+        pull_request_id: str | None = None,
         deadline_s: float | None = None,
         cancellation: Event | None = None,
     ) -> ConditionalMergeResult:
-        """Attempt one immediate squash merge conditional on the reviewed SHA.
+        """Request the policy-selected merge route for the reviewed SHA.
 
         The stage owns review and check admission. This adapter only enforces
-        the SHA condition and performs the merge request. The request
-        deliberately avoids the GitHub CLI PR-merge subcommand,
-        native auto-merge, merge queues, administrator flags, and retries. A
-        stage-owned lifecycle read decides whether an ambiguous request may be
-        retried later.
+        the SHA condition and performs one direct merge or queue-admission
+        request. Queue admission is not native auto-merge. A stage-owned
+        lifecycle read decides whether an ambiguous request can run again.
         """
         if (
             pr_number <= 0
             or not isinstance(reviewed_sha, str)
             or not re.fullmatch(r"[0-9a-fA-F]{40}", reviewed_sha)
+            or not isinstance(policy, EffectiveMergePolicy)
+            or (not policy.merge_queue_required and not policy.strict_update_enforced)
         ):
             return ConditionalMergeResult(status=None, body=None, malformed=True)
         owner, name = self._owner_name()
-        if self._skip(f"conditionally squash merge PR #{pr_number} at {reviewed_sha}"):
+        if self._skip(f"request the policy merge route for PR #{pr_number} at {reviewed_sha}"):
             return ConditionalMergeResult(status=None, body=None, dry_run=True)
         if cancellation is not None and cancellation.is_set():
             return ConditionalMergeResult(status=None, body=None, transport_error=True)
@@ -44,6 +84,8 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
             timeout = min(timeout, deadline_s - time.monotonic())
             if timeout <= 0:
                 return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        if policy.merge_queue_required:
+            return self._enqueue_pr_if_head(pr_number, pull_request_id, reviewed_sha, timeout)
         try:
             result = gh_call(
                 [
