@@ -2599,6 +2599,112 @@ class TestGitOps:
             "worktree_path": str(repo),
         }
 
+    def test_inspect_implementation_worktree_includes_staged_changes_in_diff(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """Inspection supplies staged writer changes as recovery evidence."""
+        repo = tmp_path / "repo"
+        branch = "2973-auto-impl"
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        repo.mkdir()
+        git("init", "-q", "-b", branch)
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        tracked.write_text("staged change\n", encoding="utf-8")
+        git("add", "tracked.txt")
+
+        result = pool._git_inspect_implementation_worktree(
+            GitJob(
+                repo="test/repo",
+                op="inspect_implementation_worktree",
+                timeout_s=60,
+                kwargs={
+                    "repo_root": str(repo),
+                    "worktree_path": str(repo),
+                    "branch": branch,
+                    "expected_head": head,
+                },
+            )
+        )
+
+        assert result.ok is True
+        assert result.value["outcome"] == "dirty"
+        assert "-base" in result.value["diff"]
+        assert "+staged change" in result.value["diff"]
+
+    def test_inspection_disables_repo_configured_external_helpers(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """Inspection cannot execute a writer-controlled Git helper."""
+        repo = tmp_path / "repo"
+        branch = "2973-auto-impl"
+        fsmonitor_marker = tmp_path / "fsmonitor-ran"
+        diff_marker = tmp_path / "diff-ran"
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        repo.mkdir()
+        git("init", "-q", "-b", branch)
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        fsmonitor = tmp_path / "fsmonitor"
+        fsmonitor.write_text(f"#!/bin/sh\ntouch {fsmonitor_marker}\n", encoding="utf-8")
+        fsmonitor.chmod(0o700)
+        diff_external = tmp_path / "diff-external"
+        diff_external.write_text(f"#!/bin/sh\ntouch {diff_marker}\n", encoding="utf-8")
+        diff_external.chmod(0o700)
+        git("config", "core.fsmonitor", str(fsmonitor))
+        git("config", "diff.external", str(diff_external))
+        tracked.write_text("changed\n", encoding="utf-8")
+
+        result = pool._git_inspect_implementation_worktree(
+            GitJob(
+                repo="test/repo",
+                op="inspect_implementation_worktree",
+                timeout_s=60,
+                kwargs={
+                    "repo_root": str(repo),
+                    "worktree_path": str(repo),
+                    "branch": branch,
+                    "expected_head": head,
+                },
+            )
+        )
+
+        assert result.ok is True
+        assert fsmonitor_marker.exists() is False
+        assert diff_marker.exists() is False
+
     def test_inspect_implementation_worktree_rejects_malformed_request(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:

@@ -161,23 +161,54 @@ def _path_content_identity(root: Path, paths_output: str, *, seed: str = "") -> 
 
 def _dirty_worktree_content_snapshot(worktree: Path, *, timeout: int) -> dict[str, str]:
     """Return NUL-safe identities for index, tracked, and untracked content."""
+    env = _controlled_git_env()
     index = git_utils.run(
-        ["git", "ls-files", "--stage", "-z"], cwd=worktree, timeout=timeout
+        ["git", "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"],
+        cwd=worktree,
+        timeout=timeout,
+        env=env,
     ).stdout
     tracked_paths = git_utils.run(
-        ["git", "diff", "--no-ext-diff", "--name-only", "-z"],
+        [
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "diff",
+            "--no-ext-diff",
+            "--name-only",
+            "-z",
+        ],
         cwd=worktree,
         timeout=timeout,
+        env=env,
     ).stdout
     tracked_diff = git_utils.run(
-        ["git", "diff", "--no-ext-diff", "--binary", "--full-index"],
+        [
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            "--full-index",
+        ],
         cwd=worktree,
         timeout=timeout,
+        env=env,
     ).stdout
     untracked_paths = git_utils.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        [
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
         cwd=worktree,
         timeout=timeout,
+        env=env,
     ).stdout
     if not all(
         isinstance(value, str) for value in (index, tracked_paths, tracked_diff, untracked_paths)
@@ -4536,11 +4567,12 @@ class WorkerPool:
         ):
             return fail("worktree_unconfined", "worktree is outside the repository root")
         try:
+            env = _controlled_git_env()
             listing = git_utils.run(
-                ["git", "worktree", "list", "--porcelain"],
+                ["git", "-c", "core.fsmonitor=false", "worktree", "list", "--porcelain"],
                 cwd=confined_root,
                 timeout=job.timeout_s,
-                env=_controlled_git_env(),
+                env=env,
             ).stdout
             expected_block = (
                 f"worktree {confined_worktree}\nHEAD {expected_head}\nbranch refs/heads/{branch}\n"
@@ -4548,20 +4580,30 @@ class WorkerPool:
             if expected_block not in f"{listing.rstrip()}\n":
                 return fail("worktree_identity_drift", "registered worktree identity changed")
             head_sha = git_utils.run(
-                ["git", "rev-parse", "HEAD"], cwd=confined_worktree, timeout=job.timeout_s
-            ).stdout.strip()
-            current_branch = git_utils.run(
-                ["git", "branch", "--show-current"],
+                ["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD"],
                 cwd=confined_worktree,
                 timeout=job.timeout_s,
+                env=env,
+            ).stdout.strip()
+            current_branch = git_utils.run(
+                ["git", "-c", "core.fsmonitor=false", "branch", "--show-current"],
+                cwd=confined_worktree,
+                timeout=job.timeout_s,
+                env=env,
             ).stdout.strip()
             if head_sha != expected_head or current_branch != branch:
                 return fail("worktree_identity_drift", "worktree branch or head changed")
             status = git_utils.run(
-                ["git", "status", "--short"], cwd=confined_worktree, timeout=job.timeout_s
+                ["git", "-c", "core.fsmonitor=false", "status", "--short"],
+                cwd=confined_worktree,
+                timeout=job.timeout_s,
+                env=env,
             ).stdout
             diff = git_utils.run(
-                ["git", "diff"], cwd=confined_worktree, timeout=job.timeout_s
+                ["git", "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "HEAD"],
+                cwd=confined_worktree,
+                timeout=job.timeout_s,
+                env=env,
             ).stdout
             receipt: dict[str, object] = {
                 "outcome": "dirty" if status.strip() else "clean",

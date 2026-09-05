@@ -796,6 +796,12 @@ class ImplementationStage(Stage):
         if item.payload.pop("remediation_reply_recovery_invalid", False):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
         if "remediation_output" in item.payload:
+            snapshots = item.payload.get("remediation_thread_snapshots")
+            if (
+                not isinstance(snapshots, list)
+                or parse_addressed_replies(item.payload["remediation_output"], snapshots) is None
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
             return Continue(next_state=TEST_WAIT)
         if item.attempts.get("remediation_reply", 0) >= ctx.budget("remediation_reply"):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")

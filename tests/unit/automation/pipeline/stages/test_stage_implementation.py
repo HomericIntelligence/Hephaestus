@@ -1800,6 +1800,24 @@ class TestWorktreeAndAdvise:
         assert item.attempts["remediation_reply"] == 1
         assert stage.step(item, make_ctx()) == Continue(next_state="TEST_WAIT")
 
+    def test_recovery_revalidates_persisted_remediation_output(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A resumed recovery rejects stale or malformed reply mappings."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+        item.payload.update(
+            {
+                "remediation_output": {"addressed": [], "replies": {}},
+                "remediation_thread_snapshots": [{"id": "thread-1"}],
+            }
+        )
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
     def test_restored_writer_head_drift_returns_to_fresh_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

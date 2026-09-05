@@ -136,6 +136,7 @@ def test_remediation_reply_recovery_prompt_fences_inspection_evidence() -> None:
     assert "Do not edit files." in rendered
     assert "Do not run Git commands." in rendered
     assert "Do not call GitHub." in rendered
+    assert "Read, Glob, or Grep" in rendered
 
 
 def test_comment_classification_example_is_accepted_by_response_parser() -> None:
