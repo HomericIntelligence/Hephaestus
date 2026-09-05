@@ -39,8 +39,22 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+if [ -n "${HEPHAESTUS_VERIFIED_RUNNER_ROOT:-}" ]; then
+    PROJECT_ROOT="$(cd "${HEPHAESTUS_VERIFIED_RUNNER_ROOT}" && pwd)"
+    SCRIPT_DIR="${PROJECT_ROOT}/scripts"
+    unset HEPHAESTUS_VERIFIED_RUNNER_ROOT
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+if [ -n "${HEPHAESTUS_VERIFIED_RUNNER_FD:-}" ]; then
+    if [[ ! "${HEPHAESTUS_VERIFIED_RUNNER_FD}" =~ ^([3-9]|[1-9][0-9]+)$ ]]; then
+        printf '%s\n' 'The verified runner descriptor is invalid.' >&2
+        exit 1
+    fi
+    eval "exec ${HEPHAESTUS_VERIFIED_RUNNER_FD}<&-"
+    unset HEPHAESTUS_VERIFIED_RUNNER_FD
+fi
 SUBSET="${1:-all}"
 REBUILD=0
 for arg in "$@"; do
@@ -49,8 +63,19 @@ for arg in "$@"; do
     esac
 done
 
-# shellcheck source=scripts/shell/lib/install_helpers.sh
-source "${SCRIPT_DIR}/shell/lib/install_helpers.sh"
+if [ -n "${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD:-}" ]; then
+    if [[ ! "${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD}" =~ ^([3-9]|[1-9][0-9]+)$ ]]; then
+        printf '%s\n' 'The verified helper descriptor is invalid.' >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1090 # The host launcher supplies the verified descriptor.
+    source "/dev/fd/${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD}"
+    eval "exec ${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD}<&-"
+    unset HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD
+else
+    # shellcheck source=scripts/shell/lib/install_helpers.sh
+    source "${SCRIPT_DIR}/shell/lib/install_helpers.sh"
+fi
 
 LOCAL_IMAGE="hephaestus-ci:local"
 GITLEAKS_IMAGE="ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9"

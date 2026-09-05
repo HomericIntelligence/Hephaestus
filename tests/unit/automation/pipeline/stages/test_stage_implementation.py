@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import shlex
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -87,8 +90,12 @@ def _committed_runner_fixture(tmp_path: Path, source: str) -> tuple[Path, str]:
     runner.parent.mkdir(parents=True)
     runner.write_text(source, encoding="utf-8")
     runner.chmod(0o755)
+    install_helpers = repo / "scripts" / "shell" / "lib" / "install_helpers.sh"
+    install_helpers.parent.mkdir(parents=True)
+    install_helpers.write_text("#!/bin/bash\n", encoding="utf-8")
+    install_helpers.chmod(0o644)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "add", "scripts/run_ci_local.sh"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "scripts"], cwd=repo, check=True)
     subprocess.run(
         [
             "git",
@@ -113,6 +120,74 @@ def _committed_runner_fixture(tmp_path: Path, source: str) -> tuple[Path, str]:
         text=True,
     ).stdout.strip()
     return repo, trusted_revision
+
+
+def _write_runner_swap_git(
+    tmp_path: Path,
+    repo: Path,
+    *,
+    swap_kind: str,
+) -> tuple[Path, Path]:
+    """Write a Git proxy that replaces the runner after the tree lookup."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    swap_marker = tmp_path / "runner-swapped"
+    scripts = repo / "scripts"
+    runner = scripts / "run_ci_local.sh"
+    attack_source = (
+        "#!/bin/bash\n"
+        "printf '%s\\n' "
+        "'HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent' >&2\n"
+        "exit 75\n"
+    )
+    if swap_kind == "rename":
+        attack = repo / "attack-runner.sh"
+        attack.write_text(attack_source, encoding="utf-8")
+        attack.chmod(0o755)
+        swap_command = (
+            f"mv -- {shlex.quote(str(runner))} {shlex.quote(str(repo / 'trusted-runner.sh'))}\n"
+            f"mv -- {shlex.quote(str(attack))} {shlex.quote(str(runner))}\n"
+        )
+    elif swap_kind == "ancestor-symlink":
+        attack_scripts = repo / "attack-scripts"
+        attack_scripts.mkdir()
+        attack = attack_scripts / "run_ci_local.sh"
+        attack.write_text(attack_source, encoding="utf-8")
+        attack.chmod(0o755)
+        swap_command = (
+            f"mv -- {shlex.quote(str(scripts))} {shlex.quote(str(repo / 'trusted-scripts'))}\n"
+            f"ln -s -- {shlex.quote(str(attack_scripts))} {shlex.quote(str(scripts))}\n"
+        )
+    else:
+        attack_shell = repo / "attack-shell"
+        (attack_shell / "lib").mkdir(parents=True)
+        attack = attack_shell / "lib" / "install_helpers.sh"
+        attack.write_text(attack_source, encoding="utf-8")
+        attack.chmod(0o644)
+        shell = scripts / "shell"
+        swap_command = (
+            f"mv -- {shlex.quote(str(shell))} {shlex.quote(str(scripts / 'trusted-shell'))}\n"
+            f"ln -s -- {shlex.quote(str(attack_shell))} {shlex.quote(str(shell))}\n"
+        )
+
+    proxy = fake_bin / "git"
+    proxy.write_text(
+        "#!/bin/bash\n"
+        "set -uo pipefail\n"
+        f'{shlex.quote(real_git)} "$@"\n'
+        "status=$?\n"
+        f"if [[ \"${{1:-}}\" == 'ls-tree' && ! -e {shlex.quote(str(swap_marker))} ]]; then\n"
+        f"  touch -- {shlex.quote(str(swap_marker))}\n"
+        + "  "
+        + swap_command.replace("\n", "\n  ").rstrip()
+        + "\nfi\n"
+        'exit "${status}"\n',
+        encoding="utf-8",
+    )
+    proxy.chmod(0o755)
+    return fake_bin, swap_marker
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
@@ -2789,7 +2864,7 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv[:2] == ("bash", "-c")
+        assert result.job.argv[:3] == (str(Path(sys.executable).resolve()), "-I", "-c")
         assert result.job.argv[-4:] == HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
@@ -2816,7 +2891,7 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv[:2] == ("bash", "-c")
+        assert result.job.argv[:3] == (str(Path(sys.executable).resolve()), "-I", "-c")
         assert result.job.argv[-4:] == HEPHAESTUS_REQUIRED_CHECK_ARGV
 
     @pytest.mark.parametrize("candidate_kind", ["modified", "symlink"])
@@ -2892,6 +2967,134 @@ class TestTestsAndFix:
         assert item.payload["pre_pr_runner_mode"] == "container"
         assert github.mutation_log == []
 
+    @pytest.mark.parametrize(
+        "swap_kind",
+        ["rename", "ancestor-symlink", "helper-ancestor-symlink"],
+    )
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_runner_swap_cannot_authorize_or_publish(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        swap_kind: str,
+    ) -> None:
+        """A runner path swap cannot authorize fallback or publication."""
+        trusted_source = "#!/bin/bash\nexit 23\n"
+        if swap_kind == "helper-ancestor-symlink":
+            trusted_source = (
+                "#!/bin/bash\n"
+                'if [[ -n "${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD:-}" ]]; then\n'
+                '  source "/dev/fd/${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD}"\n'
+                "else\n"
+                "  source scripts/shell/lib/install_helpers.sh\n"
+                "fi\n"
+                "exit 23\n"
+            )
+        repo, trusted_revision = _committed_runner_fixture(tmp_path, trusted_source)
+        fake_bin, swap_marker = _write_runner_swap_git(
+            tmp_path,
+            repo,
+            swap_kind=swap_kind,
+        )
+        github = FakeStageGitHub(labels=["state:plan-go"])
+        ctx = make_ctx(org="HomericIntelligence", github=github)
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.worktree = str(repo)
+        item.payload["_impl_source_revision"] = trusted_revision
+        stage = ImplementationStage()
+        host_bash = shutil.which("bash", path=os.defpath)
+        assert host_bash is not None
+
+        def host_executable(name: str) -> str:
+            return str(fake_bin / "git") if name == "git" else host_bash
+
+        with patch.object(
+            implementation_module,
+            "_trusted_host_executable",
+            side_effect=host_executable,
+        ):
+            request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert swap_marker.is_file()
+        assert result.error == "rc=23"
+        assert "HEPHAESTUS_CI_RUNNER_FAILURE" not in result.stderr_tail
+        stage.on_job_done(item, result, ctx)
+        item.state = "COMMIT_PUSH_WAIT"
+
+        next_step = stage.step(item, ctx)
+        assert next_step == Continue(next_state="TESTFIX_WAIT")
+        assert not isinstance(next_step, JobRequest)
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
+        assert item.payload.get("pre_pr_fallback_reason") is None
+        assert item.pr is None
+        assert github.mutation_log == []
+
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_candidate_python_module_cannot_bypass_runner_snapshot(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """Candidate Python imports cannot bypass the trusted launcher."""
+        repo, trusted_revision = _committed_runner_fixture(
+            tmp_path,
+            "#!/bin/bash\nexit 23\n",
+        )
+        (repo / "hashlib.py").write_text(
+            (
+                "import sys\n"
+                'print("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent", '
+                "file=sys.stderr)\n"
+                "raise SystemExit(75)\n"
+            ),
+            encoding="utf-8",
+        )
+        github = FakeStageGitHub(labels=["state:plan-go"])
+        ctx = make_ctx(org="HomericIntelligence", github=github)
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.worktree = str(repo)
+        item.payload["_impl_source_revision"] = trusted_revision
+        stage = ImplementationStage()
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert result.error == "rc=23"
+        assert "HEPHAESTUS_CI_RUNNER_FAILURE" not in result.stderr_tail
+        stage.on_job_done(item, result, ctx)
+        item.state = "COMMIT_PUSH_WAIT"
+
+        next_step = stage.step(item, ctx)
+        assert next_step == Continue(next_state="TESTFIX_WAIT")
+        assert not isinstance(next_step, JobRequest)
+        assert item.payload["pre_pr_runner_mode"] == "container"
+        assert item.pr is None
+        assert github.mutation_log == []
+
     @patch(_IMPLEMENTATION_PLATFORM, "darwin")
     def test_trusted_runner_protocol_preserves_native_fallback(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
@@ -2925,7 +3128,7 @@ class TestTestsAndFix:
         finally:
             pool.shutdown(mark_interrupted=False)
 
-        assert result.error == "rc=75"
+        assert result.error == "rc=75", (result.stdout_tail, result.stderr_tail)
         stage.on_job_done(item, result, ctx)
         item.state = "COMMIT_PUSH_WAIT"
 
@@ -4675,7 +4878,11 @@ class TestFullWalks:
             "pre_pr_tests_native_fallback",
             "commit_push",
         ]
-        assert pool.submitted[2].job.argv[:2] == ("bash", "-c")
+        assert pool.submitted[2].job.argv[:3] == (
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-c",
+        )
         assert pool.submitted[2].job.argv[-4:] == HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert pool.submitted[3].job.argv == PRE_PR_TEST_ARGV
         assert item.pr == 1001

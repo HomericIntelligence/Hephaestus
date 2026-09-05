@@ -1687,6 +1687,12 @@ worktree's shared Git metadata is mounted read-only at its original absolute
 path so hatch-vcs, tests, and scanners resolve the candidate commit without
 granting container write access to repository metadata.
 
+The host launcher opens the runner and its sourced shell helper with a
+no-follow path walk. It limits each read to 1 MiB. It compares the bytes and
+file modes with the immutable implementation-source tree. The launcher then
+executes anonymous snapshots of those exact bytes and closes all descriptors.
+A changed or unsafe candidate runner cannot authorize native fallback.
+
 `--run-pre-pr-tests` remains an opt-in fallback for repositories without an
 automatic profile. Its vetted default is
 `uv run pytest tests -q --tb=short`; programmatic callers can supply

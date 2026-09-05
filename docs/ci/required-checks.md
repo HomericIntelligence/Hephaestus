@@ -53,6 +53,11 @@ runs `uv run pytest tests -q --tb=short`. On other platforms, the queue stops
 with `pre_pr_runner_unavailable`. A failure in native verification still
 returns the item to the bounded test-fix loop.
 
+The queue reads the runner and its sourced helper through no-follow directory
+descriptors. It compares both files with the immutable implementation-source
+tree. It executes anonymous snapshots of the verified bytes. A path rename,
+symlink change, or candidate marker cannot grant native-fallback authority.
+
 This local pass cannot run checks whose inputs do not exist until GitHub creates
 the PR. `pr-policy` still validates the live PR body, title, commit subjects,
 and DCO trailers in Actions. The classic matrix contexts and
