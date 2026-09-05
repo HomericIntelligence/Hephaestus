@@ -11,7 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, Self
+from typing import Any, Literal, Protocol, Self
 
 from hephaestus.automation.pipeline.scope_retraction import (
     scope_retraction_paths_from_body,
@@ -83,6 +83,80 @@ def _json_root(value: FrozenJson, expected: type[object], field_name: str) -> ob
     if not isinstance(root, expected):
         raise ValueError(f"{field_name} must contain a JSON {expected.__name__}")
     return root
+
+
+@dataclass(frozen=True)
+class ImplementationReplyProgress:
+    """Store durable progress for one safe, incomplete reply batch."""
+
+    phase: Literal[
+        "create_review",
+        "post_replies",
+        "verify_reply",
+        "submit_review",
+        "verify_submission",
+    ]
+    pull_request_id: str
+    pending_review_id: str | None = None
+    replied_thread_ids: tuple[str, ...] = ()
+    receipts: tuple[dict[str, Any], ...] = ()
+    active_thread_id: str | None = None
+    active_comment_id: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe snapshot for a handoff journal."""
+        return {
+            "phase": self.phase,
+            "pull_request_id": self.pull_request_id,
+            "pending_review_id": self.pending_review_id,
+            "replied_thread_ids": list(self.replied_thread_ids),
+            "receipts": [dict(receipt) for receipt in self.receipts],
+            "active_thread_id": self.active_thread_id,
+            "active_comment_id": self.active_comment_id,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> ImplementationReplyProgress | None:
+        """Validate and restore progress that is in a handoff."""
+        if not isinstance(value, dict):
+            return None
+        phase = value.get("phase")
+        phases = {
+            "create_review",
+            "post_replies",
+            "verify_reply",
+            "submit_review",
+            "verify_submission",
+        }
+        pull_request_id = value.get("pull_request_id")
+        ids = value.get("replied_thread_ids", [])
+        receipts = value.get("receipts", [])
+        pending_review_id = value.get("pending_review_id")
+        active_thread_id = value.get("active_thread_id")
+        active_comment_id = value.get("active_comment_id")
+        if (
+            not isinstance(phase, str)
+            or phase not in phases
+            or not isinstance(pull_request_id, str)
+            or not pull_request_id
+            or not isinstance(ids, list)
+            or not all(isinstance(item, str) and item for item in ids)
+            or not isinstance(receipts, list)
+            or not all(isinstance(item, dict) for item in receipts)
+            or (pending_review_id is not None and not isinstance(pending_review_id, str))
+            or (active_thread_id is not None and not isinstance(active_thread_id, str))
+            or (active_comment_id is not None and not isinstance(active_comment_id, str))
+        ):
+            return None
+        return cls(
+            phase=phase,  # type: ignore[arg-type]
+            pull_request_id=pull_request_id,
+            pending_review_id=pending_review_id,
+            replied_thread_ids=tuple(ids),
+            receipts=tuple(dict(item) for item in receipts),
+            active_thread_id=active_thread_id,
+            active_comment_id=active_comment_id,
+        )
 
 
 @dataclass(frozen=True)
