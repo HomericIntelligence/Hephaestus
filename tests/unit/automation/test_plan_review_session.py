@@ -147,6 +147,8 @@ def test_cycle_recovery_preserves_an_arbitrary_reasoning_effort(tmp_path: Path) 
     [
         {"model_selection_format": True, "reasoning_effort": "high"},
         {"model_selection_format": 1, "reasoning_effort": []},
+        {"model_selection_format": 1, "reasoning_effort": " padded"},
+        {"model_selection_format": 1, "reasoning_effort": "padded "},
     ],
 )
 def test_cycle_recovery_rejects_invalid_model_selection_metadata(

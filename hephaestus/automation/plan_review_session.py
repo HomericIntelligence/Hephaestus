@@ -260,7 +260,10 @@ class PlanReviewSessionStore:
             ) from error
         if selection_format == 1:
             reasoning_effort = record.reviewer_config.get("reasoning_effort")
-            if not isinstance(reasoning_effort, str):
+            if (
+                not isinstance(reasoning_effort, str)
+                or reasoning_effort != reasoning_effort.strip()
+            ):
                 raise PlanReviewSessionLostError("reviewer reasoning effort is invalid")
         config_digest = sha256(
             json.dumps(
