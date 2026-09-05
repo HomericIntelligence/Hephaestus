@@ -2576,6 +2576,7 @@ def test_pi_default_role_effort_uses_config_for_an_unknown_model(tmp_path: Path)
         '{"defaultProvider":"configured","defaultModel":"other","defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
     selected = agent_runtime.apply_agent_model_reasoning_effort(
         "pi", "private/provider:model", "default"
     )
@@ -2599,6 +2600,7 @@ def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-0.9B:high"
@@ -2613,6 +2615,7 @@ def test_pi_default_reasoning_replaces_an_inline_reasoning_value(tmp_path: Path)
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-7B","defaultThinkingLevel":"medium"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
 
     assert (
         agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-0.9B:default", pi_dir=pi_dir)
@@ -2629,6 +2632,7 @@ def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path) -> 
         '"defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-7B", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-7B:high"
@@ -2774,6 +2778,7 @@ def test_pi_default_model_does_not_read_project_settings(
     (pi_dir / "settings.json").write_text(
         '{"defaultProvider":"global","defaultModel":"model"}', encoding="utf-8"
     )
+    (pi_dir / "settings.json").chmod(0o600)
     project_dir = tmp_path / "project"
     (project_dir / ".pi").mkdir(parents=True)
     (project_dir / ".pi" / "settings.json").write_text(

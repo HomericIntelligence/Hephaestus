@@ -536,8 +536,10 @@ class TestPrReviewStageOnEnter:
         stage = PrReviewStage()
         github = StaleThreadGitHub(pr_head_branch="1-auto-impl-direct-" + "b" * 32)
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        ctx = make_ctx(github=github)
 
-        assert stage.on_enter(item, make_ctx(github=github)) == StageOutcome(
+        assert stage.on_enter(item, ctx) is None
+        assert _complete_github_job(stage, item, ctx) == StageOutcome(
             Disposition.FAIL_BACK, "implementation_remediation"
         )
         assert item.payload["existing_pr"] is True
