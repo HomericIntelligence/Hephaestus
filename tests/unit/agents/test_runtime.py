@@ -966,6 +966,29 @@ def test_codex_base_cmd_honors_explicit_reasoning_override(
 
 
 @pytest.mark.parametrize(
+    ("reference", "expected_reasoning"),
+    [
+        (":future-effort", "future-effort"),
+        (":default", ""),
+    ],
+)
+def test_codex_base_cmd_pins_default_model_for_effort_only_selection(
+    reference: str,
+    expected_reasoning: str,
+    tmp_path: Path,
+) -> None:
+    """An effort-only selection keeps the pinned model for a new session."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=reference)
+
+    assert cmd[cmd.index("--model") + 1] == agent_runtime.CODEX_DEFAULT_MODEL
+    reasoning_args = [arg for arg in cmd if arg.startswith("model_reasoning_effort=")]
+    assert bool(reasoning_args) is bool(expected_reasoning)
+    if expected_reasoning:
+        assert reasoning_args == [f"model_reasoning_effort={json.dumps(expected_reasoning)}"]
+
+
+@pytest.mark.parametrize(
     "native_model",
     ["gpt-5.4-mini", "gpt-5.5", "gpt-5.6"],
 )

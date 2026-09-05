@@ -1496,14 +1496,12 @@ def codex_approval_args(approval: str) -> list[str]:
 def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelConfig:
     """Translate legacy tier IDs and split a free-form Codex effort."""
     selection = parse_model_selection(model)
-    if not selection.reference:
-        if use_default:
-            return CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
-        return CodexModelConfig("")
     lower_model = selection.model.lower()
     explicit_effort = selection.reasoning_effort
     alias_model = lower_model
-    if alias_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
+    if not selection.model and use_default:
+        config = CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
+    elif alias_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
         config = CodexModelConfig(CODEX_GPT_56_SOL_MODEL, CODEX_FABLE_REASONING_EFFORT)
     elif alias_model in {"terra", CODEX_GPT_56_TERRA_MODEL}:
         config = CodexModelConfig(CODEX_GPT_56_TERRA_MODEL, CODEX_OPUS_REASONING_EFFORT)

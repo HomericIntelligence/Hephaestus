@@ -97,6 +97,7 @@ def test_unregistered_model_selection_stays_string_compatible() -> None:
         (":provider-default", "", "provider-default"),
         ("private/provider:model", "private/provider", "model"),
         ("private/provider:model:", "private/provider:model:", ""),
+        ("model:   ", "model:", ""),
     ],
 )
 def test_model_selection_uses_the_final_colon_for_any_nonempty_effort(
@@ -132,6 +133,17 @@ def test_registered_ifm_model_does_not_warn(caplog: pytest.LogCaptureFixture) ->
             == "IFM/K2-Horizon-0.9B:high"
         )
 
+    assert "Unknown model" not in caplog.text
+
+
+def test_claude_provider_default_selection_stays_explicit_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An explicit empty base remains different from an omitted model."""
+    with caplog.at_level(logging.WARNING, logger=agent_config.__name__):
+        resolved = agent_config.reviewer_model(":provider-default", agent="claude")
+
+    assert resolved == ":provider-default"
     assert "Unknown model" not in caplog.text
 
 

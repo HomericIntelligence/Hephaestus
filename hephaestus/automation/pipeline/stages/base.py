@@ -56,10 +56,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from hephaestus.agents.model_selection import normalize_model_reference
 from hephaestus.agents.runtime import (
     DEFAULT_AGENT,
     agent_uses_configured_model_default,
-    direct_agent_model,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.merge_authorization import MergeAuthorization
@@ -720,7 +720,7 @@ def stage_model(
     *,
     provider: str | None = None,
 ) -> str:
-    """Return a phase model override, the catch-all model, or the legacy fallback."""
+    """Return the normalized compact selection for one pipeline phase."""
     selected_provider = provider or agent_provider(ctx)
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
@@ -729,7 +729,7 @@ def stage_model(
         configured_value
         or ("" if agent_uses_configured_model_default(selected_provider) else fallback())
     )
-    return direct_agent_model(selected_provider, configured_model)
+    return normalize_model_reference(configured_model)
 
 
 def stage_timeout(

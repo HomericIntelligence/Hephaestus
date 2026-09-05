@@ -354,16 +354,20 @@ def test_stage_model_propagates_inline_reasoning_effort(
     assert stage_model(context, role, lambda: model) == expected
 
 
-def test_stage_model_does_not_append_codex_reasoning_to_claude_model() -> None:
-    """Claude removes an inline effort and uses its model default."""
+@pytest.mark.parametrize(
+    "model",
+    ["claude-sonnet-4-6:future-effort", ":provider-default"],
+)
+def test_stage_model_preserves_claude_selection_until_invocation(model: str) -> None:
+    """The pipeline keeps the compact selection until Claude starts."""
     config = SimpleNamespace(
         agent="claude",
         model="",
-        reviewer_model="claude-sonnet-4-6:future-effort",
+        reviewer_model=model,
     )
 
     context = cast(StageContext, SimpleNamespace(config=config))
-    assert stage_model(context, "reviewer", lambda: "fallback") == ("claude-sonnet-4-6")
+    assert stage_model(context, "reviewer", lambda: "fallback") == model
 
 
 def test_stage_model_uses_the_explicit_pi_alias() -> None:

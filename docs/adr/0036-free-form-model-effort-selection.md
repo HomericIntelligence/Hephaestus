@@ -68,7 +68,8 @@ the data type, not a Hephaestus value list.
   into the applicable model reference.
 - `LoopConfig` and `PipelineConfig` callers must move each removed
   `*_reasoning_effort` value into the matching `*_model` reference.
-- The public fixed-list export `MODEL_REASONING_EFFORTS` is removed. Callers
-  parse the model reference and let the selected provider validate inline
-  effort values. `PI_THINKING_LEVELS` remains for validation of the Pi
-  `defaultThinkingLevel` settings value.
+- The public fixed-list export `MODEL_REASONING_EFFORTS` is removed. Hephaestus
+  does not use a list to validate inline effort values. Claude removes the
+  effort. Codex uses its bounded fallback for an exact rejection. OpenCode and
+  Pi use their native handling. `PI_THINKING_LEVELS` remains for validation of
+  the Pi `defaultThinkingLevel` settings value.

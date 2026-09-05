@@ -1954,7 +1954,16 @@ Exit-code priority is:
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
 - **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
-- **Reasoning effort** — the free-form final segment in `MODEL[:EFFORT]`. The runtime passes it through as Codex `model_reasoning_effort`, OpenCode `--variant`, or Pi `--thinking`. `default` selects the provider default. Claude uses the base model. Codex retries one exact pre-work unsupported-effort rejection without the effort (ADR-0036).
+- **Reasoning effort** — the free-form final segment in `MODEL[:EFFORT]`, parsed
+  by [`parse_model_selection()`](../hephaestus/agents/model_selection.py). The
+  runtime passes it through with
+  [`_codex_model_args()`](../hephaestus/agents/runtime.py),
+  [`_opencode_base_cmd()`](../hephaestus/agents/runtime.py), or
+  [`_pi_automation_cmd()`](../hephaestus/agents/runtime.py). `default` selects
+  the provider default. Claude uses the base model. Codex uses
+  [`_run_codex_session_with_effort_fallback()`](../hephaestus/agents/runtime.py)
+  to retry one exact pre-work unsupported-effort rejection without the effort.
+  See [ADR-0036](adr/0036-free-form-model-effort-selection.md).
 - **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](../hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
 - **Push retry** — [`_git_retry(item, "commit_push failed")`](../hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
 

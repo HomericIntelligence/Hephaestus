@@ -170,14 +170,14 @@ def normalize_claude_model(model: str) -> str:
 
 
 def _resolve_model(value: str | None, default: str, *, agent: str = "claude") -> str:
-    """Return an explicitly configured model ID or *default*.
+    """Return an explicit compact model selection or *default*.
 
     Args:
-        value: Explicit model value, or ``None`` to use the default.
-        default: Default model ID to use when the variable is unset.
+        value: Explicit model selection, or ``None`` to use the default.
+        default: Default model ID to use when the value is unset.
 
     Returns:
-        The resolved model ID string.
+        The resolved compact model selection.
 
     """
     if value is None and agent_uses_configured_model_default(agent):
@@ -186,14 +186,12 @@ def _resolve_model(value: str | None, default: str, *, agent: str = "claude") ->
         return default
     resolved = _normalize_configured_model(value)
     selection = parse_model_selection(resolved)
-    if selection.model not in _KNOWN_MODELS:
+    if selection.model and selection.model not in _KNOWN_MODELS:
         logger.warning(
             "Unknown model %r (known: %s). Proceeding, but verify the model ID is correct.",
             resolved,
             ", ".join(sorted(_KNOWN_MODELS)),
         )
-    if agent == "claude":
-        return selection.model
     return selection.reference
 
 
