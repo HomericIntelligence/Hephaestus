@@ -79,6 +79,18 @@ def test_npm_inventory_names_every_pi_artifact() -> None:
     for package in ("Pi CLI", "pi-subagents", "pi-web-access"):
         assert package in " ".join(npm_row)
 
+    assert "managed Pi bootstrap path" in " ".join(npm_row)
+
+
+def test_pi_inventory_row_matches_the_managed_provider_contract() -> None:
+    """The Pi inventory row must describe the managed-automation boundary."""
+    pi_row = next(row for row in _inventory_table_rows()[1:] if "Pi private provider" in row[0])
+    row_text = " ".join(pi_row)
+
+    assert "Managed Pi automation" in row_text
+    assert "--agent pi" in row_text
+    assert "reviewed OS-isolation adapter" in row_text
+
 
 def test_inventory_has_responsibility_and_status_columns() -> None:
     """The inventory table header must split responsibility and cite a status column."""

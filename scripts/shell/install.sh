@@ -173,11 +173,19 @@ readonly JUST_SHA256_LINUX_AARCH64="bb3886b15e2cbcb9c0eb19956297d36de4eaef45b89d
 readonly JUST_SHA256_DARWIN_X86_64="30aacf9cbf021c2ff36fff5a05c800360e2020e527916e1c0960452ef5a8568c"
 readonly JUST_SHA256_DARWIN_AARCH64="e7a824c4d92cdea270b61474bd48e851aedc4c65f9c5245c12b32df6de9b536f"
 
-pi_coding_agent_npm_package() {
-    node -e '
-      const p = require(process.argv[1]).compatibility.pi;
-      process.stdout.write(p.npm_name + "@" + p.version);
-    ' "$REPO_ROOT/hephaestus/agents/pi_package_catalog.json"
+HEPHAESTUS_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+readonly HEPHAESTUS_REPO_ROOT
+
+run_pi_package_manager() {
+    if has_cmd hephaestus-install-pi-plugins; then
+        hephaestus-install-pi-plugins "$@"
+        return
+    fi
+    if has_cmd uv; then
+        uv --project "$HEPHAESTUS_REPO_ROOT" run --locked hephaestus-install-pi-plugins "$@"
+        return
+    fi
+    return 127
 }
 
 # Portable SHA-256: GNU coreutils on Linux, BSD `shasum -a 256` on macOS.
@@ -910,6 +918,13 @@ section "Pi Coding Agent"
 
 if has_cmd pi; then
     check_pass "pi $(pi --version 2>&1 | head -1)"
+    if $INSTALL; then
+        if run_pi_package_manager --yes --no-approve >/dev/null 2>&1; then
+            check_pass "managed Pi package set ready"
+        else
+            check_fail "managed Pi package set — install failed"
+        fi
+    fi
 else
     check_fail "pi — NOT FOUND"
     if $INSTALL; then
@@ -923,9 +938,15 @@ else
             # from pi_package_catalog.json. --ignore-scripts follows upstream Pi
             # install guidance and avoids executing package lifecycle hooks.
             # ─────────────────────────────────────────────────────────────────────
-            pi_package="$(pi_coding_agent_npm_package)"
-            if npm install -g --ignore-scripts "$pi_package" >/dev/null 2>&1; then
-                check_pass "pi installed (npm integrity-checked)"
+            pi_package="$(
+                node -e '
+                  const p = require(process.argv[1]).compatibility.pi;
+                  process.stdout.write(p.npm_name + "@" + p.version);
+                ' "$HEPHAESTUS_REPO_ROOT/hephaestus/agents/pi_package_catalog.json"
+            )"
+            if npm install -g --ignore-scripts "$pi_package" >/dev/null 2>&1 \
+                && run_pi_package_manager --yes --no-approve >/dev/null 2>&1; then
+                check_pass "pi installed and managed package set ready"
             else
                 check_fail "pi — install failed (see https://github.com/earendil-works/pi)"
             fi

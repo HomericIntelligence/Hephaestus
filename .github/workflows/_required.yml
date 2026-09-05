@@ -800,9 +800,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Pi CLI
-        uses: ./.github/actions/setup-pi-cli
-
       - name: Cache podman container storage
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -885,6 +882,45 @@ jobs:
           --require-cli
           --override-ini="addopts=" --basetemp=build/pytest-integration
           -v --strict-markers -m "not nightly and not artifact"
+
+  pi-conformance:
+    name: pi-conformance (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Install managed Pi runtime
+        uses: ./.github/actions/setup-pi-cli
+
+      - name: Run Pi conformance tests
+        run: uv run pytest tests/integration/test_pi_plugin_package_smoke.py tests/unit/agents/test_pi_plugins.py tests/unit/agents/test_pi_skill_confinement.py tests/unit/agents/test_pi_session.py tests/unit/agents/test_pi_alias_config.py tests/unit/docs/test_pi_private_provider_docs.py tests/unit/docs/test_third_party_services_doc.py tests/unit/docs/test_pi_rollout_consistency.py tests/unit/docs/test_security_policy.py tests/unit/shell/test_install_pinning.py tests/unit/ci/test_workflows.py --override-ini="addopts=" -v --strict-markers --require-pi-package-smoke
 
   installed-cli-tests:
     # Installed-artifact lane (#2173): build the wheel, install it into a
@@ -1369,6 +1405,7 @@ jobs:
       - schema-validation
       - deps-version-sync
       - license-scan
+      - pi-conformance
     steps:
       - name: Enforce required job result policy
         env:
@@ -1383,7 +1420,7 @@ jobs:
             "shell-tests", "build", "security-dependency-scan",
             "security-secrets-scan", "security-sast-scan",
             "security-workflow-scan", "schema-validation", "deps-version-sync",
-            "license-scan"]
+            "license-scan", "pi-conformance"]
           ALLOWED_SKIPS: >-
             {"pull_request": [], "push": ["pr-policy"], "merge_group": []}
         run: |

@@ -80,9 +80,16 @@ def test_installer_can_install_catalog_pinned_pi_cli(install_script: str) -> Non
     """The ecosystem bootstrap derives the real Pi CLI from one catalog."""
     assert "has_cmd pi" in install_script
     assert "pi_package_catalog.json" in install_script
+    assert "readonly HEPHAESTUS_REPO_ROOT" in install_script
+    assert "run_pi_package_manager()" in install_script
+    assert "has_cmd hephaestus-install-pi-plugins" in install_script
     assert "PI_CODING_AGENT_NPM_PACKAGE=" not in install_script
     assert 'npm install -g --ignore-scripts "$pi_package"' in install_script
     assert "pi --version" in install_script
+    assert (
+        'uv --project "$HEPHAESTUS_REPO_ROOT" run --locked hephaestus-install-pi-plugins'
+    ) in install_script
+    assert "managed Pi package set ready" in install_script
 
 
 def test_podman_socket_uses_secure_runtime_directory(install_script: str) -> None:
