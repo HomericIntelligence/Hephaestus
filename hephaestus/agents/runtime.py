@@ -1820,11 +1820,11 @@ def _codex_reasoning_effort_rejection(event: dict[str, Any]) -> str | None:
     return _codex_structured_failure(event) or "Codex rejected the reasoning effort"
 
 
-def _codex_reasoning_effort_failure(*texts: str) -> str | None:
-    """Find a classified reasoning-effort rejection in Codex JSONL."""
-    if not all(_codex_json_object_stream_is_well_formed(text) for text in texts):
+def _codex_reasoning_effort_failure(stdout: str) -> str | None:
+    """Find a classified reasoning-effort rejection in Codex stdout JSONL."""
+    if not _codex_json_object_stream_is_well_formed(stdout):
         return None
-    events = tuple(event for text in texts for event in _codex_json_objects(text))
+    events = tuple(_codex_json_objects(stdout))
     diagnostic = next(
         (
             result
@@ -2135,9 +2135,7 @@ def _run_codex_command(
             stdout = _coerce_timeout_output(exc.stdout)
             stderr = _coerce_timeout_output(exc.stderr)
             final_message = _read_text_file(Path(output_file.name)).strip()
-            effort_diagnostic = (
-                None if final_message else _codex_reasoning_effort_failure(stdout, stderr)
-            )
+            effort_diagnostic = None if final_message else _codex_reasoning_effort_failure(stdout)
             if effort_diagnostic is not None:
                 raise _CodexReasoningEffortRejectedError(
                     f"codex_unsupported_reasoning_effort: {effort_diagnostic[:300]}"
@@ -2164,7 +2162,7 @@ def _run_codex_command(
         last_message = Path(output_file.name).read_text(encoding="utf-8")
 
     effort_diagnostic = (
-        None if last_message.strip() else _codex_reasoning_effort_failure(stdout_text, stderr_text)
+        None if last_message.strip() else _codex_reasoning_effort_failure(stdout_text)
     )
     if effort_diagnostic is not None:
         raise _CodexReasoningEffortRejectedError(

@@ -1098,6 +1098,57 @@ def test_run_codex_session_retries_an_unsupported_effective_effort_with_default(
     assert not any(part.startswith("model_reasoning_effort=") for part in commands[1])
 
 
+def test_run_codex_session_retries_effort_rejection_with_plain_stderr(
+    tmp_path: Path,
+) -> None:
+    """Normal stderr diagnostics do not make a safe stdout rejection ambiguous."""
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        commands.append(list(cmd))
+        if len(commands) == 1:
+            event = {
+                "type": "turn.failed",
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "reasoning.effort",
+                    "code": "unsupported_value",
+                    "message": "The model does not accept this effort.",
+                },
+            }
+            return _FakeCodexPopen(
+                cmd,
+                proc_stdout=json.dumps(event),
+                proc_stderr="provider emitted a normal diagnostic\n",
+                returncode=1,
+                final_message="",
+                **kwargs,
+            )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout='{"type":"session_meta","payload":{"id":"session-astra"}}\n',
+            final_message="used default",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="gpt-6-astra:future-effort",
+        )
+
+    assert result.stdout == "used default"
+    assert len(commands) == 2
+    assert 'model_reasoning_effort="future-effort"' in commands[0]
+    assert not any(part.startswith("model_reasoning_effort=") for part in commands[1])
+
+
 def test_run_codex_session_does_not_retry_an_unrelated_provider_error(
     tmp_path: Path,
 ) -> None:
