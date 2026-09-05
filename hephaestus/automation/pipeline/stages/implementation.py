@@ -79,6 +79,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.runtime import requires_plan_scope_guard
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import (
     MAX_ADDRESS_REPLY_CHARS,
@@ -374,6 +375,7 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
+    approved_plan: str = "",
     rebase_conflict: bool = False,
     rebase_conflict_paths: tuple[str, ...] = (),
 ) -> str:
@@ -407,6 +409,7 @@ def build_implementation_prompt(
         issue_body=issue_body,
         branch_name=branch_name,
         worktree_path=worktree_path,
+        approved_plan=approved_plan,
     )
     if not advise_findings and not rebase_conflict:
         return prompt
@@ -427,7 +430,17 @@ def build_implementation_prompt(
     return "".join(blocks)
 
 
-def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
+def build_test_fix_prompt(
+    issue_number: int,
+    prev_iteration: int,
+    test_output: str,
+    *,
+    issue_title: str = "",
+    issue_body: str = "",
+    branch_name: str = "",
+    worktree_path: str = "",
+    approved_plan: str = "",
+) -> str:
     """Compose the resume prompt that feeds failing pre-PR test output back.
 
     Reuses :func:`get_impl_resume_feedback_prompt` verbatim (doc section 4
@@ -446,11 +459,20 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
     review_feedback = PromptCatalog.current().render(
         "implementation/test_failure_review.j2", test_output=test_output
     )
-    return get_impl_resume_feedback_prompt(
+    prompt = get_implementation_prompt(
+        issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        branch_name=branch_name,
+        worktree_path=worktree_path,
+        approved_plan=approved_plan,
+    )
+    feedback = get_impl_resume_feedback_prompt(
         issue_number=issue_number,
         prev_iteration=prev_iteration,
         review_feedback=review_feedback,
     )
+    return prompt + feedback
 
 
 class ImplementationStage(Stage):
@@ -542,6 +564,8 @@ class ImplementationStage(Stage):
             "repo_root": str(ctx.paths.repo_root),
             "source_lane": "impl",
         }
+        if requires_plan_scope_guard(agent_provider(ctx)):
+            kwargs["capture_source_revision"] = True
         direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
         direct_branch_prefix = f"{issue}-auto-impl-direct-"
         direct_branch_nonce = (
@@ -722,10 +746,12 @@ class ImplementationStage(Stage):
                 on_done_state=DIRTY_RECOVERY_WAIT,
             )
         logger.info("implementation:%d: requesting dirty-worktree decision", issue)
+        agent = agent_provider(ctx)
+        codex_automation = requires_plan_scope_guard(agent)
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent,
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_dirty_reused_worktree_decision_prompt,
             cwd=_worktree_path(item, ctx),
@@ -733,17 +759,21 @@ class ImplementationStage(Stage):
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,
-            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            resume_session_id=(
+                None if codex_automation else item.session_ids.get(AGENT_IMPLEMENTER)
+            ),
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT_INSPECT,
                 (
                     SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
+                    if not codex_automation and AGENT_IMPLEMENTER in item.session_bindings
                     else SessionLifecycle.START_NEW
                 ),
             ),
-            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            resume_binding=(
+                None if codex_automation else item.session_bindings.get(AGENT_IMPLEMENTER)
+            ),
             prompt_kwargs={
                 "branch_name": item.branch,
                 "status_text": item.payload.get("worktree_status", ""),
@@ -1078,10 +1108,12 @@ class ImplementationStage(Stage):
                     )
                 if not item.payload.pop("_reply_journal_recovery_complete", False):
                     return Continue(next_state=REPLY_JOURNAL_RECOVERY_WAIT)
+            agent = agent_provider(ctx)
+            codex_automation = requires_plan_scope_guard(agent)
             job = AgentJob(
                 repo=item.repo,
                 issue=issue,
-                agent=agent_provider(ctx),
+                agent=agent,
                 model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_address_review_prompt,
                 cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -1089,17 +1121,21 @@ class ImplementationStage(Stage):
                 workspace=workspace,
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 session_agent=AGENT_IMPLEMENTER,
-                resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+                resume_session_id=(
+                    None if codex_automation else item.session_ids.get(AGENT_IMPLEMENTER)
+                ),
                 execution_request=ExecutionRequest(
                     AgentRole.IMPLEMENTER,
                     AgentOperation.ADDRESS_REVIEW,
                     (
                         SessionLifecycle.RESUME_REQUIRED
-                        if AGENT_IMPLEMENTER in item.session_bindings
+                        if not codex_automation and AGENT_IMPLEMENTER in item.session_bindings
                         else SessionLifecycle.START_NEW
                     ),
                 ),
-                resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+                resume_binding=(
+                    None if codex_automation else item.session_bindings.get(AGENT_IMPLEMENTER)
+                ),
                 prompt_kwargs={
                     "pr_number": item.pr,
                     "issue_number": issue,
@@ -1134,10 +1170,12 @@ class ImplementationStage(Stage):
             ),
             branch=item.branch or None,
         )
+        agent = agent_provider(ctx)
+        is_codex = requires_plan_scope_guard(agent)
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent,
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -1145,17 +1183,17 @@ class ImplementationStage(Stage):
             workspace=workspace,
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
-            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            resume_session_id=None if is_codex else item.session_ids.get(AGENT_IMPLEMENTER),
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
                 (
                     SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
+                    if not is_codex and AGENT_IMPLEMENTER in item.session_bindings
                     else SessionLifecycle.START_NEW
                 ),
             ),
-            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            resume_binding=None if is_codex else item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "issue_title": item.payload.get("issue_title", ""),
@@ -1163,6 +1201,7 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "approved_plan": item.payload.get("plan_text", ""),
                 "rebase_conflict": bool(item.payload.get("rebase_conflict")),
                 "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
@@ -1204,27 +1243,33 @@ class ImplementationStage(Stage):
         if item.attempts.get("rebase_conflict", 0) >= ctx.budget("rebase_conflict"):
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_exhausted")
         logger.info("implementation:%d: requesting edit-only rebase resolution", issue)
+        agent = agent_provider(ctx)
+        codex_automation = requires_plan_scope_guard(agent)
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent,
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             allowed_tools="Read,Write,Edit,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,
-            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            resume_session_id=(
+                None if codex_automation else item.session_ids.get(AGENT_IMPLEMENTER)
+            ),
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
                 (
                     SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
+                    if not codex_automation and AGENT_IMPLEMENTER in item.session_bindings
                     else SessionLifecycle.START_NEW
                 ),
             ),
-            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            resume_binding=(
+                None if codex_automation else item.session_bindings.get(AGENT_IMPLEMENTER)
+            ),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "issue_title": item.payload.get("issue_title", ""),
@@ -1320,27 +1365,42 @@ class ImplementationStage(Stage):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "tests_red")
         logger.info("implementation:%d: requesting test-fix job", issue)
+        agent = agent_provider(ctx)
+        codex_automation = requires_plan_scope_guard(agent)
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent,
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_test_fix_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
-            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            resume_session_id=(
+                None if codex_automation else item.session_ids.get(AGENT_IMPLEMENTER)
+            ),
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.TEST_FIX,
-                SessionLifecycle.RESUME_REQUIRED,
+                (
+                    SessionLifecycle.START_NEW
+                    if codex_automation
+                    else SessionLifecycle.RESUME_REQUIRED
+                ),
             ),
-            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            resume_binding=(
+                None if codex_automation else item.session_bindings.get(AGENT_IMPLEMENTER)
+            ),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.attempts.get("test_fix", 0),
                 "test_output": item.payload.get("test_output", ""),
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "branch_name": item.branch,
+                "worktree_path": item.worktree,
+                "approved_plan": item.payload.get("plan_text", ""),
             },
             descr="test_fix",
         )
@@ -1387,6 +1447,28 @@ class ImplementationStage(Stage):
         )
         if is_full_commit_sha(publish_base_sha):
             kwargs["publish_base_sha"] = publish_base_sha
+        if requires_plan_scope_guard(agent):
+            planned_claims = item.payload.get("_implementation_file_claims")
+            if planned_claims is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
+            allowed_paths = tuple(
+                sorted(
+                    claim[1]
+                    for claim in planned_claims
+                    if isinstance(claim, tuple)
+                    and len(claim) == 2
+                    and claim[0] == (ctx.org, item.repo)
+                    and isinstance(claim[1], str)
+                    and is_safe_scope_retraction_path(claim[1])
+                )
+            )
+            if not allowed_paths:
+                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
+            source_revision = item.payload.get("_impl_source_revision")
+            if not is_full_commit_sha(source_revision):
+                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_base_unavailable")
+            kwargs["allowed_paths"] = allowed_paths
+            kwargs["scope_history_base_sha"] = source_revision
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
         # A direct cursor's bootstrap pin reserves a newly created writer
         # branch.  Once an existing PR is adopted, its remote branch is the
@@ -2164,6 +2246,9 @@ class ImplementationStage(Stage):
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
+            source_revision = value.get("source_revision")
+            if is_full_commit_sha(source_revision):
+                item.payload["_impl_source_revision"] = source_revision
             if item.payload["worktree_dirty"]:
                 item.payload["worktree_branch"] = value.get("branch")
                 item.payload["worktree_head_sha"] = value.get("head_sha")

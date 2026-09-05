@@ -134,6 +134,7 @@ def make_coordinator(
     loops: int = 1,
     max_workers: int = 1,
     parallel_repos: int = 1,
+    agent: str = "claude",
     dry_run: bool = False,
     serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
@@ -149,6 +150,7 @@ def make_coordinator(
         loops=loops,
         max_workers=max_workers,
         parallel_repos=parallel_repos,
+        agent=agent,
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         enable_learn=enable_learn,
@@ -2429,6 +2431,39 @@ class TestImplementationAdmission:
         assert fetches == [21]
         assert id(item) not in coordinator._implementation_file_claims
         assert "_implementation_file_claims" not in item.payload
+
+    def test_capture_claims_when_overlap_serialization_is_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Codex publication guard receives plan claims in serial execution."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=1, agent="codex"
+        )
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"allowed.py"},
+        )
+
+        claims = coordinator._capture_implementation_file_claims(item)
+
+        assert claims == {(("org", "repo-a"), "allowed.py")}
+
+    def test_codex_claim_capture_rejects_an_empty_plan_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex must not start a writer turn without an approved file set."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=1, agent="codex"
+        )
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: set(),
+        )
+
+        with pytest.raises(RuntimeError, match="approved plan manifest"):
+            coordinator._capture_implementation_file_claims(item)
 
     def test_reviewed_pr_realized_diff_blocks_overlapping_direct_issue(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

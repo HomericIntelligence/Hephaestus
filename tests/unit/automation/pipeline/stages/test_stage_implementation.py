@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
@@ -996,6 +997,25 @@ class TestGate:
             Disposition.FINISH_FAIL, "rebase_conflict_exhausted"
         )
 
+    def test_codex_rebase_conflict_starts_a_new_session(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Codex conflict repair does not resume an unbound conversation."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"agent": "codex"})
+        item = make_work_item(issue=1, state="REBASE_CONFLICT_WAIT")
+        item.session_ids["implementer"] = "implement-session-id"
+        item.payload["rebase_conflict"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.resume_session_id is None
+        assert result.job.resume_binding is None
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle is SessionLifecycle.START_NEW
+
     def test_rebase_conflict_in_implement_wait_bypasses_ordinary_budget(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1725,6 +1745,19 @@ class TestWorktreeAndAdvise:
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
+    def test_codex_worktree_request_captures_source_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Codex publication scope binds to a host-observed writer base."""
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+
+        result = ImplementationStage().step(item, make_ctx(config_overrides={"agent": "codex"}))
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["capture_source_revision"] is True
+
     def test_remediation_reuses_the_writer_stowed_for_read_only_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1932,6 +1965,30 @@ class TestWorktreeAndAdvise:
         assert item.payload["worktree_status"] == "M x.py"
         assert item.payload["worktree_diff"] == "+x"
         assert item.payload["worktree_content_snapshot"] == _DIRTY_CONTENT_SNAPSHOT
+
+    def test_worktree_result_stores_scoped_source_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The host worktree receipt pins the later publication-scope diff."""
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        source_revision = "a" * 40
+
+        ImplementationStage().on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": "/tmp/wt",
+                    "dirty": False,
+                    "status": "",
+                    "diff": "",
+                    "source_revision": source_revision,
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert item.payload["_impl_source_revision"] == source_revision
 
     def test_failed_worktree_result_clears_all_stale_dirty_identity_metadata(
         self, make_ctx: Any, make_work_item: Any
@@ -2622,10 +2679,11 @@ class TestImplementBudget:
     ) -> None:
         """Review findings are fixed by the implementation stage, never pr_review."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
         item.branch = "review-branch"
         item.worktree = "/tmp/implementation-writer"
+        item.session_ids["implementer"] = "implement-session-id"
         item.payload.update(
             {
                 "existing_pr": True,
@@ -2647,6 +2705,10 @@ class TestImplementBudget:
         assert result.job.prompt_builder is get_address_review_prompt
         assert result.job.allowed_tools == "Read,Write,Edit,Glob,Grep,Bash,Task,Skill"
         assert result.job.parse is _parse_addressed_block
+        assert result.job.resume_session_id is None
+        assert result.job.resume_binding is None
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle is SessionLifecycle.START_NEW
         assert json.loads(result.job.prompt_kwargs["threads_json"]) == [
             {"thread_id": "thread-1", "path": "a.py", "line": 3, "body": "fix it"}
         ]
@@ -2700,6 +2762,7 @@ class TestImplementBudget:
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
         item.branch = "1-auto-impl"
         item.payload["advise_findings"] = "use helpers"
+        item.payload["plan_text"] = "## Files to Modify\n\n- `allowed.py`"
 
         result = stage.step(item, ctx)
 
@@ -2710,12 +2773,13 @@ class TestImplementBudget:
         assert result.on_done_state == "TEST_WAIT"
         assert result.job.prompt_kwargs["advise_findings"] == "use helpers"
         assert result.job.prompt_kwargs["branch_name"] == "1-auto-impl"
+        assert result.job.prompt_kwargs["approved_plan"] == "## Files to Modify\n\n- `allowed.py`"
         assert item.attempts["implement"] == 0  # submission burns nothing
 
-    def test_implement_resumes_the_saved_direct_agent_session(
+    def test_codex_implement_starts_a_new_session_despite_a_legacy_session_id(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A retried direct implementation keeps its prior working context."""
+        """Codex does not reuse an unbound persisted conversation."""
         stage = ImplementationStage()
         ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
@@ -2725,7 +2789,10 @@ class TestImplementBudget:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
-        assert result.job.resume_session_id == "implement-session-id"
+        assert result.job.resume_session_id is None
+        assert result.job.resume_binding is None
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle is SessionLifecycle.START_NEW
 
     def test_implement_submission_clears_stale_results(
         self, make_ctx: Any, make_work_item: Any
@@ -3685,10 +3752,10 @@ class TestTestsAndFix:
         assert isinstance(commit_push.job, GitJob)
         assert commit_push.on_done_state == "PR_CREATE"
 
-    def test_testfix_resumes_the_saved_direct_implementer_session(
+    def test_codex_testfix_starts_a_new_session_despite_a_legacy_session_id(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A test repair continues the implementation conversation."""
+        """Codex test repair does not reuse an unbound persisted conversation."""
         stage = ImplementationStage()
         ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, state="TESTFIX_WAIT")
@@ -3698,7 +3765,10 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
-        assert result.job.resume_session_id == "implement-session-id"
+        assert result.job.resume_session_id is None
+        assert result.job.resume_binding is None
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle is SessionLifecycle.START_NEW
 
     def test_testfix_budget_exhaustion_finishes_failed(
         self, make_ctx: Any, make_work_item: Any
@@ -4395,6 +4465,14 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "_implementation_file_claims": {
+                    (("test-org", "test-repo"), "allowed.py"),
+                },
+                "_impl_source_revision": "a" * 40,
+            }
+        )
 
         result = stage.step(item, ctx)
 
@@ -4417,6 +4495,49 @@ class TestCommitPushAndPrCreate:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["publish_base_sha"] == "a" * 40
+
+    def test_codex_commit_push_requires_frozen_plan_claims(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A Codex writer cannot publish when admission did not freeze its manifest."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"agent": "codex"})
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
+
+    def test_codex_commit_push_passes_frozen_plan_claims_to_host(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The host receives the repo-qualified immutable claims and base revision."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"agent": "codex"})
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "_implementation_file_claims": {
+                    (("test-org", "test-repo"), "pyproject.toml"),
+                    (("test-org", "test-repo"), "hephaestus/agents/runtime.py"),
+                },
+                "_impl_source_revision": "a" * 40,
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["allowed_paths"] == (
+            "hephaestus/agents/runtime.py",
+            "pyproject.toml",
+        )
+        assert result.job.kwargs["scope_history_base_sha"] == "a" * 40
 
     def test_direct_scope_commit_push_carries_its_remote_reservation_pin(
         self, make_ctx: Any, make_work_item: Any

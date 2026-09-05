@@ -2,6 +2,7 @@ import logging
 
 import hephaestus.automation.pipeline.admission as _admission
 import hephaestus.automation.pipeline.coordinator_types as ct
+from hephaestus.agents.runtime import requires_plan_scope_guard
 from hephaestus.automation.models import IssueInfo
 
 from .coordinator_contract import _CoordinatorHost
@@ -291,29 +292,33 @@ class ImplementationDispatcher(_CoordinatorHost):
     ) -> set[_admission.PlanFileClaim]:
         """Return the immutable claims reserved for an implementation sub-job.
 
-        The parallel admission gate places its exact selection snapshot in the
-        host-owned payload. It stays with the ct.WorkItem for every sub-job in
-        the implementation stage. Serial and overlap-opt-out modes do not
-        fetch or reserve claims because admission intentionally skips overlap
-        serialization in those configurations.
+        The host stores the exact approved-plan snapshot in the work-item
+        payload. It stays with the work item for each implementation sub-job.
+        This snapshot also bounds host publication when overlap serialization
+        is disabled.
         """
-        if (
-            item.stage is not ct.StageName.IMPLEMENTATION
-            or item.issue is None
-            or not self._overlap_serialization_enabled()
-        ):
+        if item.stage is not ct.StageName.IMPLEMENTATION or item.issue is None:
             return set()
         item_id = id(item)
         selected = self._implementation_file_claims.get(item_id)
         if selected is None:
             payload_claims = item.payload.get(ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD)
             if payload_claims is None:
+                capture_for_overlap = (
+                    self.config.max_workers > 1 and self.config.serialize_file_overlap
+                )
+                if not capture_for_overlap and not requires_plan_scope_guard(self.config.agent):
+                    return set()
                 repo = (self.config.org, item.repo)
                 planned = _admission._fetch_planned_files(item.issue, repo=repo)
                 payload_claims = {(repo, path) for path in planned} if planned else set()
             selected = set(payload_claims)
+            if not selected and requires_plan_scope_guard(self.config.agent):
+                raise RuntimeError("approved plan manifest is unavailable or empty")
             self._implementation_file_claims[item_id] = selected
             item.payload[ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(selected)
+        if not selected and requires_plan_scope_guard(self.config.agent):
+            raise RuntimeError("approved plan manifest is unavailable or empty")
         return set(selected)
 
     def _clear_implementation_file_claims_on_exit(
