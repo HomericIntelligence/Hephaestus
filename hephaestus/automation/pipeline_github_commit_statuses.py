@@ -137,7 +137,6 @@ def _status_snapshot(
         status_id = status.get("id")
         context = status.get("context")
         state = status.get("state")
-        updated_at = _current_evidence_timestamp(status.get("updated_at"), now_utc)
         if (
             not isinstance(status_id, int)
             or isinstance(status_id, bool)
@@ -145,12 +144,15 @@ def _status_snapshot(
             or not isinstance(context, str)
             or not context
             or state not in _STATUS_STATES
-            or updated_at is None
         ):
             logger.warning("Commit status for %s is malformed", head_sha)
             return None
         if context not in required_names:
             continue
+        updated_at = _current_evidence_timestamp(status.get("updated_at"), now_utc)
+        if updated_at is None:
+            logger.warning("Required commit status for %s is not current", head_sha)
+            return None
         if context in seen_contexts:
             logger.warning("Commit statuses contain duplicate context %s", context)
             return None

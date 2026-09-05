@@ -3046,6 +3046,49 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is expected
 
+    @pytest.mark.parametrize(
+        "optional_updated_at",
+        ["2026-08-29T11:59:59Z", "not-a-timestamp"],
+        ids=("expired", "malformed"),
+    )
+    def test_optional_commit_status_freshness_does_not_block_required_status(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        optional_updated_at: str,
+    ) -> None:
+        """Only required commit-status evidence must satisfy the freshness window."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        statuses = {
+            "sha": head,
+            "total_count": 2,
+            "statuses": [
+                self._commit_status(head),
+                self._commit_status(
+                    head,
+                    status_id=12,
+                    context="optional-ci",
+                    updated_at=optional_updated_at,
+                ),
+            ],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(statuses),
+                    self._json_response(statuses),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
+
     def test_required_context_can_be_satisfied_by_commit_status_only(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:

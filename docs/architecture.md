@@ -84,9 +84,10 @@ neither writes `state:skip` during seeding.
  After the evidence passes, `merge_wait` reads the stable effective policy again.
  The new typed policy must equal the policy that supplied the required-check
  inventory. The stage applies bypass and conversation safety to the new policy.
- Before a request, it may make
- a bounded read-only readiness wait (15 minutes per fresh reviewed-head proof) without
- spending a merge attempt; readiness is not authorization, and each request
+ Before a request, it may make a bounded read-only readiness wait without
+ spending a merge attempt. The `--poll-max-wait` option controls this wait. Its
+ default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof.
+ Readiness is not authorization, and each request
  still has fresh open/`main`/unarmed/exclusive-GO admission.
  The direct adapter makes one request per call and never retries. No queue
  stage invokes `gh pr merge`, creates, disables, adopts, or polls native
@@ -682,7 +683,8 @@ failed or missing required status evidence, or untrusted merge state blocks
 without a label mutation. A matching set
 permits a bounded sequence (default: five) of individual SHA-conditional
 ordinary REST squash-merge requests. A read-only readiness wait may park for
-up to 15 minutes per fresh proof; readiness and review prose never authorize
+the `--poll-max-wait` period. Its default is 1,200 seconds (20 minutes) for each
+fresh proof. Readiness and review prose never authorize
 merging, and fresh admission precedes every request
 ([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
 
@@ -1244,8 +1246,9 @@ each conditional on that SHA. Admission for every request requires an open
 `main` PR, an explicitly unarmed record, an exclusive implementation-GO
 label, the current-process reviewed-head proof, no unresolved review threads,
 and complete passing required status evidence for that head. A read-only
-readiness wait may park for up to 15 minutes per reviewed head before a request,
-without consuming the merge budget or authorizing a merge. After status evidence
+readiness wait may park for the `--poll-max-wait` period before a request. Its
+default is 1,200 seconds (20 minutes) for each reviewed head. The wait does not
+consume the merge budget or authorize a merge. After status evidence
 passes, merge wait reads the stable effective policy again. The new typed policy
 must equal the policy that supplied the required-check inventory. The stage
 applies bypass and conversation safety to the new policy before final admission.
@@ -1302,8 +1305,9 @@ Architectural contract:
 - A matching eligibility label, current-process proof, and passing exact-head
   required status evidence can submit a bounded sequence of individual
   SHA-conditional normal REST merge requests, each only after fresh admission.
-- Read-only readiness polling may wait up to 15 minutes per fresh reviewed-head proof
-  without spending the request budget or authorizing a merge. HTTP 409,
+- Read-only readiness polling may wait for the `--poll-max-wait` period. Its
+  default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof. The
+  wait does not spend the request budget or authorize a merge. HTTP 409,
   transport ambiguity, and every actual request remain subject to fresh
   lifecycle, head, label, thread, and protection checks.
 
@@ -1407,8 +1411,9 @@ per-item-lifetime and are never reset when an item re-enters a stage, so
 cross-stage regression cycles (e.g. pr_review → implementation) remain
 globally bounded. All counters live in
 [`WorkItem.attempts`](../hephaestus/automation/pipeline/work_item.py).
-Operational readiness waits use a separate 15-minute monotonic deadline keyed
-to the current reviewed-head proof.
+Operational readiness waits use a separate monotonic deadline keyed to the
+current reviewed-head proof. The `--poll-max-wait` option controls the deadline,
+and its default is 1,200 seconds (20 minutes).
 
 ---
 

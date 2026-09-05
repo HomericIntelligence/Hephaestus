@@ -7,8 +7,10 @@ review threads, and complete passing required status evidence for the exact
 head before every attempt. By default, `merge_wait` can make five ordinary
 SHA-conditional REST squash-merge requests. Every request has fresh open-`main`,
 unarmed, exclusive-label, and reviewed-head admission.
-Before a request it makes a bounded, read-only operational readiness wait (15
-minutes per fresh reviewed-head proof) without spending a merge attempt.
+Before a request, it makes a bounded, read-only operational readiness wait
+without spending a merge attempt. The `--poll-max-wait` option controls this
+wait. Its default is 1,200 seconds (20 minutes) for each fresh reviewed-head
+proof.
 Readiness is not authorization: every actual request repeats the label, head,
 thread, protection, and exact-head required-status gates. It does not invoke
 `gh pr merge`, create, disable, adopt, or poll native auto-merge, manage a
