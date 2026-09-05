@@ -55,9 +55,9 @@ read-only review. Do NOT run local format, lint, type, or test commands in this
 sandbox. If every receipt has `ok: true`, `status: passed`, and the current
 reviewed head matches each `head_sha`, treat them as independent local execution
 evidence. A receipt with `status: skipped`, the exact unsupported-platform
-reason, and a non-macOS `platform` is N/A for this host: it is not local
-execution evidence, but do not report it as a failed or missing receipt. For
-any other missing or failed receipt, do not claim the plan passed.
+reason, and a non-macOS `platform` is not local execution evidence and is an
+evidence gap. For any missing, skipped, or failed receipt, do not claim that the
+plan passed.
 
 Evidence-provenance rule: validate whether the implementation reply supplies
 concrete, internally coherent evidence (for example, the exact command and

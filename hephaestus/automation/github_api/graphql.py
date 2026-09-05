@@ -1059,21 +1059,19 @@ def review_receipts_page_query(
     return _query("reviewReceipts", document, validate)
 
 
-def merge_authorization_reviews_page_query(
+def pull_request_reviews_page_query(
     owner: str, name: str, pr_number: int
 ) -> GraphQLQuerySpec[dict[str, Any]]:
-    """Build one validated merge-authorization native-review page query."""
+    """Build one validated pull-request review page query."""
     document = (
         "query($owner:String!,$name:String!,$number:Int!,$after:String){"
         " repository(owner:$owner,name:$name){"
         "  id name owner{login}"
         "  pullRequest(number:$number){"
-        "   id number headRefOid"
+        "   id number"
         "   reviews(first:100,after:$after){"
         "    totalCount pageInfo{hasNextPage endCursor}"
-        "    nodes{id fullDatabaseId body state submittedAt updatedAt "
-        "includesCreatedEdit lastEditedAt viewerDidAuthor "
-        "author{login __typename} commit{oid}}"
+        "    nodes{id body state viewerDidAuthor}"
         "   }"
         "  }"
         " }"
@@ -1089,21 +1087,25 @@ def merge_authorization_reviews_page_query(
             not isinstance(pull_request, dict)
             or not isinstance(pull_request.get("id"), str)
             or pull_request.get("number") != pr_number
-            or not isinstance(pull_request.get("headRefOid"), str)
-            or not pull_request["headRefOid"]
         ):
-            raise ValueError("merge authorization pull request identity was malformed")
+            raise ValueError("pull request review identity was malformed")
         connection = _page_info(pull_request.get("reviews"))
         total_count = connection.get("totalCount")
         if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count < 0:
-            raise ValueError("merge authorization review count was malformed")
+            raise ValueError("pull request review count was malformed")
         for node in connection["nodes"]:
             review_id = node.get("id")
-            if not isinstance(review_id, str) or not review_id:
-                raise ValueError("merge authorization review identity was malformed")
+            if (
+                not isinstance(review_id, str)
+                or not review_id
+                or not isinstance(node.get("body"), str)
+                or not isinstance(node.get("state"), str)
+                or not isinstance(node.get("viewerDidAuthor"), bool)
+            ):
+                raise ValueError("pull request review node was malformed")
         return pull_request
 
-    return _query("MergeAuthorizationReviews", document, validate)
+    return _query("PullRequestReviews", document, validate)
 
 
 def _receipt_mutation[T](

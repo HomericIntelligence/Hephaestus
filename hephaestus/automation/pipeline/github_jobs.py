@@ -8,7 +8,9 @@ stage nor a worker can retain a shared mutable response object.
 from __future__ import annotations
 
 import json
+import math
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, Self
@@ -187,6 +189,8 @@ class RunMergeWaitCycleRequest:
     reviewed_head_sha: str
     proof_generation: int
     declined_readiness_fingerprint: tuple[str, ...] | None
+    deadline_s: float
+    cancellation: threading.Event
     issue_number: int | None = None
 
     def __post_init__(self) -> None:
@@ -199,6 +203,15 @@ class RunMergeWaitCycleRequest:
             or self.proof_generation < 0
         ):
             raise ValueError("proof_generation must be a non-negative integer")
+        if (
+            isinstance(self.deadline_s, bool)
+            or not isinstance(self.deadline_s, (int, float))
+            or not math.isfinite(self.deadline_s)
+            or self.deadline_s <= 0
+        ):
+            raise ValueError("deadline_s must be a finite positive monotonic deadline")
+        if not isinstance(self.cancellation, threading.Event):
+            raise ValueError("cancellation must be a threading.Event")
         fingerprint = self.declined_readiness_fingerprint
         if fingerprint is not None and (
             not isinstance(fingerprint, tuple)

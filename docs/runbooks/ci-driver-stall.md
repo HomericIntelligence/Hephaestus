@@ -2,17 +2,19 @@
 
 Use this runbook when a PR carries loop-owned `state:implementation-go` and
 remains blocked. The label is automated implementation eligibility. The current
-queue verifies it with its current-process reviewed-head proof and one trusted,
-unedited marked `APPROVED` operator review for the exact head before every
-attempt. `merge_wait` may make
-a bounded sequence (default: five) of individual ordinary SHA-conditional REST
-squash-merge requests. Every request has fresh open-`main`, unarmed,
-exclusive-label, and reviewed-head admission. Before a request it makes a
-bounded, read-only operational readiness wait (15 minutes per fresh reviewed-head proof)
-without spending a merge attempt. Readiness is not authorization: every actual
-request repeats the label, head, thread, and protection gates. It does not
-invoke `gh pr merge`, create, disable, adopt, or poll native auto-merge, manage
-a merge queue, or use an administrator bypass.
+queue verifies it with its current-process reviewed-head proof, no unresolved
+review threads, and complete passing required status evidence for the exact
+head before every attempt. By default, `merge_wait` can make five ordinary
+SHA-conditional REST squash-merge requests. Every request has fresh open-`main`,
+unarmed, exclusive-label, and reviewed-head admission.
+Before a request, it makes a bounded, read-only operational readiness wait
+without spending a merge attempt. The `--poll-max-wait` option controls this
+wait. Its default is 1,200 seconds (20 minutes) for each fresh reviewed-head
+proof.
+Readiness is not authorization: every actual request repeats the label, head,
+thread, protection, and exact-head required-status gates. It does not invoke
+`gh pr merge`, create, disable, adopt, or poll native auto-merge, manage a
+merge queue, or use an administrator bypass.
 
 ## Containment
 
@@ -30,38 +32,47 @@ manually as a substitute for the queue's review proof.
 
 ## Resolution
 
-Confirm the PR has `state:implementation-go` and inspect its current head. The
-operator must use a human GitHub `User` identity distinct from the automation
-actor and submit the exact marked approval for that head:
+Confirm the PR has `state:implementation-go` and inspect its current head:
 
 ```bash
 gh pr view <N> --json state,headRefOid,baseRefName,autoMergeRequest
 H1="$(gh pr view <N> --json headRefOid --jq '.headRefOid')"
 REPOSITORY="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
-APPROVAL="$(gh api --method POST "repos/${REPOSITORY}/pulls/<N>/reviews" \
-  -f event=APPROVE \
-  -f body='<!-- hephaestus-merge-authorization:v1 -->' \
-  -f commit_id="$H1")"
-test "$(jq --raw-output '.commit_id' <<<"$APPROVAL")" = "$H1"
+gh api "repos/${REPOSITORY}/commits/${H1}/check-runs?per_page=100" \
+  --paginate \
+  --jq '{total_count, check_runs: [.check_runs[] | {name, head_sha, status, conclusion}]}'
+gh api "repos/${REPOSITORY}/commits/${H1}/status?per_page=100" \
+  --paginate \
+  --jq '{sha, total_count, statuses: [.statuses[] | {id, context, state}]}'
 uv run hephaestus-automation-loop --prs <N> --loops 1 --max-workers 1
 ```
 
-`H1` is the immutable head captured before the review is created. The REST
-request explicitly binds the native approval to that SHA, and the command
-fails unless the returned review record reports the same `commit_id`. Do not
-read a later `H2` and substitute it into this flow: a concurrent push makes
-the just-created approval stale rather than transferable. For every marked
-approval, merge wait independently reads GitHub's native
-`GET /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}` record and
-requires its `commit_id` to equal the reviewed head (and to agree with the
-review snapshot). A review cannot be transferred across a pushed head.
+Both requests are scoped to `H1`. The queue validates the `head_sha` in each
+required Check Run and the top-level `sha` in each combined commit-status
+response. A Check Run must be complete and have a `success`, `neutral`, or
+`skipped` conclusion. A commit status must have the `success` state. A commit
+status can satisfy only an unbound required context. A positive GitHub App
+binding requires a Check Run from that exact application. If both sources use
+the same required context, both sources must pass. The queue reads and compares
+two complete paginated snapshots from each source. One source can have no
+entries when the other source proves all requirements. An incomplete, changed,
+or malformed snapshot fails. The combined evidence must prove all required
+contexts. A second user and a marked `APPROVED` review are not required. Do not
+substitute a later head for `H1`. A concurrent push invalidates the current
+process proof and routes the PR to fresh review.
 
-A head race makes the review stale rather than transferable. A direct run or
-restart has no durable reviewed-head proof, so merge wait returns the PR to
-fresh automated review without mutating labels; the durable marked approval
-can be reused only after that proof is recreated for the same head. Absent,
-stale, ambiguous, replayed, revoked, or untrusted authorization blocks without
-a merge request. Unavailable or changed authorization reads fail closed.
+A head race invalidates the reviewed-head proof. A direct run or restart has no
+durable reviewed-head proof, so merge wait returns the PR to fresh automated
+review without mutating labels. Missing, pending, failed, stale, or malformed
+required status evidence stops the merge path without a merge request.
+
+If unresolved threads remain, resolve them through the normal review process.
+If an existing `autoMergeRequest` is present, treat it as external ownership
+and do not change it. If the PR state, label read, thread read, protection
+read, or required status read is incomplete, stop and repair the source
+condition. If the current actor can bypass an applicable active ruleset, the
+queue rejects the direct merge. Use a production credential that cannot bypass
+the applicable rulesets before you rerun the queue.
 
 The bounded sequence of individually admitted SHA-conditional normal REST
 merge requests is driven by:
@@ -76,10 +87,11 @@ If the label is absent, do not attempt to merge: the loop must complete its
 fresh GitHub snapshot plus clean-checkout `$athena:pr-review` path first.
 
 For PRs already carrying implementation eligibility during rollout, no label
-or merge mutation occurs until the separate exact-head authorization exists. If
-authorization validation is unavailable or defective, stop queue-driven merging
-and use the normal branch-protected manual merge process; do not restore
-label-only merging or manage native auto-merge.
+or merge mutation occurs until the current-process reviewed-head proof and
+passing exact-head required status evidence exists. If either read is
+unavailable or defective, stop queue-driven merging and use the normal
+branch-protected manual process; do not restore label-only merging or manage
+native auto-merge.
 
 ## See Also
 

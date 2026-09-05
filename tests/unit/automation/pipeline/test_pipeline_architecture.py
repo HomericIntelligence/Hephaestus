@@ -325,7 +325,7 @@ def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:
 
 
 def test_conditional_merge_has_one_production_call_site() -> None:
-    """Only the closed merge-wait job may spend the authorized capability."""
+    """Only the closed merge-wait job may issue the conditional merge request."""
     calls: list[tuple[str, int]] = []
     for path in sorted(_AUTOMATION.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

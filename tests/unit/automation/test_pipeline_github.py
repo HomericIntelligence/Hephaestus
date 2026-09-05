@@ -10,10 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from collections.abc import Iterator
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from itertools import repeat
+from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
 from time import sleep
@@ -25,19 +26,18 @@ import pytest
 
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
-import hephaestus.automation.pipeline_github_authorization as authorization_mod
+import hephaestus.automation.pipeline_github_required_checks as required_checks_mod
 import hephaestus.automation.pipeline_github_transport as transport_mod
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
 )
-from hephaestus.automation.merge_authorization import (
-    MERGE_AUTHORIZATION_MARKER,
-    MergeAuthorization,
-    canonical_body_digest,
-)
 from hephaestus.automation.pipeline.stages.base import (
     ImplementationReplyProgress,
     StageGitHub,
+)
+from hephaestus.automation.pipeline_github_check_policy import (
+    EffectiveMergePolicy,
+    RequiredCheck,
 )
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
@@ -63,22 +63,480 @@ from hephaestus.utils.file_lock import LockUnavailableError
 _BATCH_NONCE = "b" * 32
 
 
-def _authorization(pr_number: int = 7, head_sha: str = "a" * 40) -> MergeAuthorization:
-    """Return a valid test-only exact-head merge capability."""
-    return MergeAuthorization(
-        repository="org/repo",
-        pr_number=pr_number,
-        head_sha=head_sha,
-        review_id="R1",
-        review_database_id=1,
-        author_login="operator",
-        author_permission="WRITE",
-        submitted_at="2026-08-08T00:00:00Z",
-        updated_at="2026-08-08T00:00:00Z",
-        includes_created_edit=False,
-        last_edited_at=None,
-        body_digest=canonical_body_digest(MERGE_AUTHORIZATION_MARKER),
+def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
+    """The final admission directly follows all mutable policy reads."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    head = "a" * 40
+    events: list[str] = []
+
+    class OrderedGitHub:
+        def __init__(self) -> None:
+            self._state_reads = 0
+
+        def gh_pr_state(self, _pr: int) -> dict[str, object]:
+            self._state_reads += 1
+            events.append(f"state:{self._state_reads}")
+            if self._state_reads == 3:
+                return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
+            return {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            }
+
+        def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+            events.append("label")
+            return True, False
+
+        def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+            events.append("threads")
+            return []
+
+        def effective_merge_policy(
+            self,
+            _pr: int,
+            _base: str,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> EffectiveMergePolicy:
+            del deadline_s, cancellation
+            events.append("policy")
+            return EffectiveMergePolicy(
+                base_branch="main",
+                default_branch="main",
+                conversation_resolution_enforced=True,
+                required_checks=(RequiredCheck("required-ci", 15368),),
+                bypassable_ruleset_ids=(),
+            )
+
+        def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+            events.append("readiness")
+            return {"headRefOid": head, "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}
+
+        def required_checks_pass_for_head(
+            self,
+            check_head: str,
+            policy: object,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> bool:
+            del policy, deadline_s, cancellation
+            events.append(f"checks:{check_head}")
+            return check_head == head
+
+        def merge_pr_if_head(
+            self, _pr: int, reviewed_head: str, **_kwargs: object
+        ) -> SimpleNamespace:
+            events.append(f"merge:{reviewed_head}")
+            return SimpleNamespace(
+                dry_run=False,
+                malformed=False,
+                transport_error=False,
+                status=200,
+                body={"merged": True},
+            )
+
+    request = RunMergeWaitCycleRequest(
+        pr_number=7,
+        reviewed_head_sha=head,
+        proof_generation=2,
+        declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
     )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, OrderedGitHub())
+
+    assert receipt.outcome == "merged"
+    assert events == [
+        "state:1",
+        "label",
+        "policy",
+        "threads",
+        "readiness",
+        f"checks:{head}",
+        "policy",
+        "threads",
+        "state:2",
+        "label",
+        f"merge:{head}",
+        "state:3",
+    ]
+
+
+class _RulesetBypassGitHub:
+    """Expose one stable effective policy at the merge-wait boundary."""
+
+    def __init__(
+        self,
+        *,
+        bypassable_ruleset_ids: tuple[int, ...],
+        conversation_resolution_enforced: bool,
+    ) -> None:
+        self.events: list[str] = []
+        self._bypassable_ruleset_ids = bypassable_ruleset_ids
+        self._conversation_resolution_enforced = conversation_resolution_enforced
+        self._merged = False
+
+    def gh_pr_state(self, _pr: int) -> dict[str, object]:
+        self.events.append("state")
+        if self._merged:
+            return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
+        return {
+            "state": "OPEN",
+            "autoMergeRequest": None,
+            "baseRefName": "main",
+            "headRefOid": "a" * 40,
+        }
+
+    def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+        self.events.append("label")
+        return True, False
+
+    def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
+        self.events.append("policy")
+        return EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=self._conversation_resolution_enforced,
+            bypassable_ruleset_ids=self._bypassable_ruleset_ids,
+        )
+
+    def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+        self.events.append("threads")
+        return []
+
+    def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+        self.events.append("readiness")
+        return {
+            "headRefOid": "a" * 40,
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE",
+        }
+
+    def required_checks_pass_for_head(self, *_args: object, **_kwargs: object) -> bool:
+        self.events.append("checks")
+        return True
+
+    def merge_pr_if_head(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        self.events.append("merge")
+        self._merged = True
+        return SimpleNamespace(
+            dry_run=False,
+            malformed=False,
+            transport_error=False,
+            status=200,
+            body={"merged": True, "sha": "b" * 40},
+        )
+
+
+def _run_ruleset_bypass_cycle(github: _RulesetBypassGitHub) -> Any:
+    """Run one exact-head merge cycle with a selected effective policy."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    return PipelineGitHubJobRunner._run_merge_wait_cycle(
+        RunMergeWaitCycleRequest(
+            pr_number=7,
+            reviewed_head_sha="a" * 40,
+            proof_generation=2,
+            declined_readiness_fingerprint=None,
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=threading.Event(),
+        ),
+        github,
+    )
+
+
+def _assert_ruleset_bypass_stops_before_mutable_merge_reads(
+    *, conversation_resolution_enforced: bool
+) -> None:
+    """Assert that a bypassable policy stops before readiness and merge reads."""
+    github = _RulesetBypassGitHub(
+        bypassable_ruleset_ids=(15556494,),
+        conversation_resolution_enforced=conversation_resolution_enforced,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merge_policy_bypassable"
+    assert receipt.attempted is False
+    assert github.events == ["state", "label", "policy"]
+
+
+def test_merge_wait_rejects_bypassable_effective_policy_before_readiness() -> None:
+    """A bypassable-only ruleset cannot authorize mutable merge reads."""
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=False)
+
+
+def test_bypassable_ruleset_with_required_signatures_cannot_reach_merge_put() -> None:
+    """Classic conversation enforcement cannot make a bypass identity safe."""
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=True)
+
+
+def test_bypassable_ruleset_with_merge_queue_cannot_reach_merge_put() -> None:
+    """A green required-check inventory cannot make a bypass identity safe."""
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=True)
+
+
+def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> None:
+    """A complete policy with no bypass identity keeps the direct merge path."""
+    github = _RulesetBypassGitHub(
+        bypassable_ruleset_ids=(),
+        conversation_resolution_enforced=True,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merged"
+    assert receipt.attempted is True
+    assert github.events == [
+        "state",
+        "label",
+        "policy",
+        "threads",
+        "readiness",
+        "checks",
+        "policy",
+        "threads",
+        "state",
+        "label",
+        "merge",
+        "state",
+    ]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        pytest.param("bypassable", id="actor-bypass"),
+        pytest.param("required-checks", id="required-check-inventory"),
+    ],
+)
+def test_policy_drift_after_status_evidence_blocks_merge(drift: str) -> None:
+    """A changed policy after status validation prevents the merge request."""
+
+    class PolicyDriftGitHub(_RulesetBypassGitHub):
+        policy_reads = 0
+
+        def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
+            policy = super().effective_merge_policy(*_args, **_kwargs)
+            self.policy_reads += 1
+            if self.policy_reads == 1:
+                return policy
+            if drift == "bypassable":
+                return replace(policy, bypassable_ruleset_ids=(15556494,))
+            return replace(
+                policy,
+                required_checks=(RequiredCheck("replacement-ci", 15368),),
+            )
+
+    github = PolicyDriftGitHub(
+        bypassable_ruleset_ids=(),
+        conversation_resolution_enforced=True,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merge_policy_unavailable"
+    assert receipt.attempted is False
+    assert github.events == [
+        "state",
+        "label",
+        "policy",
+        "threads",
+        "readiness",
+        "checks",
+        "policy",
+    ]
+
+
+def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
+    """A failed complete Check Runs traversal prevents final admission."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    head = "a" * 40
+    events: list[str] = []
+
+    class ChangedChecksGitHub:
+        def __init__(self) -> None:
+            self._state_reads = 0
+
+        def gh_pr_state(self, _pr: int) -> dict[str, object]:
+            self._state_reads += 1
+            events.append(f"state:{self._state_reads}")
+            if self._state_reads == 3:
+                return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
+            return {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            }
+
+        def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+            events.append("label")
+            return True, False
+
+        def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+            events.append("threads")
+            return []
+
+        def effective_merge_policy(
+            self,
+            _pr: int,
+            _base: str,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> EffectiveMergePolicy:
+            del deadline_s, cancellation
+            events.append("policy")
+            return EffectiveMergePolicy(
+                base_branch="main",
+                default_branch="main",
+                conversation_resolution_enforced=True,
+                required_checks=(RequiredCheck("required-ci", 15368),),
+                bypassable_ruleset_ids=(),
+            )
+
+        def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+            events.append("readiness")
+            return {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            }
+
+        def required_checks_pass_for_head(
+            self,
+            _head: str,
+            policy: object,
+            *,
+            deadline_s: float,
+            cancellation: object,
+        ) -> bool:
+            del policy, deadline_s, cancellation
+            events.append("checks")
+            return False
+
+        def merge_pr_if_head(self, _pr: int, _head: str, **_kwargs: object) -> SimpleNamespace:
+            events.append("merge")
+            return SimpleNamespace(
+                dry_run=False,
+                malformed=False,
+                transport_error=False,
+                status=200,
+                body={"merged": True},
+            )
+
+    request = RunMergeWaitCycleRequest(
+        pr_number=7,
+        reviewed_head_sha=head,
+        proof_generation=2,
+        declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, ChangedChecksGitHub())
+
+    assert receipt.outcome == "required_checks_not_green"
+    assert "merge" not in events
+
+
+@pytest.mark.parametrize(
+    ("revocation", "expected"),
+    [
+        ("go-removed", "not_implementation_go"),
+        ("no-go-added", "not_implementation_go"),
+        ("auto-merge-armed", "auto_merge_already_armed"),
+        ("closed", "closed"),
+        ("head-drift", "reviewed_head_drift"),
+    ],
+)
+def test_merge_cycle_rechecks_final_admission_after_check_traversal(
+    revocation: str,
+    expected: str,
+) -> None:
+    """A revocation during Check Runs traversal prevents the PUT."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    head = "a" * 40
+
+    class RevokedGitHub:
+        revoked = False
+
+        def gh_pr_state(self, _pr: int) -> dict[str, object]:
+            if self.revoked and revocation == "auto-merge-armed":
+                return {
+                    "state": "OPEN",
+                    "autoMergeRequest": {"enabledAt": "late"},
+                    "baseRefName": "main",
+                    "headRefOid": head,
+                }
+            if self.revoked and revocation == "closed":
+                return {"state": "CLOSED", "mergedAt": None}
+            return {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": "b" * 40 if self.revoked and revocation == "head-drift" else head,
+            }
+
+        def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+            return (
+                not (self.revoked and revocation == "go-removed"),
+                self.revoked and revocation == "no-go-added",
+            )
+
+        def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
+            return EffectiveMergePolicy(
+                base_branch="main",
+                default_branch="main",
+                conversation_resolution_enforced=True,
+                required_checks=(RequiredCheck("required-ci", 15368),),
+                bypassable_ruleset_ids=(),
+            )
+
+        def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+            return []
+
+        def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+            return {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            }
+
+        def required_checks_pass_for_head(self, *_args: object, **_kwargs: object) -> bool:
+            self.revoked = True
+            return True
+
+        def merge_pr_if_head(self, _pr: int, _head: str, **_kwargs: object) -> object:
+            raise AssertionError("revoked admission reached the PUT")
+
+    request = RunMergeWaitCycleRequest(
+        pr_number=7,
+        reviewed_head_sha=head,
+        proof_generation=2,
+        declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, RevokedGitHub())
+
+    assert receipt.outcome == expected
+    assert receipt.attempted is False
 
 
 class PipelineGitHubForTest(pg.PipelineGitHub):
@@ -140,39 +598,6 @@ def adapter(tmp_path: Path) -> PipelineGitHubForTest:
 def dry_adapter(tmp_path: Path) -> PipelineGitHubForTest:
     """Dry-run adapter: every mutator must log-and-skip."""
     return PipelineGitHubForTest("org", dry_run=True, repo_root=tmp_path)
-
-
-@pytest.fixture
-def fully_enforced_branch_protection() -> str:
-    """Return a protection response safe for the automation merge actor."""
-    return json.dumps(
-        {
-            "required_conversation_resolution": {"enabled": True},
-            "enforce_admins": {"enabled": True},
-            "required_pull_request_reviews": {
-                "bypass_pull_request_allowances": {
-                    "users": [],
-                    "teams": [],
-                    "apps": [],
-                }
-            },
-        }
-    )
-
-
-@pytest.fixture
-def fully_enforced_protection_without_bypass_allowances() -> str:
-    """Mirror GitHub's valid full response when no PR bypass is configured."""
-    return json.dumps(
-        {
-            "required_conversation_resolution": {"enabled": True},
-            "enforce_admins": {"enabled": True},
-            "required_pull_request_reviews": {
-                "dismiss_stale_reviews": True,
-                "required_approving_review_count": 1,
-            },
-        }
-    )
 
 
 def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> None:
@@ -2377,7 +2802,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.status == 200
         assert result.body == {"merged": True}
@@ -2398,6 +2823,28 @@ class TestConditionalMerge:
             max_retries=1,
             timeout=120,
         )
+
+    @pytest.mark.parametrize(
+        ("pr_number", "head_sha"),
+        [(0, "a" * 40), (-1, "a" * 40), (7, "short"), (7, "g" * 40)],
+        ids=("zero-pr", "negative-pr", "short-sha", "nonhex-sha"),
+    )
+    def test_invalid_identity_is_rejected_before_transport(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        pr_number: int,
+        head_sha: str,
+    ) -> None:
+        """An invalid PR or SHA cannot reach the merge transport."""
+        adapter.repo = "repo"
+        call_mock = MagicMock()
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        result = adapter.merge_pr_if_head(pr_number, head_sha)
+
+        assert result.malformed is True
+        call_mock.assert_not_called()
 
     def test_preserves_a_409_response_for_stage_level_head_drift_handling(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -2420,11 +2867,29 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
-        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.status == 409
         assert result.body == {"message": "head changed"}
         assert result.transport_error is False
+
+    def test_conditional_put_does_not_require_a_native_review_capability(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stage, not the mutation adapter, owns merge admission."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout='HTTP/2.0 200 OK\n\n{"merged": true}',
+                returncode=0,
+            )
+        )
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        result = adapter.merge_pr_if_head(7, "a" * 40)
+
+        assert result.status == 200
+        call_mock.assert_called_once()
 
     def test_transport_exception_is_explicit_and_never_retried_by_adapter(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -2434,7 +2899,7 @@ class TestConditionalMerge:
         call_mock = MagicMock(side_effect=OSError("connection reset"))
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.transport_error is True
         assert result.status is None
@@ -2448,509 +2913,791 @@ class TestConditionalMerge:
         call_mock = MagicMock()
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = dry_adapter.merge_pr_if_head(7, "a" * 40, _authorization())
+        result = dry_adapter.merge_pr_if_head(7, "a" * 40)
 
         assert result.dry_run is True
         call_mock.assert_not_called()
 
 
-def _authorization_review_node(
-    review_id: str = "R1",
-    *,
-    database_id: int | str | None = 1,
-    body: str = MERGE_AUTHORIZATION_MARKER,
-) -> dict[str, object]:
-    """Build one GraphQL PullRequestReview node for adapter tests."""
-    return {
-        "id": review_id,
-        "fullDatabaseId": database_id,
-        "body": body,
-        "state": "APPROVED",
-        "submittedAt": "2026-08-08T00:00:00Z",
-        "updatedAt": "2026-08-08T00:00:00Z",
-        "includesCreatedEdit": False,
-        "lastEditedAt": None,
-        "viewerDidAuthor": False,
-        "author": {"login": "operator", "__typename": "User"},
-        "commit": {"oid": "a" * 40},
-    }
+class TestExactHeadChecks:
+    """The merge gate reads complete Check Runs for one commit."""
 
+    @staticmethod
+    def _json_response(payload: object) -> SimpleNamespace:
+        """Build one successful GitHub JSON response."""
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload))
 
-def _authorization_review_page(
-    nodes: list[dict[str, object]],
-    *,
-    total_count: int,
-    has_next_page: bool = False,
-    end_cursor: str | None = None,
-) -> dict[str, object]:
-    """Build one complete repository-scoped review page."""
-    return {
-        "data": {
-            "repository": {
-                "id": "repo-node",
-                "name": "repo",
-                "owner": {"login": "org"},
-                "pullRequest": {
-                    "id": "pr-node",
-                    "number": 7,
-                    "headRefOid": "a" * 40,
-                    "reviews": {
-                        "totalCount": total_count,
-                        "pageInfo": {
-                            "hasNextPage": has_next_page,
-                            "endCursor": end_cursor,
-                        },
-                        "nodes": nodes,
-                    },
-                },
-            }
+    @classmethod
+    def _empty_status_response(cls, head_sha: str) -> SimpleNamespace:
+        """Build one exact-head response with no commit statuses."""
+        return cls._json_response({"sha": head_sha, "total_count": 0, "statuses": []})
+
+    @staticmethod
+    def _policy(*contexts: str, app_id: int | None = 1) -> EffectiveMergePolicy:
+        """Build one frozen effective-policy input for the Check Run gate."""
+        return EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=tuple(RequiredCheck(context, app_id) for context in contexts),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+    @staticmethod
+    def _passes(
+        adapter: pg.PipelineGitHub,
+        head: str,
+        policy: EffectiveMergePolicy,
+    ) -> bool:
+        """Run the exact-head gate with its required bounded inputs."""
+        with patch.object(
+            required_checks_mod,
+            "_status_evidence_now_utc",
+            return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+        ):
+            return adapter.required_checks_pass_for_head(
+                head,
+                policy,
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+
+    @staticmethod
+    def _check_run(
+        head_sha: str,
+        *,
+        check_run_id: int = 1,
+        name: str = "required-ci",
+        status: str = "completed",
+        conclusion: str = "success",
+        app_id: int = 1,
+        completed_at: object = "2026-09-05T12:00:00Z",
+    ) -> dict[str, object]:
+        """Build one exact-head Check Run response entry."""
+        check_run: dict[str, object] = {
+            "id": check_run_id,
+            "name": name,
+            "head_sha": head_sha,
+            "status": status,
+            "conclusion": conclusion,
+            "completed_at": completed_at,
         }
-    }
+        check_run["app"] = {"id": app_id}
+        return check_run
 
-
-def _bind_authorization_review_commits(
-    adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Keep GraphQL pagination tests focused on their transport boundary."""
-    monkeypatch.setattr(adapter, "_review_commit_id", lambda _pr, _review: "a" * 40)
-
-
-def _authorization_graphql_pages(
-    adapter: pg.PipelineGitHub,
-    monkeypatch: pytest.MonkeyPatch,
-    responses: Iterator[dict[str, object]],
-    calls: list[dict[str, str | int]] | None = None,
-) -> None:
-    """Feed raw GraphQL envelopes through the real merge-authorization validator."""
-    spec = github_api_mod.merge_authorization_reviews_page_query("org", "repo", 7)
-
-    def graphql(_spec: object, **fields: str | int) -> dict[str, object]:
-        if calls is not None:
-            calls.append(fields)
-        envelope = next(responses)
-        data = envelope.get("data")
-        assert isinstance(data, dict)
-        return spec.validate(data)
-
-    monkeypatch.setattr(adapter, "_graphql", graphql)
-
-
-class TestMergeAuthorizationQueries:
-    """Repository-scoped review pagination and permission reads fail closed."""
-
-    def test_complete_pagination_is_read_twice_and_normalizes_bigint(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        page_one = _authorization_review_page(
-            [_authorization_review_node()],
-            total_count=2,
-            has_next_page=True,
-            end_cursor="cursor-1",
-        )
-        page_two = _authorization_review_page(
-            [_authorization_review_node("R2", database_id="2")], total_count=2
-        )
-        responses = iter([page_one, page_two, page_one, page_two])
-        calls: list[dict[str, str | int]] = []
-
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, responses, calls)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        reviews = adapter.merge_authorization_reviews(7)
-
-        assert [review["id"] for review in reviews] == ["R1", "R2"]
-        assert reviews[1]["fullDatabaseId"] == 2
-        assert calls[1]["after"] == "cursor-1"
-        assert len(calls) == 4
-
-    def test_duplicate_review_ids_across_mixed_body_pages_are_rejected(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A page overlap cannot pair a marked approval with an unmarked duplicate."""
-        page_one = _authorization_review_page(
-            [_authorization_review_node("R1")],
-            total_count=2,
-            has_next_page=True,
-            end_cursor="cursor-1",
-        )
-        page_two = _authorization_review_page(
-            [_authorization_review_node("R1", body="ordinary review body")],
-            total_count=2,
-        )
-        responses = iter([page_one, page_two])
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, responses)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        with pytest.raises(RuntimeError, match="duplicated"):
-            adapter.merge_authorization_reviews(7)
-
-    def test_stable_read_drift_is_unavailable(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        first = _authorization_review_page([_authorization_review_node()], total_count=1)
-        changed = _authorization_review_page(
-            [_authorization_review_node(body="changed")], total_count=1
-        )
-        responses = iter([first, changed])
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, responses)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        with pytest.raises(RuntimeError, match="snapshot changed"):
-            adapter.merge_authorization_reviews(7)
+    @staticmethod
+    def _commit_status(
+        head_sha: str,
+        *,
+        status_id: int = 11,
+        context: str = "required-ci",
+        state: str = "success",
+        updated_at: object = "2026-09-05T12:00:00Z",
+    ) -> dict[str, object]:
+        """Build one exact-head commit-status response entry."""
+        return {
+            "id": status_id,
+            "context": context,
+            "state": state,
+            "sha": head_sha,
+            "updated_at": updated_at,
+        }
 
     @pytest.mark.parametrize(
-        ("page", "message"),
+        ("updated_at", "expected"),
         [
-            (
-                _authorization_review_page([_authorization_review_node()], total_count=2),
-                "truncated",
-            ),
-            (
-                _authorization_review_page(
-                    [_authorization_review_node()],
-                    total_count=1,
-                    has_next_page=True,
-                    end_cursor="cursor-1",
-                ),
-                "cursor loop",
-            ),
+            ("2026-09-05T12:00:00Z", True),
+            ("2026-08-29T12:00:00Z", True),
+            ("2026-08-29T11:59:59Z", False),
+            ("2026-09-05T12:00:01Z", False),
+            ("not-a-timestamp", False),
+            (None, False),
         ],
+        ids=("inside", "boundary", "expired", "future", "malformed", "missing"),
     )
-    def test_incomplete_pagination_is_rejected(
+    def test_required_commit_status_enforces_seven_day_freshness(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        page: dict[str, object],
-        message: str,
+        updated_at: object,
+        expected: bool,
     ) -> None:
+        """A required commit status is current only in the seven-day window."""
         adapter.repo = "repo"
-        if message == "truncated":
-            responses = iter([page])
-        else:
-            repeated = _authorization_review_page(
-                [_authorization_review_node("R2")],
-                total_count=1,
-                has_next_page=True,
-                end_cursor="cursor-1",
-            )
-            responses = iter([page, repeated])
-        _authorization_graphql_pages(adapter, monkeypatch, responses)
-        _bind_authorization_review_commits(adapter, monkeypatch)
-
-        with pytest.raises(RuntimeError, match=message):
-            adapter.merge_authorization_reviews(7)
-
-    def test_rest_review_commit_must_match_graphql_snapshot(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The authorization head is bound to the reviews API commit_id."""
-        page = _authorization_review_page([_authorization_review_node()], total_count=1)
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({"id": 1, "commit_id": "b" * 40}),
-            )
-        )
-        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
-
-        with pytest.raises(RuntimeError, match="commit changed"):
-            adapter.merge_authorization_reviews(7)
-        call_mock.assert_called_once_with(
-            ["api", "--method", "GET", "repos/org/repo/pulls/7/reviews/1"], check=False
-        )
-
-    def test_nullable_database_id_binds_through_matching_rest_node_id(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A nullable GraphQL database ID uses the REST collection node-ID binding."""
-        page = _authorization_review_page(
-            [_authorization_review_node(database_id=None)], total_count=1
-        )
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps(
-                    [
-                        {
-                            "node_id": "R1",
-                            "commit_id": "a" * 40,
-                        }
-                    ]
-                ),
-            )
-        )
-        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
-
-        reviews = adapter.merge_authorization_reviews(7)
-
-        assert reviews[0]["fullDatabaseId"] is None
-        assert call_mock.call_count == 2
-        call_mock.assert_called_with(
-            [
-                "api",
-                "--method",
-                "GET",
-                "repos/org/repo/pulls/7/reviews?per_page=100&page=1",
-            ],
-            check=False,
-        )
-
-    def test_nullable_database_id_requires_rest_node_commit_agreement(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A node-ID match alone cannot bind a different REST review head."""
-        page = _authorization_review_page(
-            [_authorization_review_node(database_id=None)], total_count=1
-        )
-        adapter.repo = "repo"
-        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head, updated_at=updated_at)],
+        }
         monkeypatch.setattr(
-            authorization_mod,
+            github_api_mod,
             "gh_call",
             MagicMock(
-                return_value=SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps([{"node_id": "R1", "commit_id": "b" * 40}]),
-                )
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
             ),
         )
 
-        with pytest.raises(RuntimeError, match="commit changed"):
-            adapter.merge_authorization_reviews(7)
-
-
-class TestMergeAuthorizationPermissions:
-    """Collaborator permissions are parsed separately from review resolution."""
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is expected
 
     @pytest.mark.parametrize(
-        ("status", "body", "expected"),
-        [
-            (200, {"permission": "write"}, "WRITE"),
-            (200, {"permission": "maintain"}, "WRITE"),
-            (200, {"permission": "admin"}, "ADMIN"),
-            (404, None, "NONE"),
-        ],
+        "optional_updated_at",
+        ["2026-08-29T11:59:59Z", "not-a-timestamp"],
+        ids=("expired", "malformed"),
     )
-    def test_permission_response_normalization(
+    def test_optional_commit_status_freshness_does_not_block_required_status(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        status: int,
-        body: dict[str, object] | None,
-        expected: str,
+        optional_updated_at: str,
     ) -> None:
+        """Only required commit-status evidence must satisfy the freshness window."""
         adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        statuses = {
+            "sha": head,
+            "total_count": 2,
+            "statuses": [
+                self._commit_status(head),
+                self._commit_status(
+                    head,
+                    status_id=12,
+                    context="optional-ci",
+                    updated_at=optional_updated_at,
+                ),
+            ],
+        }
         monkeypatch.setattr(
-            adapter,
-            "_collaborator_permission_response",
-            lambda _login: (status, body),
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(statuses),
+                    self._json_response(statuses),
+                ]
+            ),
         )
 
-        assert adapter.repository_permission_for_actor("operator") == expected
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
 
-    def test_malformed_permission_response_is_unavailable(
+    def test_required_context_can_be_satisfied_by_commit_status_only(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A successful exact-head commit status can satisfy an unbound context."""
         adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head)],
+        }
         monkeypatch.setattr(
-            adapter,
-            "_collaborator_permission_response",
-            lambda _login: (200, {"permission": "owner"}),
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
         )
 
-        with pytest.raises(RuntimeError, match="permission"):
-            adapter.repository_permission_for_actor("operator")
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
 
-    @pytest.mark.parametrize(
-        ("returncode", "stdout", "expected"),
-        [
-            (0, 'HTTP/2 200 OK\n\n{"permission":"write"}', (200, {"permission": "write"})),
-            (1, 'HTTP/2 404 Not Found\n\n{"message":"Not Found"}', (404, None)),
-        ],
-    )
-    def test_permission_uses_repository_qualified_direct_api_call(
+    def test_same_name_failed_status_blocks_a_successful_check_run(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A required name must pass as both a Check Run and a commit status when both exist."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {"total_count": 1, "check_runs": [self._check_run(head)]}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head, state="failure")],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(runs),
+                    self._json_response(runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
+    def test_changed_commit_status_snapshot_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A changed status reread cannot authorize the conditional request."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {"total_count": 1, "check_runs": [self._check_run(head)]}
+        success = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head)],
+        }
+        failure = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head, state="failure")],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(runs),
+                    self._json_response(runs),
+                    self._json_response(success),
+                    self._json_response(failure),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
+    def test_later_commit_status_page_failure_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed required status on a later page prevents merge admission."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {"total_count": 1, "check_runs": [self._check_run(head)]}
+        first_page = {
+            "sha": head,
+            "total_count": 101,
+            "statuses": [
+                self._commit_status(head, status_id=index, context=f"optional-{index}")
+                for index in range(1, 101)
+            ],
+        }
+        final_page = {
+            "sha": head,
+            "total_count": 101,
+            "statuses": [self._commit_status(head, status_id=101, state="failure")],
+        }
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            endpoint = args[1]
+            if "/check-runs?" in endpoint:
+                return self._json_response(runs)
+            if "page=2" in endpoint:
+                return self._json_response(final_page)
+            if "/status?" in endpoint:
+                return self._json_response(first_page)
+            raise AssertionError(args)
+
+        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
+    def test_app_bound_requirement_is_not_satisfied_by_commit_status_only(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A commit status cannot prove a required GitHub App identity."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head)],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=1)) is False
+
+    def test_ruleset_only_failed_required_run_blocks_merge(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed active-rules requirement prevents the merge request."""
+        from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+        from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+        adapter.repo = "repo"
+        head = "a" * 40
+        calls: list[list[str]] = []
+
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            },
+        )
+        monkeypatch.setattr(
+            adapter,
+            "pr_has_implementation_state_label",
+            lambda _pr: (True, False),
+        )
+        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_merge_readiness",
+            lambda _pr: {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            },
+        )
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(args)
+            endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if "/check-runs?" in endpoint:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 2,
+                            "check_runs": [
+                                self._check_run(head, name="classic-ci"),
+                                self._check_run(
+                                    head,
+                                    check_run_id=2,
+                                    name="ruleset-ci",
+                                    conclusion="failure",
+                                ),
+                            ],
+                        }
+                    ),
+                )
+            if args[1:3] == ["--method", "PUT"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout='HTTP/2.0 200 OK\n\n{"merged": true}',
+                )
+            raise AssertionError(args)
+
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(
+                RequiredCheck("classic-ci", 1),
+                RequiredCheck("ruleset-ci", 1),
+            ),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+        monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
+        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
+
+        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+            RunMergeWaitCycleRequest(
+                pr_number=7,
+                reviewed_head_sha=head,
+                proof_generation=2,
+                declined_readiness_fingerprint=None,
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            ),
+            adapter,
+        )
+
+        assert receipt.outcome == "required_checks_not_green"
+        assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
+
+    def test_wrong_required_app_id_blocks_merge_request(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        returncode: int,
-        stdout: str,
-        expected: tuple[int, dict[str, object] | None],
     ) -> None:
-        """Permission reads cannot inherit the adapter's PR-scoped argv policy."""
-        adapter.repo = "repo"
-        call_mock = MagicMock(return_value=SimpleNamespace(returncode=returncode, stdout=stdout))
-        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
+        """A same-name Check Run from another GitHub App cannot cause a merge."""
+        from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+        from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
-        assert adapter._collaborator_permission_response("Operator Name") == expected
-        call_mock.assert_called_once_with(
+        adapter.repo = "repo"
+        head = "a" * 40
+        calls: list[list[str]] = []
+
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            },
+        )
+        monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: (True, False))
+        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_merge_readiness",
+            lambda _pr: {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            },
+        )
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 17),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+        monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(args)
+            endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if "/check-runs?" in endpoint:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "check_runs": [self._check_run(head, app_id=18)],
+                        }
+                    ),
+                )
+            if args[1:3] == ["--method", "PUT"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout='HTTP/2.0 200 OK\n\n{"merged": true}',
+                )
+            raise AssertionError(args)
+
+        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
+
+        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+            RunMergeWaitCycleRequest(
+                pr_number=7,
+                reviewed_head_sha=head,
+                proof_generation=2,
+                declined_readiness_fingerprint=None,
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            ),
+            adapter,
+        )
+
+        assert receipt.outcome == "required_checks_not_green"
+        assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
+
+    def test_matching_required_app_id_satisfies_check_context(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A required check succeeds only when its GitHub App also matches."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "total_count": 1,
+                                "check_runs": [self._check_run(head, app_id=17)],
+                            }
+                        ),
+                    ),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "total_count": 1,
+                                "check_runs": [self._check_run(head, app_id=17)],
+                            }
+                        ),
+                    ),
+                    self._empty_status_response(head),
+                    self._empty_status_response(head),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=17)) is True
+
+    def test_optional_failed_run_does_not_block_successful_required_run(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed optional Check Run cannot block green required checks."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "total_count": 2,
+                    "check_runs": [
+                        self._check_run(head),
+                        self._check_run(
+                            head,
+                            check_run_id=2,
+                            name="optional-ci",
+                            conclusion="failure",
+                        ),
+                    ],
+                }
+            ),
+        )
+        call_mock = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
+    def test_accepts_only_complete_successful_runs_for_requested_head(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A completed successful Check Run for the reviewed SHA permits merging."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"total_count": 1, "check_runs": [self._check_run(head)]}),
+        )
+        call_mock = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+        assert [entry.args[0] for entry in call_mock.call_args_list] == [
             [
                 "api",
-                "--method",
-                "GET",
-                "--include",
-                "repos/org/repo/collaborators/Operator%20Name/permission",
+                f"/repos/org/repo/commits/{head}/check-runs?filter=latest&per_page=100",
             ],
-            check=False,
-        )
-
-    def test_permission_transport_error_is_unavailable(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A direct transport failure remains unavailable rather than no permission."""
-        adapter.repo = "repo"
-        monkeypatch.setattr(authorization_mod, "gh_call", MagicMock(side_effect=OSError("down")))
-
-        with pytest.raises(OSError, match="down"):
-            adapter._collaborator_permission_response("operator")
-
-
-def test_mismatched_authorization_is_rejected_before_transport(
-    adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The irreversible boundary accepts only a capability for its request."""
-    adapter.repo = "repo"
-    call_mock = MagicMock()
-    monkeypatch.setattr(pg, "gh_call", call_mock)
-
-    result = adapter.merge_pr_if_head(7, "a" * 40, replace(_authorization(), head_sha="b" * 40))
-
-    assert result.malformed is True
-    call_mock.assert_not_called()
-
-
-class TestConversationResolutionAdmission:
-    """The base-branch protection read is narrow, repo-scoped, and fail closed."""
-
-    def test_reads_exact_base_branch_protection_and_accepts_enabled(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        fully_enforced_branch_protection: str,
-    ) -> None:
-        adapter.repo = "repo"
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                stdout=fully_enforced_branch_protection,
-                returncode=0,
-            )
-        )
-        monkeypatch.setattr(pg, "gh_call", call_mock)
-
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
-        call_mock.assert_called_once_with(
-            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
-            check=False,
-            timeout=120,
-        )
-
-    def test_accepts_valid_protection_without_a_bypass_allowance_field(
-        self,
-        adapter: pg.PipelineGitHub,
-        monkeypatch: pytest.MonkeyPatch,
-        fully_enforced_protection_without_bypass_allowances: str,
-    ) -> None:
-        """An omitted allowance field represents no configured PR bypass."""
-        adapter.repo = "repo"
-        call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                stdout=fully_enforced_protection_without_bypass_allowances,
-                returncode=0,
-            )
-        )
-        monkeypatch.setattr(pg, "gh_call", call_mock)
-
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is True
-        call_mock.assert_called_once_with(
-            ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
-            check=False,
-            timeout=120,
-        )
+            [
+                "api",
+                f"/repos/org/repo/commits/{head}/check-runs?filter=latest&per_page=100",
+            ],
+            [
+                "api",
+                f"/repos/org/repo/commits/{head}/status?per_page=100",
+            ],
+            [
+                "api",
+                f"/repos/org/repo/commits/{head}/status?per_page=100",
+            ],
+        ]
+        assert all(0 < entry.kwargs["timeout"] <= 120 for entry in call_mock.call_args_list)
 
     @pytest.mark.parametrize(
-        "protection",
+        ("returned_head", "status", "conclusion"),
         [
-            {},
-            {
-                "required_conversation_resolution": {"enabled": False},
-                "enforce_admins": {"enabled": True},
-            },
-            {
-                "required_conversation_resolution": {"enabled": True},
-                "enforce_admins": {"enabled": False},
-            },
-            {"required_conversation_resolution": {"enabled": True}},
-            {
-                "required_conversation_resolution": {"enabled": True},
-                "enforce_admins": {"enabled": "true"},
-            },
-            "not-json",
+            ("b" * 40, "completed", "success"),
+            ("a" * 40, "in_progress", ""),
+            ("a" * 40, "completed", "failure"),
         ],
     )
-    def test_absent_false_or_malformed_protection_flags_fail_closed(
+    def test_rejects_stale_pending_or_failed_check_runs(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        protection: dict[str, object] | str,
+        returned_head: str,
+        status: str,
+        conclusion: str,
     ) -> None:
+        """Stale, pending, and failed evidence cannot authorize a merge."""
         adapter.repo = "repo"
-        stdout = protection if isinstance(protection, str) else json.dumps(protection)
+        head = "a" * 40
+        response = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        self._check_run(
+                            returned_head,
+                            status=status,
+                            conclusion=conclusion,
+                        )
+                    ],
+                }
+            ),
+        )
         monkeypatch.setattr(
-            pg,
+            github_api_mod,
             "gh_call",
-            MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0)),
+            MagicMock(side_effect=[response, response]),
         )
 
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
+    def test_empty_check_run_response_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing Check Runs do not count as green required checks."""
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"total_count": 0, "check_runs": []}),
+                    ),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"total_count": 0, "check_runs": []}),
+                    ),
+                    self._empty_status_response("a" * 40),
+                    self._empty_status_response("a" * 40),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, "a" * 40, self._policy("required-ci")) is False
 
     @pytest.mark.parametrize(
-        "bypass_allowances",
-        [
-            {"users": [{"login": "release-admin"}], "teams": [], "apps": []},
-            {"users": [], "teams": [{"slug": "maintainers"}], "apps": []},
-            {"users": [], "teams": [], "apps": [{"slug": "merge-bot"}]},
-            {"users": "not-a-list", "teams": [], "apps": []},
-            None,
-            [],
-        ],
+        ("first_id", "second_id"),
+        [(1, 1), (1, 0)],
+        ids=("duplicate", "invalid"),
     )
-    def test_explicit_or_malformed_bypass_allowances_fail_closed(
+    def test_one_page_check_run_response_rejects_invalid_identity(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        bypass_allowances: object,
+        first_id: int,
+        second_id: int,
     ) -> None:
-        """Any listed PR-requirement bypass can also evade conversation safety."""
+        """A one-page response with invalid identities cannot permit a merge."""
         adapter.repo = "repo"
-        stdout = json.dumps(
-            {
-                "required_conversation_resolution": {"enabled": True},
-                "enforce_admins": {"enabled": True},
-                "required_pull_request_reviews": {
-                    "bypass_pull_request_allowances": bypass_allowances,
-                },
-            }
+        head = "a" * 40
+        check_runs = [
+            self._check_run(head, check_run_id=first_id),
+            self._check_run(head, check_run_id=second_id),
+        ]
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"total_count": 2, "check_runs": check_runs}),
+                    ),
+                ]
+            ),
         )
-        call_mock = MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0))
-        monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
-        assert call_mock.call_args.args[0][2] == "GET"
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
 
-    def test_protection_read_is_unavailable_without_a_repo_scope(
+    def test_paginates_and_rechecks_large_check_run_snapshots(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        call_mock = MagicMock()
-        monkeypatch.setattr(pg, "gh_call", call_mock)
+        """A large Check Runs response must be complete and stable."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_page = [
+            self._check_run(
+                head,
+                check_run_id=index,
+                name="required-ci" if index == 1 else f"optional-ci-{index}",
+            )
+            for index in range(1, 101)
+        ]
+        final_page = [self._check_run(head, check_run_id=101, name="optional-ci-101")]
+        page_responses = [
+            {"total_count": 101, "check_runs": first_page},
+            {"total_count": 101, "check_runs": final_page},
+            {"total_count": 101, "check_runs": first_page},
+            {"total_count": 101, "check_runs": final_page},
+        ]
+        call_mock = MagicMock(
+            side_effect=[
+                *[
+                    SimpleNamespace(returncode=0, stdout=json.dumps(response))
+                    for response in page_responses
+                ],
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
-        assert adapter.base_branch_requires_conversation_resolution(7, "main") is False
-        call_mock.assert_not_called()
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+        assert call_mock.call_count == 6
+
+    def test_rejects_check_run_totals_above_the_safety_ceiling(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An oversized Check Runs total must fail closed on the first page."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        caplog.set_level("WARNING")
+
+        def fake_gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            page = 1
+            if "&page=" in endpoint:
+                page = int(endpoint.rsplit("page=", 1)[1])
+            run_count = 1 if page == 21 else 100
+            start_id = (page - 1) * 100 + 1
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "total_count": 2001,
+                        "check_runs": [
+                            self._check_run(head, check_run_id=index)
+                            for index in range(start_id, start_id + run_count)
+                        ],
+                    }
+                ),
+            )
+
+        call_mock = MagicMock(side_effect=fake_gh_call)
+        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert call_mock.call_count == 1
+        assert f"Check Runs response exceeds the 2000-run safety ceiling for {head}" in caplog.text
 
 
 # ---------------------------------------------------------------------------

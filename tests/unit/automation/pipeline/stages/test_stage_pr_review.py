@@ -2344,7 +2344,7 @@ class TestPrReviewStageStep:
             "stderr_tail": "",
             "stdout_tail": "",
         }
-        assert stage_module._host_verification_receipt_matches(skipped, spec, expected_head)
+        assert not stage_module._host_verification_receipt_matches(skipped, spec, expected_head)
         assert not stage_module._host_verification_receipt_matches(
             {**skipped, "platform": "darwin"}, spec, expected_head
         )
@@ -2353,6 +2353,12 @@ class TestPrReviewStageStep:
         )
         assert not stage_module._host_verification_receipt_matches(
             {**skipped, "platform": ""}, spec, expected_head
+        )
+        assert not stage_module._host_verification_receipt_matches(
+            {**skipped, "error": ""}, spec, expected_head
+        )
+        assert not stage_module._host_verification_receipt_matches(
+            {**skipped, "immutable_source": True}, spec, expected_head
         )
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
@@ -2738,10 +2744,10 @@ class TestPrReviewStageStep:
         assert item.payload["host_verification_failure"]["error"] == "timeout"
         assert "review_audit_failure" not in item.payload
 
-    def test_unsupported_host_boundary_is_explicitly_skipped(
+    def test_authenticated_unsupported_host_boundary_blocks_review_as_an_evidence_gap(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Only an attested unsupported platform may skip review checks."""
+        """An authentic unsupported-platform skip cannot satisfy a required check."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -2775,16 +2781,17 @@ class TestPrReviewStageStep:
             ctx,
         )
 
-        next_request = stage.step(item, ctx)
+        next_result = stage.step(item, ctx)
 
-        assert isinstance(next_request, JobRequest)
-        assert next_request.on_done_state == HOST_VERIFICATION_WAIT
+        assert next_result == StageOutcome(Disposition.FINISH_FAIL, "host_verification_failed")
         receipt = item.payload["host_verification_receipts"][0]
-        assert "bypassed" not in receipt
         assert receipt["error"] == "unsupported_host_verification_boundary"
         assert receipt["platform"] == "linux"
         assert receipt["status"] == "skipped"
-        assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
+        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
+        assert item.payload["host_verification_failure"]["error"] == (
+            "unsupported_host_verification_boundary"
+        )
 
     def test_unsupported_host_skip_with_mismatched_head_fails_closed(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any

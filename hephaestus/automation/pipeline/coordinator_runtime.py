@@ -103,6 +103,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 claim_registry=self._learning_claim_registry,
             ),
             plan_review_sessions=PlanReviewSessionStore(learning_state_dir),
+            cancellation=self.shutdown,
             plan_review_session_resets=set(self.config.reset_plan_review_sessions),
             branch_worktree_owner_status=self._branch_worktree_owner_status,
         )

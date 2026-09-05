@@ -1,8 +1,8 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 import subprocess
-
-from hephaestus.automation.merge_authorization import MergeAuthorization
+import time
+from threading import Event
 
 from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
@@ -15,22 +15,19 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization,
+        *,
+        deadline_s: float | None = None,
+        cancellation: Event | None = None,
     ) -> ConditionalMergeResult:
         """Attempt one immediate squash merge conditional on the reviewed SHA.
 
-        The request deliberately avoids the GitHub CLI PR-merge subcommand,
+        The stage owns review and check admission. This adapter only enforces
+        the SHA condition and performs the merge request. The request
+        deliberately avoids the GitHub CLI PR-merge subcommand,
         native auto-merge, merge queues, administrator flags, and retries. A
         stage-owned lifecycle read decides whether an ambiguous request may be
         retried later.
         """
-        if (
-            not isinstance(authorization, MergeAuthorization)
-            or authorization.repository != self._repo_slug
-            or authorization.pr_number != pr_number
-            or authorization.head_sha != reviewed_sha
-        ):
-            return ConditionalMergeResult(status=None, body=None, malformed=True)
         if (
             pr_number <= 0
             or not isinstance(reviewed_sha, str)
@@ -40,6 +37,13 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         owner, name = self._owner_name()
         if self._skip(f"conditionally squash merge PR #{pr_number} at {reviewed_sha}"):
             return ConditionalMergeResult(status=None, body=None, dry_run=True)
+        if cancellation is not None and cancellation.is_set():
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        timeout = float(self._gh_timeout)
+        if deadline_s is not None:
+            timeout = min(timeout, deadline_s - time.monotonic())
+            if timeout <= 0:
+                return ConditionalMergeResult(status=None, body=None, transport_error=True)
         try:
             result = gh_call(
                 [
@@ -56,7 +60,7 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
                 check=False,
                 retry_on_rate_limit=False,
                 max_retries=1,
-                timeout=self._gh_timeout,
+                timeout=timeout,
             )
         except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
             logger.warning("PR #%s: conditional merge transport failure: %s", pr_number, exc)

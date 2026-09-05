@@ -5,11 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never
 
-from hephaestus.automation.merge_authorization import (
-    MergeAuthorization,
-    MergeAuthorizationStatus,
-    resolve_merge_authorization,
-)
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -34,6 +29,7 @@ from hephaestus.automation.pipeline.reply_handoff import (
 )
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
+from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
 
 
 @dataclass(frozen=True)
@@ -880,6 +876,11 @@ class PipelineGitHubJobRunner:
                 return "closed"
             return None
 
+        def operation_boundary() -> str | None:
+            if request.cancellation.is_set():
+                return "merge_cycle_cancelled"
+            return None
+
         def admit() -> tuple[dict[str, object], str] | str:
             try:
                 state = github.gh_pr_state(request.pr_number)
@@ -911,21 +912,28 @@ class PipelineGitHubJobRunner:
                 return "reviewed_head_drift"
             return state, head
 
-        def conversation_safety(base_branch: str) -> str | None:
+        def conversation_safety(policy: object) -> str | None:
             try:
                 threads = github.list_unresolved_review_threads(request.pr_number)
             except Exception:
                 return "review_threads_unavailable"
             if threads:
                 return "unresolved_review_threads"
-            try:
-                protected = github.base_branch_requires_conversation_resolution(
-                    request.pr_number,
-                    base_branch,
-                )
-            except Exception:
-                return "conversation_resolution_unavailable"
-            return None if protected else "conversation_resolution_required"
+            protected = getattr(policy, "conversation_resolution_enforced", None)
+            return None if protected is True else "conversation_resolution_required"
+
+        def policy_safety(policy: object) -> str | None:
+            """Reject incomplete or bypassable policy before mutable merge reads."""
+            if not isinstance(policy, EffectiveMergePolicy):
+                return "merge_policy_unavailable"
+            if any(
+                isinstance(ruleset_id, bool) or not isinstance(ruleset_id, int) or ruleset_id <= 0
+                for ruleset_id in policy.bypassable_ruleset_ids
+            ):
+                return "merge_policy_unavailable"
+            if policy.bypassable_ruleset_ids:
+                return "merge_policy_bypassable"
+            return conversation_safety(policy)
 
         def readiness_outcome(
             state: object,
@@ -964,6 +972,9 @@ class PipelineGitHubJobRunner:
                 return "merge_readiness_unknown", fingerprint
             return "readiness_wait", fingerprint
 
+        boundary = operation_boundary()
+        if boundary is not None:
+            return complete(boundary)
         admitted = admit()
         if isinstance(admitted, str):
             return complete(admitted)
@@ -971,35 +982,21 @@ class PipelineGitHubJobRunner:
         base_branch = state.get("baseRefName")
         if not isinstance(base_branch, str) or not base_branch:
             return complete("pr_state_unverified")
-        unsafe = conversation_safety(base_branch)
+        try:
+            policy = github.effective_merge_policy(
+                request.pr_number,
+                base_branch,
+                deadline_s=request.deadline_s,
+                cancellation=request.cancellation,
+            )
+        except Exception:
+            policy = None
+        if policy is None:
+            return complete("merge_policy_unavailable")
+        unsafe = policy_safety(policy)
         if unsafe is not None:
             return complete(unsafe)
 
-        def authorization() -> MergeAuthorization | str:
-            """Resolve the trusted exact-head operator approval."""
-            try:
-                repository = github._repo_slug
-                if not isinstance(repository, str) or not repository:
-                    raise RuntimeError("repository identity is unavailable")
-                resolution = resolve_merge_authorization(
-                    github.merge_authorization_reviews(request.pr_number),
-                    repository=repository,
-                    pr_number=request.pr_number,
-                    head_sha=request.reviewed_head_sha,
-                    automation_login=github._viewer_login(),
-                    permission_for_actor=github.repository_permission_for_actor,
-                )
-            except Exception:
-                return "merge_authorization_unavailable"
-            if resolution.status is not MergeAuthorizationStatus.AUTHORIZED:
-                return f"merge_authorization_{resolution.status.value}"
-            if resolution.authorization is None:
-                return "merge_authorization_unavailable"
-            return resolution.authorization
-
-        initial_authorization = authorization()
-        if isinstance(initial_authorization, str):
-            return complete(initial_authorization)
         try:
             readiness = github.gh_pr_merge_readiness(request.pr_number)
         except Exception:
@@ -1008,29 +1005,48 @@ class PipelineGitHubJobRunner:
         if readiness_status is not None:
             return complete(readiness_status, fingerprint=fingerprint)
 
-        # Read all authority-bearing facts again immediately before the PUT.
-        admitted = admit()
-        if isinstance(admitted, str):
-            return complete(admitted)
-        state, _ = admitted
-        base_branch = state.get("baseRefName")
-        if not isinstance(base_branch, str) or not base_branch:
-            return complete("pr_state_unverified")
-        unsafe = conversation_safety(base_branch)
+        try:
+            checks_green = github.required_checks_pass_for_head(
+                request.reviewed_head_sha,
+                policy,
+                deadline_s=request.deadline_s,
+                cancellation=request.cancellation,
+            )
+        except Exception:
+            checks_green = False
+        if checks_green is not True:
+            return complete("required_checks_not_green")
+
+        # Complete all mutable GitHub traversals before final admission. The
+        # returned admission then binds the immediate conditional PUT.
+        try:
+            current_policy = github.effective_merge_policy(
+                request.pr_number,
+                base_branch,
+                deadline_s=request.deadline_s,
+                cancellation=request.cancellation,
+            )
+        except Exception:
+            current_policy = None
+        if not isinstance(current_policy, EffectiveMergePolicy) or current_policy != policy:
+            return complete("merge_policy_unavailable")
+        unsafe = policy_safety(current_policy)
         if unsafe is not None:
             return complete(unsafe)
 
-        final_authorization = authorization()
-        if isinstance(final_authorization, str):
-            return complete(final_authorization)
-        if final_authorization != initial_authorization:
-            return complete("merge_authorization_changed")
+        boundary = operation_boundary()
+        if boundary is not None:
+            return complete(boundary)
+        admitted = admit()
+        if isinstance(admitted, str):
+            return complete(admitted)
 
         try:
             result = github.merge_pr_if_head(
                 request.pr_number,
                 request.reviewed_head_sha,
-                final_authorization,
+                deadline_s=request.deadline_s,
+                cancellation=request.cancellation,
             )
         except Exception:
             return complete("merge_request_transport_error", attempted=True, can_retry=True)

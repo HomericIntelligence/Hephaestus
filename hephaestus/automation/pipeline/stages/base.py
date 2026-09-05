@@ -50,6 +50,7 @@ Coordinator convention (binding for #1817, the coordinator slice):
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -62,7 +63,6 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
 from hephaestus.automation.state_labels import STATE_SKIP
 
@@ -557,35 +557,37 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness without granting authorization."""
         pass
 
-    def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
-        """Return one stable native-review authorization snapshot."""
+    def effective_merge_policy(
+        self,
+        pr_number: int,
+        base_branch: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> Any:
+        """Return one stable classic-and-ruleset merge-policy snapshot."""
         pass
 
-    def repository_permission_for_actor(self, login: str) -> str:
-        """Return the actor's current repository permission."""
-        pass
-
-    def base_branch_requires_conversation_resolution(
-        self, pr_number: int, base_branch: str
+    def required_checks_pass_for_head(
+        self,
+        head_sha: str,
+        policy: Any,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
     ) -> bool:
-        """Return whether this PR base branch has server-enforced conversation resolution.
-
-        The read is scoped to the accessor's explicit repository and the exact
-        base branch admitted for ``pr_number``. Admission requires enforced
-        conversation resolution and administrator enforcement, with no
-        explicit PR-bypass allowances. ``False`` includes an absent,
-        unreadable, or malformed branch-protection response and must prevent a
-        normal merge request.
-        """
-        ...
+        """Return whether required status evidence passes for ``head_sha``."""
+        pass
 
     def merge_pr_if_head(
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization,
+        *,
+        deadline_s: float | None = None,
+        cancellation: threading.Event | None = None,
     ) -> ConditionalMergeResult:
-        """Perform one authorized normal merge conditional on ``reviewed_sha``."""
+        """Perform one normal merge after exact-head admission succeeds."""
         pass
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
@@ -673,6 +675,7 @@ class StageContext:
     event_fn: Callable[[StageEvent], None] | None = None
     learning_journal: Any = None
     plan_review_sessions: Any = None
+    cancellation: threading.Event = field(default_factory=threading.Event)
     # Per-Coordinator one-shot consumption state for plan-review session
     # resets. The coordinator copies this from the immutable
     # ``PipelineConfig.reset_plan_review_sessions`` frozenset so stages can

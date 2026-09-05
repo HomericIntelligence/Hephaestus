@@ -591,14 +591,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                     verification,
                     str(receipt.get("error") or "host_verification_receipt_invalid"),
                 )
-            if receipt["ok"] or receipt.get("status") == "skipped":
-                continue
-            return self._handle_host_verification_failure(
-                item,
-                ctx,
-                verification,
-                str(receipt.get("error") or "host_verification_failed"),
-            )
         if len(matched_receipts) < len(verifications):
             return self._submit_host_verification(item, ctx, verifications[len(matched_receipts)])
         if not _host_verification_receipts_match(receipts, verifications, reviewed_head):

@@ -27,8 +27,20 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github.py": 500,
     "hephaestus/automation/pipeline_github_contract.py": 125,
     "hephaestus/automation/pipeline_github_transport.py": 425,
-    "hephaestus/automation/pipeline_github_authorization.py": 300,
+    "hephaestus/automation/pipeline_github_review_queries.py": 150,
     "hephaestus/automation/pipeline_github_queries.py": 650,
+    # Effective classic and ruleset policy reads form one stable snapshot. The
+    # bound includes the authenticated absent-classic-protection parser.
+    "hephaestus/automation/pipeline_github_check_policy.py": 450,
+    # Parent-ruleset selectors and branch matching are one bounded concern.
+    "hephaestus/automation/pipeline_github_ruleset_conditions.py": 200,
+    # GitHub branch patterns use Ruby's path-separator-aware wildcard rules.
+    "hephaestus/automation/pipeline_github_ref_patterns.py": 125,
+    # Commit statuses use an independent paginated stability boundary.
+    "hephaestus/automation/pipeline_github_commit_statuses.py": 225,
+    # Exact-head Check Runs use a complete paginated double-read. Keep this
+    # separate repository-scoped merge-gate collaborator bounded.
+    "hephaestus/automation/pipeline_github_required_checks.py": 425,
     "hephaestus/automation/pipeline_github_reviews.py": 1_475,
     "hephaestus/automation/pipeline_github_mutations.py": 475,
     "hephaestus/automation/pipeline/stages/pr_review.py": 550,
@@ -51,9 +63,14 @@ _COLLABORATOR_MODULES = frozenset(
         "coordinator_sources",
         "coordinator_dispatch",
         "pipeline_github_transport",
-        "pipeline_github_authorization",
+        "pipeline_github_review_queries",
         "pipeline_github_contract",
+        "pipeline_github_check_policy",
+        "pipeline_github_commit_statuses",
+        "pipeline_github_ref_patterns",
+        "pipeline_github_ruleset_conditions",
         "pipeline_github_queries",
+        "pipeline_github_required_checks",
         "pipeline_github_reviews",
         "pipeline_github_mutations",
         "pr_review_threads",

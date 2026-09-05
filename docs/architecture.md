@@ -79,11 +79,15 @@ neither writes `state:skip` during seeding.
  unarmed live PR before the label is written. `merge_wait` uses that same
  active-run proof before every request in a bounded sequence (default: five)
  of SHA-conditional ordinary REST squash merges. Each request also requires
- exactly one trusted, unedited marked `APPROVED` GitHub review bound to the
- same head; the review is durable operator authorization, not an agent verdict.
- Before a request, it may make
- a bounded read-only readiness wait (15 minutes per fresh reviewed-head proof) without
- spending a merge attempt; readiness is not authorization, and each request
+ complete passing required status evidence for that exact head. The evidence
+ is an independent merge gate, not a substitute for the structural review proof.
+ After the evidence passes, `merge_wait` reads the stable effective policy again.
+ The new typed policy must equal the policy that supplied the required-check
+ inventory. The stage applies bypass and conversation safety to the new policy.
+ Before a request, it may make a bounded read-only readiness wait without
+ spending a merge attempt. The `--poll-max-wait` option controls this wait. Its
+ default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof.
+ Readiness is not authorization, and each request
  still has fresh open/`main`/unarmed/exclusive-GO admission.
  The direct adapter makes one request per call and never retries. No queue
  stage invokes `gh pr merge`, creates, disables, adopts, or polls native
@@ -663,26 +667,30 @@ A label alone never authorizes merge. The three independent admission facts
 are:
 
 ```text
-state:implementation-go ─────► automated eligibility
-current-process head proof ──► reviewed checkout identity
-human APPROVED review ───────► durable exact-head authorization
-                               │
-                               ▼
-                    SHA-conditional squash merge
+state:implementation-go ────────► automated eligibility
+current-process head proof ─────► reviewed checkout identity
+exact-head status evidence ─────► current CI merge gate
+                                 │
+                                 ▼
+                      SHA-conditional squash merge
 ```
 
 `merge_wait` requires the implementation-GO label, a matching in-memory
 reviewed-head proof on an open `main`, confirmed-unarmed live PR with an
-exclusive GO label, and exactly one trusted unedited marked native GitHub
-approval for that head. A missing or drifted proof or authorization blocks
-without a label mutation. A matching set permits a bounded sequence (default:
-five) of individual SHA-conditional ordinary REST squash-merge requests. A
-read-only readiness wait may park for up to 15 minutes per fresh proof;
-readiness and review prose never authorize merging, and fresh admission
-precedes every request ([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
+exclusive GO label, no unresolved review threads, and complete passing required
+status evidence for that head. A missing or drifted proof,
+failed or missing required status evidence, or untrusted merge state blocks
+without a label mutation. A matching set
+permits a bounded sequence (default: five) of individual SHA-conditional
+ordinary REST squash-merge requests. A read-only readiness wait may park for
+the `--poll-max-wait` period. Its default is 1,200 seconds (20 minutes) for each
+fresh proof. Readiness and review prose never authorize
+merging, and fresh admission precedes every request
+([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
 
-Plan-review labels remain durable routing state, while the marked native review
-is the separate durable operator authorization. Comment markers locate
+Plan-review labels remain durable routing state. Native review records remain
+part of review-thread and scope data, but a second user and a marked native
+`APPROVED` review are not merge prerequisites. Comment markers locate
 actor-owned journal artifacts only; foreign marker text is ignored.
 
 Implementation reviewers emit a structural audit, not a textual decision.
@@ -1087,10 +1095,9 @@ the current open, unarmed PR head.
 For the registered host-verification plan, the reviewed execution boundary
 currently requires macOS `sandbox-exec` plus disposable, quota-backed disk
 images. Other platforms record an exact-head, platform-bound `skipped` receipt
-before resolving tools, archiving source, or executing PR code. That receipt is
-N/A rather than passing execution evidence, and it does not independently grant
-implementation authority; head-bound CI and the remaining review gates retain
-their separate authority. A Linux or Windows backend must be added as a
+before they resolve tools, archive source, or execute PR code. That receipt is
+a blocking host-verification gap. It is not passing execution evidence, and it
+cannot grant implementation authority. Add a Linux or Windows backend as a
 separately reviewed isolation implementation; there is no unsandboxed fallback.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
@@ -1232,16 +1239,20 @@ Architectural contract:
 
 ### 5.6 Merge wait
 
-Merge wait verifies a still-valid implementation approval against its
+Merge wait verifies a still-valid implementation review against its
 in-memory reviewed-head proof before each request. It may issue a bounded
 sequence (default: five) of individual ordinary REST squash-merge requests,
 each conditional on that SHA. Admission for every request requires an open
 `main` PR, an explicitly unarmed record, an exclusive implementation-GO
-label, the current-process reviewed-head proof, and exactly one trusted,
-unedited marked `APPROVED` GitHub review bound to that head. A read-only
-readiness wait may park for up to 15 minutes per reviewed head before a
-request, without consuming the merge budget or authorizing a merge. The
-direct adapter performs one request per call and never retries.
+label, the current-process reviewed-head proof, no unresolved review threads,
+and complete passing required status evidence for that head. A read-only
+readiness wait may park for the `--poll-max-wait` period before a request. Its
+default is 1,200 seconds (20 minutes) for each reviewed head. The wait does not
+consume the merge budget or authorize a merge. After status evidence
+passes, merge wait reads the stable effective policy again. The new typed policy
+must equal the policy that supplied the required-check inventory. The stage
+applies bypass and conversation safety to the new policy before final admission.
+The direct adapter performs one request per call and never retries.
 Merge wait does not invoke `gh pr merge`,
 create, disable, adopt, or poll native auto-merge, manage a merge queue, or use
 an administrator bypass; an existing request is external ownership and is left
@@ -1251,7 +1262,7 @@ untouched.
 
 ```mermaid
 flowchart LR
-    Approved["GO label + reviewed-head proof + operator review"] --> Verify
+    Approved["GO label + reviewed-head proof + passing exact-head status evidence"] --> Verify
     Verify --> Merge["Conditional SHA squash merge"]
     Verify --> Review["Missing or drifted proof"]
     Verify --> Operator["External or ambiguous ownership"]
@@ -1266,11 +1277,12 @@ stateDiagram-v2
     Inspect --> Complete: already merged
     Inspect --> Failed: closed or unavailable
     Inspect --> OperatorOwned: externally armed
-    Inspect --> PRReview: approval missing
-    Inspect --> Verify: approval label present
+    Inspect --> PRReview: implementation proof missing
+    Inspect --> Verify: implementation proof present
     Verify --> Merge: matching reviewed head, main, unarmed exclusive GO
     Verify --> PRReview: missing or drifted proof
     Verify --> OperatorOwned: externally armed or ownership ambiguous
+    Verify --> Failed: required status evidence missing or failed
     Verify --> Failed: incomplete or unavailable state
     Merge --> Complete: 200 merged and lifecycle confirms
     Merge --> PRReview: 409 or ambiguous lifecycle head drift
@@ -1290,11 +1302,12 @@ Architectural contract:
 - A current-process review proof is bound to the reviewed head commit.
 - Existing external merge ownership is preserved.
 - Missing or drifted proof returns approval to PR review with zero label writes.
-- A matching eligibility label, current-process proof, and exact-head operator
-  authorization can submit a bounded sequence of individual SHA-conditional
-  normal REST merge requests, each only after fresh admission.
-- Read-only readiness polling may wait up to 15 minutes per fresh reviewed-head proof
-  without spending the request budget or authorizing a merge. HTTP 409,
+- A matching eligibility label, current-process proof, and passing exact-head
+  required status evidence can submit a bounded sequence of individual
+  SHA-conditional normal REST merge requests, each only after fresh admission.
+- Read-only readiness polling may wait for the `--poll-max-wait` period. Its
+  default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof. The
+  wait does not spend the request budget or authorize a merge. HTTP 409,
   transport ambiguity, and every actual request remain subject to fresh
   lifecycle, head, label, thread, and protection checks.
 
@@ -1398,8 +1411,9 @@ per-item-lifetime and are never reset when an item re-enters a stage, so
 cross-stage regression cycles (e.g. pr_review → implementation) remain
 globally bounded. All counters live in
 [`WorkItem.attempts`](../hephaestus/automation/pipeline/work_item.py).
-Operational readiness waits use a separate 15-minute monotonic deadline keyed
-to the current reviewed-head proof.
+Operational readiness waits use a separate monotonic deadline keyed to the
+current reviewed-head proof. The `--poll-max-wait` option controls the deadline,
+and its default is 1,200 seconds (20 minutes).
 
 ---
 
@@ -1480,13 +1494,13 @@ continues.
 
 ### Merge-wait restart semantics
 
-The queue is in-memory: a restart re-seeds normally through the ordinary
+The queue is in-memory. A restart re-seeds normally through the ordinary
 [`classifier`](../hephaestus/automation/pipeline/seeding.py) and does not recover
-the process-local reviewed-head proof. A marked exact-head GitHub approval
-survives that restart, but it is not sufficient by itself: the loop still
-requires fresh automated review to recreate the process-local proof before
+the process-local reviewed-head proof. The implementation-GO label and native
+review records survive the restart only as non-authoritative context. The loop
+requires a fresh automated review to recreate the process-local proof before
 merge admission. A direct PR seed or restart therefore cannot use a durable
-implementation-GO label by itself: merge wait first requires a
+implementation-GO label by itself. Merge wait first requires a
 confirmed-unarmed read, then returns the PR to review without mutating its
 labels. Other-run auto-merge requests are
 [blocked without adoption or mutation](../hephaestus/automation/pipeline/stages/merge_wait.py)
@@ -1970,10 +1984,9 @@ Exit-code priority is:
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
-  also requires one trusted, unedited marked native review whose GitHub
-  `commit.oid` matches that SHA, then compares the complete proof set with the
-  confirmed-unarmed live PR and issues a normal SHA-conditional merge rather
-  than arming or polling auto-merge.
+  compares the proof with the confirmed-unarmed live PR, reads complete passing
+  required status evidence for that SHA, and issues a normal SHA-conditional
+  merge rather than arming or polling auto-merge.
 - **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New tracker reasons are recorded in run logs; a confirmed obsolete disposition uses its distinct bounded actor-owned explanation role under ADR-0031.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
