@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import implementation_writer
+from hephaestus.automation import implementation_writer, worktree_manager
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -375,6 +375,67 @@ def test_direct_writer_replaces_owned_attached_source_before_rebinding(
     )
 
 
+def test_direct_worker_preserves_existing_writer_without_receipt(tmp_path: Path) -> None:
+    """A direct worker rejects an existing writer that has no receipt."""
+    repo, first, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = source_manager.path_for(9, SourceLane.IMPLEMENTATION)
+    writer.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "--detach", str(writer), first)
+    assert not source_manager._receipt_path(9, SourceLane.IMPLEMENTATION).exists()
+
+    completion_q: CompletionQueue = queue.Queue()
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+    )
+    job = GitJob(
+        repo="example/project",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 9,
+            "branch_name": "writer-branch",
+            "repo_root": str(repo),
+            "source_lane": SourceLane.IMPLEMENTATION.value,
+            "base_sha": second,
+        },
+    )
+
+    with (
+        patch.object(
+            pool,
+            "_prepare_direct_scope_worktree",
+            return_value=(second, "writer-branch"),
+        ),
+        patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ()),
+        ),
+        patch.object(WorktreeManager, "create_worktree", autospec=True) as create_worktree,
+    ):
+        pool.submit(job, StageName.REPO)
+        _, result = completion_q.get(timeout=10)
+
+    create_worktree.assert_not_called()
+    assert result.ok is False
+    assert result.error == (
+        "source_workspace_ownership_unavailable: implementation writer predecessor is unproven"
+    )
+    assert isinstance(result.value, dict)
+    recovery = result.value["source_workspace_recovery"]
+    assert recovery["kind"] == "unproven_predecessor"
+    assert recovery["item_number"] == 9
+    assert recovery["path"] == str(writer)
+    assert recovery["manual_action"]
+    assert writer.exists()
+    assert _git(writer, "rev-parse", "HEAD") == first
+    assert _git(writer, "branch", "--show-current") == ""
+
+
 def test_direct_writer_preserves_attached_source_with_durable_obligations(
     tmp_path: Path,
 ) -> None:
@@ -465,6 +526,119 @@ def test_direct_writer_checkout_change_after_authorization_has_recovery(
     assert captured.value.recovery["kind"] == "unproven_predecessor"
     assert isinstance(captured.value.__cause__, RuntimeError)
     assert str(captured.value.__cause__) == "implementation writer direct transition is invalid"
+
+
+@pytest.mark.parametrize("mutation", ["dirty", "branch", "revision"])
+def test_direct_writer_preserves_checkout_changed_after_transition_consumption(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A predecessor change after transition consumption prevents its removal."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    _git(repo, "push", "origin", "main:writer-branch")
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(9, SourceLane.IMPLEMENTATION, first, branch="old-writer-branch")
+    writer_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        manager.authorize_direct_implementation_writer_transition(
+            9, branch="writer-branch", base_sha=second, handoff=handoff
+        )
+        original_consume = type(handoff)._consume_direct_transition
+
+        def consume_then_change(active_handoff: Any, **kwargs: Any) -> object:
+            evidence = original_consume(active_handoff, **kwargs)
+            if mutation == "dirty":
+                (predecessor.cwd / "pending-change").write_text("preserve\n", encoding="utf-8")
+            elif mutation == "branch":
+                _git(predecessor.cwd, "switch", "-c", "unexpected-branch")
+            else:
+                _git(predecessor.cwd, "reset", "--hard", second)
+            return evidence
+
+        with patch.object(
+            type(handoff),
+            "_consume_direct_transition",
+            autospec=True,
+            side_effect=consume_then_change,
+        ):
+            with pytest.raises(WorktreeCreationReceiptError) as captured:
+                writer_manager.create_worktree(
+                    9,
+                    "writer-branch",
+                    base_sha=second,
+                    remote_branch_reserved=True,
+                    source_lane=SourceLane.IMPLEMENTATION.value,
+                    implementation_writer_handoff=handoff,
+                )
+
+    assert predecessor.cwd.exists()
+    assert captured.value.recovery is not None
+    assert captured.value.recovery["kind"] == "unproven_predecessor"
+    if mutation == "dirty":
+        assert (predecessor.cwd / "pending-change").read_text(encoding="utf-8") == "preserve\n"
+    elif mutation == "branch":
+        assert _git(predecessor.cwd, "symbolic-ref", "HEAD") == "refs/heads/unexpected-branch"
+    else:
+        assert _git(predecessor.cwd, "rev-parse", "HEAD") == second
+
+
+def test_direct_writer_failed_branch_probe_has_recovery(tmp_path: Path) -> None:
+    """A failed predecessor branch probe returns a typed recovery action."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    _git(repo, "push", "origin", "main:writer-branch")
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(9, SourceLane.IMPLEMENTATION, first, branch="old-writer-branch")
+    writer_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+    original_run = worktree_manager.__dict__["run"]
+
+    def fail_branch_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv == ["git", "symbolic-ref", "--quiet", "HEAD"]:
+            return subprocess.CompletedProcess(argv, 128, stdout="", stderr="probe failed")
+        return original_run(argv, **kwargs)
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        manager.authorize_direct_implementation_writer_transition(
+            9, branch="writer-branch", base_sha=second, handoff=handoff
+        )
+        with (
+            patch.dict(worktree_manager.__dict__, {"run": fail_branch_probe}),
+            pytest.raises(WorktreeCreationReceiptError) as captured,
+        ):
+            writer_manager.create_worktree(
+                9,
+                "writer-branch",
+                base_sha=second,
+                remote_branch_reserved=True,
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+
+    assert predecessor.cwd.exists()
+    assert captured.value.recovery is not None
+    assert captured.value.recovery["kind"] == "unproven_predecessor"
+    assert captured.value.recovery["item_number"] == 9
+    assert captured.value.recovery["path"] == str(predecessor.cwd)
+    manual_action = captured.value.recovery["manual_action"]
+    assert isinstance(manual_action, str)
+    assert "Inspect it before cleanup" in manual_action
 
 
 @pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift", "obligations"])

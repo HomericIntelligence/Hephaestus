@@ -665,16 +665,29 @@ class WorktreeManager:
                                     capture_output=True,
                                     **_timeout_kw(timeout),
                                 ).stdout.strip()
+                                predecessor_branch = self._implementation_writer_branch(
+                                    worktree_path, timeout=timeout
+                                )
                                 predecessor_evidence = (
                                     implementation_writer_handoff._consume_direct_transition(
                                         path=worktree_path,
                                         predecessor_revision=predecessor_revision,
-                                        predecessor_branch=self._implementation_writer_branch(
-                                            worktree_path, timeout=timeout
-                                        ),
+                                        predecessor_branch=predecessor_branch,
                                         branch=branch_name,
                                         base_sha=base_sha,
                                     )
+                                )
+                                predecessor_is_clean = is_clean_working_tree(
+                                    worktree_path, timeout=timeout
+                                )
+                                current_revision = run(
+                                    ["git", "rev-parse", "HEAD"],
+                                    cwd=worktree_path,
+                                    capture_output=True,
+                                    **_timeout_kw(timeout),
+                                ).stdout.strip()
+                                current_branch = self._implementation_writer_branch(
+                                    worktree_path, timeout=timeout
                                 )
                             except Exception as exc:
                                 raise WorktreeCreationReceiptError(
@@ -684,6 +697,18 @@ class WorktreeManager:
                                         worktree_path=worktree_path,
                                     ),
                                 ) from exc
+                            if (
+                                not predecessor_is_clean
+                                or current_revision != predecessor_revision
+                                or current_branch != predecessor_branch
+                            ):
+                                raise WorktreeCreationReceiptError(
+                                    "implementation writer predecessor changed after authorization",
+                                    recovery=self._implementation_writer_recovery(
+                                        issue_number=issue_number,
+                                        worktree_path=worktree_path,
+                                    ),
+                                )
                         self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
                     else:
                         predecessor_evidence = None
@@ -948,9 +973,18 @@ class WorktreeManager:
                     capture_output=True,
                     **_timeout_kw(timeout),
                 ).stdout.strip()
-                predecessor_branch = self._implementation_writer_branch(
-                    worktree_path, timeout=timeout
-                )
+                try:
+                    predecessor_branch = self._implementation_writer_branch(
+                        worktree_path, timeout=timeout
+                    )
+                except WorktreeCreationReceiptError as exc:
+                    raise WorktreeCreationReceiptError(
+                        "implementation writer predecessor changed after authorization",
+                        recovery=self._implementation_writer_recovery(
+                            issue_number=issue_number,
+                            worktree_path=worktree_path,
+                        ),
+                    ) from exc
                 if is_clean_working_tree(worktree_path, timeout=timeout):
                     try:
                         implementation_writer_handoff._validate_direct_transition(
