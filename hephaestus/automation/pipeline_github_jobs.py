@@ -29,6 +29,7 @@ from hephaestus.automation.pipeline.reply_handoff import (
 )
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
+from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
 
 
 @dataclass(frozen=True)
@@ -921,6 +922,19 @@ class PipelineGitHubJobRunner:
             protected = getattr(policy, "conversation_resolution_enforced", None)
             return None if protected is True else "conversation_resolution_required"
 
+        def policy_safety(policy: object) -> str | None:
+            """Reject incomplete or bypassable policy before mutable merge reads."""
+            if not isinstance(policy, EffectiveMergePolicy):
+                return "merge_policy_unavailable"
+            if any(
+                isinstance(ruleset_id, bool) or not isinstance(ruleset_id, int) or ruleset_id <= 0
+                for ruleset_id in policy.bypassable_ruleset_ids
+            ):
+                return "merge_policy_unavailable"
+            if policy.bypassable_ruleset_ids:
+                return "merge_policy_bypassable"
+            return conversation_safety(policy)
+
         def readiness_outcome(
             state: object,
             *,
@@ -979,7 +993,7 @@ class PipelineGitHubJobRunner:
             policy = None
         if policy is None:
             return complete("merge_policy_unavailable")
-        unsafe = conversation_safety(policy)
+        unsafe = policy_safety(policy)
         if unsafe is not None:
             return complete(unsafe)
 
@@ -1005,7 +1019,7 @@ class PipelineGitHubJobRunner:
 
         # Complete all mutable GitHub traversals before final admission. The
         # returned admission then binds the immediate conditional PUT.
-        unsafe = conversation_safety(policy)
+        unsafe = policy_safety(policy)
         if unsafe is not None:
             return complete(unsafe)
 

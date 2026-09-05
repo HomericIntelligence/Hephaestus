@@ -13,7 +13,6 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -36,6 +35,10 @@ from hephaestus.automation.pipeline.stages.base import (
     ImplementationReplyProgress,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline_github_check_policy import (
+    EffectiveMergePolicy,
+    RequiredCheck,
+)
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
@@ -709,13 +712,18 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
 
-    def effective_merge_policy(self, pr_number: int, base_branch: str, **_kwargs: Any) -> Any:
+    def effective_merge_policy(
+        self, pr_number: int, base_branch: str, **_kwargs: Any
+    ) -> EffectiveMergePolicy:
         """Return the canned effective merge policy."""
-        return SimpleNamespace(
+        return EffectiveMergePolicy(
+            base_branch=base_branch,
+            default_branch="main",
             conversation_resolution_enforced=self.base_branch_requires_conversation_resolution(
                 pr_number, base_branch
             ),
-            required_checks=(("required-ci", 1),),
+            required_checks=(RequiredCheck("required-ci", 1),),
+            bypassable_ruleset_ids=(),
         )
 
     def required_checks_pass_for_head(

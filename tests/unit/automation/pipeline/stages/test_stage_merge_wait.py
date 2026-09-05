@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +20,10 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
 from hephaestus.automation.pipeline.work_item import LearningIntent
+from hephaestus.automation.pipeline_github_check_policy import (
+    EffectiveMergePolicy,
+    RequiredCheck,
+)
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -117,13 +120,18 @@ class _ConditionalGitHub(FakeStageGitHub):
             return dict(self._readiness.pop(0))
         return dict(self._readiness[0])
 
-    def effective_merge_policy(self, pr_number: int, base_branch: str, **_kwargs: Any) -> Any:
+    def effective_merge_policy(
+        self, pr_number: int, base_branch: str, **_kwargs: Any
+    ) -> EffectiveMergePolicy:
         """Return the scripted effective policy."""
-        return SimpleNamespace(
+        return EffectiveMergePolicy(
+            base_branch=base_branch,
+            default_branch="main",
             conversation_resolution_enforced=self.base_branch_requires_conversation_resolution(
                 pr_number, base_branch
             ),
-            required_checks=(("required-ci", 1),),
+            required_checks=(RequiredCheck("required-ci", 1),),
+            bypassable_ruleset_ids=(),
         )
 
     def required_checks_pass_for_head(
@@ -587,6 +595,35 @@ def test_unreadable_conversation_resolution_policy_blocks_merge_put(
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_policy_unavailable")
+    assert github.merge_attempts == []
+
+
+def test_bypassable_effective_policy_is_a_terminal_fail_closed_outcome(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A bypass-capable actor cannot enter readiness or use a merge request."""
+
+    class BypassableRulesetGitHub(_ConditionalGitHub):
+        def effective_merge_policy(
+            self, pr_number: int, base_branch: str, **_kwargs: Any
+        ) -> EffectiveMergePolicy:
+            policy = super().effective_merge_policy(pr_number, base_branch, **_kwargs)
+            return EffectiveMergePolicy(
+                base_branch=policy.base_branch,
+                default_branch=policy.default_branch,
+                required_checks=policy.required_checks,
+                conversation_resolution_enforced=policy.conversation_resolution_enforced,
+                bypassable_ruleset_ids=(15556494,),
+            )
+
+    github = BypassableRulesetGitHub(required_checks_green=True)
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_policy_bypassable")
+    assert github.checked_heads == []
     assert github.merge_attempts == []
 
 

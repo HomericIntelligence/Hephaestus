@@ -1,4 +1,4 @@
-"""Exact-head required Check Runs merge-gate queries."""
+"""Exact-head required status-evidence merge-gate queries."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def _passing_check_run_requirements(
 
 
 class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
-    """Read exact-head required Check Runs for the final merge gate."""
+    """Read exact-head required status evidence for the final merge gate."""
 
     def required_checks_pass_for_head(
         self,
@@ -180,7 +180,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         deadline_s: float,
         cancellation: Event,
     ) -> bool:
-        """Return whether every effective required Check Run succeeds for ``head_sha``."""
+        """Return whether each effective requirement has passing exact-head evidence."""
         if (
             self._repo_slug is None
             or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None

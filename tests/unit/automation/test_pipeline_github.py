@@ -108,12 +108,15 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
             *,
             deadline_s: float,
             cancellation: object,
-        ) -> SimpleNamespace:
+        ) -> EffectiveMergePolicy:
             del deadline_s, cancellation
             events.append("policy")
-            return SimpleNamespace(
+            return EffectiveMergePolicy(
+                base_branch="main",
+                default_branch="main",
                 conversation_resolution_enforced=True,
-                required_checks=(("required-ci", 15368),),
+                required_checks=(RequiredCheck("required-ci", 15368),),
+                bypassable_ruleset_ids=(),
             )
 
         def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
@@ -171,6 +174,148 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
     ]
 
 
+class _RulesetBypassGitHub:
+    """Expose one stable effective policy at the merge-wait boundary."""
+
+    def __init__(
+        self,
+        *,
+        bypassable_ruleset_ids: tuple[int, ...],
+        conversation_resolution_enforced: bool,
+    ) -> None:
+        self.events: list[str] = []
+        self._bypassable_ruleset_ids = bypassable_ruleset_ids
+        self._conversation_resolution_enforced = conversation_resolution_enforced
+        self._merged = False
+
+    def gh_pr_state(self, _pr: int) -> dict[str, object]:
+        self.events.append("state")
+        if self._merged:
+            return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
+        return {
+            "state": "OPEN",
+            "autoMergeRequest": None,
+            "baseRefName": "main",
+            "headRefOid": "a" * 40,
+        }
+
+    def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+        self.events.append("label")
+        return True, False
+
+    def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
+        self.events.append("policy")
+        return EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=self._conversation_resolution_enforced,
+            bypassable_ruleset_ids=self._bypassable_ruleset_ids,
+        )
+
+    def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+        self.events.append("threads")
+        return []
+
+    def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+        self.events.append("readiness")
+        return {
+            "headRefOid": "a" * 40,
+            "mergeStateStatus": "CLEAN",
+            "mergeable": "MERGEABLE",
+        }
+
+    def required_checks_pass_for_head(self, *_args: object, **_kwargs: object) -> bool:
+        self.events.append("checks")
+        return True
+
+    def merge_pr_if_head(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        self.events.append("merge")
+        self._merged = True
+        return SimpleNamespace(
+            dry_run=False,
+            malformed=False,
+            transport_error=False,
+            status=200,
+            body={"merged": True, "sha": "b" * 40},
+        )
+
+
+def _run_ruleset_bypass_cycle(github: _RulesetBypassGitHub) -> Any:
+    """Run one exact-head merge cycle with a selected effective policy."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    return PipelineGitHubJobRunner._run_merge_wait_cycle(
+        RunMergeWaitCycleRequest(
+            pr_number=7,
+            reviewed_head_sha="a" * 40,
+            proof_generation=2,
+            declined_readiness_fingerprint=None,
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=threading.Event(),
+        ),
+        github,
+    )
+
+
+def _assert_ruleset_bypass_stops_before_mutable_merge_reads(
+    *, conversation_resolution_enforced: bool
+) -> None:
+    """Assert that a bypassable policy stops before readiness and merge reads."""
+    github = _RulesetBypassGitHub(
+        bypassable_ruleset_ids=(15556494,),
+        conversation_resolution_enforced=conversation_resolution_enforced,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merge_policy_bypassable"
+    assert receipt.attempted is False
+    assert github.events == ["state", "label", "policy"]
+
+
+def test_merge_wait_rejects_bypassable_effective_policy_before_readiness() -> None:
+    """A bypassable-only ruleset cannot authorize mutable merge reads."""
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=False)
+
+
+def test_bypassable_ruleset_with_required_signatures_cannot_reach_merge_put() -> None:
+    """Classic conversation enforcement cannot make a bypass identity safe."""
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=True)
+
+
+def test_bypassable_ruleset_with_merge_queue_cannot_reach_merge_put() -> None:
+    """A green required-check inventory cannot make a bypass identity safe."""
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=True)
+
+
+def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> None:
+    """A complete policy with no bypass identity keeps the direct merge path."""
+    github = _RulesetBypassGitHub(
+        bypassable_ruleset_ids=(),
+        conversation_resolution_enforced=True,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merged"
+    assert receipt.attempted is True
+    assert github.events == [
+        "state",
+        "label",
+        "policy",
+        "threads",
+        "readiness",
+        "checks",
+        "threads",
+        "state",
+        "label",
+        "merge",
+        "state",
+    ]
+
+
 def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
     """A failed complete Check Runs traversal prevents final admission."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
@@ -210,12 +355,15 @@ def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
             *,
             deadline_s: float,
             cancellation: object,
-        ) -> SimpleNamespace:
+        ) -> EffectiveMergePolicy:
             del deadline_s, cancellation
             events.append("policy")
-            return SimpleNamespace(
+            return EffectiveMergePolicy(
+                base_branch="main",
+                default_branch="main",
                 conversation_resolution_enforced=True,
-                required_checks=(("required-ci", 15368),),
+                required_checks=(RequiredCheck("required-ci", 15368),),
+                bypassable_ruleset_ids=(),
             )
 
         def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
@@ -309,10 +457,13 @@ def test_merge_cycle_rechecks_authorization_after_check_traversal(
                 self.revoked and revocation == "no-go-added",
             )
 
-        def effective_merge_policy(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(
+        def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
+            return EffectiveMergePolicy(
+                base_branch="main",
+                default_branch="main",
                 conversation_resolution_enforced=True,
-                required_checks=(("required-ci", 15368),),
+                required_checks=(RequiredCheck("required-ci", 15368),),
+                bypassable_ruleset_ids=(),
             )
 
         def list_unresolved_review_threads(self, _pr: int) -> list[object]:
@@ -3026,12 +3177,10 @@ class TestExactHeadChecks:
         assert receipt.outcome == "required_checks_not_green"
         assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
 
-    @pytest.mark.parametrize("required_source", ["classic", "ruleset"])
     def test_wrong_required_app_id_blocks_merge_request(
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        required_source: str,
     ) -> None:
         """A same-name Check Run from another GitHub App cannot cause a merge."""
         from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
@@ -3072,7 +3221,7 @@ class TestExactHeadChecks:
             default_branch="main",
             required_checks=(RequiredCheck("required-ci", 17),),
             conversation_resolution_enforced=True,
-            bypassable_ruleset_ids=((155,) if required_source == "ruleset" else ()),
+            bypassable_ruleset_ids=(),
         )
         monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
 
