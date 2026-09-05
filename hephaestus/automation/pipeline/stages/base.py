@@ -577,7 +577,7 @@ class StageGitHub(Protocol):
         deadline_s: float,
         cancellation: threading.Event,
     ) -> bool:
-        """Return whether complete successful Check Runs exist for ``head_sha``."""
+        """Return whether required status evidence passes for ``head_sha``."""
         pass
 
     def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:

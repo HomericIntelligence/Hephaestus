@@ -269,7 +269,8 @@ def main() -> int:
             prs=prs,
             # A single loop pass is sufficient: in-loop review either applies
             # the eligibility label or routes back; merge_wait separately
-            # consumes the current proof and exact-head Check Runs.
+            # consumes the current proof and exact-head required status
+            # evidence.
             loops=1,
             # --max-workers maps to the pipeline worker-pool size.
             max_workers=args.max_workers,

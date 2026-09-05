@@ -79,8 +79,8 @@ neither writes `state:skip` during seeding.
  unarmed live PR before the label is written. `merge_wait` uses that same
  active-run proof before every request in a bounded sequence (default: five)
  of SHA-conditional ordinary REST squash merges. Each request also requires
- complete successful Check Runs for that exact head. The checks are an
- independent merge gate, not a substitute for the structural review proof.
+ complete passing required status evidence for that exact head. The evidence
+ is an independent merge gate, not a substitute for the structural review proof.
  Before a request, it may make
  a bounded read-only readiness wait (15 minutes per fresh reviewed-head proof) without
  spending a merge attempt; readiness is not authorization, and each request
@@ -663,19 +663,20 @@ A label alone never authorizes merge. The three independent admission facts
 are:
 
 ```text
-state:implementation-go ─────► automated eligibility
-current-process head proof ──► reviewed checkout identity
-exact-head Check Runs ────────► current CI merge gate
-                               │
-                               ▼
-                    SHA-conditional squash merge
+state:implementation-go ────────► automated eligibility
+current-process head proof ─────► reviewed checkout identity
+exact-head status evidence ─────► current CI merge gate
+                                 │
+                                 ▼
+                      SHA-conditional squash merge
 ```
 
 `merge_wait` requires the implementation-GO label, a matching in-memory
 reviewed-head proof on an open `main`, confirmed-unarmed live PR with an
-exclusive GO label, no unresolved review threads, and complete successful
-Check Runs for that head. A missing or drifted proof, failed or missing Check
-Runs, or untrusted merge state blocks without a label mutation. A matching set
+exclusive GO label, no unresolved review threads, and complete passing required
+status evidence for that head. A missing or drifted proof,
+failed or missing required status evidence, or untrusted merge state blocks
+without a label mutation. A matching set
 permits a bounded sequence (default: five) of individual SHA-conditional
 ordinary REST squash-merge requests. A read-only readiness wait may park for
 up to 15 minutes per fresh proof; readiness and review prose never authorize
@@ -1240,8 +1241,8 @@ sequence (default: five) of individual ordinary REST squash-merge requests,
 each conditional on that SHA. Admission for every request requires an open
 `main` PR, an explicitly unarmed record, an exclusive implementation-GO
 label, the current-process reviewed-head proof, no unresolved review threads,
-and complete successful Check Runs for that head. A read-only readiness wait
-may park for up to 15 minutes per reviewed head before a request, without
+and complete passing required status evidence for that head. A read-only
+readiness wait may park for up to 15 minutes per reviewed head before a request, without
 consuming the merge budget or authorizing a merge. The direct adapter performs
 one request per call and never retries.
 Merge wait does not invoke `gh pr merge`,
@@ -1253,7 +1254,7 @@ untouched.
 
 ```mermaid
 flowchart LR
-    Approved["GO label + reviewed-head proof + green exact-head checks"] --> Verify
+    Approved["GO label + reviewed-head proof + passing exact-head status evidence"] --> Verify
     Verify --> Merge["Conditional SHA squash merge"]
     Verify --> Review["Missing or drifted proof"]
     Verify --> Operator["External or ambiguous ownership"]
@@ -1273,7 +1274,7 @@ stateDiagram-v2
     Verify --> Merge: matching reviewed head, main, unarmed exclusive GO
     Verify --> PRReview: missing or drifted proof
     Verify --> OperatorOwned: externally armed or ownership ambiguous
-    Verify --> Failed: checks missing or failed
+    Verify --> Failed: required status evidence missing or failed
     Verify --> Failed: incomplete or unavailable state
     Merge --> Complete: 200 merged and lifecycle confirms
     Merge --> PRReview: 409 or ambiguous lifecycle head drift
@@ -1293,9 +1294,9 @@ Architectural contract:
 - A current-process review proof is bound to the reviewed head commit.
 - Existing external merge ownership is preserved.
 - Missing or drifted proof returns approval to PR review with zero label writes.
-- A matching eligibility label, current-process proof, and green exact-head
-  Check Runs can submit a bounded sequence of individual SHA-conditional
-  normal REST merge requests, each only after fresh admission.
+- A matching eligibility label, current-process proof, and passing exact-head
+  required status evidence can submit a bounded sequence of individual
+  SHA-conditional normal REST merge requests, each only after fresh admission.
 - Read-only readiness polling may wait up to 15 minutes per fresh reviewed-head proof
   without spending the request budget or authorizing a merge. HTTP 409,
   transport ambiguity, and every actual request remain subject to fresh
@@ -1949,8 +1950,8 @@ Exit-code priority is:
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
-  compares the proof with the confirmed-unarmed live PR, reads complete
-  successful Check Runs for that SHA, and issues a normal SHA-conditional
+  compares the proof with the confirmed-unarmed live PR, reads complete passing
+  required status evidence for that SHA, and issues a normal SHA-conditional
   merge rather than arming or polling auto-merge.
 - **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New tracker reasons are recorded in run logs; a confirmed obsolete disposition uses its distinct bounded actor-owned explanation role under ADR-0031.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).

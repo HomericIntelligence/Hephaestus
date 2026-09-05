@@ -4,8 +4,8 @@
 This stage may perform one ordinary REST squash merge only after it observes
 the exact active-run reviewed head, an exclusive implementation-GO label, an
 open ``main`` PR, an explicitly absent auto-merge request, no unresolved
-review threads, and green Check Runs for that head. It never enables,
-disables, adopts, or polls native auto-merge.
+review threads, and passing required status evidence for that head. It never
+enables, disables, adopts, or polls native auto-merge.
 
 The implemented mini-state graph is:
 
