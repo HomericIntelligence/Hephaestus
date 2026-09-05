@@ -933,7 +933,6 @@ class TestWorkerPoolSubmitComplete:
         assert "Pi default model configuration" in (result.error or "")
         assert calls == []
 
-
     def test_codex_agent_job_ignores_a_legacy_saved_session(
         self,
         pool: WorkerPool,

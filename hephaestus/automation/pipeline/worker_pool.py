@@ -4088,6 +4088,7 @@ class WorkerPool:
                     error=f"worktree creation failed: {exc}",
                 )
             raise
+
     @staticmethod
     def _creation_receipt_failure(
         *,

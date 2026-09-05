@@ -564,8 +564,7 @@ class ImplementationStage(Stage):
             "repo_root": str(ctx.paths.repo_root),
             "source_lane": "impl",
         }
-        if requires_plan_scope_guard(agent_provider(ctx)):
-            kwargs["capture_source_revision"] = True
+        self._add_plan_scope_source_capture(kwargs, agent_provider(ctx))
         direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
         direct_branch_prefix = f"{issue}-auto-impl-direct-"
         direct_branch_nonce = (
@@ -617,6 +616,12 @@ class ImplementationStage(Stage):
             descr="create_worktree",
         )
         return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
+
+    @staticmethod
+    def _add_plan_scope_source_capture(kwargs: dict[str, object], agent: str) -> None:
+        """Request a host-observed source revision for a guarded writer."""
+        if requires_plan_scope_guard(agent):
+            kwargs["capture_source_revision"] = True
 
     def _dirty_decision_wait(  # noqa: C901
         self, item: WorkItem, ctx: StageContext
@@ -1451,28 +1456,8 @@ class ImplementationStage(Stage):
         )
         if is_full_commit_sha(publish_base_sha):
             kwargs["publish_base_sha"] = publish_base_sha
-        if requires_plan_scope_guard(agent):
-            planned_claims = item.payload.get("_implementation_file_claims")
-            if planned_claims is None:
-                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
-            allowed_paths = tuple(
-                sorted(
-                    claim[1]
-                    for claim in planned_claims
-                    if isinstance(claim, tuple)
-                    and len(claim) == 2
-                    and claim[0] == (ctx.org, item.repo)
-                    and isinstance(claim[1], str)
-                    and is_safe_scope_retraction_path(claim[1])
-                )
-            )
-            if not allowed_paths:
-                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
-            source_revision = item.payload.get("_impl_source_revision")
-            if not is_full_commit_sha(source_revision):
-                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_base_unavailable")
-            kwargs["allowed_paths"] = allowed_paths
-            kwargs["scope_history_base_sha"] = source_revision
+        if outcome := self._add_commit_plan_scope_guard(item, ctx, agent, kwargs):
+            return outcome
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
         # A direct cursor's bootstrap pin reserves a newly created writer
         # branch.  Once an existing PR is adopted, its remote branch is the
@@ -1506,6 +1491,39 @@ class ImplementationStage(Stage):
             descr="commit_push",
         )
         return JobRequest(push_job, on_done_state=PR_CREATE)
+
+    @staticmethod
+    def _add_commit_plan_scope_guard(
+        item: WorkItem,
+        ctx: StageContext,
+        agent: str,
+        kwargs: dict[str, object],
+    ) -> StageOutcome | None:
+        """Bind a guarded writer publication to its admitted path manifest."""
+        if not requires_plan_scope_guard(agent):
+            return None
+        planned_claims = item.payload.get("_implementation_file_claims")
+        if planned_claims is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
+        allowed_paths = tuple(
+            sorted(
+                claim[1]
+                for claim in planned_claims
+                if isinstance(claim, tuple)
+                and len(claim) == 2
+                and claim[0] == (ctx.org, item.repo)
+                and isinstance(claim[1], str)
+                and is_safe_scope_retraction_path(claim[1])
+            )
+        )
+        if not allowed_paths:
+            return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
+        source_revision = item.payload.get("_impl_source_revision")
+        if not is_full_commit_sha(source_revision):
+            return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_base_unavailable")
+        kwargs["allowed_paths"] = allowed_paths
+        kwargs["scope_history_base_sha"] = source_revision
+        return None
 
     @staticmethod
     def _github_job(
