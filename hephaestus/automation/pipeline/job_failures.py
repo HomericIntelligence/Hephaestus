@@ -20,6 +20,7 @@ _DURABLE_FAILURE_KINDS = frozenset(
         "validation_runner",
         "runner",
         "timeout",
+        "source_workspace_ownership",
     }
 )
 

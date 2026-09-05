@@ -85,7 +85,11 @@ from hephaestus.automation.remote_git import (
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
 from hephaestus.automation.review_journal import CommentJournalReadError
-from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspaceRecovery,
+)
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -3950,23 +3954,21 @@ class WorkerPool:
             and source_manager is not None
             and implementation_writer_handoff is not None
         ):
-            writer_path = base_dir / source_worktree_name(cast(int, kwargs["issue_number"]), "impl")
-            if writer_path.exists():
-                try:
-                    source_manager.authorize_direct_implementation_writer_transition(
-                        cast(int, kwargs["issue_number"]),
-                        branch=branch_name,
-                        base_sha=base_sha,
-                        handoff=implementation_writer_handoff,
-                    )
-                except SourceWorkspaceError as exc:
-                    return self._creation_receipt_failure(
-                        base_dir=base_dir,
-                        item_number=kwargs.get("issue_number"),
-                        exc=exc,
-                        branch_name=branch_name,
-                        base_sha=base_sha,
-                    )
+            try:
+                source_manager.authorize_direct_implementation_writer_transition(
+                    cast(int, kwargs["issue_number"]),
+                    branch=branch_name,
+                    base_sha=base_sha,
+                    handoff=implementation_writer_handoff,
+                )
+            except SourceWorkspaceError as exc:
+                return self._creation_receipt_failure(
+                    base_dir=base_dir,
+                    item_number=kwargs.get("issue_number"),
+                    exc=exc,
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                )
         created_or_failure = self._create_managed_worktree(
             manager=manager,
             kwargs=kwargs,
@@ -4076,6 +4078,14 @@ class WorkerPool:
             "path": str(worktree_path),
             WORKTREE_MATERIALIZED_KEY: worktree_path.exists(),
         }
+        recovery = getattr(exc, "recovery", None)
+        if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)) and isinstance(
+            recovery, (dict, SourceWorkspaceRecovery)
+        ):
+            value["failure_kind"] = "source_workspace_ownership"
+            value["source_workspace_recovery"] = (
+                recovery.to_dict() if isinstance(recovery, SourceWorkspaceRecovery) else recovery
+            )
         if base_sha is not None:
             value["direct_scope_reservation"] = {
                 "branch": branch_name,

@@ -22,6 +22,7 @@ from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
+    SourceWorkspaceRecoveryKind,
 )
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
@@ -313,7 +314,107 @@ def test_direct_writer_replaces_owned_detached_source_before_rebinding(
     assert rebound == binding
 
 
-@pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift"])
+def test_direct_writer_replaces_owned_attached_source_before_rebinding(
+    tmp_path: Path,
+) -> None:
+    """A direct writer can replace an exact owned attached predecessor."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    _git(repo, "push", "origin", "main:writer-branch")
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        source_manager.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+        writer = worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            base_sha=second,
+            remote_branch_reserved=True,
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+        binding = source_manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=worktree_manager.implementation_writer_authority(writer),
+            handoff=handoff,
+        )
+
+    assert writer == predecessor.cwd
+    assert _git(repo, "rev-parse", "old-writer-branch") == first
+    assert binding.revision == second
+    assert (
+        source_manager.prepare(
+            9,
+            SourceLane.IMPLEMENTATION,
+            second,
+            branch="writer-branch",
+        )
+        == binding
+    )
+
+
+def test_direct_writer_checkout_change_after_authorization_has_recovery(
+    tmp_path: Path,
+) -> None:
+    """A changed predecessor remains preserved with a typed recovery action."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    _git(repo, "push", "origin", "main:writer-branch")
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(9, SourceLane.IMPLEMENTATION, first, branch="old-writer-branch")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        manager.authorize_direct_implementation_writer_transition(
+            9, branch="writer-branch", base_sha=second, handoff=handoff
+        )
+        _git(predecessor.cwd, "reset", "--hard", second)
+        with pytest.raises(WorktreeCreationReceiptError) as captured:
+            worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                base_sha=second,
+                remote_branch_reserved=True,
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+
+    assert predecessor.cwd.exists()
+    assert captured.value.recovery is not None
+    assert captured.value.recovery["kind"] == "unproven_predecessor"
+
+
+@pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift", "obligations"])
 def test_direct_writer_transition_preserves_invalid_predecessor(
     tmp_path: Path, mutation: str
 ) -> None:
@@ -325,11 +426,13 @@ def test_direct_writer_transition_preserves_invalid_predecessor(
         (predecessor.cwd / "pending-change").write_text("preserve\n", encoding="utf-8")
     elif mutation == "attached":
         _git(predecessor.cwd, "switch", "-c", "unexpected-branch")
+    elif mutation == "obligations":
+        manager.add_obligation(9, SourceLane.IMPLEMENTATION, "durable-cleanup")
     else:
         _git(predecessor.cwd, "reset", "--hard", second)
 
     with manager.implementation_writer_handoff(9) as handoff:
-        with pytest.raises(SourceWorkspaceError, match="predecessor is invalid"):
+        with pytest.raises(SourceWorkspaceError) as captured:
             manager.authorize_direct_implementation_writer_transition(
                 9,
                 branch="writer-branch",
@@ -339,6 +442,49 @@ def test_direct_writer_transition_preserves_invalid_predecessor(
 
     assert predecessor.cwd.exists()
     assert manager._read_receipt(9, SourceLane.IMPLEMENTATION) is not None
+    assert captured.value.recovery is not None
+    assert (
+        captured.value.recovery.kind.value
+        == {
+            "dirty": "dirty_worktree",
+            "attached": "branch_mismatch",
+            "revision-drift": "revision_drift",
+            "obligations": "durable_obligations",
+        }[mutation]
+    )
+    assert captured.value.recovery.item_number == 9
+    assert str(captured.value.recovery.path) == str(predecessor.cwd)
+    assert str(captured.value.recovery.receipt_path).endswith("9-impl.json")
+
+
+def test_direct_writer_transition_rejects_receipt_when_path_is_missing(
+    tmp_path: Path,
+) -> None:
+    """A receipt without its checkout remains available for manual recovery."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "remove", str(predecessor.cwd))
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError, match="receipt path is missing") as captured:
+            manager.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    assert captured.value.recovery is not None
+    assert captured.value.recovery.kind is SourceWorkspaceRecoveryKind.RECEIPT_PATH_MISSING
+    assert receipt_path.exists()
+    assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
 
 
 def test_implementation_writer_handoff_cannot_be_forged_outside_manager(
@@ -1033,7 +1179,7 @@ def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -
     second_manager = SourceWorkspaceManager(repo, repository="two/project")
 
     with second_manager.implementation_writer_handoff(9) as handoff:
-        with pytest.raises(SourceWorkspaceError, match="owned by another repository"):
+        with pytest.raises(SourceWorkspaceError, match="owned by another repository") as captured:
             second_manager.claim_implementation_writer(
                 9,
                 branch="writer-branch",
@@ -1042,6 +1188,9 @@ def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -
             )
 
     assert _git(writer, "branch", "--show-current") == "writer-branch"
+    assert captured.value.recovery is not None
+    assert captured.value.recovery.kind is SourceWorkspaceRecoveryKind.FOREIGN_OWNER
+    assert "one/project" in captured.value.recovery.manual_action
 
 
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:

@@ -103,6 +103,7 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     issue_auto_impl_branch_name,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceRecoveryKind
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_IMPLEMENTATION_GO,
@@ -254,6 +255,48 @@ def _issue_number(item: WorkItem) -> int:
     if item.issue is None:
         raise RuntimeError("implementation stage reached without an issue number")
     return item.issue
+
+
+_SOURCE_WORKSPACE_RECOVERY_KEYS = frozenset(
+    {"kind", "item_number", "path", "receipt_path", "manual_action"}
+)
+_SOURCE_WORKSPACE_RECOVERY_KINDS = frozenset(kind.value for kind in SourceWorkspaceRecoveryKind)
+
+
+def _validated_source_workspace_recovery(
+    value: object, *, item_number: int
+) -> dict[str, object] | None:
+    """Return a complete, bounded source-workspace recovery record."""
+    if not isinstance(value, dict) or set(value) != _SOURCE_WORKSPACE_RECOVERY_KEYS:
+        return None
+    kind = value.get("kind")
+    recovery_item = value.get("item_number")
+    path = value.get("path")
+    receipt_path = value.get("receipt_path")
+    manual_action = value.get("manual_action")
+    if (
+        not isinstance(kind, str)
+        or kind not in _SOURCE_WORKSPACE_RECOVERY_KINDS
+        or isinstance(recovery_item, bool)
+        or not isinstance(recovery_item, int)
+        or recovery_item != item_number
+        or not isinstance(path, str)
+        or not path
+        or not isinstance(receipt_path, str)
+        or not isinstance(manual_action, str)
+        or not manual_action
+        or len(path) > 500
+        or len(receipt_path) > 500
+        or len(manual_action) > 2000
+    ):
+        return None
+    return {
+        "kind": kind,
+        "item_number": recovery_item,
+        "path": redact_diagnostic_text(path),
+        "receipt_path": redact_diagnostic_text(receipt_path),
+        "manual_action": redact_diagnostic_text(manual_action),
+    }
 
 
 #: Max CONSECUTIVE transient git failures (worktree creation / commit+push)
@@ -561,6 +604,15 @@ class ImplementationStage(Stage):
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
         if item.payload.pop("source_workspace_ownership_unavailable", None):
+            recovery = _validated_source_workspace_recovery(
+                item.payload.pop("source_workspace_recovery", None),
+                item_number=issue,
+            )
+            if recovery is not None:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    f"source_workspace_ownership:{recovery['kind']}: {recovery['manual_action']}",
+                )
             return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
         if (ownership := item.payload.get("branch_worktree_owner")) is not None:
             branch = ownership.get("branch") if isinstance(ownership, dict) else None
@@ -1961,6 +2013,28 @@ class ImplementationStage(Stage):
                 item.payload["source_workspace_ownership_error"] = redact_diagnostic_text(
                     result.error or "source workspace ownership unavailable"
                 )[:500]
+                result_value = result.value if isinstance(result.value, dict) else {}
+                if result_value.get("failure_kind") == "source_workspace_ownership":
+                    recovery = _validated_source_workspace_recovery(
+                        result_value.get("source_workspace_recovery"),
+                        item_number=_issue_number(item),
+                    )
+                    if recovery is None:
+                        recovery_path = result_value.get("path")
+                        if not isinstance(recovery_path, str) or not recovery_path:
+                            recovery_path = item.worktree or "deterministic implementation worktree"
+                        recovery = {
+                            "kind": SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR.value,
+                            "item_number": _issue_number(item),
+                            "path": redact_diagnostic_text(recovery_path),
+                            "receipt_path": "",
+                            "manual_action": (
+                                f"Inspect and preserve {recovery_path}. Use the approved "
+                                "source-workspace cleanup only after you preserve the work. "
+                                f"Then rerun issue #{_issue_number(item)}."
+                            ),
+                        }
+                    item.payload["source_workspace_recovery"] = recovery
                 direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
                 reservation = (
                     result.value.get("direct_scope_reservation")

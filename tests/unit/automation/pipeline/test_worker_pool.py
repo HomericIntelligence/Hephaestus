@@ -79,7 +79,11 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
-from hephaestus.automation.source_worktree import SourceWorkspaceError
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceRecovery,
+    SourceWorkspaceRecoveryKind,
+)
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -4341,6 +4345,117 @@ class TestGitOps:
         else:
             assert manager_kwargs["base_branch"] == base_sha
         assert result.ok is True
+
+    def test_direct_implementation_receipt_check_runs_before_create(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A direct writer checks source ownership before creating its checkout."""
+        pin = "a" * 40
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        events: list[str] = []
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+                "base_sha": pin,
+            },
+        )
+        worktree_manager = MagicMock()
+
+        def create_worktree(**_kwargs: object) -> Path:
+            events.append("create")
+            return writer_path
+
+        worktree_manager.create_worktree.side_effect = create_worktree
+        worktree_manager.implementation_writer_authority.return_value = (
+            ImplementationWriterAuthority("authority-token")
+        )
+        source_manager = MagicMock()
+        source_manager.authorize_direct_implementation_writer_transition.side_effect = (
+            lambda *_args, **_kwargs: events.append("authorize")
+        )
+        source_manager.claim_implementation_writer.return_value.revision = pin
+        with (
+            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(pin, "7-auto")),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ()),
+            ),
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert events == ["authorize", "create"]
+        assert result.ok is True
+
+    def test_direct_implementation_receipt_failure_prevents_create(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A rejected source receipt prevents worktree creation."""
+        pin = "a" * 40
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        receipt_path = tmp_path / "source-receipt.json"
+        recovery = SourceWorkspaceRecovery(
+            kind=SourceWorkspaceRecoveryKind.DIRTY_WORKTREE,
+            item_number=7,
+            path=writer_path,
+            receipt_path=receipt_path,
+            manual_action=f"Commit or stash the changes in {writer_path}.",
+        )
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+                "base_sha": pin,
+            },
+        )
+        worktree_manager = MagicMock()
+        source_manager = MagicMock()
+        source_manager.authorize_direct_implementation_writer_transition.side_effect = (
+            SourceWorkspaceError("source workspace is dirty", recovery=recovery)
+        )
+        with (
+            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(pin, "7-auto")),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ()),
+            ),
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        worktree_manager.create_worktree.assert_not_called()
+        assert result.error == "source_workspace_ownership_unavailable: source workspace is dirty"
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: False,
+            "failure_kind": "source_workspace_ownership",
+            "source_workspace_recovery": recovery.to_dict(),
+            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pin},
+        }
 
     def test_create_implementation_source_lane_returns_typed_claim_failure(
         self,

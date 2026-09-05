@@ -26,7 +26,11 @@ from hephaestus.automation.pipeline.routing import Disposition, Route
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
-from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
+from .diagnostics import (
+    bounded_source_workspace_recovery,
+    redact_bounded_diagnostic_tails,
+    redact_diagnostic_text,
+)
 from .job_failures import is_durable_failure_kind
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
@@ -783,6 +787,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
         if diagnostics:
             fields["diagnostics"] = diagnostics
+        if isinstance(value, dict) and value.get("failure_kind") == "source_workspace_ownership":
+            recovery = bounded_source_workspace_recovery(value.get("source_workspace_recovery"))
+            if recovery is not None:
+                fields["source_workspace_recovery"] = recovery
         if (
             isinstance(value, dict)
             and value.get("failure_kind") in {"signing", "continuation"}

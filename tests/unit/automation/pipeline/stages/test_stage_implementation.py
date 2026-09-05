@@ -1431,6 +1431,44 @@ class TestGitErrorRetryCap:
         assert item.worktree == "/tmp/auto-1-impl"
         assert item.payload[WORKTREE_MATERIALIZED_KEY] is True
 
+    def test_source_workspace_ownership_failure_is_terminal_and_actionable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A structured ownership failure keeps its exact recovery action."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        action = "Commit or stash the changes in /tmp/auto-1-impl. Then rerun issue #1."
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="source_workspace_ownership_unavailable: source workspace is dirty",
+                value={
+                    "failure_kind": "source_workspace_ownership",
+                    "path": "/tmp/auto-1-impl",
+                    WORKTREE_MATERIALIZED_KEY: True,
+                    "source_workspace_recovery": {
+                        "kind": "dirty_worktree",
+                        "item_number": 1,
+                        "path": "/tmp/auto-1-impl",
+                        "receipt_path": "/tmp/receipts/1-impl.json",
+                        "manual_action": action,
+                    },
+                },
+            ),
+            ctx,
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note == f"source_workspace_ownership:dirty_worktree: {action}"
+        assert item.attempts["implement"] == 0
+
     def test_source_workspace_ownership_failure_clears_stale_worktree_state(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

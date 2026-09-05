@@ -1522,6 +1522,14 @@ rebind the same path and increment its receipt generation. Review never creates
 a review branch. The stable `auto-<#>-guard` ref is a CAS-protected ownership
 record only and never owns a third worktree. Dirty lanes and lanes with durable
 learning or cleanup obligations are preserved.
+Before a direct implementation request reuses `auto-<#>-impl`, the worker
+checks the receipt while it holds the implementation-lane lock. A clean
+receipt for the same repository, item, path, revision, and attached branch can
+be replaced only when its branch differs from the requested branch and the
+worker proves the physical checkout again under the Git metadata lock. The
+replacement keeps the old local branch reference. A dirty, drifted, foreign,
+missing, or unproven predecessor remains unchanged and returns a typed
+recovery record with the exact manual action.
 The exhaustive classification is maintained in the
 [source-agent workspace inventory](source-agent-workspace-inventory.md).
 

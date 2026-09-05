@@ -95,6 +95,11 @@ class RemoteGitRefreshError(RuntimeError):
 class WorktreeCreationReceiptError(RuntimeError):
     """Raised when a writer checkout has no valid process-owned authority."""
 
+    def __init__(self, message: str, *, recovery: dict[str, object] | None = None) -> None:
+        """Initialize the error and its optional typed recovery payload."""
+        super().__init__(message)
+        self.recovery = recovery
+
 
 BRANCH_WORKTREE_OWNED = "branch_worktree_owned"
 
@@ -659,6 +664,9 @@ class WorktreeManager:
                                 implementation_writer_handoff._consume_direct_transition(
                                     path=worktree_path,
                                     predecessor_revision=predecessor_revision,
+                                    predecessor_branch=self._implementation_writer_branch(
+                                        worktree_path, timeout=timeout
+                                    ),
                                     branch=branch_name,
                                     base_sha=base_sha,
                                 )
@@ -927,26 +935,39 @@ class WorktreeManager:
                     capture_output=True,
                     **_timeout_kw(timeout),
                 ).stdout.strip()
-                detached = (
-                    run(
-                        ["git", "symbolic-ref", "--quiet", "HEAD"],
-                        cwd=worktree_path,
-                        capture_output=True,
-                        check=False,
-                        **_timeout_kw(timeout),
-                    ).returncode
-                    == 1
+                predecessor_branch = self._implementation_writer_branch(
+                    worktree_path, timeout=timeout
                 )
-                if detached and is_clean_working_tree(worktree_path, timeout=timeout):
+                if is_clean_working_tree(worktree_path, timeout=timeout):
                     try:
                         implementation_writer_handoff._validate_direct_transition(
                             path=worktree_path,
                             predecessor_revision=predecessor_revision,
+                            predecessor_branch=predecessor_branch,
                             branch=branch_name,
                             base_sha=reserved_remote_branch_sha,
                         )
-                    except RuntimeError:
-                        pass
+                    except RuntimeError as exc:
+                        receipt_path = (
+                            self.repo_root
+                            / ".git"
+                            / "hephaestus-source-workspaces"
+                            / f"{issue_number}-impl.json"
+                        )
+                        raise WorktreeCreationReceiptError(
+                            "implementation writer predecessor changed after authorization",
+                            recovery={
+                                "kind": "unproven_predecessor",
+                                "item_number": issue_number,
+                                "path": str(worktree_path),
+                                "receipt_path": str(receipt_path),
+                                "manual_action": (
+                                    f"Preserve {worktree_path}; its checkout changed after "
+                                    "authorization. Inspect it before cleanup, then rerun "
+                                    f"issue #{issue_number}."
+                                ),
+                            },
+                        ) from exc
                     else:
                         return True
             raise WorktreeCreationReceiptError(
@@ -969,6 +990,25 @@ class WorktreeManager:
                 "implementation writer branch is an unowned existing branch"
             )
         return False
+
+    @staticmethod
+    def _implementation_writer_branch(path: Path, *, timeout: int | None) -> str | None:
+        """Return the physical branch ref for a writer checkout."""
+        result = run(
+            ["git", "symbolic-ref", "--quiet", "HEAD"],
+            cwd=path,
+            capture_output=True,
+            check=False,
+            **_timeout_kw(timeout),
+        )
+        if result.returncode == 1:
+            return None
+        branch = result.stdout.strip()
+        if result.returncode or not branch.startswith("refs/heads/"):
+            raise WorktreeCreationReceiptError(
+                "implementation writer checkout branch cannot be verified"
+            )
+        return branch
 
     def _implementation_writer_branch_exists(
         self,
