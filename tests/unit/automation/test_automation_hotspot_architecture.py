@@ -33,6 +33,8 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github_check_policy.py": 425,
     # Parent-ruleset selectors and branch matching are one bounded concern.
     "hephaestus/automation/pipeline_github_ruleset_conditions.py": 200,
+    # Commit statuses use an independent paginated stability boundary.
+    "hephaestus/automation/pipeline_github_commit_statuses.py": 225,
     # Exact-head Check Runs use a complete paginated double-read. Keep this
     # separate repository-scoped merge-gate collaborator bounded.
     "hephaestus/automation/pipeline_github_required_checks.py": 425,
@@ -61,6 +63,7 @@ _COLLABORATOR_MODULES = frozenset(
         "pipeline_github_authorization",
         "pipeline_github_contract",
         "pipeline_github_check_policy",
+        "pipeline_github_commit_statuses",
         "pipeline_github_ruleset_conditions",
         "pipeline_github_queries",
         "pipeline_github_required_checks",

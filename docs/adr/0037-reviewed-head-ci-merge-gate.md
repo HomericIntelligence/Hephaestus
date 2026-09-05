@@ -40,18 +40,20 @@ exact-head Check Runs ────────► current CI merge gate
    supply this protection when an applicable ruleset has a repository-role
    bypass.
 4. The effective required-check inventory is the union of the classic and
-   ruleset inventories. Each required `(context, app_id)` must have a completed
-   Check Run for the reviewed commit with conclusion `success`, `neutral`, or
-   `skipped`. A requirement without an application binding can match the same
-   context from any identified GitHub App. Optional Check Runs do not grant or
-   revoke merge authority. The required set does not need a `success` conclusion
-   when each required Check Run has another permitted terminal conclusion.
-   Empty, malformed, pending, failed, stale, or changing required evidence fails
-   closed.
-5. Policy and Check Run pagination share one aggregate deadline and cancellation
-   signal. The queue completes all mutable traversals, reads unresolved threads,
-   and then repeats the open-head-label admission. It sends the conditional
-   request immediately after that admission, with no intervening mutable read.
+   ruleset inventories. Exact-head evidence includes Check Runs and commit
+   statuses. Each required `(context, app_id)` must have a completed Check Run
+   with conclusion `success`, `neutral`, or `skipped`, or a commit status with
+   state `success`. A commit status can satisfy only a requirement without an
+   application binding. When a Check Run and a commit status have the same
+   required name, both must pass. Optional evidence does not grant or revoke
+   merge authority. The required set does not need a `success` Check Run when
+   each required Check Run has another permitted terminal conclusion. Empty,
+   malformed, pending, failed, stale, or changing required evidence fails closed.
+5. Policy, Check Run, and commit-status pagination share one aggregate deadline
+   and cancellation signal. The queue completes all mutable traversals, reads
+   unresolved threads, and then repeats the open-head-label admission. It sends
+   the conditional request immediately after that admission, with no intervening
+   mutable read.
 6. The queue sends one normal REST merge request with `sha=<reviewed head>` and
    `merge_method=squash`. The request is the only merge-state mutation owned by
    the queue. The queue does not enable or manage native auto-merge.

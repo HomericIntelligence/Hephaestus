@@ -12,6 +12,7 @@ from threading import Event
 import hephaestus.automation.github_api as github_api
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
+from .pipeline_github_commit_statuses import stable_passing_commit_status_requirements
 from .pipeline_github_contract import _PipelineGitHubHost
 
 logger = logging.getLogger(__name__)
@@ -138,34 +139,34 @@ def _check_run_snapshot(
     return tuple(sorted(snapshot))
 
 
-def _required_check_runs_pass(
+def _passing_check_run_requirements(
     check_runs: list[object],
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
-) -> bool:
-    """Return whether all required Check Runs match and succeed on ``head_sha``."""
+) -> frozenset[_RequiredCheck] | None:
+    """Return requirements proved by passing exact-head Check Runs."""
     matched_checks: set[_RequiredCheck] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
-            return False
+            return None
         try:
             _check_run_app_id(check_run)
         except ValueError:
-            return False
+            return None
         matches = _check_run_required_matches(check_run, required_checks, head_sha)
         if matches is None:
-            return False
+            return None
         if not matches:
             continue
         if check_run.get("head_sha") != head_sha:
             logger.warning("Check Run does not match reviewed head %s", head_sha)
-            return False
+            return None
         status = str(check_run.get("status") or "").lower()
         conclusion = str(check_run.get("conclusion") or "").lower()
         if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
-            return False
+            return None
         matched_checks.update(matches)
-    return matched_checks == required_checks
+    return frozenset(matched_checks)
 
 
 class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
@@ -204,7 +205,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         ) as exc:
             logger.warning("Check Runs read failed for %s: %s", head_sha, exc)
             return False
-        if not required_checks or first is None or not first:
+        if not required_checks or first is None:
             return False
         first_snapshot = _check_run_snapshot(first, head_sha, required_checks)
         if first_snapshot is None:
@@ -229,7 +230,35 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         ):
             logger.warning("Check Runs changed while reading %s", head_sha)
             return False
-        return _required_check_runs_pass(second, head_sha, required_checks)
+        run_requirements = _passing_check_run_requirements(
+            second,
+            head_sha,
+            required_checks,
+        )
+        if run_requirements is None:
+            return False
+        try:
+            status_requirements = stable_passing_commit_status_requirements(
+                self,
+                head_sha,
+                required_checks,
+                deadline_s=deadline_s,
+                cancellation=cancellation,
+            )
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+        ) as exc:
+            logger.warning("Commit-status stability read failed for %s: %s", head_sha, exc)
+            return False
+        return (
+            status_requirements is not None
+            and (run_requirements | status_requirements) == required_checks
+        )
 
     def _check_runs_for_head(
         self,

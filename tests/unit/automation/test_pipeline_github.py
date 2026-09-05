@@ -2709,6 +2709,16 @@ class TestExactHeadChecks:
     """The merge gate reads complete Check Runs for one commit."""
 
     @staticmethod
+    def _json_response(payload: object) -> SimpleNamespace:
+        """Build one successful GitHub JSON response."""
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload))
+
+    @classmethod
+    def _empty_status_response(cls, head_sha: str) -> SimpleNamespace:
+        """Build one exact-head response with no commit statuses."""
+        return cls._json_response({"sha": head_sha, "total_count": 0, "statuses": []})
+
+    @staticmethod
     def _policy(*contexts: str, app_id: int | None = 1) -> EffectiveMergePolicy:
         """Build one frozen effective-policy input for the Check Run gate."""
         return EffectiveMergePolicy(
@@ -2753,6 +2763,170 @@ class TestExactHeadChecks:
         }
         check_run["app"] = {"id": app_id}
         return check_run
+
+    @staticmethod
+    def _commit_status(
+        head_sha: str,
+        *,
+        status_id: int = 11,
+        context: str = "required-ci",
+        state: str = "success",
+    ) -> dict[str, object]:
+        """Build one exact-head commit-status response entry."""
+        return {
+            "id": status_id,
+            "context": context,
+            "state": state,
+            "sha": head_sha,
+        }
+
+    def test_required_context_can_be_satisfied_by_commit_status_only(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful exact-head commit status can satisfy an unbound context."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head)],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
+
+    def test_same_name_failed_status_blocks_a_successful_check_run(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A required name must pass as both a Check Run and a commit status when both exist."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {"total_count": 1, "check_runs": [self._check_run(head)]}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head, state="failure")],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(runs),
+                    self._json_response(runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
+    def test_changed_commit_status_snapshot_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A changed status reread cannot authorize the conditional request."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {"total_count": 1, "check_runs": [self._check_run(head)]}
+        success = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head)],
+        }
+        failure = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head, state="failure")],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(runs),
+                    self._json_response(runs),
+                    self._json_response(success),
+                    self._json_response(failure),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
+    def test_later_commit_status_page_failure_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed required status on a later page prevents authorization."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {"total_count": 1, "check_runs": [self._check_run(head)]}
+        first_page = {
+            "sha": head,
+            "total_count": 101,
+            "statuses": [
+                self._commit_status(head, status_id=index, context=f"optional-{index}")
+                for index in range(1, 101)
+            ],
+        }
+        final_page = {
+            "sha": head,
+            "total_count": 101,
+            "statuses": [self._commit_status(head, status_id=101, state="failure")],
+        }
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            endpoint = args[1]
+            if "/check-runs?" in endpoint:
+                return self._json_response(runs)
+            if "page=2" in endpoint:
+                return self._json_response(final_page)
+            if "/status?" in endpoint:
+                return self._json_response(first_page)
+            raise AssertionError(args)
+
+        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
+    def test_app_bound_requirement_is_not_satisfied_by_commit_status_only(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A commit status cannot prove a required GitHub App identity."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [self._commit_status(head)],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=1)) is False
 
     def test_ruleset_only_failed_required_run_blocks_merge(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -2968,6 +3142,8 @@ class TestExactHeadChecks:
                             }
                         ),
                     ),
+                    self._empty_status_response(head),
+                    self._empty_status_response(head),
                 ]
             ),
         )
@@ -2997,7 +3173,14 @@ class TestExactHeadChecks:
                 }
             ),
         )
-        call_mock = MagicMock(side_effect=[response, response])
+        call_mock = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
         monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
@@ -3012,7 +3195,14 @@ class TestExactHeadChecks:
             returncode=0,
             stdout=json.dumps({"total_count": 1, "check_runs": [self._check_run(head)]}),
         )
-        call_mock = MagicMock(side_effect=[response, response])
+        call_mock = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
         monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
@@ -3024,6 +3214,14 @@ class TestExactHeadChecks:
             [
                 "api",
                 f"/repos/org/repo/commits/{head}/check-runs?filter=latest&per_page=100",
+            ],
+            [
+                "api",
+                f"/repos/org/repo/commits/{head}/status?per_page=100",
+            ],
+            [
+                "api",
+                f"/repos/org/repo/commits/{head}/status?per_page=100",
             ],
         ]
         assert all(0 < entry.kwargs["timeout"] <= 120 for entry in call_mock.call_args_list)
@@ -3084,6 +3282,12 @@ class TestExactHeadChecks:
                         returncode=0,
                         stdout=json.dumps({"total_count": 0, "check_runs": []}),
                     ),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"total_count": 0, "check_runs": []}),
+                    ),
+                    self._empty_status_response("a" * 40),
+                    self._empty_status_response("a" * 40),
                 ]
             ),
         )
@@ -3151,12 +3355,14 @@ class TestExactHeadChecks:
                     SimpleNamespace(returncode=0, stdout=json.dumps(response))
                     for response in page_responses
                 ],
+                self._empty_status_response(head),
+                self._empty_status_response(head),
             ]
         )
         monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
-        assert call_mock.call_count == 4
+        assert call_mock.call_count == 6
 
     def test_rejects_check_run_totals_above_the_safety_ceiling(
         self,

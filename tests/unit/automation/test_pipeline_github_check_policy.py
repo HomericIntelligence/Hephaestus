@@ -473,7 +473,14 @@ def test_all_allowed_required_check_conclusions_satisfy_policy(
     monkeypatch.setattr(
         github_api_mod,
         "gh_call",
-        MagicMock(side_effect=[_response(payload), _response(payload)]),
+        MagicMock(
+            side_effect=[
+                _response(payload),
+                _response(payload),
+                _response({"sha": head, "total_count": 0, "statuses": []}),
+                _response({"sha": head, "total_count": 0, "statuses": []}),
+            ]
+        ),
     )
 
     assert adapter.required_checks_pass_for_head(
@@ -640,8 +647,10 @@ def test_check_traversal_passes_aggregate_remaining_deadline_to_each_page(
     head = "a" * 40
     timeouts: list[float] = []
 
-    def call(_args: list[str], **kwargs: Any) -> SimpleNamespace:
+    def call(args: list[str], **kwargs: Any) -> SimpleNamespace:
         timeouts.append(float(kwargs["timeout"]))
+        if "/status?" in args[1]:
+            return _response({"sha": head, "total_count": 0, "statuses": []})
         return _response(
             {
                 "total_count": 1,
@@ -658,9 +667,9 @@ def test_check_traversal_passes_aggregate_remaining_deadline_to_each_page(
         deadline_s=deadline,
         cancellation=threading.Event(),
     )
-    assert len(timeouts) == 2
+    assert len(timeouts) == 4
     assert all(0.0 < timeout <= 2.0 for timeout in timeouts)
-    assert timeouts[1] <= timeouts[0]
+    assert timeouts == sorted(timeouts, reverse=True)
 
 
 def test_conditional_put_uses_remaining_aggregate_deadline(
