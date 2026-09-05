@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import time
 from collections.abc import Callable, Iterator
@@ -116,6 +117,14 @@ class _PreparationDeadline:
                 "source workspace preparation deadline expired",
             )
         return remaining
+
+
+def _is_direct_implementation_branch(item_number: int, branch: str | None) -> bool:
+    """Return whether *branch* is the exact managed direct-writer form."""
+    return (
+        branch is not None
+        and re.fullmatch(rf"{item_number}-auto-impl-direct-[0-9a-f]{{32}}", branch) is not None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,6 +495,12 @@ class SourceWorkspaceManager:
         self._reject_foreign_owner(old, item_number, lane)
         if old is not None and old.path.resolve() != expected_path:
             raise SourceWorkspaceError("incompatible source workspace receipt")
+        replacing_direct_writer = (
+            old is not None
+            and not old.detached
+            and old.branch != branch
+            and _is_direct_implementation_branch(item_number, old.branch)
+        )
         if old is not None and not old.detached and old.branch != branch and authority is None:
             raise SourceWorkspaceError("incompatible source workspace receipt")
         if not expected_path.exists():
@@ -527,7 +542,7 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError(
                 f"implementation writer authority is invalid: {exc}"
             ) from exc
-        if old is not None and old.detached:
+        if old is not None and (old.detached or replacing_direct_writer):
             try:
                 handoff._validate_consumed_direct_transition(
                     predecessor_evidence,

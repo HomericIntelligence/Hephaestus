@@ -4416,6 +4416,136 @@ class TestGitOps:
         assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
         assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == branch
 
+    def test_direct_pinned_impl_writer_recovers_an_exact_prior_direct_writer(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A fresh cursor can replace its clean, receipt-owned direct writer."""
+        repo, _, base_revision = _worker_repository(tmp_path)
+        first_nonce = "a" * 32
+        first_branch = f"7-auto-impl-direct-{first_nonce}"
+        first_job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": first_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": base_revision,
+                "direct_worktree_nonce": first_nonce,
+            },
+        )
+        second_nonce = "b" * 32
+        second_branch = f"7-auto-impl-direct-{second_nonce}"
+        second_job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": second_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": base_revision,
+                "direct_worktree_nonce": second_nonce,
+            },
+        )
+
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", "credential.helper=")),
+        ):
+            pool.submit(first_job, StageName.REPO)
+            _, first_result = completion_q.get(timeout=10)
+            pool.submit(second_job, StageName.REPO)
+            _, second_result = completion_q.get(timeout=10)
+
+        assert first_result.ok is True
+        assert second_result.ok is True
+        assert second_result.value == {
+            "path": first_result.value["path"],
+            "impl_source_revision": base_revision,
+            "direct_scope_reservation": {
+                "branch": second_branch,
+                "base_sha": base_revision,
+            },
+        }
+        source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+        receipt = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+        assert receipt is not None
+        assert receipt.detached is False
+        assert receipt.branch == second_branch
+        assert receipt.revision == base_revision
+        assert _git(receipt.path, "symbolic-ref", "--short", "HEAD") == second_branch
+
+    def test_direct_pinned_impl_writer_preserves_a_wrong_prior_direct_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clean writer cannot recover when its attached branch changed."""
+        repo, _, base_revision = _worker_repository(tmp_path)
+        first_nonce = "c" * 32
+        first_branch = f"7-auto-impl-direct-{first_nonce}"
+        first_job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": first_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": base_revision,
+                "direct_worktree_nonce": first_nonce,
+            },
+        )
+        second_nonce = "d" * 32
+        second_branch = f"7-auto-impl-direct-{second_nonce}"
+        second_job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": second_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": base_revision,
+                "direct_worktree_nonce": second_nonce,
+            },
+        )
+
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", "credential.helper=")),
+        ):
+            pool.submit(first_job, StageName.REPO)
+            _, first_result = completion_q.get(timeout=10)
+            writer_path = Path(first_result.value["path"])
+            _git(writer_path, "switch", "-c", "unrelated-writer")
+            pool.submit(second_job, StageName.REPO)
+            _, second_result = completion_q.get(timeout=10)
+
+        assert first_result.ok is True
+        assert second_result.ok is False
+        assert second_result.error == (
+            "source_workspace_ownership_unavailable: "
+            "detached implementation writer predecessor is invalid"
+        )
+        assert _git(writer_path, "symbolic-ref", "--short", "HEAD") == "unrelated-writer"
+
     @pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift"])
     def test_direct_pinned_impl_writer_preserves_invalid_predecessor(
         self,
