@@ -45,12 +45,13 @@ security scans, schema and version checks, license policy, shell checks, and
 repository structure checks. A failure returns to the bounded implementation
 test-fix loop instead of publishing a knowingly red branch.
 
-On macOS, the shell can request native verification only when the engine is
-absent, the engine is unavailable, or the no-op container-start probe fails.
-It exits with code 75 and writes one exact terminal protocol record. The queue
-validates the record and then runs `uv run pytest tests -q --tb=short`. A
-failure in native verification still returns the item to the bounded test-fix
-loop.
+For each platform, the shell reports an approved runner-initialization failure.
+Approved failures are an absent engine, an unavailable engine, and a failed
+no-op container-start probe. The shell exits with code 75 and writes one exact
+terminal protocol record. The queue validates the record. On macOS, the queue
+runs `uv run pytest tests -q --tb=short`. On other platforms, the queue stops
+with `pre_pr_runner_unavailable`. A failure in native verification still
+returns the item to the bounded test-fix loop.
 
 This local pass cannot run checks whose inputs do not exist until GitHub creates
 the PR. `pr-policy` still validates the live PR body, title, commit subjects,

@@ -1691,12 +1691,14 @@ granting container write access to repository metadata.
 automatic profile. Its vetted default is
 `uv run pytest tests -q --tb=short`; programmatic callers can supply
 `PipelineConfig.pre_pr_test_argv` for a different vetted fallback command.
-For the Hephaestus profile on macOS, the shell can request a native run only
-for an absent engine, an unavailable engine, or a failed container-start
-probe. The shell exits with code 75 and writes one exact terminal protocol
-record. The stage validates the complete protocol, changes the runner mode,
-and runs the fixed native command. A native failure still blocks publication.
-The test receipt uses the stage-owned runner mode and fallback reason.
+For the Hephaestus profile, the shell reports an approved runner-initialization
+failure on each platform. Approved failures are an absent engine, an
+unavailable engine, and a failed container-start probe. The shell exits with
+code 75 and writes one exact terminal protocol record. The stage validates the
+complete protocol. On macOS, the stage changes the runner mode and runs the
+fixed native command. On other platforms, the stage stops with
+`pre_pr_runner_unavailable`. A native failure still blocks publication. The
+test receipt uses the stage-owned runner mode and fallback reason.
 GitHub-only checks that need a created PR, especially `pr-policy`, still run
 after publication and remain part of the merge contract.
 

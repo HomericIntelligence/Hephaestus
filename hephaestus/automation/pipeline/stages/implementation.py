@@ -314,7 +314,7 @@ def _append_no_commit_reply_warning(reply: str) -> str:
 
 def _pre_pr_runner_handoff_reason(result: JobResult) -> str | None:
     """Return the reason from one exact terminal runner protocol record."""
-    if result.ok or result.error != "rc=75" or sys.platform != "darwin":
+    if result.ok or result.error != "rc=75":
         return None
     if RUNNER_FAILURE_MARKER in result.stdout_tail:
         return None
@@ -331,6 +331,15 @@ def _pre_pr_runner_handoff_reason(result: JobResult) -> str | None:
     if terminal_record != f"{prefix}{reason}":
         return None
     return reason
+
+
+def _native_pre_pr_fallback_is_authorized(item: WorkItem) -> bool:
+    """Return whether the current host can run the stored native fallback."""
+    return (
+        item.payload.get("pre_pr_runner_mode") == "native"
+        and item.payload.get("pre_pr_fallback_reason") in RUNNER_FALLBACK_REASONS
+        and sys.platform == "darwin"
+    )
 
 
 def _remediation_reply_head(
@@ -1254,12 +1263,10 @@ class ImplementationStage(Stage):
         item.payload.pop("test_receipt", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
         runner_mode = item.payload.get("pre_pr_runner_mode")
-        fallback_reason = item.payload.get("pre_pr_fallback_reason")
-        run_native_fallback = (
-            run_hephaestus_pre_pr_checks
-            and runner_mode == "native"
-            and fallback_reason in RUNNER_FALLBACK_REASONS
-        )
+        native_fallback_authorized = _native_pre_pr_fallback_is_authorized(item)
+        if runner_mode == "native" and not native_fallback_authorized:
+            return StageOutcome(Disposition.FINISH_FAIL, "pre_pr_runner_unavailable")
+        run_native_fallback = run_hephaestus_pre_pr_checks and native_fallback_authorized
         if run_native_fallback:
             test_argv = PRE_PR_TEST_ARGV
             test_descr = "pre_pr_tests_native_fallback"
@@ -1332,6 +1339,11 @@ class ImplementationStage(Stage):
     def _commit_push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """COMMIT_PUSH_WAIT either re-enters test-fix or submits commit+push."""
         issue = _issue_number(item)
+        if item.payload.get("pre_pr_runner_unavailable") is True or (
+            item.payload.get("pre_pr_runner_mode") == "native"
+            and not _native_pre_pr_fallback_is_authorized(item)
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "pre_pr_runner_unavailable")
         if item.payload.get("tests_failed"):
             return Continue(next_state=TESTFIX_WAIT)
         if (
@@ -1340,10 +1352,12 @@ class ImplementationStage(Stage):
             and not item.payload.get("test_receipt")
         ):
             logger.warning(
-                "implementation:%d: container runner failed; "
-                "requesting fixed native verification: %s",
+                "implementation:%d: container runner failure=%s; platform=%s; "
+                "requesting fixed native verification: command=%s",
                 issue,
                 item.payload.get("pre_pr_fallback_reason"),
+                sys.platform,
+                shlex.join(PRE_PR_TEST_ARGV),
             )
             return Continue(next_state=TEST_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
@@ -2210,8 +2224,11 @@ class ImplementationStage(Stage):
         )
         if handoff_reason is not None:
             item.payload.pop("test_command", None)
-            item.payload["pre_pr_runner_mode"] = "native"
-            item.payload["pre_pr_fallback_reason"] = handoff_reason
+            if sys.platform == "darwin":
+                item.payload["pre_pr_runner_mode"] = "native"
+                item.payload["pre_pr_fallback_reason"] = handoff_reason
+            else:
+                item.payload["pre_pr_runner_unavailable"] = True
             return
         item.payload["tests_failed"] = True
         item.payload["test_output"] = output

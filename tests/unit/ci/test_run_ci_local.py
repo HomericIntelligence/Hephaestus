@@ -340,12 +340,11 @@ def test_container_start_probe_failure_emits_terminal_handoff(tmp_path: Path) ->
     _assert_runner_handoff(result, "container-start-failed")
 
 
-def test_runner_failure_on_non_macos_has_no_reserved_protocol(tmp_path: Path) -> None:
-    """Only macOS can request the queue-owned native handoff."""
+def test_runner_failure_on_non_macos_emits_terminal_protocol(tmp_path: Path) -> None:
+    """Each platform reports the same runner-initialization protocol."""
     result, _ = _run_runner(tmp_path, "all", info_fails=True, machine_system="Linux")
 
-    assert result.returncode == 1
-    assert RUNNER_FAILURE_MARKER not in result.stderr
+    _assert_runner_handoff(result, "container-engine-unavailable")
 
 
 def _candidate_repo(tmp_path: Path) -> Path:

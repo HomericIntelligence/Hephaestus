@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import shlex
 import threading
 import time
 from collections import deque
@@ -2920,9 +2921,9 @@ class TestTestsAndFix:
         ],
     )
     def test_exact_container_handoff_uses_fixed_native_command(
-        self, make_ctx: Any, make_work_item: Any, reason: str
+        self, make_ctx: Any, make_work_item: Any, reason: str, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The exact container protocol selects the fixed native command."""
+        """The exact Darwin protocol selects and reports the fixed native command."""
         stage = ImplementationStage()
         ctx = make_ctx(
             org="HomericIntelligence",
@@ -2945,12 +2946,11 @@ class TestTestsAndFix:
                 ),
                 ctx,
             )
-
-        item.state = "COMMIT_PUSH_WAIT"
-        transition = stage.step(item, ctx)
-        assert transition == Continue(next_state="TEST_WAIT")
-        item.state = transition.next_state
-        native = stage.step(item, ctx)
+            item.state = "COMMIT_PUSH_WAIT"
+            transition = stage.step(item, ctx)
+            assert transition == Continue(next_state="TEST_WAIT")
+            item.state = transition.next_state
+            native = stage.step(item, ctx)
 
         assert isinstance(native, JobRequest)
         assert isinstance(native.job, BuildTestJob)
@@ -2958,6 +2958,9 @@ class TestTestsAndFix:
         assert native.job.descr == "pre_pr_tests_native_fallback"
         assert item.payload["pre_pr_runner_mode"] == "native"
         assert item.payload["pre_pr_fallback_reason"] == reason
+        assert f"runner failure={reason}" in caplog.text
+        assert "platform=darwin" in caplog.text
+        assert f"command={shlex.join(PRE_PR_TEST_ARGV)}" in caplog.text
 
     def test_native_mode_remains_transition_authority_after_restart(
         self, make_ctx: Any, make_work_item: Any
@@ -2967,9 +2970,27 @@ class TestTestsAndFix:
         item.payload["pre_pr_runner_mode"] = "native"
         item.payload["pre_pr_fallback_reason"] = "container-start-failed"
 
-        result = ImplementationStage().step(item, make_ctx(org="HomericIntelligence"))
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            result = ImplementationStage().step(item, make_ctx(org="HomericIntelligence"))
 
         assert result == Continue(next_state="TEST_WAIT")
+
+    @pytest.mark.parametrize("state", ["COMMIT_PUSH_WAIT", "TEST_WAIT"])
+    def test_persisted_native_mode_is_rejected_on_non_darwin(
+        self, make_ctx: Any, make_work_item: Any, state: str
+    ) -> None:
+        """A different platform cannot reuse a Darwin fallback decision."""
+        item = make_work_item(issue=1, repo="Hephaestus", state=state)
+        item.payload["pre_pr_runner_mode"] = "native"
+        item.payload["pre_pr_fallback_reason"] = "container-start-failed"
+
+        with patch(_IMPLEMENTATION_PLATFORM, "linux"):
+            result = ImplementationStage().step(item, make_ctx(org="HomericIntelligence"))
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "pre_pr_runner_unavailable",
+        )
 
     @pytest.mark.parametrize(
         ("stderr_tail", "error", "value"),
@@ -3071,10 +3092,10 @@ class TestTestsAndFix:
         )
 
     @pytest.mark.parametrize("platform", ["linux", "win32"])
-    def test_non_darwin_cannot_authorize_native_mode(
+    def test_non_darwin_exact_handoff_finishes_runner_unavailable(
         self, make_ctx: Any, make_work_item: Any, platform: str
     ) -> None:
-        """The handoff protocol is macOS-only."""
+        """A valid non-Darwin signal fails closed without a test-fix run."""
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
@@ -3090,7 +3111,13 @@ class TestTestsAndFix:
                 ctx,
             )
 
-        assert item.payload["tests_failed"] is True
+        item.state = "COMMIT_PUSH_WAIT"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "pre_pr_runner_unavailable",
+        )
+        assert "tests_failed" not in item.payload
         assert item.payload["pre_pr_runner_mode"] == "container"
 
     def test_configured_non_container_command_cannot_authorize_native_mode(
@@ -3143,6 +3170,7 @@ class TestTestsAndFix:
         assert item.payload["tests_failed"] is True
         assert item.payload["pre_pr_runner_mode"] == "container"
 
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
     def test_native_fallback_failure_blocks_commit_and_pr(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -3184,6 +3212,7 @@ class TestTestsAndFix:
         assert result.next_state == "TESTFIX_WAIT"
         assert item.payload["tests_failed"] is True
 
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
     def test_native_mode_persists_through_test_fix_rerun(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

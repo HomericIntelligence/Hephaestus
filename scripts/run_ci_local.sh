@@ -269,10 +269,6 @@ detect_engine() {
     export CONTAINER_ENGINE
 }
 
-is_macos() {
-    [ "$(uname -s)" = "Darwin" ]
-}
-
 # ============================================================================
 # Image resolution
 # ============================================================================
@@ -635,7 +631,7 @@ prepare_container_runner() {
 }
 
 if ! prepare_container_runner; then
-    if is_macos && [ "${SUBSET}" = "all" ]; then
+    if [ "${SUBSET}" = "all" ]; then
         case "${CONTAINER_RUNNER_FAILURE_CODE}" in
             container-engine-absent|container-engine-unavailable|container-start-failed)
                 cleanup
