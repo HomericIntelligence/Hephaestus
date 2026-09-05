@@ -1037,7 +1037,9 @@ class WorktreeManager:
     ) -> dict[str, object]:
         """Build recovery details for a changed writer checkout."""
         receipt_path = (
-            self.repo_root / ".git" / "hephaestus-source-workspaces" / f"{issue_number}-impl.json"
+            self.git_metadata_lock_path(self.repo_root).parent
+            / "hephaestus-source-workspaces"
+            / f"{issue_number}-impl.json"
         )
         return {
             "kind": "unproven_predecessor",

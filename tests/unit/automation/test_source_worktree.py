@@ -19,9 +19,8 @@ from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
-from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
-    Disposition,
     ImplementationStage,
     StageContext,
     StageOutcome,

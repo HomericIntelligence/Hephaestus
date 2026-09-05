@@ -609,6 +609,7 @@ class ImplementationStage(Stage):
                 item_number=issue,
             )
             if recovery is not None:
+                item.payload["source_workspace_recovery"] = recovery
                 return StageOutcome(
                     Disposition.FINISH_FAIL,
                     f"source_workspace_ownership:{recovery['kind']}: {recovery['manual_action']}",
