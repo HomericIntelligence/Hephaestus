@@ -192,9 +192,56 @@ def test_issue_body_editor_must_match_authenticated_viewer(
 ) -> None:
     """Finalization trusts only the current actor's latest body edit."""
     adapter.repo = "repo"
-    monkeypatch.setattr(adapter, "_graphql", lambda *_args, **_kwargs: expected)
+    calls: list[list[str]] = []
+
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "owner": {"login": "org"},
+                            "name": "repo",
+                            "issue": {
+                                "number": 2795,
+                                "editor": {"login": editor} if editor is not None else None,
+                            },
+                        },
+                        "viewer": {"login": "maintainer"},
+                    }
+                }
+            ),
+            returncode=0,
+        )
+
+    monkeypatch.setattr(transport_mod, "gh_call", fake_gh_call)
 
     assert adapter.issue_body_edited_by_viewer(2795) is expected
+
+    variables = dict(
+        argument.split("=", 1)
+        for argument in calls[0]
+        if argument.startswith(("owner=", "name=", "number="))
+    )
+    assert variables == {"owner": "org", "name": "repo", "number": "2795"}
+
+
+@pytest.mark.parametrize("issue_number", [0, -1, True])
+def test_issue_body_editor_rejects_invalid_number_before_github_io(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    issue_number: int,
+) -> None:
+    """Invalid issue numbers are rejected before the transport is called."""
+    adapter.repo = "repo"
+    transport = MagicMock()
+    monkeypatch.setattr(transport_mod, "gh_call", transport)
+
+    with pytest.raises(ValueError, match="issue_number must be a positive integer"):
+        adapter.issue_body_edited_by_viewer(issue_number)
+
+    transport.assert_not_called()
 
 
 @pytest.mark.parametrize(
