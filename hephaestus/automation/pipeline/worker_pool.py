@@ -4278,7 +4278,7 @@ class WorkerPool:
             )
         if not dirty and not sync_to_remote and base_sha is None:
             if source_lane == "impl":
-                value: dict[str, object] = {
+                initial_value: dict[str, object] = {
                     "path": str(worktree_path),
                     "impl_source_revision": binding.revision,
                 }
@@ -4288,10 +4288,10 @@ class WorkerPool:
                     )
                     if isinstance(metadata_receipt, JobResult):
                         return metadata_receipt
-                    value.update(metadata_receipt)
+                    initial_value.update(metadata_receipt)
                 return JobResult(
                     ok=True,
-                    value=value,
+                    value=initial_value,
                 )
             return JobResult(ok=True, value=str(worktree_path))
         value: dict[str, object] = {"path": str(worktree_path)}
