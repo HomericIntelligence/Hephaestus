@@ -411,8 +411,8 @@ def test_address_prompt_round_trips_curly_braced_thread_data() -> None:
     assert json.dumps([{"thread_id": "T1", "path": "a.py", "line": 1, "body": body}]) in rendered
 
 
-def test_pr_review_prompts_classify_authenticated_platform_skips_as_not_applicable() -> None:
-    """An authenticated platform skip is N/A and review can continue."""
+def test_pr_review_prompts_classify_platform_skips_as_evidence_gaps() -> None:
+    """Unsupported-platform skips do not satisfy required host evidence."""
     rendered = (
         prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1),
         prompts.get_review_validation_prompt(
@@ -425,8 +425,5 @@ def test_pr_review_prompts_classify_authenticated_platform_skips_as_not_applicab
     for prompt in rendered:
         normalized = " ".join(prompt.split())
         assert "`status: skipped`" in normalized
-        assert "N/A" in normalized
         assert "not local execution evidence" in normalized
-        assert "not a failed or missing receipt" in normalized
-        assert "does not stop the review" in normalized
-        assert "mismatched or unauthenticated" in normalized
+        assert "is an evidence gap" in normalized
