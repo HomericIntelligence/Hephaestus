@@ -2048,9 +2048,8 @@ class ImplementationStage(Stage):
         without another implementation turn or commit. Before that retry can
         begin, this method records the exact batch in GitHub's immutable
         journal, allowing an interrupted loop to recover the original writer
-        response. A successful no-commit remediation is posted against the
-        unchanged reviewed head with an explicit warning so the reviewer—not
-        the implementation stage—decides whether the reply is sufficient.
+        response. A recovery-bound dirty writer must create and publish a new
+        commit before this method can prepare the handoff.
         """
         if not item.payload.get("implementation_remediation"):
             return

@@ -1065,9 +1065,11 @@ Architectural contract:
   publish, call GitHub, or resolve threads. It must produce one valid exhaustive
   thread-reply mapping before tests, commits, pushes, or review can continue.
   The commit worker compares the captured head and content snapshot immediately
-  before the commit. It binds the new head and content snapshot again before
-  the push. The stage preserves the writer, snapshots, and diagnostic on every
-  recovery failure.
+  before the commit. An ambiguous or false commit result fails and preserves
+  the dirty writer. It cannot prepare a reply handoff for the unchanged head.
+  The worker binds the new head and content snapshot again before the push. The
+  stage preserves the writer, snapshots, and diagnostic on every recovery
+  failure.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That
   metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot

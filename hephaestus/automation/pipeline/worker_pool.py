@@ -5144,6 +5144,15 @@ class WorkerPool:
         if isinstance(changed, JobResult):
             return changed
         branch = str(job.kwargs.get("branch") or "")
+        if not changed and recovery_bound:
+            # The inspected writer was dirty immediately before this call.
+            # ``commit_if_changes`` also returns False when its commit helper
+            # catches RuntimeError, so False cannot prove a safe no-op here.
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "commit_failed"},
+                error="remediation writer commit did not complete",
+            )
         if not changed:
             publish_state = self._commit_push_requires_publish(
                 job=job,
