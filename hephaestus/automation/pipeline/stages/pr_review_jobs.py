@@ -108,10 +108,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.payload[_COMMENT_VALIDATION_ONLY] = True
             return None
 
-        # Scope-retraction remediation needs a base proof that only the
-        # detached checkout can derive.  Preserve the safe established path
-        # for this exceptional directive instead of sending an unprovable
-        # retraction to a writer.
         scope_retraction_paths = _scope_retraction_paths(remediation_threads)
         if scope_retraction_paths is None:
             return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")

@@ -4645,10 +4645,10 @@ class TestRepoScoping:
                     "nodes": [
                         {
                             "id": "C1",
-                        "body": "Please fix this.",
-                        "viewerDidAuthor": False,
-                        "authorAssociation": "NONE",
-                        "author": None,
+                            "body": "Please fix this.",
+                            "viewerDidAuthor": False,
+                            "authorAssociation": "NONE",
+                            "author": None,
                             "pullRequestReview": None,
                         }
                     ],

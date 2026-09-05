@@ -1171,7 +1171,7 @@ class ImplementationStage(Stage):
             branch=item.branch or None,
         )
         agent = agent_provider(ctx)
-        is_codex = requires_plan_scope_guard(agent)
+        fresh_session_required = requires_plan_scope_guard(agent)
         job = AgentJob(
             repo=item.repo,
             issue=issue,
@@ -1183,17 +1183,21 @@ class ImplementationStage(Stage):
             workspace=workspace,
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
-            resume_session_id=None if is_codex else item.session_ids.get(AGENT_IMPLEMENTER),
+            resume_session_id=(
+                None if fresh_session_required else item.session_ids.get(AGENT_IMPLEMENTER)
+            ),
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
                 (
                     SessionLifecycle.RESUME_REQUIRED
-                    if not is_codex and AGENT_IMPLEMENTER in item.session_bindings
+                    if not fresh_session_required and AGENT_IMPLEMENTER in item.session_bindings
                     else SessionLifecycle.START_NEW
                 ),
             ),
-            resume_binding=None if is_codex else item.session_bindings.get(AGENT_IMPLEMENTER),
+            resume_binding=(
+                None if fresh_session_required else item.session_bindings.get(AGENT_IMPLEMENTER)
+            ),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "issue_title": item.payload.get("issue_title", ""),

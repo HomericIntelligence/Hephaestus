@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import signal
@@ -58,6 +59,7 @@ from hephaestus.config.child_environments import (
     build_claude_child_env,
     build_codex_automation_env,
     build_codex_child_env,
+    build_git_child_env,
     build_pi_child_env,
     read_approved_parent_env,
 )
@@ -233,6 +235,11 @@ def requires_plan_scope_guard(agent: str) -> bool:
     return is_codex(agent)
 
 
+def requires_fresh_agent_session(agent: str) -> bool:
+    """Return whether an agent must start a new isolated session."""
+    return is_codex(agent)
+
+
 def _verify_codex_automation_capability(executable: Path, *, cwd: Path) -> None:
     """Prove the selected Codex CLI supports the isolated automation contract."""
     try:
@@ -286,6 +293,8 @@ def _codex_outer_isolated_command(
     """
     if not command:
         raise AgentExecutionError("Codex automation command is empty")
+    if platform.system() != "Darwin":
+        raise AgentExecutionError("Codex automation host isolation is unavailable")
     executable = shutil.which(command[0])
     if not executable:
         raise AgentExecutionError("Codex automation executable is unavailable")
@@ -320,16 +329,15 @@ def _validate_athena_plugin_metadata(root: Path) -> None:
     """Reject cache artifacts that advertise an additional command surface."""
     try:
         package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-        plugin = json.loads(
-            (root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
-        )
+        plugin = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AgentExecutionError("Codex automation requires Athena plugin metadata") from exc
     if not isinstance(package, dict) or not isinstance(plugin, dict):
         raise AgentExecutionError("Codex automation Athena metadata is invalid")
-    if package.get("name") != "@homericintelligence/athena" or package.get(
-        "version"
-    ) != CODEX_ATHENA_VERSION:
+    if (
+        package.get("name") != "@homericintelligence/athena"
+        or package.get("version") != CODEX_ATHENA_VERSION
+    ):
         raise AgentExecutionError("Codex automation Athena package is not admitted")
     if plugin.get("name") != "athena" or plugin.get("version") != CODEX_ATHENA_VERSION:
         raise AgentExecutionError("Codex automation Athena plugin is not admitted")
@@ -373,6 +381,7 @@ def _validated_athena_artifact(source_home: Path) -> Path:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=GIT_COMMON_DIR_PROBE_SECONDS,
+            env=build_git_child_env(),
         ).stdout.strip()
         digest = package_tree_digest(artifact)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:

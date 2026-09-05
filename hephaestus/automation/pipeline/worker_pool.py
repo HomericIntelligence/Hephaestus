@@ -37,13 +37,12 @@ import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
 from hephaestus.agents.execution_policy import (
     ExecutionPolicyError,
-    SessionLifecycle,
     resolve_policy,
 )
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
-    is_codex,
+    requires_fresh_agent_session,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
@@ -2246,15 +2245,7 @@ class WorkerPool:
                         ),
                     )
                     return stdout, claude_session_id, None, ()
-                if is_codex(agent):
-                    if (
-                        job.execution_request is not None
-                        and job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
-                    ):
-                        raise ExecutionPolicyError(
-                            "Codex automation does not support session resume without a bound "
-                            "session receipt"
-                        )
+                if requires_fresh_agent_session(agent):
                     agent_result = run_agent_session(
                         agent=agent,
                         prompt=prompt,

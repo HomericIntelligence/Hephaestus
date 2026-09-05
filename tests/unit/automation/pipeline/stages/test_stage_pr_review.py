@@ -3579,9 +3579,7 @@ class TestReviewThreadLifecycle:
         stale = self._thread("stale", 4, "fix this")
         stale["comments"][0]["review_commit_sha"] = "b" * 40
 
-        assert _normalize_remediation_threads(
-            [foreign, stale], reviewed_head_sha="a" * 40
-        ) == []
+        assert _normalize_remediation_threads([foreign, stale], reviewed_head_sha="a" * 40) == []
 
     def test_partial_reconciliation_restarts_fresh_review_without_stale_receipts(
         self, make_ctx: Any, make_work_item: Any
