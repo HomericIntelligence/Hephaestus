@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -51,6 +52,30 @@ _SCOPE_DEPENDENCY_RECEIPT_ERROR = "_scope_dependency_receipt_error"
 _POST_REMEDIATION_REVIEW_HEAD = "_post_remediation_review_head_sha"
 _POST_REMEDIATION_REVIEW_HEAD_RETRIES = "_post_remediation_review_head_retries"
 POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP = 3
+
+
+def trusted_remediation_thread_ids(threads: Iterable[Mapping[str, object]]) -> list[str]:
+    """Return the non-empty remediation thread IDs from trusted thread data."""
+    return [
+        str(thread["thread_id"])
+        for thread in threads
+        if isinstance(thread.get("thread_id"), str) and thread["thread_id"]
+    ]
+
+
+def store_remediation_thread_context(
+    item: WorkItem,
+    live_threads: Iterable[Mapping[str, object]],
+    remediation_threads: list[dict[str, Any]],
+) -> None:
+    """Store trusted remediation data for the implementation handoff."""
+    item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
+    item.payload["remediation_threads"] = remediation_threads
+    item.payload["trusted_remediation_thread_ids"] = trusted_remediation_thread_ids(
+        remediation_threads
+    )
+    item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
+    item.payload["unresolved_threads_before_address"] = len(remediation_threads)
 
 
 class PrReviewScopeExpansionMixin:

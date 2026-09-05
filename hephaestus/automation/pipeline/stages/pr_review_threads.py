@@ -359,9 +359,8 @@ def _clear_round_review_state(item: WorkItem) -> None:
     """Discard review evidence that cannot survive a head-changing commit."""
     for key in _ROUND_PAYLOAD_KEYS:
         item.payload.pop(key, None)
-    item.payload.pop("reviewed_pr_head_sha", None)
-    item.payload.pop("pr_diff", None)
-    item.payload.pop("review_changed_paths", None)
+    for key in ("reviewed_pr_head_sha", "pr_diff", "review_changed_paths"):
+        item.payload.pop(key, None)
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:

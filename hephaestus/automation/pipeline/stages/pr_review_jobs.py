@@ -30,7 +30,10 @@ from .pr_review_recovery import (
     empty_diff_outcome,
     restart_direct_pr_review,
 )
-from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
+from .pr_review_scope_expansion import (
+    PrReviewScopeExpansionMixin,
+    store_remediation_thread_context,
+)
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -114,15 +117,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             return None
 
         item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
-        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        item.payload["remediation_threads"] = remediation_threads
-        item.payload["trusted_remediation_thread_ids"] = [
-            str(thread["thread_id"])
-            for thread in remediation_threads
-            if isinstance(thread.get("thread_id"), str) and thread["thread_id"]
-        ]
-        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
-        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        store_remediation_thread_context(item, live_threads, remediation_threads)
         no_go_outcome = PrReviewStage._write_no_go(item, ctx)
         if no_go_outcome is not None:
             if isinstance(no_go_outcome, StageOutcome):
@@ -463,15 +458,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.payload[_COMMENT_VALIDATION_ONLY] = True
             return Continue(next_state=VALIDATE_WAIT)
         item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
-        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        item.payload["remediation_threads"] = remediation_threads
-        item.payload["trusted_remediation_thread_ids"] = [
-            str(thread["thread_id"])
-            for thread in remediation_threads
-            if isinstance(thread.get("thread_id"), str) and thread["thread_id"]
-        ]
-        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
-        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        store_remediation_thread_context(item, live_threads, remediation_threads)
         return Continue(next_state=ADDRESS_WAIT)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
