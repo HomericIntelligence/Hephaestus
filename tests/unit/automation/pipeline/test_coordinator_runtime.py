@@ -81,3 +81,31 @@ def test_event_diagnostics_redact_secret_like_tails() -> None:
     assert gh_token not in diagnostics["stderr_tail"]
     assert "redacted" in diagnostics["stdout_tail"]
     assert "redacted" in diagnostics["stderr_tail"]
+
+
+def test_source_workspace_recovery_is_durable_and_redacted() -> None:
+    """A source-workspace recovery event keeps bounded safe fields only."""
+    token = "ghp_" + "a" * 36
+    result = JobResult(
+        ok=False,
+        error="source workspace is dirty",
+        value={
+            "failure_kind": "source_workspace_ownership",
+            "source_workspace_recovery": {
+                "kind": "dirty_worktree",
+                "item_number": 2969,
+                "path": "/repo/build/.worktrees/auto-2969-impl",
+                "receipt_path": "/repo/state/2969-impl.json",
+                "manual_action": f"Use token={token} only after preserving the checkout.",
+            },
+        },
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result)
+
+    assert fields["error"] == "source_workspace_ownership"
+    recovery = fields["source_workspace_recovery"]
+    assert recovery["kind"] == "dirty_worktree"
+    assert recovery["item_number"] == 2969
+    assert token not in recovery["manual_action"]
+    assert recovery["manual_action"] == "Use token=<redacted> only after preserving the checkout."

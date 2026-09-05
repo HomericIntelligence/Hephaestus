@@ -23,6 +23,7 @@ if TYPE_CHECKING:
             path: Path,
             predecessor_generation: int,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
             base_sha: str,
         ) -> None:
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
             *,
             path: Path,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
             base_sha: str,
         ) -> None:
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
             *,
             path: Path,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
             base_sha: str,
         ) -> object:
@@ -55,6 +58,7 @@ if TYPE_CHECKING:
             path: Path,
             predecessor_generation: int,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
         ) -> None:
             raise NotImplementedError
@@ -68,12 +72,13 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
     sentinel = object()
 
     class _DirectTransitionEvidence:
-        """Private immutable facts for one detached-to-attached transition."""
+        """Private immutable facts for one direct writer transition."""
 
         __slots__ = (
             "base_sha",
             "branch",
             "path",
+            "predecessor_branch",
             "predecessor_generation",
             "predecessor_revision",
         )
@@ -84,12 +89,14 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             path: Path,
             predecessor_generation: int,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
             base_sha: str,
         ) -> None:
             self.path = path.resolve()
             self.predecessor_generation = predecessor_generation
             self.predecessor_revision = predecessor_revision
+            self.predecessor_branch = predecessor_branch
             self.branch = branch
             self.base_sha = base_sha
 
@@ -134,6 +141,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             path: Path,
             predecessor_generation: int,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
             base_sha: str,
         ) -> None:
@@ -146,6 +154,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                     path=path,
                     predecessor_generation=predecessor_generation,
                     predecessor_revision=predecessor_revision,
+                    predecessor_branch=predecessor_branch,
                     branch=branch,
                     base_sha=base_sha,
                 ),
@@ -156,6 +165,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             *,
             path: Path,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
             base_sha: str,
         ) -> None:
@@ -165,6 +175,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 or evidence is None
                 or evidence.path != path.resolve()
                 or evidence.predecessor_revision != predecessor_revision
+                or evidence.predecessor_branch != predecessor_branch
                 or evidence.branch != branch
                 or evidence.base_sha != base_sha
             ):
@@ -175,12 +186,14 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             *,
             path: Path,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
             base_sha: str,
         ) -> object:
             self._validate_direct_transition(
                 path=path,
                 predecessor_revision=predecessor_revision,
+                predecessor_branch=predecessor_branch,
                 branch=branch,
                 base_sha=base_sha,
             )
@@ -198,6 +211,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             path: Path,
             predecessor_generation: int,
             predecessor_revision: str,
+            predecessor_branch: str | None,
             branch: str,
         ) -> None:
             expected = self._consumed_direct_transition
@@ -208,6 +222,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 or expected.path != path.resolve()
                 or expected.predecessor_generation != predecessor_generation
                 or expected.predecessor_revision != predecessor_revision
+                or expected.predecessor_branch != predecessor_branch
                 or expected.branch != branch
             ):
                 raise RuntimeError("implementation writer direct transition evidence is invalid")

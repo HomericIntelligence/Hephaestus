@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import worktree_manager as worktree_manager_module
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
@@ -109,6 +110,58 @@ class TestWorktreeManager:
                 text=True,
             )
             assert status.stdout == ""
+
+    def test_linked_worktree_recovery_uses_source_receipt_path(self, tmp_path: Path) -> None:
+        """A linked-worktree recovery record uses the shared receipt path."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (("user.name", "Test User"), ("user.email", "test@example.com")):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "linked", str(linked)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        source_manager = SourceWorkspaceManager(
+            linked,
+            repository="test/repo",
+            base_dir=tmp_path / "worktrees",
+        )
+        manager = WorktreeManager(
+            repo_root=linked,
+            base_dir=source_manager.base_dir,
+        )
+
+        recovery = manager._implementation_writer_recovery(
+            issue_number=9,
+            worktree_path=source_manager.path_for(9, SourceLane.IMPLEMENTATION),
+        )
+
+        assert recovery["receipt_path"] == str(
+            source_manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+        )
 
     def test_initialization_default_base_dir(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test initialization with default base directory."""

@@ -8,6 +8,7 @@ import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
@@ -32,8 +33,51 @@ from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 
+class SourceWorkspaceRecoveryKind(StrEnum):
+    """Classify a source-workspace condition that needs operator recovery."""
+
+    DIRTY_WORKTREE = "dirty_worktree"
+    REVISION_DRIFT = "revision_drift"
+    BRANCH_MISMATCH = "branch_mismatch"
+    FOREIGN_OWNER = "foreign_owner"
+    RECEIPT_PATH_MISSING = "receipt_path_missing"
+    UNPROVEN_PREDECESSOR = "unproven_predecessor"
+    DURABLE_OBLIGATIONS = "durable_obligations"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceWorkspaceRecovery:
+    """Describe one safe manual action for a rejected source workspace."""
+
+    kind: SourceWorkspaceRecoveryKind
+    item_number: int
+    path: Path
+    receipt_path: Path
+    manual_action: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the bounded recovery record for a worker result."""
+        return {
+            "kind": self.kind.value,
+            "item_number": self.item_number,
+            "path": str(self.path),
+            "receipt_path": str(self.receipt_path),
+            "manual_action": self.manual_action,
+        }
+
+
 class SourceWorkspaceError(RuntimeError):
     """Raised when a source lane cannot be prepared safely."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        recovery: SourceWorkspaceRecovery | None = None,
+    ) -> None:
+        """Initialize the error and its optional operator recovery record."""
+        super().__init__(message)
+        self.recovery = recovery
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,7 +352,7 @@ class SourceWorkspaceManager:
         self._reject_foreign_owner(old, item_number, lane)
         if old is not None and old.path.resolve() != expected_path:
             raise SourceWorkspaceError("incompatible source workspace receipt")
-        if old is not None and not old.detached and old.branch != branch:
+        if old is not None and not old.detached and old.branch != branch and authority is None:
             raise SourceWorkspaceError("incompatible source workspace receipt")
         if not expected_path.exists():
             raise SourceWorkspaceError("implementation writer worktree does not exist")
@@ -356,10 +400,23 @@ class SourceWorkspaceManager:
                     path=expected_path,
                     predecessor_generation=old.generation,
                     predecessor_revision=old.revision,
+                    predecessor_branch=(None if old.detached else f"refs/heads/{old.branch}"),
                     branch=branch,
                 )
             except RuntimeError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
+        elif old is not None and old.branch != branch:
+            try:
+                handoff._validate_consumed_direct_transition(
+                    predecessor_evidence,
+                    path=expected_path,
+                    predecessor_generation=old.generation,
+                    predecessor_revision=old.revision,
+                    predecessor_branch=(None if old.detached else f"refs/heads/{old.branch}"),
+                    branch=branch,
+                )
+            except RuntimeError as exc:
+                raise SourceWorkspaceError("incompatible source workspace receipt") from exc
         elif predecessor_evidence is not None:
             raise SourceWorkspaceError("unexpected implementation writer transition evidence")
         try:
@@ -368,7 +425,7 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError("cannot record implementation writer receipt") from exc
         return binding
 
-    def authorize_direct_implementation_writer_transition(
+    def authorize_direct_implementation_writer_transition(  # noqa: C901
         self,
         item_number: int,
         *,
@@ -376,7 +433,7 @@ class SourceWorkspaceManager:
         base_sha: str,
         handoff: ImplementationWriterHandoff | None,
     ) -> None:
-        """Arm one exact detached predecessor transition for a direct writer."""
+        """Arm one exact predecessor transition for a direct writer."""
         lane = SourceLane.IMPLEMENTATION
         expected_path = self.path_for(item_number, lane).resolve()
         if handoff is None:
@@ -389,32 +446,224 @@ class SourceWorkspaceManager:
             )
         except RuntimeError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
-        old = self._read_receipt(item_number, lane)
+        receipt_path = self._receipt_path(item_number, lane)
+        try:
+            old = self._read_receipt(item_number, lane)
+        except (OSError, UnicodeError, subprocess.SubprocessError, SourceWorkspaceError) as exc:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is unproven",
+                recovery=self._unproven_recovery(
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            ) from exc
         self._reject_foreign_owner(old, item_number, lane)
-        if (
-            old is None
-            or old.path.resolve() != expected_path
-            or not old.detached
-            or old.branch is not None
-            or not expected_path.exists()
-            or self._is_dirty(expected_path)
-            or self._head_branch(expected_path) is not None
-            or self._head_revision(expected_path) != old.revision
-        ):
-            raise SourceWorkspaceError("detached implementation writer predecessor is invalid")
         target = _git(self.repo_root, "rev-parse", f"{base_sha}^{{commit}}").stdout.strip()
         if target != base_sha:
             raise SourceWorkspaceError("direct implementation writer base is invalid")
+        if old is None:
+            if expected_path.exists():
+                raise SourceWorkspaceError(
+                    "implementation writer predecessor is unproven",
+                    recovery=self._recovery(
+                        SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR,
+                        item_number=item_number,
+                        path=expected_path,
+                        receipt_path=receipt_path,
+                        manual_action=(
+                            f"Inspect and preserve {expected_path}. Use the approved "
+                            "source-workspace cleanup only after you preserve the work. "
+                            f"Then rerun issue #{item_number}."
+                        ),
+                    ),
+                )
+            return
+        if old.path.resolve() != expected_path:
+            raise SourceWorkspaceError(
+                "source workspace receipt path is not deterministic",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR,
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Inspect and preserve {expected_path}. Use the approved "
+                        "source-workspace cleanup only after you preserve the work. "
+                        f"Then rerun issue #{item_number}."
+                    ),
+                ),
+            )
+        if (old.detached and old.branch is not None) or (not old.detached and not old.branch):
+            raise SourceWorkspaceError(
+                "implementation writer predecessor receipt is unproven",
+                recovery=self._unproven_recovery(
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            )
+        if old.obligations:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor has durable obligations",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS,
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Complete or explicitly clear the durable obligations for {expected_path} "
+                        "through the owning pipeline. Then rerun "
+                        f"issue #{item_number}."
+                    ),
+                ),
+            )
+        if not expected_path.exists():
+            raise SourceWorkspaceError(
+                f"source workspace receipt path is missing: {expected_path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.RECEIPT_PATH_MISSING,
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Inspect the worktree registration for {expected_path}. Repair the "
+                        "registration if the worktree moved. If it was deleted, preserve "
+                        "reachable refs, prune only that stale registration, remove "
+                        f"{receipt_path}, and rerun issue #{item_number}."
+                    ),
+                ),
+            )
+        try:
+            is_dirty = self._is_dirty(expected_path)
+            physical_revision = self._head_revision(expected_path)
+            physical_branch = self._head_branch(expected_path)
+        except (OSError, UnicodeError, subprocess.SubprocessError, SourceWorkspaceError) as exc:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is unproven",
+                recovery=self._unproven_recovery(
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            ) from exc
+        if is_dirty:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is invalid because source workspace is "
+                f"dirty and preserved: {expected_path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.DIRTY_WORKTREE,
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Commit or stash the changes in {expected_path}. Verify that the "
+                        f"worktree is clean. Then rerun issue #{item_number}."
+                    ),
+                ),
+            )
+        if physical_revision != old.revision:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is invalid because source workspace "
+                f"revision drifted and is preserved: {expected_path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.REVISION_DRIFT,
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                    manual_action=self._revision_recovery_action(
+                        item_number=item_number,
+                        path=expected_path,
+                        receipt=old,
+                    ),
+                ),
+            )
+        expected_predecessor_branch = (
+            None if old.detached else f"refs/heads/{old.branch}" if old.branch else "invalid"
+        )
+        if physical_branch != expected_predecessor_branch:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is invalid because source workspace "
+                f"branch does not match its receipt: {expected_path}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.BRANCH_MISMATCH,
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                    manual_action=self._revision_recovery_action(
+                        item_number=item_number,
+                        path=expected_path,
+                        receipt=old,
+                    ),
+                ),
+            )
+        if not old.detached and old.branch == branch:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor is not stale",
+                recovery=self._unproven_recovery(
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                ),
+            )
         try:
             handoff._arm_direct_transition(
                 path=expected_path,
                 predecessor_generation=old.generation,
-                predecessor_revision=old.revision,
+                predecessor_revision=physical_revision,
+                predecessor_branch=physical_branch,
                 branch=branch,
                 base_sha=base_sha,
             )
         except RuntimeError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
+
+    def _recovery(
+        self,
+        kind: SourceWorkspaceRecoveryKind,
+        *,
+        item_number: int,
+        path: Path,
+        receipt_path: Path,
+        manual_action: str,
+    ) -> SourceWorkspaceRecovery:
+        """Build one recovery record with normalized paths."""
+        return SourceWorkspaceRecovery(
+            kind=kind,
+            item_number=item_number,
+            path=path.resolve(),
+            receipt_path=receipt_path.absolute(),
+            manual_action=manual_action,
+        )
+
+    def _unproven_recovery(
+        self, *, item_number: int, path: Path, receipt_path: Path
+    ) -> SourceWorkspaceRecovery:
+        """Build the recovery record for an unproven predecessor."""
+        return self._recovery(
+            SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR,
+            item_number=item_number,
+            path=path,
+            receipt_path=receipt_path,
+            manual_action=(
+                f"Inspect and preserve {path}. Use the approved source-workspace cleanup "
+                "only after you preserve the work. "
+                f"Then rerun issue #{item_number}."
+            ),
+        )
+
+    @staticmethod
+    def _revision_recovery_action(
+        *, item_number: int, path: Path, receipt: SourceWorkspaceReceipt
+    ) -> str:
+        """Return the recovery action for attached or detached checkout drift."""
+        receipt_branch = receipt.branch or "detached"
+        return (
+            f"Preserve the current checkout at {path}. Restore its branch and HEAD to "
+            f"{receipt_branch}@{receipt.revision}, or use the approved source-workspace "
+            "cleanup after you preserve the work. "
+            f"Then rerun issue #{item_number}."
+        )
 
     @contextmanager
     def acquire(self, binding: WorkspaceBinding, *, allowed_tools: str = "") -> Iterator[Path]:
@@ -613,13 +862,13 @@ class SourceWorkspaceManager:
 
     def _read_receipt(self, item_number: int, lane: SourceLane) -> SourceWorkspaceReceipt | None:
         path = self._receipt_path(item_number, lane)
-        if not path.exists():
-            return None
         if path.is_symlink():
             raise SourceWorkspaceError(f"refusing symlinked source receipt: {path}")
+        if not path.exists():
+            return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise SourceWorkspaceError(f"cannot read source workspace receipt: {path}") from exc
         if not isinstance(payload, dict):
             raise SourceWorkspaceError("source workspace receipt must be an object")
@@ -644,7 +893,28 @@ class SourceWorkspaceManager:
         item_number: int,
         lane: SourceLane,
     ) -> None:
-        if receipt is not None and receipt.ownership_key != self.ownership_key(item_number, lane):
+        if receipt is None:
+            return
+        expected_ownership_key = self.ownership_key(item_number, lane)
+        if (
+            receipt.ownership_key != expected_ownership_key
+            or receipt.repository != self.repository
+            or receipt.repository_identity != self.repository_identity
+            or receipt.item_number != item_number
+            or receipt.lane is not lane
+        ):
+            path = self.path_for(item_number, lane).resolve()
+            receipt_path = self._receipt_path(item_number, lane).resolve()
             raise SourceWorkspaceError(
-                f"source workspace is owned by another repository: {receipt.ownership_key}"
+                f"source workspace is owned by another repository: {receipt.ownership_key}",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.FOREIGN_OWNER,
+                    item_number=item_number,
+                    path=path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Use the repository run that owns {receipt.ownership_key}. Do not "
+                        f"change {path} or {receipt_path} from this run."
+                    ),
+                ),
             )
