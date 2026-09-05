@@ -8,7 +8,6 @@ import re
 import subprocess
 import time
 from threading import Event
-from typing import Any
 
 import hephaestus.automation.github_api as github_api
 
@@ -19,23 +18,17 @@ logger = logging.getLogger(__name__)
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _CHECK_RUNS_PAGE_SIZE = 100
+# Limit one exact-head traversal to 2,000 Check Runs.
 _CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
-_RULES_PAGE_SIZE = 100
-_RULES_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-_ANY_APP_ID = -1
 _RequiredCheck = tuple[str, int | None]
 
 
-def _valid_app_id(value: object, *, allow_wildcard: bool = False) -> int | None:
-    """Return a valid GitHub App ID, or return ``None``."""
+def _valid_app_id(value: object) -> int | None:
+    """Return a valid nullable GitHub App ID."""
     if value is None:
         return None
-    if (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and (value > 0 or (allow_wildcard and value == _ANY_APP_ID))
-    ):
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     raise ValueError("GitHub App ID is malformed")
 
@@ -60,13 +53,10 @@ def _check_run_required_matches(
     except ValueError:
         logger.warning("Check Run for %s has no valid app identity", head_sha)
         return None
-    if app_id is None:
-        logger.warning("Check Run for %s has no valid app identity", head_sha)
-        return None
     return frozenset(
         requirement
         for requirement in named_requirements
-        if requirement[1] in (None, _ANY_APP_ID) or requirement[1] == app_id
+        if requirement[1] is None or requirement[1] == app_id
     )
 
 
@@ -154,7 +144,6 @@ def _required_check_runs_pass(
     required_checks: frozenset[_RequiredCheck],
 ) -> bool:
     """Return whether all required Check Runs match and succeed on ``head_sha``."""
-    saw_success = False
     matched_checks: set[_RequiredCheck] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
@@ -176,8 +165,7 @@ def _required_check_runs_pass(
         if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
             return False
         matched_checks.update(matches)
-        saw_success = saw_success or conclusion == "success"
-    return matched_checks == required_checks and saw_success
+    return matched_checks == required_checks
 
 
 class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
@@ -186,24 +174,26 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
     def required_checks_pass_for_head(
         self,
         head_sha: str,
-        policy: EffectiveMergePolicy | None = None,
+        policy: EffectiveMergePolicy,
         *,
-        deadline_s: float | None = None,
-        cancellation: Event | None = None,
-        **_kwargs: Any,
+        deadline_s: float,
+        cancellation: Event,
     ) -> bool:
         """Return whether every effective required Check Run succeeds for ``head_sha``."""
-        if self._repo_slug is None or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None:
+        if (
+            self._repo_slug is None
+            or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None
+            or not isinstance(policy, EffectiveMergePolicy)
+            or not isinstance(cancellation, Event)
+        ):
             return False
-        signal = cancellation if cancellation is not None else Event()
-        deadline = deadline_s if deadline_s is not None else time.monotonic() + self._gh_timeout
         try:
-            required_checks = (
-                frozenset((check.context, check.app_id) for check in policy.required_checks)
-                if policy is not None
-                else self._required_checks_for_main()
+            required_checks = frozenset(
+                (check.context, check.app_id) for check in policy.required_checks
             )
-            first = self._check_runs_for_head(head_sha, deadline_s=deadline, cancellation=signal)
+            first = self._check_runs_for_head(
+                head_sha, deadline_s=deadline_s, cancellation=cancellation
+            )
         except (
             AttributeError,
             TypeError,
@@ -216,80 +206,30 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if not required_checks or first is None or not first:
             return False
-        if policy is not None or len(first) > _CHECK_RUNS_PAGE_SIZE:
-            first_snapshot = _check_run_snapshot(first, head_sha, required_checks)
-            if first_snapshot is None:
-                return False
-            try:
-                second = self._check_runs_for_head(
-                    head_sha, deadline_s=deadline, cancellation=signal
-                )
-            except (
-                AttributeError,
-                TypeError,
-                ValueError,
-                subprocess.SubprocessError,
-                RuntimeError,
-                OSError,
-            ) as exc:
-                logger.warning("Check Runs stability read failed for %s: %s", head_sha, exc)
-                return False
-            if (
-                second is None
-                or _check_run_snapshot(second, head_sha, required_checks) != first_snapshot
-            ):
-                logger.warning("Check Runs changed while reading %s", head_sha)
-                return False
-            checks = second
-        else:
-            checks = first
-        return _required_check_runs_pass(checks, head_sha, required_checks)
-
-    def _required_checks_for_main(self) -> frozenset[_RequiredCheck] | None:
-        """Read and union classic and effective branch requirements for ``main``."""
-        owner, name = self._owner_name()
-        classic_endpoint = f"/repos/{owner}/{name}/branches/main/protection/required_status_checks"
-        rules_endpoint = f"/repos/{owner}/{name}/rules/branches/main"
-        classic = self._gh(["api", "--method", "GET", classic_endpoint], check=False)
-        if classic.returncode != 0:
-            raise RuntimeError("GitHub returned an error for required status checks")
-        rules = self._rules_for_main(rules_endpoint)
-        classic_checks = _classic_required_checks(classic.stdout or "null")
-        return classic_checks | _ruleset_required_checks(json.dumps(rules))
-
-    def _rules_for_main(self, endpoint: str) -> list[object]:
-        """Read one complete and stable active-rules snapshot for ``main``."""
-        first = self._rules_for_main_traversal(endpoint)
-        if len(first) < _RULES_PAGE_SIZE:
-            return first
-        second = self._rules_for_main_traversal(endpoint)
-        if second != first:
-            raise RuntimeError("GitHub active rules changed while reading main")
-        return second
-
-    def _rules_for_main_traversal(self, endpoint: str) -> list[object]:
-        """Read every active-rules page for ``main`` or raise."""
-        rules: list[object] = []
-        page_fingerprints: set[str] = set()
-        page = 1
-        while True:
-            page_endpoint = f"{endpoint}?per_page={_RULES_PAGE_SIZE}&page={page}"
-            result = self._gh(["api", "--method", "GET", page_endpoint], check=False)
-            if result.returncode != 0:
-                raise RuntimeError("GitHub returned an error for active rules")
-            payload = json.loads(result.stdout or "null")
-            if not isinstance(payload, list) or len(payload) > _RULES_PAGE_SIZE:
-                raise ValueError("Active rules response for main has a malformed page")
-            fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-            if fingerprint in page_fingerprints:
-                raise RuntimeError("GitHub active-rules pagination repeated a page")
-            page_fingerprints.add(fingerprint)
-            rules.extend(payload)
-            if len(rules) > _RULES_MAX_TOTAL_COUNT:
-                raise RuntimeError("GitHub active rules exceed the safety ceiling")
-            if len(payload) < _RULES_PAGE_SIZE:
-                return rules
-            page += 1
+        first_snapshot = _check_run_snapshot(first, head_sha, required_checks)
+        if first_snapshot is None:
+            return False
+        try:
+            second = self._check_runs_for_head(
+                head_sha, deadline_s=deadline_s, cancellation=cancellation
+            )
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+        ) as exc:
+            logger.warning("Check Runs stability read failed for %s: %s", head_sha, exc)
+            return False
+        if (
+            second is None
+            or _check_run_snapshot(second, head_sha, required_checks) != first_snapshot
+        ):
+            logger.warning("Check Runs changed while reading %s", head_sha)
+            return False
+        return _required_check_runs_pass(second, head_sha, required_checks)
 
     def _check_runs_for_head(
         self,
@@ -358,62 +298,3 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
                 return None
             page += 1
         return check_runs
-
-
-def _classic_required_checks(payload_text: str) -> frozenset[_RequiredCheck]:
-    """Parse classic branch-protection status-check requirements."""
-    payload = json.loads(payload_text)
-    if not isinstance(payload, dict):
-        raise ValueError("Required status checks response for main is not an object")
-    contexts = payload.get("contexts")
-    checks = payload.get("checks", [])
-    if not isinstance(contexts, list) or not isinstance(checks, list):
-        raise ValueError("Required status checks response for main is malformed")
-    required_checks: set[_RequiredCheck] = set()
-    for context in contexts:
-        if not isinstance(context, str) or not context:
-            raise ValueError("Required status checks response for main is malformed")
-        required_checks.add((context, None))
-    for check in checks:
-        if not isinstance(check, dict):
-            raise ValueError("Required status checks response for main is malformed")
-        context = check.get("context")
-        try:
-            app_id = _valid_app_id(check.get("app_id"), allow_wildcard=True)
-        except ValueError:
-            raise ValueError("Required status checks response for main is malformed") from None
-        if not isinstance(context, str) or not context:
-            raise ValueError("Required status checks response for main is malformed")
-        required_checks.add((context, app_id))
-    return frozenset(required_checks)
-
-
-def _ruleset_required_checks(payload_text: str) -> frozenset[_RequiredCheck]:
-    """Parse active-rules required status-check requirements."""
-    payload = json.loads(payload_text)
-    if not isinstance(payload, list):
-        raise ValueError("Active rules response for main is not a list")
-    required_checks: set[_RequiredCheck] = set()
-    for rule in payload:
-        if not isinstance(rule, dict) or not isinstance(rule.get("type"), str):
-            raise ValueError("Active rules response for main is malformed")
-        if rule["type"] != "required_status_checks":
-            continue
-        parameters = rule.get("parameters")
-        if not isinstance(parameters, dict):
-            raise ValueError("Active rules response for main is malformed")
-        checks = parameters.get("required_status_checks")
-        if not isinstance(checks, list):
-            raise ValueError("Active rules response for main is malformed")
-        for check in checks:
-            if not isinstance(check, dict):
-                raise ValueError("Active rules response for main is malformed")
-            context = check.get("context")
-            try:
-                app_id = _valid_app_id(check.get("integration_id"), allow_wildcard=True)
-            except ValueError:
-                raise ValueError("Active rules response for main is malformed") from None
-            if not isinstance(context, str) or not context:
-                raise ValueError("Active rules response for main is malformed")
-            required_checks.add((context, app_id))
-    return frozenset(required_checks)

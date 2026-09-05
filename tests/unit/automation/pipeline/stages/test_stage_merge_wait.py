@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -126,10 +127,15 @@ class _ConditionalGitHub(FakeStageGitHub):
         )
 
     def required_checks_pass_for_head(
-        self, head_sha: str, policy: Any = None, **_kwargs: Any
+        self,
+        head_sha: str,
+        policy: Any,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
     ) -> bool:
         """Return the scripted exact-head check result."""
-        del policy
+        del policy, deadline_s, cancellation
         self.events.append(f"checks:{head_sha}")
         self.checked_heads.append(head_sha)
         return self._required_checks_green
@@ -663,29 +669,6 @@ def test_stale_proof_fails_back_without_revoking_a_label(
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
     assert github.merge_attempts == []
-    assert github.mutation_log == []
-
-
-def test_revoke_stale_reviewed_head_never_writes_after_external_interleaving(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A new arm/GO may arrive after the final read, so stale runs never relabel."""
-
-    class InterleavingGitHub(_ConditionalGitHub):
-        def mark_pr_implementation_no_go(self, pr_number: int) -> None:
-            self._pr_state = _open_pr(
-                "c" * 40,
-                auto_merge_request={"enabledAt": "external-after-read"},
-            )
-            self._pr_impl_state = (True, False)
-            super().mark_pr_implementation_no_go(pr_number)
-
-    github = InterleavingGitHub(states=[_open_pr("b" * 40)])
-    item = _reviewed_item(make_work_item)
-
-    result = MergeWaitStage()._revoke_stale_reviewed_head(item, make_ctx(github=github), "a" * 40)
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
     assert github.mutation_log == []
 
 

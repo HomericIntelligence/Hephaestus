@@ -572,10 +572,10 @@ class StageGitHub(Protocol):
     def required_checks_pass_for_head(
         self,
         head_sha: str,
-        policy: Any = None,
+        policy: Any,
         *,
-        deadline_s: float | None = None,
-        cancellation: threading.Event | None = None,
+        deadline_s: float,
+        cancellation: threading.Event,
     ) -> bool:
         """Return whether complete successful Check Runs exist for ``head_sha``."""
         pass

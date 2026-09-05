@@ -44,8 +44,10 @@ exact-head Check Runs ────────► current CI merge gate
    Check Run for the reviewed commit with conclusion `success`, `neutral`, or
    `skipped`. A requirement without an application binding can match the same
    context from any identified GitHub App. Optional Check Runs do not grant or
-   revoke merge authority. Empty, malformed, pending, failed, stale, or changing
-   required evidence fails closed.
+   revoke merge authority. The required set does not need a `success` conclusion
+   when each required Check Run has another permitted terminal conclusion.
+   Empty, malformed, pending, failed, stale, or changing required evidence fails
+   closed.
 5. Policy and Check Run pagination share one aggregate deadline and cancellation
    signal. The queue completes all mutable traversals, reads unresolved threads,
    and then repeats the open-head-label admission. It sends the conditional

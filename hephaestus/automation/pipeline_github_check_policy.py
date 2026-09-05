@@ -7,7 +7,6 @@ import logging
 import subprocess
 import time
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from threading import Event
 from typing import cast
 from urllib.parse import quote
@@ -15,6 +14,7 @@ from urllib.parse import quote
 import hephaestus.automation.github_api as github_api
 
 from .pipeline_github_contract import _PipelineGitHubHost
+from .pipeline_github_ruleset_conditions import required_app_id, ruleset_applies
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +23,20 @@ _RULESET_MAX_TOTAL = 1_000
 _BYPASS_STATES = frozenset({"never", "always", "pull_requests_only"})
 _BYPASS_MODES = frozenset({"always", "pull_request", "exempt"})
 _BYPASS_ACTOR_TYPES = frozenset(
-    {"DeployKey", "Integration", "OrganizationAdmin", "RepositoryRole", "Team"}
+    {
+        "DeployKey",
+        "EnterpriseOwner",
+        "EnterpriseRole",
+        "Integration",
+        "OrganizationAdmin",
+        "RepositoryRole",
+        "Team",
+        "User",
+    }
 )
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class RequiredCheck:
     """One required status context and its optional GitHub App identity."""
 
@@ -40,18 +49,15 @@ class EffectiveMergePolicy:
     """Stable effective merge policy for one exact repository base branch."""
 
     base_branch: str
+    default_branch: str
     required_checks: tuple[RequiredCheck, ...]
     conversation_resolution_enforced: bool
     bypassable_ruleset_ids: tuple[int, ...]
 
 
-def _positive_app_id(value: object) -> int | None:
-    """Return a valid nullable GitHub App ID."""
-    if value is None:
-        return None
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    raise ValueError("GitHub App ID is malformed")
+def _required_check_sort_key(check: RequiredCheck) -> tuple[str, int, int]:
+    """Return a total order for unbound and app-bound check identities."""
+    return (check.context, check.app_id is not None, check.app_id or 0)
 
 
 def _request(
@@ -101,7 +107,7 @@ def _classic_check_inventory(status_checks: object) -> set[RequiredCheck]:
     if not isinstance(status_checks, dict):
         raise ValueError("classic required status checks are malformed")
     contexts = status_checks.get("contexts")
-    bound_checks = status_checks.get("checks")
+    bound_checks = status_checks.get("checks", [])
     if not isinstance(contexts, list) or not isinstance(bound_checks, list):
         raise ValueError("classic required status checks are incomplete")
     if not all(isinstance(context, str) and context for context in contexts):
@@ -116,7 +122,7 @@ def _classic_check_inventory(status_checks: object) -> set[RequiredCheck]:
         context = entry.get("context")
         if not isinstance(context, str) or not context:
             raise ValueError("classic status-check binding has no context")
-        check = RequiredCheck(context, _positive_app_id(entry.get("app_id")))
+        check = RequiredCheck(context, required_app_id(entry.get("app_id")))
         if check in checks:
             raise ValueError("classic status-check bindings contain duplicates")
         checks.add(check)
@@ -143,34 +149,6 @@ def _classic_policy(payload: object) -> tuple[set[RequiredCheck], bool]:
         and _has_no_explicit_pull_request_bypasses(payload)
     )
     return checks, resolution_safe
-
-
-def _ruleset_applies(ruleset: dict[str, object], base_branch: str) -> bool:
-    """Return whether one validated active branch ruleset applies to the base."""
-    conditions = ruleset.get("conditions")
-    if not isinstance(conditions, dict) or set(conditions) != {"ref_name"}:
-        raise ValueError("ruleset branch conditions are malformed")
-    ref_name = conditions["ref_name"]
-    if not isinstance(ref_name, dict) or set(ref_name) != {"include", "exclude"}:
-        raise ValueError("ruleset ref-name conditions are malformed")
-    includes = ref_name["include"]
-    excludes = ref_name["exclude"]
-    if not isinstance(includes, list) or not isinstance(excludes, list):
-        raise ValueError("ruleset ref-name patterns are malformed")
-    if not all(isinstance(pattern, str) and pattern for pattern in [*includes, *excludes]):
-        raise ValueError("ruleset ref-name pattern is malformed")
-    ref = f"refs/heads/{base_branch}"
-
-    def matches(pattern: str) -> bool:
-        if pattern == "~DEFAULT_BRANCH":
-            return True
-        if pattern == "~ALL":
-            return True
-        return fnmatchcase(ref, pattern)
-
-    return any(matches(pattern) for pattern in includes) and not any(
-        matches(pattern) for pattern in excludes
-    )
 
 
 def _validate_bypass(ruleset: dict[str, object]) -> bool:
@@ -208,7 +186,7 @@ def _required_checks_from_parameters(parameters: dict[str, object]) -> set[Requi
         context = entry.get("context")
         if not isinstance(context, str) or not context:
             raise ValueError("ruleset required status-check context is malformed")
-        check = RequiredCheck(context, _positive_app_id(entry.get("integration_id")))
+        check = RequiredCheck(context, required_app_id(entry.get("integration_id")))
         if check in checks:
             raise ValueError("ruleset required checks contain duplicates")
         checks.add(check)
@@ -251,6 +229,7 @@ def _ruleset_rules(rules: object) -> tuple[set[RequiredCheck], bool]:
 def _ruleset_policy(
     ruleset: object,
     base_branch: str,
+    default_branch: str,
 ) -> tuple[set[RequiredCheck], bool, bool]:
     """Parse one active ruleset into checks, resolution, and live bypass facts."""
     if not isinstance(ruleset, dict):
@@ -260,7 +239,7 @@ def _ruleset_policy(
         raise ValueError("ruleset ID is malformed")
     if ruleset.get("target") != "branch" or ruleset.get("enforcement") != "active":
         raise ValueError("active branch ruleset identity is malformed")
-    if not _ruleset_applies(ruleset, base_branch):
+    if not ruleset_applies(ruleset, base_branch, default_branch):
         return set(), False, False
     bypassable = _validate_bypass(ruleset)
     checks, requires_resolution = _ruleset_rules(ruleset.get("rules"))
@@ -280,9 +259,12 @@ def _active_summary_id(summary: object, seen_ids: set[int]) -> int | None:
     ):
         raise ValueError("repository ruleset summary ID is malformed")
     seen_ids.add(ruleset_id)
-    if summary.get("enforcement") == "disabled":
+    if summary.get("target") != "branch":
+        raise ValueError("repository ruleset summary is malformed")
+    enforcement = summary.get("enforcement")
+    if enforcement in {"disabled", "evaluate"}:
         return None
-    if summary.get("enforcement") != "active" or summary.get("target") != "branch":
+    if enforcement != "active":
         raise ValueError("repository ruleset summary is malformed")
     return ruleset_id
 
@@ -341,6 +323,18 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
     ) -> EffectiveMergePolicy:
         """Read one complete classic-and-ruleset policy snapshot."""
         owner, name = self._owner_name()
+        repository_result = _request(
+            self,
+            ["api", "--method", "GET", f"/repos/{owner}/{name}"],
+            deadline_s=deadline_s,
+            cancellation=cancellation,
+        )
+        if repository_result.returncode != 0:
+            raise RuntimeError("GitHub returned an error for repository metadata")
+        repository = json.loads(repository_result.stdout or "null")
+        default_branch = repository.get("default_branch") if isinstance(repository, dict) else None
+        if not isinstance(default_branch, str) or not default_branch:
+            raise ValueError("repository default branch is malformed")
         branch = quote(base_branch, safe="")
         classic_result = _request(
             self,
@@ -361,14 +355,17 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
         ruleset_resolution = False
         bypassable: list[int] = []
         for detail in details:
-            ruleset_checks, safe_resolution, can_bypass = _ruleset_policy(detail, base_branch)
+            ruleset_checks, safe_resolution, can_bypass = _ruleset_policy(
+                detail, base_branch, default_branch
+            )
             checks.update(ruleset_checks)
             ruleset_resolution = ruleset_resolution or safe_resolution
-            if can_bypass and _ruleset_applies(detail, base_branch):
+            if can_bypass:
                 bypassable.append(cast(int, detail["id"]))
         return EffectiveMergePolicy(
             base_branch=base_branch,
-            required_checks=tuple(sorted(checks)),
+            default_branch=default_branch,
+            required_checks=tuple(sorted(checks, key=_required_check_sort_key)),
             conversation_resolution_enforced=classic_resolution or ruleset_resolution,
             bypassable_ruleset_ids=tuple(sorted(bypassable)),
         )

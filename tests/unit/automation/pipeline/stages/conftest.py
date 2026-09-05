@@ -9,6 +9,7 @@ format stay identical to what coordinator tests (#1817) will assert.
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
@@ -718,10 +719,15 @@ class FakeStageGitHub(FakeGitHub):
         )
 
     def required_checks_pass_for_head(
-        self, head_sha: str, policy: Any = None, **_kwargs: Any
+        self,
+        head_sha: str,
+        policy: Any,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
     ) -> bool:
         """Return a green result for the requested exact head by default."""
-        del head_sha, policy
+        del head_sha, policy, deadline_s, cancellation
         return True
 
     @property
