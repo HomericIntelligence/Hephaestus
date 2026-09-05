@@ -66,14 +66,14 @@ class RepositoryMetadata:
 
     slug: str
     default_branch: str
-    head_sha: str
+    head_sha: str = ""
     is_fork: bool = False
     parent_full_name: str = ""
 
 
 @dataclass(frozen=True)
 class MnemosyneTarget:
-    """Resolved Mnemosyne repository identity and immutable branch facts."""
+    """Resolved Mnemosyne repository identity and default branch."""
 
     owner: str
     slug: str
@@ -158,30 +158,26 @@ def fetch_current_repository_metadata() -> CurrentRepositoryMetadata:
     )
 
 
-def _default_branch_and_head(data: dict[str, Any], slug: str) -> tuple[str, str]:
+def _default_branch(data: dict[str, Any], slug: str) -> str:
     default_branch_ref = data.get("defaultBranchRef")
     if not isinstance(default_branch_ref, dict):
         raise MnemosyneResolutionError(f"{slug} metadata lacks defaultBranchRef")
     branch = default_branch_ref.get("name")
-    target = default_branch_ref.get("target")
-    head = ""
-    if isinstance(target, dict):
-        raw_head = target.get("oid") or target.get("sha")
-        if isinstance(raw_head, str):
-            head = raw_head
-    raw_oid = default_branch_ref.get("oid")
-    if not head and isinstance(raw_oid, str):
-        head = raw_oid
     if not isinstance(branch, str) or not branch:
         raise MnemosyneResolutionError(f"{slug} metadata lacks a default branch name")
-    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
-        ref = _gh_json(["api", f"repos/{slug}/git/ref/heads/{branch}"])
-        obj = ref.get("object")
-        raw_head = obj.get("sha") if isinstance(obj, dict) else None
-        head = raw_head if isinstance(raw_head, str) else ""
-    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
-        raise MnemosyneResolutionError(f"{slug} metadata lacks a default branch head SHA")
-    return branch, head
+    return branch
+
+
+def _optional_head_sha(data: dict[str, Any]) -> str:
+    """Return an informational branch head when the response includes one."""
+    default_branch_ref = data.get("defaultBranchRef")
+    if not isinstance(default_branch_ref, dict):
+        return ""
+    target = default_branch_ref.get("target")
+    raw_head = target.get("oid") if isinstance(target, dict) else None
+    if not isinstance(raw_head, str):
+        raw_head = default_branch_ref.get("oid")
+    return raw_head if isinstance(raw_head, str) and re.fullmatch(r"[0-9a-f]{40}", raw_head) else ""
 
 
 def fetch_repository_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
@@ -192,7 +188,7 @@ def fetch_repository_metadata(slug: str, *, missing_ok: bool = False) -> Reposit
         if missing_ok and any(marker in str(exc).casefold() for marker in _NOT_FOUND_MARKERS):
             return None
         raise
-    default_branch, head_sha = _default_branch_and_head(data, slug)
+    default_branch = _default_branch(data, slug)
     parent = data.get("parent")
     parent_full_name = ""
     if isinstance(parent, dict) and isinstance(parent.get("nameWithOwner"), str):
@@ -200,7 +196,7 @@ def fetch_repository_metadata(slug: str, *, missing_ok: bool = False) -> Reposit
     return RepositoryMetadata(
         slug=slug,
         default_branch=default_branch,
-        head_sha=head_sha,
+        head_sha=_optional_head_sha(data),
         is_fork=bool(data.get("isFork")),
         parent_full_name=parent_full_name,
     )

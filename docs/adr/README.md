@@ -49,3 +49,4 @@ numbered, and listed here.
 | [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |
 | [0035](0035-provider-aware-ifm-model-selection.md) | Provider-aware IFM model selection | Partly superseded by ADR-0036 |
 | [0036](0036-free-form-model-effort-selection.md) | Free-form model effort selection | Accepted |
+| [0037](0037-version-bound-mnemosyne-checkout.md) | Version-bound Mnemosyne checkout | Accepted |
