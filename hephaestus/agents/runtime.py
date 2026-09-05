@@ -35,6 +35,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.macos_sandbox import MacOSSandboxError, isolated_command
 from hephaestus.agents.model_selection import (
     GPT_6_ASTRA,
     IFM_MODELS,
@@ -42,7 +43,6 @@ from hephaestus.agents.model_selection import (
     AgentModelSelection,
     parse_model_selection,
 )
-from hephaestus.agents.macos_sandbox import MacOSSandboxError, isolated_command
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     package_tree_digest,

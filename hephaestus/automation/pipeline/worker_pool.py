@@ -4186,7 +4186,7 @@ class WorkerPool:
         repo: str,
         source_repository: str | None = None,
         sync_to_remote: bool,
-        capture_source_revision: bool,
+        capture_source_revision: bool = False,
         pr_number: object,
         timeout_s: int,
         source_lane: object = None,
