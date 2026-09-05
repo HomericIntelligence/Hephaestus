@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import unicodedata
 from contextlib import suppress
 from pathlib import Path
@@ -151,6 +152,40 @@ def get_repo_root(start_path: str | Path | None = None) -> Path:
 
 _LOG_ARG_MAX = 200
 _LOG_STREAM_TAIL_MAX = 2000
+_PROCESS_GROUP_TERMINATION_GRACE_SECONDS = 1.0
+
+
+def _process_group_exists(pgid: int) -> bool:
+    """Return true while a POSIX process group has a live member."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - owned children use the same identity
+        return True
+    return True
+
+
+def _stop_process_group(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Stop an owned process group and reap its direct child."""
+    pgid = process.pid
+    with suppress(ProcessLookupError, OSError):
+        os.killpg(pgid, signal.SIGTERM)
+    grace_deadline = time.monotonic() + _PROCESS_GROUP_TERMINATION_GRACE_SECONDS
+    while time.monotonic() < grace_deadline:
+        process.poll()
+        if not _process_group_exists(pgid):
+            break
+        time.sleep(0.01)
+    if _process_group_exists(pgid):
+        with suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+    try:
+        return process.communicate(timeout=_PROCESS_GROUP_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        with suppress(ProcessLookupError, OSError):
+            process.kill()
+        return process.communicate()
 
 
 def _format_cmd_for_log(cmd: list[str]) -> str:
@@ -215,14 +250,7 @@ def _run_tracked_process_group(
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
-            try:
-                stdout, stderr = process.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                stdout, stderr = process.communicate(timeout=1)
+            stdout, stderr = _stop_process_group(process)
             raise subprocess.TimeoutExpired(
                 cmd,
                 float(timeout or 0),
