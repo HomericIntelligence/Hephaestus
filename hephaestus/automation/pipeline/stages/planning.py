@@ -38,7 +38,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
@@ -97,6 +97,7 @@ from hephaestus.automation.review_journal import (
     render_current_review,
 )
 from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER
+from hephaestus.automation.source_worktree import SourceWorkspacePreparationError
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
@@ -121,6 +122,7 @@ from ..plan_journal import (
     reconcile_plan_journal,
 )
 from .base import (
+    SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S,
     AgentJob,
     AthenaSkillJob,
     AthenaSkillRequest,
@@ -1087,11 +1089,67 @@ def _apply_requirements_recovery(
     return _apply_confirmed_requirements(item, ctx, proposal)
 
 
+def _source_workspace_preparation_failure(
+    item: WorkItem,
+    ctx: StageContext,
+    error: SourceWorkspacePreparationError,
+) -> StageOutcome:
+    """Return a bounded, observable outcome for unavailable source preparation."""
+    assert item.issue is not None  # noqa: S101 - caller validates this
+    attempt = item.attempts.get("source_workspace", 0) + 1
+    item.attempts["source_workspace"] = attempt
+    budget = ctx.budget("source_workspace")
+    cause = error.cause.value
+    reason = f"source workspace preparation failed: {cause}"
+    logger.warning(
+        "planning:%d: %s (attempt %d/%d)",
+        item.issue,
+        reason,
+        attempt,
+        budget,
+    )
+    if attempt < budget:
+        item.payload["retry_delay_s"] = float(2 ** (attempt - 1))
+        return StageOutcome(
+            Disposition.RETRY,
+            f"{reason}; retry {attempt}/{budget}",
+        )
+    logger.error("planning:%d: %s; budget exhausted", item.issue, reason)
+    return StageOutcome(
+        Disposition.FINISH_FAIL,
+        f"{reason}; exhausted after {budget} attempts",
+    )
+
+
+def _prepare_planning_workspace(
+    item: WorkItem,
+    ctx: StageContext,
+    lane: SourceLane,
+) -> tuple[WorkspaceBinding | None, StageOutcome | None]:
+    """Prepare a planning source lane and classify bounded preparation failures."""
+    try:
+        workspace = source_workspace_binding(
+            item,
+            ctx,
+            lane,
+            preparation_timeout_s=SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S,
+        )
+    except SourceWorkspacePreparationError as exc:
+        return None, _source_workspace_preparation_failure(item, ctx, exc)
+    return workspace, None
+
+
 def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
     """Build or apply one requirements-recovery substate action."""
     assert item.issue is not None  # noqa: S101 - PlanningStage.step validates this
     if item.state == "REQUIREMENTS_RECOVERY_WAIT":
-        workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
+        workspace, preparation_outcome = _prepare_planning_workspace(
+            item,
+            ctx,
+            SourceLane.IMPLEMENTATION,
+        )
+        if preparation_outcome is not None:
+            return preparation_outcome
         revision = _recovery_revision(item, workspace.revision if workspace is not None else None)
         binding = evidence_digest(
             item.repo,
@@ -1141,7 +1199,13 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 ctx,
                 "requirements planner returned no valid proposal",
             )
-        workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
+        workspace, preparation_outcome = _prepare_planning_workspace(
+            item,
+            ctx,
+            SourceLane.REVIEW,
+        )
+        if preparation_outcome is not None:
+            return preparation_outcome
         revision = _recovery_revision(item, workspace.revision if workspace is not None else None)
         binding = str(item.payload.get("requirements_evidence_digest") or "")
         if proposal.evidence != binding:
@@ -1755,7 +1819,8 @@ class PlanningStage(Stage):
       ``item.payload["advise_findings"]``.
     - PLAN_WAIT: submit the plan agent job (planner session); plan text
       lands in ``item.payload["plan_text"]``; the plan comment posted by the
-      pipeline is the durable artifact.
+      pipeline is the durable artifact. Source-workspace preparation is
+      bounded and timer-retried before either agent job is built.
     - VERIFY: check the plan comment exists -> ADVANCE, else reset to
       ``PLAN_WAIT`` and RETRY within the ``plan`` budget, then FINISH_FAIL.
 
@@ -2055,8 +2120,14 @@ class PlanningStage(Stage):
             return recovery_step
 
         if item.state == "ADVISE_WAIT":
+            workspace, preparation_outcome = _prepare_planning_workspace(
+                item,
+                ctx,
+                SourceLane.IMPLEMENTATION,
+            )
+            if preparation_outcome is not None:
+                return preparation_outcome
             logger.info("planning:%d: requesting advise job", item.issue)
-            workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
             advise_job = AthenaSkillJob(
                 request=AthenaSkillRequest(
                     kind="advise",
@@ -2083,8 +2154,14 @@ class PlanningStage(Stage):
                     Disposition.FINISH_FAIL,
                     athena_advise_failure_reason(item),
                 )
+            workspace, preparation_outcome = _prepare_planning_workspace(
+                item,
+                ctx,
+                SourceLane.IMPLEMENTATION,
+            )
+            if preparation_outcome is not None:
+                return preparation_outcome
             logger.info("planning:%d: requesting plan job", item.issue)
-            workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,

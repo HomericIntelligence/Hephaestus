@@ -76,7 +76,7 @@ class Route:
 # target. Budget provenance:
 #   plan_review_iter=3, pr_review_iter=3, pr_review_hard=6
 #                                             <- architecture doc stage sections
-#   clone=2, plan=2, plan_cycles=2,
+#   clone=2, plan=2, source_workspace=2, plan_cycles=2,
 #   implement=2, rebase_conflict=2, test_fix=1
 #                                             <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops
@@ -92,7 +92,7 @@ ROUTES: dict[StageName, Route] = {
     StageName.PLANNING: Route(
         next=StageName.PLAN_REVIEW,
         fail_routes={"*": StageName.FINISHED},
-        budgets={"plan": 2},
+        budgets={"plan": 2, "source_workspace": 2},
     ),
     StageName.PLAN_REVIEW: Route(
         next=StageName.IMPLEMENTATION,

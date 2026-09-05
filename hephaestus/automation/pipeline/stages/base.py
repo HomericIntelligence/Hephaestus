@@ -54,7 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from hephaestus.agents.model_selection import normalize_model_reference
 from hephaestus.agents.runtime import (
@@ -64,6 +64,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
+from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "GIT_JOB_TIMEOUT_S",
+    "SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S",
     "AgentJob",
     "AthenaSkillJob",
     "AthenaSkillRequest",
@@ -139,6 +141,9 @@ def athena_advise_failure_reason(item: WorkItem) -> str:
 #: by every stage that submits :class:`GitJob`s (single home — stages must
 #: not import it from each other).
 GIT_JOB_TIMEOUT_S = 600
+
+# Keep source preparation below the coordinator's 60-second stage watchdog.
+SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S = 45.0
 
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
@@ -754,6 +759,7 @@ def source_workspace_binding(
     *,
     revision: str | None = None,
     branch: str | None = None,
+    preparation_timeout_s: float | None = None,
 ) -> WorkspaceBinding | None:
     """Prepare a typed source lane when production workspace ownership is wired.
 
@@ -784,10 +790,26 @@ def source_workspace_binding(
     )
     if len(target) != 40:
         raise RuntimeError("source workspace requires a captured full revision")
-    binding: WorkspaceBinding = manager.prepare(item_number, lane, target, branch=branch)
+    if preparation_timeout_s is None:
+        binding = manager.prepare(item_number, lane, target, branch=branch)
+    else:
+        if preparation_timeout_s <= 0:
+            raise ValueError("preparation_timeout_s must be positive")
+        clock = ctx.now_fn or time.monotonic
+        deadline = _PreparationDeadline(
+            expires_at=clock() + preparation_timeout_s,
+            monotonic=clock,
+        )
+        binding = manager.prepare_bounded(
+            item_number,
+            lane,
+            target,
+            branch=branch,
+            deadline=deadline,
+        )
     if lane is SourceLane.IMPLEMENTATION:
         item.payload["_impl_source_revision"] = binding.revision
-    return binding
+    return cast(WorkspaceBinding, binding)
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

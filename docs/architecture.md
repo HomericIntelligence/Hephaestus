@@ -817,7 +817,8 @@ flowchart LR
     Provenance --> Context
     RecoveryGate -->|"requirements"| Context
     History["Current rejected plan/review"] --> Context
-    Context --> Planner --> Canonical["Canonical plan comment"]
+    Context --> SourceWorkspace["Bounded source workspace"]
+    SourceWorkspace --> Planner --> Canonical["Canonical plan comment"]
     Canonical --> PlanReview["Plan review"]
 ```
 
@@ -838,7 +839,10 @@ stateDiagram-v2
     Eligibility --> AwaitOperator: state:plan-blocked present
     Eligibility --> BuildContext: eligible plan-state label
     AwaitOperator --> Eligibility: external actor replaces blocked label
-    BuildContext --> Draft
+    BuildContext --> SourceWorkspace
+    SourceWorkspace --> Draft: exact revision and locks confirmed
+    SourceWorkspace --> SourceWorkspace: bounded lock or Git retry
+    SourceWorkspace --> Failed: preparation budget exhausted
     Draft --> Verify: candidate produced
     Draft --> Draft: recoverable failure
     Verify --> Publish: candidate complete
@@ -885,6 +889,15 @@ Architectural contract:
   third ordinary review outcome.
 - Each durable state transition is published with its corresponding canonical
   artifact, and restart routing reads the label rather than comment prose.
+- Source-workspace preparation runs before each source-reading planning job. It
+  uses a 45-second deadline, takes the source-lane lock before the Git metadata
+  lock, and uses non-blocking lock acquisition in this bounded path. Lock
+  contention and Git timeout return a timer-backed retry; preparation failure
+  does not start an agent job.
+- Source preparation has a separate retry budget from plan generation. A
+  failed bounded attempt leaves the item at its current planning state. It
+  writes no source-workspace receipt, and a later attempt can verify and reuse
+  a clean partial checkout without weakening ownership or revision checks.
 - `state:plan-blocked` is never removed or replaced by ordinary planning. An
   authenticated Athena-finalized body is the narrow exception because it
   proves the planning decision already completed. Comments otherwise do

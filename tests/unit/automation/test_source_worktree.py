@@ -22,6 +22,9 @@ from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
+    SourceWorkspacePreparationCause,
+    SourceWorkspacePreparationError,
+    _PreparationDeadline,
 )
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
@@ -74,6 +77,135 @@ def test_many_preparations_reuse_exactly_two_named_worktrees(tmp_path: Path) -> 
     }
     assert paths == {"repository", "auto-42-impl", "auto-42-review"}
     assert _git(repo, "branch", "--format=%(refname:short)").splitlines() == ["main"]
+
+
+def test_bounded_prepare_rejects_held_lane_lock_without_receipt_mutation(
+    tmp_path: Path,
+) -> None:
+    """Bounded preparation reports lane contention before it can mutate state."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    lane = SourceLane.IMPLEMENTATION
+    receipt_path = manager._receipt_path(42, lane)
+    path = manager.path_for(42, lane)
+
+    with file_lock(manager._lane_lock_path(42, lane), require_exclusive=True):
+        bounded_prepare = getattr(manager, "prepare_bounded", None)
+        assert callable(bounded_prepare)
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            bounded_prepare(42, lane, second)
+
+    assert raised.value.cause is SourceWorkspacePreparationCause.LANE_LOCK_UNAVAILABLE
+    assert not receipt_path.exists()
+    assert not path.exists()
+
+
+def test_bounded_prepare_rejects_held_git_metadata_lock_without_receipt_mutation(
+    tmp_path: Path,
+) -> None:
+    """Metadata contention releases the lane and preserves durable state."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    lane = SourceLane.REVIEW
+    receipt_path = manager._receipt_path(42, lane)
+    metadata_lock = WorktreeManager.git_metadata_lock_path(repo)
+
+    with file_lock(metadata_lock, require_exclusive=True):
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            manager.prepare_bounded(42, lane, second)
+
+        assert raised.value.cause is SourceWorkspacePreparationCause.GIT_METADATA_LOCK_UNAVAILABLE
+        with file_lock(
+            manager._lane_lock_path(42, lane),
+            blocking=False,
+            require_exclusive=True,
+        ):
+            pass
+
+    assert not receipt_path.exists()
+    assert not manager.path_for(42, lane).exists()
+
+
+def test_bounded_prepare_times_out_stalled_git_without_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled Git command uses the remaining deadline and writes no receipt."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    calls: list[float] = []
+    ticks = iter((0.0, 2.0))
+    deadline = _PreparationDeadline(10.0, lambda: next(ticks))
+    real_run = subprocess.run
+
+    def delayed_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, float)
+        calls.append(timeout)
+        if args and isinstance(args[0], list) and args[0][1:3] == ["worktree", "add"]:
+            raise subprocess.TimeoutExpired(args[0], timeout)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", delayed_run)
+
+    with pytest.raises(SourceWorkspacePreparationError) as raised:
+        manager.prepare_bounded(
+            42,
+            SourceLane.REVIEW,
+            second,
+            deadline=deadline,
+        )
+
+    assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+    assert calls == [10.0, 8.0]
+    assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
+    assert not manager.path_for(42, SourceLane.REVIEW).exists()
+
+
+def test_bounded_prepare_restarts_after_replacement_timeout(
+    tmp_path: Path,
+) -> None:
+    """A retry reconciles a clean partial replacement before writing its receipt."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    real_replace = manager._replace_worktree
+
+    def replace_then_timeout(*args: Any, **kwargs: Any) -> None:
+        real_replace(*args, **kwargs)
+        raise SourceWorkspacePreparationError(SourceWorkspacePreparationCause.GIT_TIMEOUT)
+
+    with patch.object(manager, "_replace_worktree", side_effect=replace_then_timeout):
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            manager.prepare_bounded(42, SourceLane.REVIEW, second)
+
+    assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+    assert manager.path_for(42, SourceLane.REVIEW).exists()
+    assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
+
+    binding = manager.prepare_bounded(42, SourceLane.REVIEW, second)
+
+    assert binding.revision == second
+    assert manager._read_receipt(42, SourceLane.REVIEW) is not None
+
+
+def test_source_manager_uses_shared_git_common_dir_from_linked_checkout(
+    tmp_path: Path,
+) -> None:
+    """A linked checkout shares identity, locks, and receipt storage with its base."""
+    repo, _, second = _repository(tmp_path)
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-b", "linked", str(linked), second)
+    base_manager = SourceWorkspaceManager(repo, repository="example/project")
+    linked_manager = SourceWorkspaceManager(linked, repository="example/project")
+
+    assert linked_manager.common_dir == base_manager.common_dir
+    assert linked_manager.repository_identity == base_manager.repository_identity
+    assert linked_manager._lane_lock_path(42, SourceLane.REVIEW) == (
+        base_manager._lane_lock_path(42, SourceLane.REVIEW)
+    )
+    assert linked_manager._receipt_path(42, SourceLane.REVIEW) == (
+        base_manager._receipt_path(42, SourceLane.REVIEW)
+    )
 
 
 def test_review_rebinds_same_path_to_exact_revision(tmp_path: Path) -> None:
