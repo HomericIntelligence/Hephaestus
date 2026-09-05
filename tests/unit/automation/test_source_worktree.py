@@ -463,6 +463,8 @@ def test_direct_writer_checkout_change_after_authorization_has_recovery(
     assert predecessor.cwd.exists()
     assert captured.value.recovery is not None
     assert captured.value.recovery["kind"] == "unproven_predecessor"
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert str(captured.value.__cause__) == "implementation writer direct transition is invalid"
 
 
 @pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift", "obligations"])

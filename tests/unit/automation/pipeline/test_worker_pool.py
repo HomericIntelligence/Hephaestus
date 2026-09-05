@@ -37,6 +37,7 @@ from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
+from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
@@ -4505,10 +4506,13 @@ class TestGitOps:
             first,
             branch="old-writer-branch",
         )
-        authorize = source_manager.authorize_direct_implementation_writer_transition
+        original_validate = ImplementationWriterHandoff._validate_direct_transition
 
-        def authorize_then_change(item_number: int, **kwargs: Any) -> None:
-            authorize(item_number, **kwargs)
+        def validate_then_change(
+            active_handoff: ImplementationWriterHandoff,
+            **kwargs: Any,
+        ) -> None:
+            original_validate(active_handoff, **kwargs)
             git("reset", "--hard", second, cwd=predecessor.cwd)
 
         job = GitJob(
@@ -4536,9 +4540,10 @@ class TestGitOps:
             ),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
             patch.object(
-                source_manager,
-                "authorize_direct_implementation_writer_transition",
-                side_effect=authorize_then_change,
+                ImplementationWriterHandoff,
+                "_validate_direct_transition",
+                autospec=True,
+                side_effect=validate_then_change,
             ),
         ):
             pool.submit(job, StageName.REPO)
