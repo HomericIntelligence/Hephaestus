@@ -4645,9 +4645,10 @@ class TestRepoScoping:
                     "nodes": [
                         {
                             "id": "C1",
-                            "body": "Please fix this.",
-                            "viewerDidAuthor": False,
-                            "author": None,
+                        "body": "Please fix this.",
+                        "viewerDidAuthor": False,
+                        "authorAssociation": "NONE",
+                        "author": None,
                             "pullRequestReview": None,
                         }
                     ],
@@ -4672,6 +4673,7 @@ class TestRepoScoping:
                 "id": f"C{index}",
                 "body": f"reply {index}",
                 "viewerDidAuthor": False,
+                "authorAssociation": "MEMBER",
                 "author": {"login": "reviewer", "__typename": "User"},
                 "pullRequestReview": None,
             }
@@ -4901,6 +4903,7 @@ class TestRepoScoping:
                 "id": f"C{index}",
                 "body": f"reply {index}",
                 "viewerDidAuthor": False,
+                "authorAssociation": "MEMBER",
                 "author": {"login": "reviewer", "__typename": "User"},
                 "pullRequestReview": {
                     "id": "R1",

@@ -3157,6 +3157,7 @@ class TestReviewThreadLifecycle:
         participants = authors or ["hephaestus[bot]"]
         return {
             "id": thread_id,
+            "isResolved": False,
             "path": "a.py",
             "line": line,
             "side": "RIGHT",
@@ -3168,13 +3169,18 @@ class TestReviewThreadLifecycle:
                 {
                     "id": f"comment-{thread_id}-{index}",
                     "author": author,
+                    "author_type": "User",
+                    "author_association": "MEMBER",
                     "body": body,
                     "review_id": f"review-{thread_id}",
+                    "review_state": "COMMENTED",
+                    "review_commit_sha": "a" * 40,
                 }
                 for index, author in enumerate(participants)
             ],
             "review_id": f"review-{thread_id}",
-            "created_head_sha": "b" * 40,
+            "created_head_sha": "a" * 40,
+            "pr_state": {"state": "OPEN", "headRefOid": "a" * 40},
         }
 
     def test_reviewer_decisions_are_limited_to_host_replied_threads(self) -> None:
@@ -3536,7 +3542,7 @@ class TestReviewThreadLifecycle:
             }
         )
 
-        normalized = _normalize_remediation_threads([thread])
+        normalized = _normalize_remediation_threads([thread], reviewed_head_sha="a" * 40)
 
         assert len(normalized) == 1
         assert "guard None first" in normalized[0]["body"]
@@ -3561,10 +3567,21 @@ class TestReviewThreadLifecycle:
             }
         )
 
-        normalized = _normalize_remediation_threads([thread])
+        normalized = _normalize_remediation_threads([thread], reviewed_head_sha="a" * 40)
 
         assert _scope_retraction_paths(normalized) == ("out-of-scope.py",)
         assert normalized[0]["body"].count("hephaestus-scope-retraction-paths:") == 1
+
+    def test_remediation_rejects_a_foreign_or_stale_finding(self) -> None:
+        """Only a trusted finding from the exact reviewed head can add edit scope."""
+        foreign = self._thread("foreign", 3, "fix this")
+        foreign["comments"][0]["author_association"] = "NONE"
+        stale = self._thread("stale", 4, "fix this")
+        stale["comments"][0]["review_commit_sha"] = "b" * 40
+
+        assert _normalize_remediation_threads(
+            [foreign, stale], reviewed_head_sha="a" * 40
+        ) == []
 
     def test_partial_reconciliation_restarts_fresh_review_without_stale_receipts(
         self, make_ctx: Any, make_work_item: Any
@@ -3672,10 +3689,10 @@ class TestReviewThreadLifecycle:
             make_ctx(github=BlockedReconciliationGitHub(unresolved=[(2, 0)])),
         ) == Continue(next_state="REVIEW_WAIT")
 
-    def test_unaddressed_external_bot_thread_routes_to_remediation(
+    def test_unaddressed_external_bot_thread_cannot_expand_remediation_scope(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An exact bot finding is routed to the implementation/reviewer cycle."""
+        """A foreign bot finding remains open but cannot direct the writer."""
         bot = self._thread("bot-1", 3, "fix this")
         bot.update(
             {
@@ -3704,16 +3721,9 @@ class TestReviewThreadLifecycle:
 
         stage = PrReviewStage()
         assert _complete_github_job(stage, item, make_ctx(github=BotGitHub())) == Continue(
-            next_state="ADDRESS_WAIT"
+            next_state="EVAL"
         )
-        assert item.payload["remediation_threads"] == [
-            {
-                "thread_id": "bot-1",
-                "path": "a.py",
-                "line": 3,
-                "body": "<!-- hephaestus-severity: major -->\nfix this",
-            }
-        ]
+        assert "remediation_threads" not in item.payload
 
     def test_validation_reads_all_open_threads_after_restart(
         self, make_ctx: Any, make_work_item: Any
@@ -4068,10 +4078,10 @@ class TestReviewThreadLifecycle:
         assert result == Continue(next_state="EVAL")
         assert github.posted == []
 
-    def test_changed_open_thread_is_sent_back_to_implementation(
+    def test_changed_open_thread_cannot_expand_remediation_scope(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A changed thread remains open for a fresh implementation reply."""
+        """A changed thread remains open but cannot direct a writer retry."""
 
         class ChangedReceiptGitHub(FakeStageGitHub):
             def __init__(self, live: list[dict[str, Any]]) -> None:
@@ -4134,9 +4144,9 @@ class TestReviewThreadLifecycle:
 
         result = _complete_github_job(PrReviewStage(), item, make_ctx(github=github))
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == Continue(next_state="EVAL")
         assert github.posted == []
-        assert item.payload["remediation_threads"][0]["thread_id"] == "thread-1"
+        assert "remediation_threads" not in item.payload
 
     def test_replaced_validation_receipt_restarts_validation_without_reconciliation(
         self, make_ctx: Any, make_work_item: Any

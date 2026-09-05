@@ -367,9 +367,11 @@ class FakeStageGitHub(FakeGitHub):
                     posted[cursor] if cursor < len(posted) else f"live-thread-{pr_number}-{cursor}"
                 )
                 cursor += 1
+                origin_author = "reviewer" if author else "hephaestus[bot]"
                 threads.append(
                     {
                         "id": thread_id,
+                        "isResolved": False,
                         "path": posted_comment.get("path") or "a.py",
                         "line": posted_comment.get("line") or cursor,
                         "side": "RIGHT",
@@ -378,14 +380,23 @@ class FakeStageGitHub(FakeGitHub):
                             f"<!-- hephaestus-severity: {severity} -->\n"
                             f"{posted_comment.get('body') or 'finding'}"
                         ),
-                        "author": "reviewer" if author else "hephaestus[bot]",
-                        "authors": ["reviewer" if author else "hephaestus[bot]"],
+                        "author": origin_author,
+                        "author_type": "User",
+                        "author_association": "MEMBER",
+                        "authors": [origin_author],
                         "review_id": f"review-{pr_number}-{cursor}",
+                        "pr_state": dict(self._pr_state),
                         "comments": [
                             {
                                 "id": f"comment-{thread_id}",
-                                "author": "reviewer" if author else "hephaestus[bot]",
+                                "author": origin_author,
+                                "author_type": "User",
+                                "author_association": "MEMBER",
                                 "body": posted_comment.get("body") or "finding",
+                                "review_id": f"review-{pr_number}-{cursor}",
+                                "review_state": "COMMENTED",
+                                "review_commit_sha": self._pr_state["headRefOid"],
+                                "viewer_did_author": not author,
                             },
                             *self._thread_replies.get(thread_id, []),
                         ],

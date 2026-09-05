@@ -319,7 +319,9 @@ class PipelineGitHubJobRunner:
             reviewed_head_sha=request.source_head_sha,
             threads=live_threads,
         )
-        normalized_threads = _normalize_remediation_threads(live_threads)
+        normalized_threads = _normalize_remediation_threads(
+            live_threads, reviewed_head_sha=request.source_head_sha
+        )
         snapshots = _validation_thread_snapshots(live_threads, validation_receipts)
         if (
             len(normalized_threads) != len(live_threads)
@@ -833,7 +835,9 @@ class PipelineGitHubJobRunner:
         if len(posted_receipts) != len(findings):
             return receipt("audit_failure")
         live_threads = github.list_unresolved_review_threads(request.pr_number)
-        remediation_threads = _normalize_remediation_threads(live_threads)
+        remediation_threads = _normalize_remediation_threads(
+            live_threads, reviewed_head_sha=request.reviewed_head_sha
+        )
         if len(remediation_threads) != len(live_threads):
             return receipt("audit_failure")
         return receipt(
