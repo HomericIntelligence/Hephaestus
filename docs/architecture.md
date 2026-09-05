@@ -1691,6 +1691,9 @@ granting container write access to repository metadata.
 automatic profile. Its vetted default is
 `uv run pytest tests -q --tb=short`; programmatic callers can supply
 `PipelineConfig.pre_pr_test_argv` for a different vetted fallback command.
+If the optional runner reports an availability or startup failure, the stage
+logs the reason and runs this native command. A native failure still blocks
+publication. The test receipt records the runner and the fallback reason.
 GitHub-only checks that need a created PR, especially `pr-policy`, still run
 after publication and remain part of the merge contract.
 

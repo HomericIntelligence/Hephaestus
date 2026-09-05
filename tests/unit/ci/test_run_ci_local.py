@@ -143,9 +143,10 @@ def _run_runner(
     tmp_path: Path,
     subset: str,
     *,
-    engine_name: str = "podman",
+    engine_name: str | None = "podman",
     failing_command: str = "",
     info_fails: bool = False,
+    native_exit_code: int = 0,
     license_violation: bool = False,
     host_uid: int | None = None,
     host_gid: int | None = None,
@@ -156,6 +157,7 @@ def _run_runner(
     repo_root: Path = REPO_ROOT,
     color_environment: dict[str, str] | None = None,
     machine_architecture: str | None = None,
+    machine_system: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -167,7 +169,9 @@ def _run_runner(
         image_id=image_id,
         external_git_common_dir=external_git_common_dir,
     )
-    if engine_name != "podman":
+    if engine_name is None:
+        engine_path.unlink()
+    elif engine_name != "podman":
         docker = engine_path.with_name(engine_name)
         engine_path.rename(docker)
     if host_uid is not None and host_gid is not None:
@@ -191,18 +195,54 @@ def _run_runner(
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
                 f'[[ "$1" == "-m" ]] && printf "%s\\n" "{machine_architecture}" && exit 0\n'
+                + (
+                    f'[[ "$1" == "-s" ]] && printf "%s\\n" "{machine_system}" && exit 0\n'
+                    if machine_system is not None
+                    else ""
+                )
+                + 'printf "unsupported uname argument: %s\\n" "$1" >&2\n'
+                "exit 2\n"
+            ),
+            encoding="utf-8",
+        )
+        uname.chmod(0o755)
+    elif machine_system is not None:
+        uname = tmp_path / "uname"
+        uname.write_text(
+            (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f'[[ "$1" == "-s" ]] && printf "%s\\n" "{machine_system}" && exit 0\n'
                 'printf "unsupported uname argument: %s\\n" "$1" >&2\n'
                 "exit 2\n"
             ),
             encoding="utf-8",
         )
         uname.chmod(0o755)
+    native_log = tmp_path / "native.log"
+    native_uv = tmp_path / "uv"
+    native_uv.write_text(
+        (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf "NATIVE_RUNNER " >> "$FAKE_NATIVE_LOG"\n'
+            'printf "%q " "$@" >> "$FAKE_NATIVE_LOG"\n'
+            'printf "\\n" >> "$FAKE_NATIVE_LOG"\n'
+            f"exit {native_exit_code}\n"
+        ),
+        encoding="utf-8",
+    )
+    native_uv.chmod(0o755)
     environment = os.environ | {
-        "CONTAINER_ENGINE": engine_name,
         "FAKE_ENGINE_LOG": str(log),
+        "FAKE_NATIVE_LOG": str(native_log),
         "FAKE_LICENSE_VIOLATION": "1" if license_violation else "0",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
+    if engine_name is None:
+        environment.pop("CONTAINER_ENGINE", None)
+    else:
+        environment["CONTAINER_ENGINE"] = engine_name
     for name in ("NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
         environment.pop(name, None)
     if color_environment:
@@ -218,7 +258,11 @@ def _run_runner(
         capture_output=True,
         check=False,
     )
-    return result, log.read_text(encoding="utf-8") if log.exists() else ""
+    if native_log.exists():
+        log_text = native_log.read_text(encoding="utf-8")
+    else:
+        log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+    return result, log_text
 
 
 def test_unavailable_selected_engine_emits_runner_failure_marker(tmp_path: Path) -> None:
@@ -227,6 +271,54 @@ def test_unavailable_selected_engine_emits_runner_failure_marker(tmp_path: Path)
 
     assert result.returncode != 0
     assert "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable" in result.stderr
+
+
+def test_unavailable_engine_on_macos_runs_native_checks(tmp_path: Path) -> None:
+    """The macOS runner uses native checks when the engine is unavailable."""
+    result, log = _run_runner(
+        tmp_path,
+        "all",
+        info_fails=True,
+        machine_system="Darwin",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "falling back to native pre-PR verification" in result.stdout
+    assert "Runner: native" in result.stdout
+    assert "NATIVE_RUNNER run pytest tests -q --tb=short" in log
+
+
+def test_unavailable_engine_on_macos_does_not_replace_lint(tmp_path: Path) -> None:
+    """A non-pre-PR subset keeps its container-runner failure."""
+    result, log = _run_runner(tmp_path, "lint", info_fails=True, machine_system="Darwin")
+
+    assert result.returncode != 0
+    assert "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable" in result.stderr
+    assert "NATIVE_RUNNER" not in log
+
+
+def test_absent_engine_on_macos_runs_native_checks(tmp_path: Path) -> None:
+    """The macOS runner uses native checks when no engine is installed."""
+    result, log = _run_runner(tmp_path, "all", engine_name=None, machine_system="Darwin")
+
+    assert result.returncode == 0, result.stderr
+    assert "falling back to native pre-PR verification" in result.stdout
+    assert "NATIVE_RUNNER run pytest tests -q --tb=short" in log
+
+
+def test_native_fallback_failure_remains_blocking(tmp_path: Path) -> None:
+    """A native fallback failure remains a failed local check."""
+    result, log = _run_runner(
+        tmp_path,
+        "all",
+        info_fails=True,
+        native_exit_code=23,
+        machine_system="Darwin",
+    )
+
+    assert result.returncode != 0
+    assert "Native pre-PR verification FAILED" in result.stderr
+    assert "NATIVE_RUNNER run pytest tests -q --tb=short" in log
 
 
 def _candidate_repo(tmp_path: Path) -> Path:

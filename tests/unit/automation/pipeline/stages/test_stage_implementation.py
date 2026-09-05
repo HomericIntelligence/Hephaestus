@@ -2907,11 +2907,23 @@ class TestTestsAndFix:
         assert isinstance(result, Continue)
         assert result.next_state == "TESTFIX_WAIT"
 
-    def test_runner_failure_ends_without_testfix(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A marked host runner failure fails closed without an agent repair attempt."""
+    def test_runner_failure_falls_back_to_native_tests(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An optional runner failure starts the configured native test path."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(
+            config_overrides={
+                "run_pre_pr_tests": True,
+                "pre_pr_test_argv": ("pytest", "tests/native", "-q"),
+            }
+        )
         item = make_work_item(issue=1, state="TEST_WAIT")
+
+        initial = stage.step(item, ctx)
+        assert isinstance(initial, JobRequest)
+        assert isinstance(initial.job, BuildTestJob)
+        assert initial.job.argv == ("pytest", "tests/native", "-q")
 
         stage.on_job_done(
             item,
@@ -2926,11 +2938,108 @@ class TestTestsAndFix:
         item.state = "COMMIT_PUSH_WAIT"
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
-        assert result.note == "pre_pr_runner_unavailable"
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == ("pytest", "tests/native", "-q")
+        assert result.on_done_state == "COMMIT_PUSH_WAIT"
         assert "tests_failed" not in item.payload
-        assert "container-engine-unavailable" in item.payload["pre_pr_runner_error"]
+        assert "container-engine-unavailable" in item.payload["pre_pr_fallback_reason"]
+
+        item.state = "TEST_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value=0), ctx)
+        assert "pre_pr_runner_error" not in item.payload
+        assert "native fallback" in item.payload["test_receipt"]
+        assert "container-engine-unavailable" in item.payload["test_receipt"]
+
+    def test_native_fallback_failure_blocks_commit_and_pr(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A native fallback failure still routes to test repair."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        initial = stage.step(item, ctx)
+        assert isinstance(initial, JobRequest)
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value=1,
+                stderr_tail="HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable",
+            ),
+            ctx,
+        )
+        item.state = "COMMIT_PUSH_WAIT"
+        fallback = stage.step(item, ctx)
+        assert isinstance(fallback, JobRequest)
+
+        item.state = "TEST_WAIT"
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, value=23, stdout_tail="FAILED native check"),
+            ctx,
+        )
+        item.state = "COMMIT_PUSH_WAIT"
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "TESTFIX_WAIT"
+        assert item.payload["tests_failed"] is True
+
+    def test_script_native_fallback_failure_routes_to_testfix(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed script fallback is a test failure, not a runner failure."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="TEST_WAIT")
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value=1,
+                stderr_tail=(
+                    "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable\n"
+                    "Native pre-PR verification FAILED."
+                ),
+                stdout_tail="HEPHAESTUS_CI_RUNNER_FALLBACK: container-engine-unavailable",
+            ),
+            make_ctx(),
+        )
+        item.state = "COMMIT_PUSH_WAIT"
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "TESTFIX_WAIT"
+
+    def test_optional_runner_start_failure_falls_back_to_native_tests(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A subprocess runner start failure does not block a green native gate."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        initial = stage.step(item, ctx)
+        assert isinstance(initial, JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"failure_kind": "runner"},
+                error="host_verification_failed: executable unavailable",
+            ),
+            ctx,
+        )
+        item.state = "COMMIT_PUSH_WAIT"
+
+        fallback = stage.step(item, ctx)
+
+        assert isinstance(fallback, JobRequest)
+        assert isinstance(fallback.job, BuildTestJob)
+        assert fallback.job.descr == "pre_pr_tests_native_fallback"
+        assert "optional pre-PR runner failed to start" in item.payload["pre_pr_fallback_reason"]
 
     def test_green_tests_clear_failure_state(self, make_ctx: Any, make_work_item: Any) -> None:
         """A green run clears any prior failure payload."""

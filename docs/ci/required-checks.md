@@ -45,6 +45,11 @@ security scans, schema and version checks, license policy, shell checks, and
 repository structure checks. A failure returns to the bounded implementation
 test-fix loop instead of publishing a knowingly red branch.
 
+On macOS, an unavailable optional container runner emits a warning and the
+queue runs the native pre-PR verification command. The output names the runner
+that ran and the reason for the fallback. A failure in native verification
+still returns the item to the bounded test-fix loop.
+
 This local pass cannot run checks whose inputs do not exist until GitHub creates
 the PR. `pr-policy` still validates the live PR body, title, commit subjects,
 and DCO trailers in Actions. The classic matrix contexts and

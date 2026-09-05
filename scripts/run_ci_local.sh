@@ -1,7 +1,9 @@
 #!/bin/bash
 # Run the locally executable Hephaestus CI checks.
 #
-# Project toolchain commands use the same CI container image as GitHub Actions.
+# Project toolchain commands use the same CI container image as GitHub Actions
+# when a usable container engine is available. On macOS, the pre-PR check uses
+# the native toolchain when the optional container runner is unavailable.
 # Supports both Podman (rootless, no SU — preferred) and Docker.
 #
 # Usage:
@@ -65,6 +67,7 @@ CANDIDATE_OBJECTS_CONTAINER=""
 REPOSITORY_OBJECTS_CONTAINER=""
 CI_BUILD_ROOT=""
 CI_RUN_IMAGE=""
+CONTAINER_RUNNER_FAILURE_REASON=""
 
 cleanup_candidate_snapshot() {
     if [ -z "${CANDIDATE_ROOT}" ]; then
@@ -126,26 +129,44 @@ prepare_candidate_snapshot() {
     local repository_objects
 
     cleanup_candidate_snapshot
-    mkdir -p "${PROJECT_ROOT}/build"
-    CANDIDATE_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-candidate.XXXXXX")"
+    if ! mkdir -p "${PROJECT_ROOT}/build"; then
+        log_error "Unable to create the local CI candidate directory."
+        return 1
+    fi
+    CANDIDATE_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-candidate.XXXXXX")" || {
+        log_error "Unable to create the local CI candidate workspace."
+        return 1
+    }
     CANDIDATE_TREE="${CANDIDATE_ROOT}/tree"
-    mkdir -p "${CANDIDATE_TREE}" "${CANDIDATE_ROOT}/objects"
+    if ! mkdir -p "${CANDIDATE_TREE}" "${CANDIDATE_ROOT}/objects"; then
+        log_error "Unable to create the local CI candidate workspace."
+        return 1
+    fi
 
     repository_objects="$(
         git -C "${PROJECT_ROOT}" rev-parse --path-format=absolute --git-path objects
-    )"
+    )" || {
+        log_error "Unable to resolve repository Git objects."
+        return 1
+    }
 
     # Mirror the bytes that a later `git add -A` and commit would publish,
     # including non-ignored untracked files, without touching the real index or
     # object database.
-    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+    if ! GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
         GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
         GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
-        git -C "${PROJECT_ROOT}" read-tree HEAD
-    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        git -C "${PROJECT_ROOT}" read-tree HEAD; then
+        log_error "Unable to prepare the local CI candidate index."
+        return 1
+    fi
+    if ! GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
         GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
         GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
-        git -C "${PROJECT_ROOT}" add -A -- .
+        git -C "${PROJECT_ROOT}" add -A -- .; then
+        log_error "Unable to stage the local CI candidate."
+        return 1
+    fi
 
     # The image allowlist must contain regular files only. checkout-index
     # preserves staged symlinks and ordinary cp would dereference their host
@@ -153,10 +174,13 @@ prepare_candidate_snapshot() {
     # symlink gate runs. Reject symlinks and gitlinks at the alternate-index
     # boundary, before materializing or copying any candidate path.
     candidate_sources="${CANDIDATE_ROOT}/build-sources"
-    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+    if ! GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
         GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
         GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
-        git -C "${PROJECT_ROOT}" ls-files --stage -z -- > "${candidate_sources}"
+        git -C "${PROJECT_ROOT}" ls-files --stage -z -- > "${candidate_sources}"; then
+        log_error "Unable to inspect the local CI candidate."
+        return 1
+    fi
     while IFS=$'\t' read -r -d '' metadata path; do
         mode="${metadata%% *}"
         case "${path}" in
@@ -171,11 +195,14 @@ prepare_candidate_snapshot() {
                 ;;
         esac
     done < "${candidate_sources}"
-    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+    if ! GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
         GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
         GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
         git -C "${PROJECT_ROOT}" \
-        checkout-index --all --prefix="${CANDIDATE_TREE}/"
+        checkout-index --all --prefix="${CANDIDATE_TREE}/"; then
+        log_error "Unable to materialize the local CI candidate."
+        return 1
+    fi
 
     candidate_relative="${CANDIDATE_ROOT#"${PROJECT_ROOT}/"}"
     CANDIDATE_INDEX_CONTAINER="/workspace/${candidate_relative}/index"
@@ -197,17 +224,23 @@ trap cleanup EXIT
 # Container engine detection
 # ============================================================================
 
+report_engine_unavailable() {
+    CONTAINER_RUNNER_FAILURE_REASON="$1"
+    log_error "${CONTAINER_RUNNER_FAILURE_REASON}"
+    log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
+    return 1
+}
+
 detect_engine() {
     if [ -n "${CONTAINER_ENGINE:-}" ]; then
         if ! command -v "${CONTAINER_ENGINE}" &> /dev/null; then
-            log_error "CONTAINER_ENGINE=${CONTAINER_ENGINE} not found in PATH"
-            log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
-            exit 1
+            report_engine_unavailable "CONTAINER_ENGINE=${CONTAINER_ENGINE} not found in PATH"
+            return 1
         fi
         if ! "${CONTAINER_ENGINE}" info >/dev/null 2>&1; then
-            log_error "CONTAINER_ENGINE=${CONTAINER_ENGINE} is unavailable. Start its service."
-            log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
-            exit 1
+            report_engine_unavailable \
+                "CONTAINER_ENGINE=${CONTAINER_ENGINE} is unavailable. Start its service."
+            return 1
         fi
         log_info "Container engine: ${CONTAINER_ENGINE} (from env)"
         return
@@ -220,16 +253,31 @@ detect_engine() {
         CONTAINER_ENGINE="docker"
         log_info "Container engine: docker"
     elif command -v podman &> /dev/null || command -v docker &> /dev/null; then
-        log_error "A container engine is installed but unavailable. Start its service."
-        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
-        exit 1
+        report_engine_unavailable \
+            "A container engine is installed but unavailable. Start its service."
+        return 1
     else
-        log_error "No container engine found. Install podman (recommended) or docker."
+        report_engine_unavailable \
+            "No container engine found. Install podman (recommended) or docker."
         log_error "  Podman: https://podman.io/getting-started/installation"
-        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
-        exit 1
+        return 1
     fi
     export CONTAINER_ENGINE
+}
+
+is_macos() {
+    [ "$(uname -s)" = "Darwin" ]
+}
+
+run_native_pre_pr_checks() {
+    log_warn "Container runner unavailable: ${CONTAINER_RUNNER_FAILURE_REASON}; "\
+        "falling back to native pre-PR verification."
+    log_info "HEPHAESTUS_CI_RUNNER_FALLBACK: ${CONTAINER_RUNNER_FAILURE_REASON}"
+    log_info "Runner: native (uv run pytest tests -q --tb=short)"
+    if ! (cd "${PROJECT_ROOT}" && uv run pytest tests -q --tb=short); then
+        log_error "Native pre-PR verification FAILED."
+        return 1
+    fi
 }
 
 # ============================================================================
@@ -253,31 +301,51 @@ build_ci_image() {
         aarch64|arm64) target_arch="arm64" ;;
         *)
             log_error "Unsupported local CI build architecture: $(uname -m)"
-            exit 1
+            return 1
             ;;
     esac
 
     # Build from the exact publishable candidate bytes. The alternate index
     # excludes ignored local files without mutating the implementer's index.
-    prepare_candidate_snapshot
-    mkdir -p "${PROJECT_ROOT}/build"
-    CI_BUILD_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-build.XXXXXX")"
+    if ! prepare_candidate_snapshot; then
+        return 1
+    fi
+    if ! mkdir -p "${PROJECT_ROOT}/build"; then
+        log_error "Unable to create the local CI build directory."
+        return 1
+    fi
+    CI_BUILD_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-build.XXXXXX")" || {
+        log_error "Unable to create the local CI build workspace."
+        return 1
+    }
     build_context="${CI_BUILD_ROOT}/context"
     image_id_file="${CI_BUILD_ROOT}/image-id"
     CI_RUN_IMAGE="hephaestus-ci:run-$$-${RANDOM}"
-    mkdir -p "${build_context}/ci"
+    if ! mkdir -p "${build_context}/ci"; then
+        log_error "Unable to create the local CI build context."
+        return 1
+    fi
 
     # Do not send the checkout as build context. In particular, ignored local
     # credentials, Git metadata, and unrelated build artifacts must never be
     # readable by the container engine. Keep this allowlist aligned with COPY
     # instructions in ci/Containerfile.
-    cp "${CANDIDATE_TREE}/ci/Containerfile" "${build_context}/ci/Containerfile"
-    cp "${CANDIDATE_TREE}/uv.lock" \
+    if ! cp "${CANDIDATE_TREE}/ci/Containerfile" "${build_context}/ci/Containerfile"; then
+        log_error "Unable to prepare the local CI build context."
+        return 1
+    fi
+    if ! cp "${CANDIDATE_TREE}/uv.lock" \
         "${CANDIDATE_TREE}/pyproject.toml" \
         "${CANDIDATE_TREE}/.pre-commit-config.yaml" \
         "${CANDIDATE_TREE}/README.md" \
-        "${build_context}/"
-    cp -R "${CANDIDATE_TREE}/hephaestus" "${build_context}/hephaestus"
+        "${build_context}/"; then
+        log_error "Unable to prepare the local CI build context."
+        return 1
+    fi
+    if ! cp -R "${CANDIDATE_TREE}/hephaestus" "${build_context}/hephaestus"; then
+        log_error "Unable to prepare the local CI build context."
+        return 1
+    fi
 
     (
         cd "${build_context}"
@@ -290,12 +358,12 @@ build_ci_image() {
             .
     ) || {
         log_error "Failed to build local CI image '${LOCAL_IMAGE}'."
-        exit 1
+        return 1
     }
     CI_IMAGE="$(tr -d '\r\n' < "${image_id_file}")"
     if ! is_immutable_image_id "${CI_IMAGE}"; then
         log_error "Container engine returned an invalid image ID."
-        exit 1
+        return 1
     fi
     log_info "Built local CI image: ${CI_IMAGE}"
 }
@@ -305,26 +373,32 @@ resolve_image_id() {
         "${CONTAINER_ENGINE}" image inspect --format '{{.Id}}' "${LOCAL_IMAGE}"
     )" || {
         log_error "Unable to resolve immutable ID for '${LOCAL_IMAGE}'."
-        exit 1
+        return 1
     }
     CI_IMAGE="$(printf '%s' "${CI_IMAGE}" | tr -d '\r\n')"
     if ! is_immutable_image_id "${CI_IMAGE}"; then
         log_error "Container engine returned an invalid image ID."
-        exit 1
+        return 1
     fi
 }
 
 resolve_image() {
     if [ "${REBUILD}" = "1" ]; then
         log_info "Rebuilding CI image from the current checkout."
-        build_ci_image
+        if ! build_ci_image; then
+            return 1
+        fi
     elif "${CONTAINER_ENGINE}" image exists "${LOCAL_IMAGE}" 2>/dev/null || \
        "${CONTAINER_ENGINE}" images -q "${LOCAL_IMAGE}" 2>/dev/null | grep -q .; then
-        resolve_image_id
+        if ! resolve_image_id; then
+            return 1
+        fi
         log_info "Using local CI image: ${CI_IMAGE}"
     else
         log_warn "Local image '${LOCAL_IMAGE}' not found; building it now."
-        build_ci_image
+        if ! build_ci_image; then
+            return 1
+        fi
     fi
     export CI_IMAGE
 }
@@ -335,7 +409,7 @@ resolve_git_metadata_mount() {
         git -C "${PROJECT_ROOT}" rev-parse --path-format=absolute --git-common-dir
     )" || {
         log_error "Unable to resolve repository Git metadata."
-        exit 1
+        return 1
     }
     GIT_METADATA_MOUNT=()
     case "${common_dir}" in
@@ -549,9 +623,33 @@ run_step() {
     fi
 }
 
-detect_engine
-resolve_image
-resolve_git_metadata_mount
+prepare_container_runner() {
+    if ! detect_engine; then
+        return 1
+    fi
+    if ! resolve_image; then
+        CONTAINER_RUNNER_FAILURE_REASON="Container runner failed to initialize: image resolution failed."
+        log_error "${CONTAINER_RUNNER_FAILURE_REASON}"
+        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-runner-initialization-failed"
+        return 1
+    fi
+    if ! resolve_git_metadata_mount; then
+        CONTAINER_RUNNER_FAILURE_REASON="Container runner failed to initialize: Git metadata preparation failed."
+        log_error "${CONTAINER_RUNNER_FAILURE_REASON}"
+        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-runner-initialization-failed"
+        return 1
+    fi
+}
+
+if ! prepare_container_runner; then
+    if is_macos && [ "${SUBSET}" = "all" ]; then
+        if ! run_native_pre_pr_checks; then
+            exit 1
+        fi
+        exit 0
+    fi
+    exit 1
+fi
 
 log_info "CI subset: ${SUBSET}"
 log_info "Project root: ${PROJECT_ROOT}"
