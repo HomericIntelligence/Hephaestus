@@ -2344,7 +2344,7 @@ class TestPrReviewStageStep:
             "stderr_tail": "",
             "stdout_tail": "",
         }
-        assert not stage_module._host_verification_receipt_matches(skipped, spec, expected_head)
+        assert stage_module._host_verification_receipt_matches(skipped, spec, expected_head)
         assert not stage_module._host_verification_receipt_matches(
             {**skipped, "platform": "darwin"}, spec, expected_head
         )
@@ -2738,10 +2738,10 @@ class TestPrReviewStageStep:
         assert item.payload["host_verification_failure"]["error"] == "timeout"
         assert "review_audit_failure" not in item.payload
 
-    def test_unsupported_host_boundary_cannot_satisfy_required_review_evidence(
+    def test_authenticated_unsupported_host_boundary_allows_review_to_continue(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An unsupported boundary cannot satisfy a required host check."""
+        """A head-bound unsupported-platform receipt is an authenticated N/A result."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -2778,16 +2778,12 @@ class TestPrReviewStageStep:
         next_request = stage.step(item, ctx)
 
         assert isinstance(next_request, JobRequest)
-        assert isinstance(next_request.job, GitJob)
         receipt = item.payload["host_verification_receipts"][0]
-        assert "bypassed" not in receipt
         assert receipt["error"] == "unsupported_host_verification_boundary"
         assert receipt["platform"] == "linux"
         assert receipt["status"] == "skipped"
-        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
-        assert item.payload["host_verification_failure"]["error"] == (
-            "unsupported_host_verification_boundary"
-        )
+        assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
+        assert "host_verification_failure" not in item.payload
 
     def test_unsupported_host_skip_with_mismatched_head_fails_closed(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any

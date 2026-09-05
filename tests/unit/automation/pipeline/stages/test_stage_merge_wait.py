@@ -52,12 +52,14 @@ class _ConditionalGitHub(FakeStageGitHub):
         readiness: dict[str, object] | list[dict[str, object]] | None = None,
         conversation_resolution: bool = True,
         required_checks_green: bool = True,
+        authorization_reviews: tuple[dict[str, object], ...] | None = None,
     ) -> None:
         scripted_states = states or [_open_pr()]
         super().__init__(
             pr_impl_state=labels,
             pr_state=scripted_states[0],
             conversation_resolution=conversation_resolution,
+            authorization_reviews=authorization_reviews,
         )
         self._states = list(scripted_states)
         self._merge_results = list(
@@ -167,7 +169,10 @@ def test_green_exact_head_checks_allow_merge_without_operator_review(
 ) -> None:
     """A current GO label and green exact-head checks can reach the merge."""
     head = "a" * 40
-    github = _ConditionalGitHub(states=[_open_pr(head), _open_pr(head), {"state": "MERGED"}])
+    github = _ConditionalGitHub(
+        states=[_open_pr(head), _open_pr(head), {"state": "MERGED"}],
+        authorization_reviews=(),
+    )
     ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item, head=head), ctx)
