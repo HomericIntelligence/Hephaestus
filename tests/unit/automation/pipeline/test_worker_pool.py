@@ -165,8 +165,16 @@ def test_evidence_receipts_cover_host_lifecycle_jobs(tmp_path: Path) -> None:
         lock_dir=tmp_path,
         evidence_receipt_dir=receipt_dir,
     )
+    revision = "a" * 40
     jobs: list[BuildTestJob | GitJob] = [
-        BuildTestJob("Hephaestus", tmp_path, ("uv", "run", "pytest"), 60, descr="tests"),
+        BuildTestJob(
+            "Hephaestus",
+            tmp_path,
+            ("uv", "run", "pytest"),
+            60,
+            verified_runner_source_revision=revision,
+            descr="tests",
+        ),
         GitJob("Hephaestus", "push", 60, descr="push"),
     ]
     try:
@@ -185,6 +193,8 @@ def test_evidence_receipts_cover_host_lifecycle_jobs(tmp_path: Path) -> None:
     assert all(payload["claim_key"] == "Hephaestus#2519" for payload in payloads)
     assert all(payload["claim_stage"] == "implementation" for payload in payloads)
     assert all(payload["interrupted"] is False for payload in payloads)
+    build_payload = next(payload for payload in payloads if payload["job_type"] == "build_test")
+    assert build_payload["verified_runner_source_revision"] == revision
 
 
 def _executable_path(name: str, *, path: str | None = None) -> str:
@@ -1235,6 +1245,35 @@ class TestWorkerPoolSubmitComplete:
 
         assert result.ok is False
         assert "rc=1" in result.error
+
+    def test_verified_runner_is_resolved_only_at_worker_execution(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """The worker converts a pure runner request to the secured launcher."""
+        revision = "a" * 40
+        command = ("bash", "scripts/run_ci_local.sh", "all", "--rebuild")
+        launcher = ("/usr/bin/python3", "-I", "-c", "secured-launcher")
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=Path("/tmp"),
+            argv=command,
+            timeout_s=60,
+            verified_runner_source_revision=revision,
+        )
+        completed = subprocess.CompletedProcess(launcher, 0, stdout="passed", stderr="")
+
+        with (
+            patch(f"{_WP}.build_verified_runner_argv", return_value=launcher) as build_launcher,
+            patch(f"{_WP}.subprocess.run", return_value=completed) as run,
+        ):
+            result = pool._run_build_test(job)
+
+        build_launcher.assert_called_once_with(command, revision)
+        assert run.call_args.args == (launcher,)
+        assert run.call_args.kwargs["cwd"] == "/tmp"
+        assert result.ok is True
+        assert result.stdout_tail == "passed"
 
     def test_build_test_timeout_returns_error(
         self,

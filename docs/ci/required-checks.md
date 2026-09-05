@@ -30,7 +30,7 @@ an applicable active ruleset.
 ## Queue pre-PR source checks
 
 Before publishing a Hephaestus implementation, the queue runs the fixed command
-`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all`. Rebuilding the
+`bash scripts/run_ci_local.sh all --rebuild`. Rebuilding the
 CI image prevents a prior checkout's dependency environment from weakening the
 gate. Each invocation builds from an explicit allowlisted context, captures its
 own immutable image ID, and runs every container step against that ID; parallel
@@ -52,6 +52,21 @@ integration tests, installed-CLI tests, artifact lifecycle validation,
 security scans, schema and version checks, license policy, shell checks, and
 repository structure checks. A failure returns to the bounded implementation
 test-fix loop instead of publishing a knowingly red branch.
+
+For each platform, the shell reports an approved runner-initialization failure.
+Approved failures are an absent engine, an unavailable engine, and a failed
+no-op container-start probe. The shell exits with code 75 and writes one exact
+terminal protocol record. The queue validates the record. On macOS, the queue
+runs `uv run pytest tests -q --tb=short`. On other platforms, the queue stops
+with `pre_pr_runner_unavailable`. A failure in native verification still
+returns the item to the bounded test-fix loop.
+
+The stage puts only the fixed command and source revision in the build job.
+The closed worker resolves the system executables. Its launcher reads the
+runner and its sourced helper through no-follow directory descriptors. It
+compares both files with the immutable implementation-source tree. It executes
+anonymous snapshots of the verified bytes. A path rename, symlink change, or
+candidate marker cannot grant native-fallback authority.
 
 This local pass cannot run checks whose inputs do not exist until GitHub creates
 the PR. `pr-policy` still validates the live PR body, title, commit subjects,

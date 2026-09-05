@@ -1551,7 +1551,9 @@ The exhaustive classification is maintained in the
  coordinator constructs them from vetted templates
  (`HEPHAESTUS_REQUIRED_CHECK_ARGV` for Hephaestus's automatic required-check
  gate, `PRE_PR_TEST_ARGV` for other repositories' opt-in fallback, and the
- fixed host-review verification registry).
+ fixed host-review verification registry). A non-null
+ `verified_runner_source_revision` keeps launcher construction in the closed
+ worker boundary.
 - [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
  sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
  rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
@@ -1685,7 +1687,7 @@ out-of-band.
 | `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](../hephaestus/automation/agent_stage.py) |
 
 Hephaestus implementation work always runs
-`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all` through the
+`bash scripts/run_ci_local.sh all --rebuild` through the
 [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py)
 test-fix gate before commit, push, and PR creation. The fixed command executes
 the repository's locally executable required source checks and cannot be
@@ -1697,10 +1699,27 @@ worktree's shared Git metadata is mounted read-only at its original absolute
 path so hatch-vcs, tests, and scanners resolve the candidate commit without
 granting container write access to repository metadata.
 
+The implementation stage submits only the fixed command and the source
+revision in a `BuildTestJob`. The closed worker resolves the system
+executables and starts the host launcher. The launcher opens the runner and
+its sourced shell helper with a no-follow path walk. It limits each read to 1
+MiB. It compares the bytes and file modes with the immutable
+implementation-source tree. The launcher then executes anonymous snapshots of
+those exact bytes and closes all descriptors. A changed or unsafe candidate
+runner cannot authorize native fallback.
+
 `--run-pre-pr-tests` remains an opt-in fallback for repositories without an
 automatic profile. Its vetted default is
 `uv run pytest tests -q --tb=short`; programmatic callers can supply
 `PipelineConfig.pre_pr_test_argv` for a different vetted fallback command.
+For the Hephaestus profile, the shell reports an approved runner-initialization
+failure on each platform. Approved failures are an absent engine, an
+unavailable engine, and a failed container-start probe. The shell exits with
+code 75 and writes one exact terminal protocol record. The stage validates the
+complete protocol. On macOS, the stage changes the runner mode and runs the
+fixed native command. On other platforms, the stage stops with
+`pre_pr_runner_unavailable`. A native failure still blocks publication. The
+test receipt uses the stage-owned runner mode and fallback reason.
 GitHub-only checks that need a created PR, especially `pr-policy`, still run
 after publication and remain part of the merge contract.
 
@@ -1714,11 +1733,16 @@ exception through `PATH`.
 
 The loop passes this admitted executable to its worker Git operations and its
 host-owned Mnemosyne binding. Each remote Git command uses an isolated child
-environment and a command-scoped `gh auth git-credential` helper. A missing
-helper or a failed fetch stops the operation. The loop does not continue with a
-stale remote-tracking ref, and its diagnostic does not copy remote command
-output. The summary retains only an allowed remote authentication, identity, or
-transport failure class.
+environment and a command-scoped `gh auth git-credential` helper. The binding
+tries to fast-forward the clean checkout to the trusted default branch. A
+missing helper or an update failure does not block an available local release.
+The binding reads the release version from committed project metadata and
+records the local commit only as provenance. It does not require that commit to
+match a remote branch head. If repository resolution is unavailable, an
+existing clean checkout with the exact canonical origin remains usable. An
+unverified fork does not use this fallback. A missing checkout still requires
+a successful clone. See
+[ADR-0037](adr/0037-version-bound-mnemosyne-checkout.md).
 
 All model options accept `MODEL[:EFFORT]`. The final nonempty colon segment is
 a free-form effort value. The runtime maps it to Codex

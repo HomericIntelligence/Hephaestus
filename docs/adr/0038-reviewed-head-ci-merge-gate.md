@@ -1,4 +1,4 @@
-# ADR-0037: Reviewed-head CI gate authorizes queue merge
+# ADR-0038: Reviewed-head CI gate authorizes queue merge
 
 - Status: Accepted
 - Date: 2026-09-05

@@ -45,7 +45,9 @@ def _binding() -> MnemosyneBindingReceipt:
         root="/tmp/knowledge",
         repository="HomericIntelligence/Mnemosyne",
         default_branch="main",
+        version="3.0.0",
         commit_sha="b" * 40,
+        sync_status="updated",
         trust_basis="canonical upstream",
         athena_contract=_contract().to_dict(),
     )
@@ -116,7 +118,9 @@ def test_default_contract_loader_runs_advise_without_an_agent_harness(tmp_path: 
                 root="/tmp/knowledge",
                 repository="HomericIntelligence/Mnemosyne",
                 default_branch="main",
+                version="3.0.0",
                 commit_sha="b" * 40,
+                sync_status="updated",
                 trust_basis="canonical upstream",
                 athena_contract=contract.to_dict(),
             )

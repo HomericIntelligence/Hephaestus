@@ -16,9 +16,14 @@ from hephaestus.automation.mnemosyne_binding import (
     _origin_matches,
     default_mnemosyne_root,
 )
-from hephaestus.github.mnemosyne_repo import MnemosyneTarget, MnemosyneTrustBasis
+from hephaestus.github.mnemosyne_repo import (
+    MnemosyneResolutionError,
+    MnemosyneTarget,
+    MnemosyneTrustBasis,
+)
 
 SHA = "c" * 40
+AVAILABLE_VERSION = "3.0.0"
 UNSAFE_CONFIG_COMMAND = "config --null --list"
 
 
@@ -28,7 +33,6 @@ def _target() -> MnemosyneTarget:
         slug="HomericIntelligence/Mnemosyne",
         is_fork_of_upstream=False,
         default_branch="main",
-        head_sha=SHA,
         trust_basis=MnemosyneTrustBasis.CANONICAL_UPSTREAM,
     )
 
@@ -73,6 +77,9 @@ class FakeGit:
             "checkout main": _completed(),
             "merge --ff-only origin/main": _completed(),
             "rev-parse HEAD": _completed(stdout=f"{SHA}\n"),
+            f"show {SHA}:pyproject.toml": _completed(
+                stdout=(f'[project]\nname = "Project-Mnemosyne"\nversion = "{AVAILABLE_VERSION}"\n')
+            ),
         }
         return responses[key]
 
@@ -102,7 +109,7 @@ def test_default_root_uses_agent_brain_knowledge(
     assert default_mnemosyne_root() == tmp_path / ".agent_brain" / "knowledge"
 
 
-def test_binding_success_reports_target_revision_and_contract(tmp_path: Path) -> None:
+def test_binding_success_reports_available_version_and_contract(tmp_path: Path) -> None:
     root = tmp_path / "knowledge"
     root.mkdir()
     service = MnemosyneBindingService(
@@ -115,7 +122,9 @@ def test_binding_success_reports_target_revision_and_contract(tmp_path: Path) ->
     receipt = service.bind(contract=_contract())
 
     assert receipt.repository == "HomericIntelligence/Mnemosyne"
+    assert receipt.version == AVAILABLE_VERSION
     assert receipt.commit_sha == SHA
+    assert receipt.sync_status == "updated"
     assert receipt.default_branch == "main"
     assert receipt.trust_basis == "canonical upstream"
     assert receipt.athena_contract["athena_commit"] == "a" * 40
@@ -245,7 +254,7 @@ def test_binding_rejects_url_rewrite_before_authenticated_fetch(tmp_path: Path) 
     assert all(_git_command(call) != ("fetch", "origin") for call in git.calls)
 
 
-def test_binding_classifies_missing_github_login_before_fetch(
+def test_binding_uses_available_version_without_github_login(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path / "knowledge"
@@ -263,10 +272,12 @@ def test_binding_classifies_missing_github_login_before_fetch(
         raising=False,
     )
 
-    with pytest.raises(MnemosyneBindingError) as exc_info:
-        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+    receipt = MnemosyneBindingService(root=root, resolver=_target, git=git).bind(
+        contract=_contract()
+    )
 
-    assert exc_info.value.failure_kind == "remote_git_authentication"
+    assert receipt.version == AVAILABLE_VERSION
+    assert receipt.sync_status == "not_updated"
     assert all(_git_command(call) != ("fetch", "origin") for call in git.calls)
 
 
@@ -287,10 +298,10 @@ def test_binding_redacts_unsafe_config_value(tmp_path: Path) -> None:
     assert sensitive_value not in str(exc_info.value)
 
 
-def test_binding_stops_before_fetch_without_trusted_github_helper(
+def test_binding_uses_available_version_without_trusted_github_helper(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A missing trusted helper stops the bind before remote Git runs."""
+    """A missing trusted helper does not block an available local version."""
     root = tmp_path / "knowledge"
     root.mkdir()
     git = FakeGit()
@@ -301,15 +312,18 @@ def test_binding_stops_before_fetch_without_trusted_github_helper(
         raising=False,
     )
 
-    with pytest.raises(MnemosyneBindingError) as exc_info:
-        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+    receipt = MnemosyneBindingService(root=root, resolver=_target, git=git).bind(
+        contract=_contract()
+    )
 
-    assert exc_info.value.failure_kind == "remote_git_authentication"
+    assert receipt.version == AVAILABLE_VERSION
+    assert receipt.commit_sha == SHA
+    assert receipt.sync_status == "not_updated"
     assert all(_git_command(call) != ("fetch", "origin") for call in git.calls)
 
 
-def test_binding_remote_fetch_failure_does_not_expose_transport_output(tmp_path: Path) -> None:
-    """A remote fetch failure reports a safe error without command output."""
+def test_binding_uses_available_version_when_remote_fetch_fails(tmp_path: Path) -> None:
+    """A remote fetch failure does not block an available local version."""
     root = tmp_path / "knowledge"
     root.mkdir()
     sensitive_value = "transport-sensitive-value"
@@ -321,13 +335,95 @@ def test_binding_remote_fetch_failure_does_not_expose_transport_output(tmp_path:
         }
     )
 
-    with pytest.raises(MnemosyneBindingError) as exc_info:
-        MnemosyneBindingService(root=root, resolver=_target, git=git, remote_git_config=()).bind(
-            contract=_contract()
-        )
+    receipt = MnemosyneBindingService(
+        root=root, resolver=_target, git=git, remote_git_config=()
+    ).bind(contract=_contract())
 
-    assert "fetch failed" in str(exc_info.value)
-    assert sensitive_value not in str(exc_info.value)
+    assert receipt.version == AVAILABLE_VERSION
+    assert receipt.commit_sha == SHA
+    assert receipt.sync_status == "not_updated"
+    assert sensitive_value not in str(receipt.to_dict())
+
+
+def test_binding_uses_available_version_when_fast_forward_fails(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    git = FakeGit(
+        **{
+            "merge --ff-only origin/main": _completed(
+                returncode=1,
+                stderr="not possible to fast-forward",
+            )
+        }
+    )
+
+    receipt = MnemosyneBindingService(
+        root=root, resolver=_target, git=git, remote_git_config=()
+    ).bind(contract=_contract())
+
+    assert receipt.version == AVAILABLE_VERSION
+    assert receipt.commit_sha == SHA
+    assert receipt.sync_status == "not_updated"
+
+
+def test_binding_can_use_available_version_without_sync(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    git = FakeGit()
+
+    receipt = MnemosyneBindingService(
+        root=root, resolver=_target, git=git, remote_git_config=()
+    ).bind(contract=_contract(), sync=False)
+
+    assert receipt.version == AVAILABLE_VERSION
+    assert receipt.sync_status == "not_requested"
+    assert all(_git_command(call) != ("fetch", "origin") for call in git.calls)
+
+
+def test_binding_uses_canonical_available_version_when_resolution_is_offline(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+
+    def unavailable() -> MnemosyneTarget:
+        raise MnemosyneResolutionError("GitHub is unavailable")
+
+    receipt = MnemosyneBindingService(
+        root=root,
+        resolver=unavailable,
+        git=FakeGit(),
+        remote_git_config=(),
+    ).bind(contract=_contract(), sync=False)
+
+    assert receipt.repository == "HomericIntelligence/Mnemosyne"
+    assert receipt.default_branch == "main"
+    assert receipt.version == AVAILABLE_VERSION
+    assert receipt.sync_status == "not_requested"
+
+
+def test_binding_rejects_unverified_fork_when_resolution_is_offline(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+
+    def unavailable() -> MnemosyneTarget:
+        raise MnemosyneResolutionError("GitHub is unavailable")
+
+    git = FakeGit(
+        **{
+            "config --get remote.origin.url": _completed(
+                stdout="https://github.com/another-owner/Mnemosyne.git\n"
+            )
+        }
+    )
+
+    with pytest.raises(MnemosyneResolutionError, match="GitHub is unavailable"):
+        MnemosyneBindingService(
+            root=root,
+            resolver=unavailable,
+            git=git,
+            remote_git_config=(),
+        ).bind(contract=_contract(), sync=False)
 
 
 def test_binding_wrong_origin_does_not_expose_embedded_credential(tmp_path: Path) -> None:
@@ -420,7 +516,6 @@ def test_binding_fails_closed_when_checkout_clone_fails(tmp_path: Path) -> None:
             {UNSAFE_CONFIG_COMMAND: _completed(stdout="core.hooksPath\n.githooks\0")},
             "unsafe Git config",
         ),
-        ({"rev-parse HEAD": _completed(stdout=f"{'d' * 40}\n")}, "revision drift"),
     ],
 )
 def test_binding_rejects_untrusted_checkout_states(
@@ -439,6 +534,53 @@ def test_binding_rejects_untrusted_checkout_states(
 
     with pytest.raises(MnemosyneBindingError, match=match):
         service.bind(contract=_contract())
+
+
+def test_binding_records_local_commit_only_as_version_provenance(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    local_sha = "d" * 40
+    git = FakeGit(
+        **{
+            "rev-parse HEAD": _completed(stdout=f"{local_sha}\n"),
+            f"show {local_sha}:pyproject.toml": _completed(
+                stdout=(f'[project]\nname = "Project-Mnemosyne"\nversion = "{AVAILABLE_VERSION}"\n')
+            ),
+        }
+    )
+
+    receipt = MnemosyneBindingService(
+        root=root,
+        resolver=_target,
+        git=git,
+        remote_git_config=(),
+    ).bind(contract=_contract())
+
+    assert receipt.version == AVAILABLE_VERSION
+    assert receipt.commit_sha == local_sha
+    assert receipt.sync_status == "updated"
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        '[project]\nname = "another-project"\nversion = "3.0.0"\n',
+        '[project]\nname = "project-mnemosyne"\nversion = "not a version"\n',
+        '[tool.example]\nversion = "3.0.0"\n',
+    ],
+)
+def test_binding_rejects_invalid_available_version_metadata(tmp_path: Path, pyproject: str) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    git = FakeGit(**{f"show {SHA}:pyproject.toml": _completed(stdout=pyproject)})
+
+    with pytest.raises(MnemosyneBindingError, match=r"project|version"):
+        MnemosyneBindingService(
+            root=root,
+            resolver=_target,
+            git=git,
+            remote_git_config=(),
+        ).bind(contract=_contract())
 
 
 def test_binding_rejects_symlinked_checkout(tmp_path: Path) -> None:
