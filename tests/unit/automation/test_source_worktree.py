@@ -375,6 +375,43 @@ def test_direct_writer_replaces_owned_attached_source_before_rebinding(
     )
 
 
+def test_direct_writer_preserves_attached_source_with_durable_obligations(
+    tmp_path: Path,
+) -> None:
+    """A stale attached writer with obligations stays preserved."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    manager.add_obligation(9, SourceLane.IMPLEMENTATION, "durable-cleanup")
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(
+            SourceWorkspaceError,
+            match="predecessor has durable obligations",
+        ) as captured:
+            manager.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    recovery = captured.value.recovery
+    assert recovery is not None
+    assert recovery.kind is SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS
+    assert "owning pipeline" in recovery.manual_action
+    assert predecessor.cwd.exists()
+    assert _git(predecessor.cwd, "symbolic-ref", "HEAD") == ("refs/heads/old-writer-branch")
+    receipt = manager._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert receipt is not None
+    assert receipt.obligations == ("durable-cleanup",)
+
+
 def test_direct_writer_checkout_change_after_authorization_has_recovery(
     tmp_path: Path,
 ) -> None:
@@ -398,16 +435,30 @@ def test_direct_writer_checkout_change_after_authorization_has_recovery(
         manager.authorize_direct_implementation_writer_transition(
             9, branch="writer-branch", base_sha=second, handoff=handoff
         )
-        _git(predecessor.cwd, "reset", "--hard", second)
-        with pytest.raises(WorktreeCreationReceiptError) as captured:
-            worktree_manager.create_worktree(
-                9,
-                "writer-branch",
-                base_sha=second,
-                remote_branch_reserved=True,
-                source_lane=SourceLane.IMPLEMENTATION.value,
-                implementation_writer_handoff=handoff,
-            )
+        original_validate = type(handoff)._validate_direct_transition
+
+        def validate_then_change(
+            active_handoff: Any,
+            **kwargs: Any,
+        ) -> None:
+            original_validate(active_handoff, **kwargs)
+            _git(predecessor.cwd, "reset", "--hard", second)
+
+        with patch.object(
+            type(handoff),
+            "_validate_direct_transition",
+            autospec=True,
+            side_effect=validate_then_change,
+        ):
+            with pytest.raises(WorktreeCreationReceiptError) as captured:
+                worktree_manager.create_worktree(
+                    9,
+                    "writer-branch",
+                    base_sha=second,
+                    remote_branch_reserved=True,
+                    source_lane=SourceLane.IMPLEMENTATION.value,
+                    implementation_writer_handoff=handoff,
+                )
 
     assert predecessor.cwd.exists()
     assert captured.value.recovery is not None

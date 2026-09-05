@@ -493,6 +493,21 @@ class SourceWorkspaceManager:
                     receipt_path=receipt_path,
                 ),
             )
+        if old.obligations:
+            raise SourceWorkspaceError(
+                "implementation writer predecessor has durable obligations",
+                recovery=self._recovery(
+                    SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS,
+                    item_number=item_number,
+                    path=expected_path,
+                    receipt_path=receipt_path,
+                    manual_action=(
+                        f"Complete or explicitly clear the durable obligations for {expected_path} "
+                        "through the owning pipeline. Then rerun "
+                        f"issue #{item_number}."
+                    ),
+                ),
+            )
         if not expected_path.exists():
             raise SourceWorkspaceError(
                 f"source workspace receipt path is missing: {expected_path}",
@@ -568,21 +583,6 @@ class SourceWorkspaceManager:
                     item_number=item_number,
                     path=expected_path,
                     receipt_path=receipt_path,
-                ),
-            )
-        if old.obligations:
-            raise SourceWorkspaceError(
-                "implementation writer predecessor has durable obligations",
-                recovery=self._recovery(
-                    SourceWorkspaceRecoveryKind.DURABLE_OBLIGATIONS,
-                    item_number=item_number,
-                    path=expected_path,
-                    receipt_path=receipt_path,
-                    manual_action=(
-                        f"Complete or explicitly clear the durable obligations for {expected_path} "
-                        "through the owning pipeline. Then rerun "
-                        f"issue #{item_number}."
-                    ),
                 ),
             )
         try:

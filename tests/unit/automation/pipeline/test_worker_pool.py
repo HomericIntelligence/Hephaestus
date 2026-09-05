@@ -34,6 +34,7 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -81,6 +82,7 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
+    SourceWorkspaceManager,
     SourceWorkspaceRecovery,
     SourceWorkspaceRecoveryKind,
 )
@@ -4456,6 +4458,118 @@ class TestGitOps:
             "source_workspace_recovery": recovery.to_dict(),
             "direct_scope_reservation": {"branch": "7-auto", "base_sha": pin},
         }
+
+    def test_direct_writer_change_after_authorization_returns_typed_recovery(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A changed authorized predecessor returns an exact recovery action."""
+        repo = tmp_path / "repository"
+        remote = tmp_path / "remote.git"
+        repo.mkdir()
+
+        def git(*args: str, cwd: Path = repo) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        git("init", "-b", "main")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test User")
+        (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-m", "first")
+        first = git("rev-parse", "HEAD")
+        (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+        git("commit", "-am", "second")
+        second = git("rev-parse", "HEAD")
+        subprocess.run(
+            ["git", "init", "--bare", str(remote)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        git("remote", "add", "origin", str(remote))
+        git("push", "--set-upstream", "origin", "main")
+        git("push", "origin", "main:writer-branch")
+        source_manager = SourceWorkspaceManager(repo, repository="test/repo")
+        predecessor = source_manager.prepare(
+            7,
+            SourceLane.IMPLEMENTATION,
+            first,
+            branch="old-writer-branch",
+        )
+        authorize = source_manager.authorize_direct_implementation_writer_transition
+
+        def authorize_then_change(item_number: int, **kwargs: Any) -> None:
+            authorize(item_number, **kwargs)
+            git("reset", "--hard", second, cwd=predecessor.cwd)
+
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "writer-branch",
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": second,
+            },
+        )
+        with (
+            patch.object(
+                pool,
+                "_prepare_direct_scope_worktree",
+                return_value=(second, "writer-branch"),
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
+            ),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+            patch.object(
+                source_manager,
+                "authorize_direct_implementation_writer_transition",
+                side_effect=authorize_then_change,
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        receipt_path = repo / ".git" / "hephaestus-source-workspaces" / "7-impl.json"
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: implementation writer predecessor "
+            "changed after authorization"
+        )
+        assert result.value == {
+            "path": str(predecessor.cwd),
+            WORKTREE_MATERIALIZED_KEY: True,
+            "failure_kind": "source_workspace_ownership",
+            "source_workspace_recovery": {
+                "kind": "unproven_predecessor",
+                "item_number": 7,
+                "path": str(predecessor.cwd),
+                "receipt_path": str(receipt_path),
+                "manual_action": (
+                    f"Preserve {predecessor.cwd}; its checkout changed after authorization. "
+                    "Inspect it before cleanup, then rerun issue #7."
+                ),
+            },
+            "direct_scope_reservation": {
+                "branch": "writer-branch",
+                "base_sha": second,
+            },
+        }
+        assert predecessor.cwd.exists()
 
     def test_create_implementation_source_lane_returns_typed_claim_failure(
         self,

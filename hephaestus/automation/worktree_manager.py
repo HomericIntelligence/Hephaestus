@@ -643,8 +643,12 @@ class WorktreeManager:
                         return existing
                     if source_lane == "impl" and base_sha is not None and worktree_path.exists():
                         if not is_clean_working_tree(worktree_path, timeout=timeout):
-                            raise RuntimeError(
-                                f"deterministic implementation worktree is dirty: {worktree_path}"
+                            raise WorktreeCreationReceiptError(
+                                "implementation writer predecessor changed after authorization",
+                                recovery=self._implementation_writer_recovery(
+                                    issue_number=issue_number,
+                                    worktree_path=worktree_path,
+                                ),
                             )
                         predecessor_evidence = None
                         if direct_predecessor:
@@ -654,23 +658,32 @@ class WorktreeManager:
                                 raise WorktreeCreationReceiptError(
                                     "implementation writer handoff is missing"
                                 )
-                            predecessor_revision = run(
-                                ["git", "rev-parse", "HEAD"],
-                                cwd=worktree_path,
-                                capture_output=True,
-                                **_timeout_kw(timeout),
-                            ).stdout.strip()
-                            predecessor_evidence = (
-                                implementation_writer_handoff._consume_direct_transition(
-                                    path=worktree_path,
-                                    predecessor_revision=predecessor_revision,
-                                    predecessor_branch=self._implementation_writer_branch(
-                                        worktree_path, timeout=timeout
-                                    ),
-                                    branch=branch_name,
-                                    base_sha=base_sha,
+                            try:
+                                predecessor_revision = run(
+                                    ["git", "rev-parse", "HEAD"],
+                                    cwd=worktree_path,
+                                    capture_output=True,
+                                    **_timeout_kw(timeout),
+                                ).stdout.strip()
+                                predecessor_evidence = (
+                                    implementation_writer_handoff._consume_direct_transition(
+                                        path=worktree_path,
+                                        predecessor_revision=predecessor_revision,
+                                        predecessor_branch=self._implementation_writer_branch(
+                                            worktree_path, timeout=timeout
+                                        ),
+                                        branch=branch_name,
+                                        base_sha=base_sha,
+                                    )
                                 )
-                            )
+                            except Exception as exc:
+                                raise WorktreeCreationReceiptError(
+                                    "implementation writer predecessor changed after authorization",
+                                    recovery=self._implementation_writer_recovery(
+                                        issue_number=issue_number,
+                                        worktree_path=worktree_path,
+                                    ),
+                                ) from exc
                         self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
                     else:
                         predecessor_evidence = None
@@ -948,28 +961,22 @@ class WorktreeManager:
                             base_sha=reserved_remote_branch_sha,
                         )
                     except RuntimeError as exc:
-                        receipt_path = (
-                            self.repo_root
-                            / ".git"
-                            / "hephaestus-source-workspaces"
-                            / f"{issue_number}-impl.json"
-                        )
                         raise WorktreeCreationReceiptError(
                             "implementation writer predecessor changed after authorization",
-                            recovery={
-                                "kind": "unproven_predecessor",
-                                "item_number": issue_number,
-                                "path": str(worktree_path),
-                                "receipt_path": str(receipt_path),
-                                "manual_action": (
-                                    f"Preserve {worktree_path}; its checkout changed after "
-                                    "authorization. Inspect it before cleanup, then rerun "
-                                    f"issue #{issue_number}."
-                                ),
-                            },
+                            recovery=self._implementation_writer_recovery(
+                                issue_number=issue_number,
+                                worktree_path=worktree_path,
+                            ),
                         ) from exc
                     else:
                         return True
+                raise WorktreeCreationReceiptError(
+                    "implementation writer predecessor changed after authorization",
+                    recovery=self._implementation_writer_recovery(
+                        issue_number=issue_number,
+                        worktree_path=worktree_path,
+                    ),
+                )
             raise WorktreeCreationReceiptError(
                 "deterministic implementation writer is already registered and preserved"
             )
@@ -990,6 +997,25 @@ class WorktreeManager:
                 "implementation writer branch is an unowned existing branch"
             )
         return False
+
+    def _implementation_writer_recovery(
+        self, *, issue_number: int, worktree_path: Path
+    ) -> dict[str, object]:
+        """Build recovery details for a changed writer checkout."""
+        receipt_path = (
+            self.repo_root / ".git" / "hephaestus-source-workspaces" / f"{issue_number}-impl.json"
+        )
+        return {
+            "kind": "unproven_predecessor",
+            "item_number": issue_number,
+            "path": str(worktree_path.resolve()),
+            "receipt_path": str(receipt_path.resolve()),
+            "manual_action": (
+                f"Preserve {worktree_path}; its checkout changed after authorization. "
+                "Inspect it before cleanup, then rerun "
+                f"issue #{issue_number}."
+            ),
+        }
 
     @staticmethod
     def _implementation_writer_branch(path: Path, *, timeout: int | None) -> str | None:
