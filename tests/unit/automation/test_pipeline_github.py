@@ -2705,11 +2705,15 @@ class TestExactHeadChecks:
         assert call_mock.call_count == 4
 
     def test_rejects_check_run_totals_above_the_safety_ceiling(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """An oversized Check Runs total must fail closed on the first page."""
         adapter.repo = "repo"
         head = "a" * 40
+        caplog.set_level("WARNING")
 
         def fake_gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
             endpoint = args[1]
@@ -2736,6 +2740,7 @@ class TestExactHeadChecks:
 
         assert adapter.required_checks_pass_for_head(head) is False
         assert call_mock.call_count == 1
+        assert f"Check Runs response exceeds the 2000-run safety ceiling for {head}" in caplog.text
 
 
 def _authorization_review_node(
