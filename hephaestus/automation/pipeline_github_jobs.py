@@ -978,13 +978,6 @@ class PipelineGitHubJobRunner:
         if readiness_status is not None:
             return complete(readiness_status, fingerprint=fingerprint)
 
-        try:
-            checks_green = github.required_checks_pass_for_head(request.reviewed_head_sha)
-        except Exception:
-            checks_green = False
-        if checks_green is not True:
-            return complete("required_checks_not_green")
-
         # Read all authority-bearing facts again immediately before the PUT.
         unsafe = conversation_safety(base_branch)
         if unsafe is not None:
@@ -993,6 +986,13 @@ class PipelineGitHubJobRunner:
         admitted = admit()
         if isinstance(admitted, str):
             return complete(admitted)
+
+        try:
+            checks_green = github.required_checks_pass_for_head(request.reviewed_head_sha)
+        except Exception:
+            checks_green = False
+        if checks_green is not True:
+            return complete("required_checks_not_green")
 
         try:
             result = github.merge_pr_if_head(

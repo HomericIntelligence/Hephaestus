@@ -63,8 +63,8 @@ from hephaestus.utils.file_lock import LockUnavailableError
 _BATCH_NONCE = "b" * 32
 
 
-def test_merge_cycle_reads_checks_before_final_admission() -> None:
-    """The conditional merge has no external read after final admission."""
+def test_merge_cycle_reads_checks_after_final_admission() -> None:
+    """The final Check Runs read follows all other admission reads."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
@@ -133,14 +133,85 @@ def test_merge_cycle_reads_checks_before_final_admission() -> None:
         "threads",
         "conversation",
         "readiness",
-        f"checks:{head}",
         "threads",
         "conversation",
         "state:2",
         "label",
+        f"checks:{head}",
         f"merge:{head}",
         "state:3",
     ]
+
+
+def test_changed_checks_after_final_admission_block_conditional_merge() -> None:
+    """A changed final Check Runs result prevents the conditional merge."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    head = "a" * 40
+    events: list[str] = []
+
+    class ChangedChecksGitHub:
+        def __init__(self) -> None:
+            self._state_reads = 0
+
+        def gh_pr_state(self, _pr: int) -> dict[str, object]:
+            self._state_reads += 1
+            events.append(f"state:{self._state_reads}")
+            if self._state_reads == 3:
+                return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
+            return {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            }
+
+        def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+            events.append("label")
+            return True, False
+
+        def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+            events.append("threads")
+            return []
+
+        def base_branch_requires_conversation_resolution(self, _pr: int, _base: str) -> bool:
+            events.append("conversation")
+            return True
+
+        def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+            events.append("readiness")
+            return {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            }
+
+        def required_checks_pass_for_head(self, _head: str) -> bool:
+            events.append("checks")
+            return self._state_reads < 2
+
+        def merge_pr_if_head(self, _pr: int, _head: str) -> SimpleNamespace:
+            events.append("merge")
+            return SimpleNamespace(
+                dry_run=False,
+                malformed=False,
+                transport_error=False,
+                status=200,
+                body={"merged": True},
+            )
+
+    request = RunMergeWaitCycleRequest(
+        pr_number=7,
+        reviewed_head_sha=head,
+        proof_generation=2,
+        declined_readiness_fingerprint=None,
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, ChangedChecksGitHub())
+
+    assert receipt.outcome == "required_checks_not_green"
+    assert "merge" not in events
 
 
 def _authorization(pr_number: int = 7, head_sha: str = "a" * 40) -> MergeAuthorization:
@@ -2632,6 +2703,39 @@ class TestExactHeadChecks:
 
         assert adapter.required_checks_pass_for_head(head) is True
         assert call_mock.call_count == 4
+
+    def test_rejects_check_run_totals_above_the_safety_ceiling(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An oversized Check Runs total must fail closed on the first page."""
+        adapter.repo = "repo"
+        head = "a" * 40
+
+        def fake_gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            endpoint = args[1]
+            page = 1
+            if "&page=" in endpoint:
+                page = int(endpoint.rsplit("page=", 1)[1])
+            run_count = 1 if page == 21 else 100
+            start_id = (page - 1) * 100 + 1
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "total_count": 2001,
+                        "check_runs": [
+                            self._check_run(head, check_run_id=index)
+                            for index in range(start_id, start_id + run_count)
+                        ],
+                    }
+                ),
+            )
+
+        call_mock = MagicMock(side_effect=fake_gh_call)
+        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+
+        assert adapter.required_checks_pass_for_head(head) is False
+        assert call_mock.call_count == 1
 
 
 def _authorization_review_node(

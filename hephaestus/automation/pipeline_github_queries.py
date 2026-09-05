@@ -17,6 +17,8 @@ from .review_journal import (
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _CHECK_RUNS_PAGE_SIZE = 100
+# Limit one exact-head traversal to 2,000 Check Runs.
+_CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 
 
@@ -680,6 +682,13 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             total_count, page_runs = parsed
             if expected_count is None:
                 expected_count = total_count
+                if expected_count > _CHECK_RUNS_MAX_TOTAL_COUNT:
+                    logger.warning(
+                        "Check Runs response exceeds the %d-run safety ceiling for %s",
+                        _CHECK_RUNS_MAX_TOTAL_COUNT,
+                        head_sha,
+                    )
+                    return None
                 if expected_count > len(page_runs):
                     check_run_ids = set()
             elif total_count != expected_count:
