@@ -4100,6 +4100,7 @@ class TestGitOps:
             assert expected_head is not None
             assert expected_head == base_revision
             assert _git(predecessor.cwd, "rev-parse", "HEAD") == expected_head
+            assert _git(predecessor.cwd, "branch", "--show-current") == ""
 
     def test_implementation_source_lane_rejects_unmaterialized_writer(
         self,
