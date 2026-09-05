@@ -18,6 +18,7 @@ from hephaestus.automation.pipeline_github_check_policy import (
     EffectiveMergePolicy,
     RequiredCheck,
 )
+from hephaestus.automation.pipeline_github_ruleset_conditions import ruleset_applies
 
 
 def _response(payload: object) -> SimpleNamespace:
@@ -183,6 +184,28 @@ def test_default_branch_token_matches_only_the_repository_default_branch(
 
     assert policy is not None
     assert any(check.context == "ruleset-ci" for check in policy.required_checks) is applies
+
+
+@pytest.mark.parametrize(
+    ("include", "exclude", "applies"),
+    [
+        (["refs/*"], [], False),
+        (["refs/heads/*"], [], True),
+        (["~ALL"], ["refs/*"], True),
+        (["~ALL"], ["refs/heads/*"], False),
+        (["refs/**/main"], [], True),
+    ],
+)
+def test_ruleset_ref_patterns_use_github_pathname_matching(
+    include: list[str],
+    exclude: list[str],
+    applies: bool,
+) -> None:
+    """Ruleset patterns use GitHub's path-separator-aware match rules."""
+    ruleset = _ruleset()
+    ruleset["conditions"] = {"ref_name": {"include": include, "exclude": exclude}}
+
+    assert ruleset_applies(ruleset, "main", "main") is applies
 
 
 def test_classic_contexts_only_response_is_a_valid_required_check_inventory(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
+from .pipeline_github_ref_patterns import pathname_pattern_matches
 
 _REPOSITORY_SELECTORS = frozenset({"repository_name", "repository_id", "repository_property"})
 _ORGANIZATION_SELECTORS = frozenset(
@@ -149,7 +149,7 @@ def ruleset_applies(
             return ref == default_ref
         if pattern == "~ALL":
             return True
-        return fnmatchcase(ref, pattern)
+        return pathname_pattern_matches(ref, pattern)
 
     return any(matches(pattern) for pattern in includes) and not any(
         matches(pattern) for pattern in excludes
