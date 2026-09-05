@@ -120,6 +120,11 @@ from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
 from ..diagnostics import redact_diagnostic_text
+from ..git_jobs import (
+    DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+    IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+    IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+)
 from ..github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -251,6 +256,37 @@ def _is_valid_dirty_content_snapshot(value: object) -> bool:
             isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
             for digest in value.values()
         )
+    )
+
+
+def _is_sha256(value: object) -> bool:
+    """Return whether a value is one lowercase SHA-256 digest."""
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _is_bounded_inspection_text(value: object, *, max_bytes: int) -> bool:
+    """Return whether inspection text fits its UTF-8 prompt limit."""
+    return isinstance(value, str) and len(value.encode("utf-8", "surrogateescape")) <= max_bytes
+
+
+def _is_valid_dirty_inspection(value: object) -> bool:
+    """Return whether a dirty writer receipt is complete and bounded."""
+    return (
+        isinstance(value, dict)
+        and value.get("outcome") == "dirty"
+        and _is_bounded_inspection_text(
+            value.get("status"),
+            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+        )
+        and _is_bounded_inspection_text(
+            value.get("diff"),
+            max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+        )
+        and isinstance(value.get("changed_file_count"), int)
+        and 0 < value["changed_file_count"] <= DIRTY_SNAPSHOT_CHANGED_FILE_MAX
+        and _is_valid_dirty_content_snapshot(value.get("content_snapshot"))
+        and _is_sha256(value.get("status_sha256"))
+        and _is_sha256(value.get("diff_sha256"))
     )
 
 
@@ -558,13 +594,14 @@ class ImplementationStage(Stage):
     def _restored_remediation_inspection_job(
         item: WorkItem, ctx: StageContext
     ) -> JobRequest | StageOutcome | None:
-        """Return the identity-bound inspection for a restored remediation writer."""
-        if not (
-            item.payload.get("implementation_remediation")
-            and item.payload.get("implementation_writer_restored")
-            and item.worktree
-        ):
+        """Return the inspection that one failed remediation event requires."""
+        if not item.payload.get("remediation_reply_inspection_required"):
             return None
+        if not item.payload.get("implementation_remediation") or not item.worktree:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_reply_writer_identity_invalid",
+            )
         expected_head = item.payload.get("_impl_source_revision")
         if not is_full_commit_sha(expected_head):
             return StageOutcome(
@@ -612,6 +649,17 @@ class ImplementationStage(Stage):
             if not isinstance(inspection, dict):
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
             if inspection.get("outcome") == "failed":
+                failure_kind = inspection.get("failure_kind")
+                if failure_kind not in {"timeout", "git_error", "worker_error"}:
+                    note = (
+                        failure_kind
+                        if isinstance(failure_kind, str) and failure_kind
+                        else "result_invalid"
+                    )
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        f"implementation_reply_inspection_{note}",
+                    )
                 outcome = self._git_retry(item, "remediation writer inspection failed")
                 if outcome.disposition is Disposition.RETRY:
                     item.state = WORKTREE_WAIT
@@ -620,6 +668,7 @@ class ImplementationStage(Stage):
                 inspection.get("branch") == item.branch
                 and inspection.get("worktree_path") == item.worktree
                 and is_full_commit_sha(inspection.get("head_sha"))
+                and inspection.get("head_sha") == item.payload.get("_impl_source_revision")
             )
             if not expected_identity:
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
@@ -627,13 +676,9 @@ class ImplementationStage(Stage):
             item.payload.pop("remediation_writer_inspection_inflight", None)
             if inspection.get("outcome") == "clean":
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
-            if (
-                inspection.get("outcome") != "dirty"
-                or not isinstance(inspection.get("status"), str)
-                or not isinstance(inspection.get("diff"), str)
-                or not _is_valid_dirty_content_snapshot(inspection.get("content_snapshot"))
-            ):
+            if not _is_valid_dirty_inspection(inspection):
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            item.payload.pop("git_error_retries", None)
             item.payload["remediation_writer_inspection"] = dict(inspection)
             return Continue(next_state=REMEDIATION_REPLY_RECOVERY_WAIT)
         if item.payload.pop("source_workspace_ownership_unavailable", None):
@@ -809,13 +854,13 @@ class ImplementationStage(Stage):
         snapshots = item.payload.get("remediation_thread_snapshots")
         diagnostic = item.payload.get("remediation_failure_diagnostic")
         if (
-            not isinstance(inspection, dict)
-            or inspection.get("outcome") != "dirty"
+            not _is_valid_dirty_inspection(inspection)
             or not isinstance(snapshots, list)
             or not snapshots
             or not isinstance(diagnostic, str)
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+        inspection = cast(dict[str, object], inspection)
         content_snapshot = inspection.get("content_snapshot")
         if not _is_valid_dirty_content_snapshot(content_snapshot):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
@@ -847,7 +892,16 @@ class ImplementationStage(Stage):
                 "thread_snapshots": snapshots,
                 "inspection_status": {
                     key: inspection[key]
-                    for key in ("outcome", "branch", "head_sha", "status", "worktree_path")
+                    for key in (
+                        "outcome",
+                        "branch",
+                        "head_sha",
+                        "status",
+                        "status_sha256",
+                        "diff_sha256",
+                        "content_snapshot",
+                        "worktree_path",
+                    )
                     if key in inspection
                 },
                 "diff_text": inspection["diff"],
@@ -1455,6 +1509,31 @@ class ImplementationStage(Stage):
             "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
             "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
         }
+        recovery_inspection = item.payload.get("remediation_writer_inspection")
+        if recovery_inspection is not None:
+            expected_head = (
+                recovery_inspection.get("head_sha")
+                if isinstance(recovery_inspection, dict)
+                else None
+            )
+            expected_content = (
+                recovery_inspection.get("content_snapshot")
+                if isinstance(recovery_inspection, dict)
+                else None
+            )
+            if (
+                not is_full_commit_sha(expected_head)
+                or expected_head != item.payload.get("_impl_source_revision")
+                or not _is_valid_dirty_content_snapshot(expected_content)
+            ):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "implementation_reply_writer_identity_invalid",
+                )
+            kwargs["expected_recovery_head"] = expected_head
+            kwargs["expected_recovery_content_snapshot"] = dict(
+                cast(dict[str, str], expected_content)
+            )
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
         publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(

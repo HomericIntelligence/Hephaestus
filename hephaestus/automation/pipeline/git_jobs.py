@@ -25,6 +25,14 @@ GIT_OPS: frozenset[str] = frozenset(
 
 WORKTREE_MATERIALIZED_KEY = "worktree_materialized"
 
+# These limits bound data from an implementation writer before the data enters
+# coordinator state or an agent prompt.
+IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES = 64 * 1024
+IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES = 256 * 1024
+DIRTY_SNAPSHOT_GIT_MAX_BYTES = 4 * 1024 * 1024
+DIRTY_SNAPSHOT_CONTENT_MAX_BYTES = 8 * 1024 * 1024
+DIRTY_SNAPSHOT_CHANGED_FILE_MAX = 512
+
 
 @dataclass(frozen=True)
 class GitJob:

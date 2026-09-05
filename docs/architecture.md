@@ -1011,7 +1011,7 @@ stateDiagram-v2
     Adopt --> RecoverDirty: reused workspace is dirty
     RecoverDirty --> Prepare: exact COMMIT or STASH recovery succeeds
     RecoverDirty --> Failed: identity, recovery, or postflight check fails
-    Adopt --> ReplyInspection: restored remediation writer
+    Implement --> ReplyInspection: remediation fails after a writer change
     ReplyInspection --> ReplyRecovery: dirty writer
     ReplyInspection --> Failed: clean or invalid writer
     ReplyRecovery --> Implement: one valid exhaustive reply mapping
@@ -1053,14 +1053,20 @@ Architectural contract:
   either branch head. A clean-tree and head postflight must succeed before the
   implementation source revision is rebound. All failures preserve the writer
   worktree and any commit or stash evidence for diagnosis.
-- A restored remediation writer is never assumed clean. The implementation
-  stage first asks the Git worker to inspect the registered repository path,
-  branch, and expected head without changing it. A clean or invalid inspection
-  finishes with `implementation_reply_failed`. A dirty inspection permits one
-  read-only reply-recovery turn with `Read,Glob,Grep`. That turn cannot edit,
-  run Git, publish, call GitHub, or resolve threads. It must produce one valid
-  exhaustive thread-reply mapping before tests, commits, pushes, or review can
-  continue. The stage preserves the writer, snapshots, and diagnostic on every
+- A failed remediation event is the only trigger for reply inspection. A
+  normal restored writer continues to writable remediation. After a failed
+  remediation, the implementation stage asks the Git worker to inspect the
+  registered repository path, branch, and expected head without a change. The
+  worker rejects executable or path-redirection Git configuration before it
+  reads the writer. Fixed byte, file-count, and snapshot limits bound the
+  inspection. A clean, invalid, or oversized inspection finishes with
+  `implementation_reply_failed`. A dirty inspection permits one read-only
+  reply-recovery turn with `Read,Glob,Grep`. That turn cannot edit, run Git,
+  publish, call GitHub, or resolve threads. It must produce one valid exhaustive
+  thread-reply mapping before tests, commits, pushes, or review can continue.
+  The commit worker compares the captured head and content snapshot immediately
+  before the commit. It binds the new head and content snapshot again before
+  the push. The stage preserves the writer, snapshots, and diagnostic on every
   recovery failure.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That

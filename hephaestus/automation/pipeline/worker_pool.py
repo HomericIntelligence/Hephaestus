@@ -15,6 +15,7 @@ import logging
 import os
 import queue as queue_mod
 import re
+import selectors
 import shutil
 import signal
 import stat
@@ -52,6 +53,13 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
     AthenaSkillResult,
+)
+from hephaestus.automation.pipeline.git_jobs import (
+    DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+    DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
+    DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+    IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+    IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
 )
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
@@ -121,13 +129,118 @@ _GIT_LOCK_WAIT_POLL_S = 0.1
 _DIRTY_CONTENT_SNAPSHOT_KEYS = frozenset({"index_sha256", "worktree_sha256", "untracked_sha256"})
 
 
-def _path_content_identity(root: Path, paths_output: str, *, seed: str = "") -> str:
+class _GitInspectionResourceLimitError(RuntimeError):
+    """Raised when untrusted writer data exceeds an inspection bound."""
+
+
+@dataclass(frozen=True)
+class _BoundedGitOutput:
+    """One bounded Git output and its exact full digest."""
+
+    text: str
+    sha256: str
+    byte_count: int
+
+
+@dataclass(frozen=True)
+class _DirtySnapshotEvidence:
+    """Bounded dirty-content identity and changed-file count."""
+
+    snapshot: dict[str, str]
+    changed_file_count: int
+
+
+def _run_bounded_git_output(  # noqa: C901
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    timeout: int,
+    max_bytes: int,
+    retain_text: bool,
+) -> _BoundedGitOutput:
+    """Run Git with bounded memory and return an exact output digest."""
+    process = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        env=_controlled_git_env(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if process.stdout is None or process.stderr is None:  # pragma: no cover
+        process.kill()
+        process.wait()
+        raise RuntimeError("Git output pipes are unavailable")
+    os.set_blocking(process.stdout.fileno(), False)
+    os.set_blocking(process.stderr.fileno(), False)
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    digest = hashlib.sha256()
+    output = bytearray()
+    stderr_tail = bytearray()
+    byte_count = 0
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                process.wait()
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _events in selector.select(timeout=min(remaining, 0.1)):
+                try:
+                    chunk = os.read(key.fd, 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stderr":
+                    stderr_tail.extend(chunk)
+                    if len(stderr_tail) > _TAIL:
+                        del stderr_tail[:-_TAIL]
+                    continue
+                byte_count += len(chunk)
+                if byte_count > max_bytes:
+                    process.kill()
+                    process.wait()
+                    raise _GitInspectionResourceLimitError("Git output limit exceeded")
+                digest.update(chunk)
+                if retain_text:
+                    output.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            process.wait()
+            raise subprocess.TimeoutExpired(argv, timeout)
+        returncode = process.wait(timeout=remaining)
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    text = output.decode("utf-8", errors="surrogateescape") if retain_text else ""
+    if returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode,
+            argv,
+            output=text,
+            stderr=stderr_tail.decode("utf-8", errors="replace"),
+        )
+    return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
+
+
+def _path_content_identity(
+    root: Path,
+    paths_output: str,
+    *,
+    seed_digest: str = "",
+    remaining_content_bytes: list[int] | None = None,
+) -> str:
     """Hash NUL-delimited paths and their current file-system content."""
     digest = hashlib.sha256()
-    encoded_seed = seed.encode("utf-8", errors="surrogateescape")
-    digest.update(b"S")
-    digest.update(len(encoded_seed).to_bytes(8, "big"))
-    digest.update(encoded_seed)
+    digest.update(b"D")
+    digest.update(seed_digest.encode("ascii"))
     for relative in (value for value in paths_output.split("\0") if value):
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
@@ -145,11 +258,19 @@ def _path_content_identity(root: Path, paths_output: str, *, seed: str = "") -> 
         if stat.S_ISLNK(metadata.st_mode):
             digest.update(b"L")
             target = os.fsencode(os.readlink(path))
+            if remaining_content_bytes is not None:
+                remaining_content_bytes[0] -= len(target)
+                if remaining_content_bytes[0] < 0:
+                    raise _GitInspectionResourceLimitError("dirty snapshot content limit exceeded")
             digest.update(len(target).to_bytes(8, "big"))
             digest.update(target)
         elif stat.S_ISREG(metadata.st_mode):
             digest.update(b"F")
             digest.update(metadata.st_size.to_bytes(8, "big"))
+            if remaining_content_bytes is not None:
+                remaining_content_bytes[0] -= metadata.st_size
+                if remaining_content_bytes[0] < 0:
+                    raise _GitInspectionResourceLimitError("dirty snapshot content limit exceeded")
             with path.open("rb") as stream:
                 while block := stream.read(1024 * 1024):
                     digest.update(block)
@@ -159,70 +280,81 @@ def _path_content_identity(root: Path, paths_output: str, *, seed: str = "") -> 
     return digest.hexdigest()
 
 
-def _dirty_worktree_content_snapshot(worktree: Path, *, timeout: int) -> dict[str, str]:
-    """Return NUL-safe identities for index, tracked, and untracked content."""
-    env = _controlled_git_env()
-    index = git_utils.run(
-        ["git", "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"],
+def _dirty_worktree_snapshot_evidence(worktree: Path, *, timeout: int) -> _DirtySnapshotEvidence:
+    """Return bounded identities for index, tracked, and untracked content."""
+    command_prefix = ("git", "-c", "core.fsmonitor=false")
+    index = _run_bounded_git_output(
+        (*command_prefix, "ls-files", "--stage", "-z"),
         cwd=worktree,
         timeout=timeout,
-        env=env,
-    ).stdout
-    tracked_paths = git_utils.run(
-        [
-            "git",
-            "-c",
-            "core.fsmonitor=false",
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=False,
+    )
+    tracked_paths = _run_bounded_git_output(
+        (
+            *command_prefix,
             "diff",
             "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
             "--name-only",
             "-z",
-        ],
+            "HEAD",
+        ),
         cwd=worktree,
         timeout=timeout,
-        env=env,
-    ).stdout
-    tracked_diff = git_utils.run(
-        [
-            "git",
-            "-c",
-            "core.fsmonitor=false",
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=True,
+    )
+    tracked_diff = _run_bounded_git_output(
+        (
+            *command_prefix,
             "diff",
             "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
             "--binary",
             "--full-index",
-        ],
+            "HEAD",
+        ),
         cwd=worktree,
         timeout=timeout,
-        env=env,
-    ).stdout
-    untracked_paths = git_utils.run(
-        [
-            "git",
-            "-c",
-            "core.fsmonitor=false",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=False,
+    )
+    untracked_paths = _run_bounded_git_output(
+        (*command_prefix, "ls-files", "--others", "--exclude-standard", "-z"),
         cwd=worktree,
         timeout=timeout,
-        env=env,
-    ).stdout
-    if not all(
-        isinstance(value, str) for value in (index, tracked_paths, tracked_diff, untracked_paths)
-    ):
-        raise RuntimeError("dirty worktree content snapshot is unavailable")
-    return {
-        "index_sha256": hashlib.sha256(index.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=True,
+    )
+    tracked = tuple(path for path in tracked_paths.text.split("\0") if path)
+    untracked = tuple(path for path in untracked_paths.text.split("\0") if path)
+    changed_file_count = len(set(tracked).union(untracked))
+    if changed_file_count > DIRTY_SNAPSHOT_CHANGED_FILE_MAX:
+        raise _GitInspectionResourceLimitError("dirty snapshot file limit exceeded")
+    remaining_content_bytes = [DIRTY_SNAPSHOT_CONTENT_MAX_BYTES]
+    snapshot = {
+        "index_sha256": index.sha256,
         "worktree_sha256": _path_content_identity(
             worktree,
-            tracked_paths,
-            seed=tracked_diff,
+            tracked_paths.text,
+            seed_digest=tracked_diff.sha256,
+            remaining_content_bytes=remaining_content_bytes,
         ),
-        "untracked_sha256": _path_content_identity(worktree, untracked_paths),
+        "untracked_sha256": _path_content_identity(
+            worktree,
+            untracked_paths.text,
+            remaining_content_bytes=remaining_content_bytes,
+        ),
     }
+    return _DirtySnapshotEvidence(snapshot=snapshot, changed_file_count=changed_file_count)
+
+
+def _dirty_worktree_content_snapshot(worktree: Path, *, timeout: int) -> dict[str, str]:
+    """Return the bounded content identity for one dirty worktree."""
+    return _dirty_worktree_snapshot_evidence(worktree, timeout=timeout).snapshot
 
 
 def _valid_dirty_content_snapshot(value: object) -> TypeGuard[dict[str, str]]:
@@ -1547,7 +1679,7 @@ def _trusted_gh_executable(extra_path_root: Path | None = None) -> str | None:
     )
 
 
-def _unsafe_local_git_config_key(config: str) -> str | None:
+def _unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
     """Return an unsafe repository/worktree config key, if *config* contains one."""
     for entry in config.split("\0"):
         if not entry:
@@ -1557,10 +1689,20 @@ def _unsafe_local_git_config_key(config: str) -> str | None:
         if normalized in {
             "core.askpass",
             "core.attributesfile",
+            "core.excludesfile",
             "core.fsmonitor",
             "core.gitproxy",
+            "core.hookspath",
+            "core.pager",
             "core.sshcommand",
             "core.worktree",
+        }:
+            return key
+        if normalized in {"diff.external", "interactive.difffilter"}:
+            return key
+        if normalized.startswith("diff.") and normalized.rsplit(".", 1)[-1] in {
+            "command",
+            "textconv",
         }:
             return key
         if normalized == "credential.helper" or (
@@ -4531,10 +4673,10 @@ class WorkerPool:
 
         return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
 
-    def _git_inspect_implementation_worktree(self, job: GitJob) -> JobResult:
+    def _git_inspect_implementation_worktree(self, job: GitJob) -> JobResult:  # noqa: C901
         """Inspect an identity-bound writer without changing its contents."""
-        worktree = Path(str(job.kwargs.get("worktree_path") or ""))
-        repo_root = Path(str(job.kwargs.get("repo_root") or ""))
+        raw_worktree = job.kwargs.get("worktree_path")
+        raw_repo_root = job.kwargs.get("repo_root")
         branch = str(job.kwargs.get("branch") or "")
         expected_head = str(job.kwargs.get("expected_head") or "")
 
@@ -4549,25 +4691,51 @@ class WorkerPool:
                 },
             )
 
-        if not branch or not _is_full_commit_sha(expected_head):
-            return fail("invalid_request", "inspection requires branch and exact head")
+        if (
+            not branch
+            or not _is_full_commit_sha(expected_head)
+            or not isinstance(raw_worktree, str)
+            or not raw_worktree
+            or not Path(raw_worktree).is_absolute()
+            or not isinstance(raw_repo_root, str)
+            or not raw_repo_root
+            or not Path(raw_repo_root).is_absolute()
+        ):
+            return fail(
+                "invalid_request",
+                "inspection requires absolute repository and writer paths, branch, and exact head",
+            )
+        worktree = Path(raw_worktree)
+        repo_root = Path(raw_repo_root)
         try:
             confined_root = repo_root.resolve(strict=True)
             confined_worktree = worktree.resolve(strict=True)
         except OSError as exc:
             return fail("worktree_unavailable", str(exc))
         if (
-            worktree.is_symlink()
+            repo_root.is_symlink()
+            or worktree.is_symlink()
+            or not confined_root.is_dir()
+            or not (confined_root / ".git").exists()
             or not confined_worktree.is_dir()
             or not (confined_worktree / ".git").exists()
-            or (
-                confined_worktree != confined_root
-                and confined_root not in confined_worktree.parents
-            )
+            or confined_worktree == confined_root
+            or confined_root not in confined_worktree.parents
         ):
             return fail("worktree_unconfined", "worktree is outside the repository root")
         try:
             env = _controlled_git_env()
+            for checkout in (confined_root, confined_worktree):
+                if preflight_error := _checkout_preflight_error(checkout, job.timeout_s):
+                    return fail("unsafe_git_configuration", preflight_error)
+            canonical_root = git_utils.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=confined_root,
+                timeout=job.timeout_s,
+                env=env,
+            ).stdout.strip()
+            if not canonical_root or Path(canonical_root).resolve(strict=True) != confined_root:
+                return fail("worktree_unconfined", "repository root identity changed")
             listing = git_utils.run(
                 ["git", "-c", "core.fsmonitor=false", "worktree", "list", "--porcelain"],
                 cwd=confined_root,
@@ -4593,32 +4761,63 @@ class WorkerPool:
             ).stdout.strip()
             if head_sha != expected_head or current_branch != branch:
                 return fail("worktree_identity_drift", "worktree branch or head changed")
-            status = git_utils.run(
-                ["git", "-c", "core.fsmonitor=false", "status", "--short"],
+            status_result = _run_bounded_git_output(
+                (
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "status.relativePaths=false",
+                    "status",
+                    "--short",
+                    "--untracked-files=all",
+                    "--no-renames",
+                ),
                 cwd=confined_worktree,
                 timeout=job.timeout_s,
-                env=env,
-            ).stdout
-            diff = git_utils.run(
-                ["git", "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "HEAD"],
+                max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                retain_text=True,
+            )
+            diff_result = _run_bounded_git_output(
+                (
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-renames",
+                    "--binary",
+                    "--full-index",
+                    "HEAD",
+                ),
                 cwd=confined_worktree,
                 timeout=job.timeout_s,
-                env=env,
-            ).stdout
+                max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+                retain_text=True,
+            )
+            status = status_result.text
+            diff = diff_result.text
             receipt: dict[str, object] = {
                 "outcome": "dirty" if status.strip() else "clean",
                 "branch": branch,
                 "head_sha": head_sha,
                 "status": status,
                 "diff": diff,
+                "status_sha256": status_result.sha256,
+                "diff_sha256": diff_result.sha256,
                 "worktree_path": str(confined_worktree),
             }
             if status.strip():
-                receipt["content_snapshot"] = _dirty_worktree_content_snapshot(
+                evidence = _dirty_worktree_snapshot_evidence(
                     confined_worktree,
                     timeout=job.timeout_s,
                 )
+                receipt["content_snapshot"] = evidence.snapshot
+                receipt["changed_file_count"] = evidence.changed_file_count
             return JobResult(ok=True, value=receipt)
+        except _GitInspectionResourceLimitError as exc:
+            return fail("resource_limit_exceeded", str(exc))
         except subprocess.TimeoutExpired as exc:
             return fail("timeout", str(exc))
         except subprocess.CalledProcessError as exc:
@@ -4861,7 +5060,7 @@ class WorkerPool:
         receipt["cause"] = ""
         return JobResult(ok=True, value=receipt)
 
-    def _git_commit_push(self, job: GitJob) -> JobResult:
+    def _git_commit_push(self, job: GitJob) -> JobResult:  # noqa: C901
         """Commit pending changes in a worktree, then push its branch.
 
         Only the keys ``commit_if_changes`` actually accepts are forwarded —
@@ -4882,6 +5081,45 @@ class WorkerPool:
                 ok=False,
                 error="detached reviewer commit publication is unsupported",
             )
+        expected_recovery_head = job.kwargs.get("expected_recovery_head")
+        expected_recovery_snapshot = job.kwargs.get("expected_recovery_content_snapshot")
+        recovery_bound = (
+            expected_recovery_head is not None or expected_recovery_snapshot is not None
+        )
+        worktree = Path(worktree_path)
+        if recovery_bound:
+            if not _is_full_commit_sha(expected_recovery_head) or not (
+                _valid_dirty_content_snapshot(expected_recovery_snapshot)
+            ):
+                return JobResult(ok=False, error="remediation writer binding invalid")
+            current_head = self._read_publish_head(worktree, timeout=job.timeout_s)
+            if isinstance(current_head, JobResult):
+                return current_head
+            if current_head != expected_recovery_head:
+                return JobResult(
+                    ok=False,
+                    error="remediation writer head drift before commit",
+                )
+            try:
+                current_snapshot = _dirty_worktree_content_snapshot(
+                    worktree,
+                    timeout=job.timeout_s,
+                )
+            except (
+                _GitInspectionResourceLimitError,
+                OSError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ):
+                return JobResult(
+                    ok=False,
+                    error="remediation writer content binding unavailable before commit",
+                )
+            if current_snapshot != expected_recovery_snapshot:
+                return JobResult(
+                    ok=False,
+                    error="remediation writer content drift before commit",
+                )
         # ``commit_if_changes`` returns False for a clean worktree.  An agent
         # is instructed to leave its edits uncommitted, but a defensive
         # recovery still recognizes a clean branch that is ahead of its
@@ -4890,7 +5128,7 @@ class WorkerPool:
         # remote head.
         commit_args = (
             int(issue_number),
-            Path(worktree_path),
+            worktree,
             str(job.kwargs.get("agent", "claude")),
         )
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
@@ -4910,12 +5148,12 @@ class WorkerPool:
             publish_state = self._commit_push_requires_publish(
                 job=job,
                 branch=branch,
-                worktree_path=Path(worktree_path),
+                worktree_path=worktree,
             )
             if isinstance(publish_state, JobResult):
                 return publish_state
             if not publish_state:
-                clean_head = self._read_publish_head(Path(worktree_path), timeout=job.timeout_s)
+                clean_head = self._read_publish_head(worktree, timeout=job.timeout_s)
                 if isinstance(clean_head, JobResult):
                     return clean_head
                 return JobResult(
@@ -4924,16 +5162,42 @@ class WorkerPool:
                 )
             status = git_utils.run(
                 ["git", "status", "--porcelain"],
-                cwd=Path(worktree_path),
+                cwd=worktree,
                 capture_output=True,
                 timeout=job.timeout_s,
             )
             if status.stdout.strip():
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
-        scope_retraction = self._verify_scope_retraction(job, Path(worktree_path))
+        scope_retraction = self._verify_scope_retraction(job, worktree)
         if scope_retraction is not None:
             return scope_retraction
-        return self._publish_commit_push(job, branch, Path(worktree_path))
+        if not recovery_bound:
+            return self._publish_commit_push(job, branch, worktree)
+        publication_head = self._read_publish_head(worktree, timeout=job.timeout_s)
+        if isinstance(publication_head, JobResult):
+            return publication_head
+        try:
+            publication_snapshot = _dirty_worktree_content_snapshot(
+                worktree,
+                timeout=job.timeout_s,
+            )
+        except (
+            _GitInspectionResourceLimitError,
+            OSError,
+            RuntimeError,
+            subprocess.SubprocessError,
+        ):
+            return JobResult(
+                ok=False,
+                error="remediation writer content binding unavailable before push",
+            )
+        return self._publish_commit_push(
+            job,
+            branch,
+            worktree,
+            expected_head=publication_head,
+            expected_content_snapshot=publication_snapshot,
+        )
 
     @staticmethod
     def _commit_if_changes_with_controlled_signing(
@@ -5027,37 +5291,80 @@ class WorkerPool:
             )
         return None
 
-    def _publish_commit_push(self, job: GitJob, branch: str, worktree_path: Path) -> JobResult:
+    def _publish_commit_push(
+        self,
+        job: GitJob,
+        branch: str,
+        worktree_path: Path,
+        *,
+        expected_head: str | None = None,
+        expected_content_snapshot: dict[str, str] | None = None,
+    ) -> JobResult:
         """Publish a newly created commit and return its exact immutable SHA."""
         branch = branch or "HEAD"
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
         if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
             return JobResult(ok=False, error="direct scope base pin invalid")
+        publication_bound = expected_head is not None or expected_content_snapshot is not None
+        if publication_bound and (
+            not _is_full_commit_sha(expected_head)
+            or not _valid_dirty_content_snapshot(expected_content_snapshot)
+        ):
+            return JobResult(ok=False, error="remediation publication binding invalid")
         source_sha = self._read_publish_head(worktree_path, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
+        if publication_bound and source_sha != expected_head:
+            return JobResult(ok=False, error="remediation writer head drift before push")
+        if publication_bound:
+            try:
+                current_snapshot = _dirty_worktree_content_snapshot(
+                    worktree_path,
+                    timeout=job.timeout_s,
+                )
+            except (
+                _GitInspectionResourceLimitError,
+                OSError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ):
+                return JobResult(
+                    ok=False,
+                    error="remediation writer content binding unavailable before push",
+                )
+            if current_snapshot != expected_content_snapshot:
+                return JobResult(
+                    ok=False,
+                    error="remediation writer content drift before push",
+                )
 
         revalidate_remote = self._authenticated_remote_revalidator(
             cwd=worktree_path, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
         remote_env, remote_config = revalidate_remote()
         if isinstance(expected_remote_sha, str):
+            strict_push_kwargs: dict[str, Any] = {
+                "timeout": job.timeout_s,
+                "env": remote_env,
+                "remote_config": remote_config,
+            }
+            if publication_bound:
+                strict_push_kwargs["source_sha"] = source_sha
             git_utils.push_branch_if_remote_matches(
                 branch,
                 expected_remote_sha,
                 worktree_path,
-                timeout=job.timeout_s,
-                env=remote_env,
-                remote_config=remote_config,
+                **strict_push_kwargs,
             )
         else:
-            git_utils.push_branch(
-                branch,
-                worktree_path,
-                timeout=job.timeout_s,
-                env=remote_env,
-                remote_config=remote_config,
-            )
+            push_kwargs: dict[str, Any] = {
+                "timeout": job.timeout_s,
+                "env": remote_env,
+                "remote_config": remote_config,
+            }
+            if publication_bound:
+                push_kwargs["source_sha"] = source_sha
+            git_utils.push_branch(branch, worktree_path, **push_kwargs)
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     @staticmethod

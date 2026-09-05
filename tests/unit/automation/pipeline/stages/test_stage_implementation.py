@@ -1609,10 +1609,10 @@ class TestWorktreeAndAdvise:
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
-    def test_remediation_inspects_the_writer_stowed_for_read_only_review(
+    def test_failed_remediation_inspects_the_current_writer_without_restore_marker(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A review handoff inspects its restored writer before remediation."""
+        """A failed remediation inspects its writer without a reviewer restore."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
@@ -1621,7 +1621,7 @@ class TestWorktreeAndAdvise:
         item.payload.update(
             {
                 "implementation_remediation": True,
-                "implementation_writer_restored": True,
+                "remediation_reply_inspection_required": True,
                 "_impl_source_revision": "a" * 40,
             }
         )
@@ -1638,7 +1638,31 @@ class TestWorktreeAndAdvise:
             "expected_head": "a" * 40,
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
-        assert item.payload["implementation_writer_restored"] is True
+        assert item.payload["remediation_reply_inspection_required"] is True
+
+    def test_normal_clean_review_failback_reenters_writable_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A normal review failback does not enter reply-only inspection."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "implementation_remediation": True,
+                "implementation_writer_restored": True,
+                "_impl_source_revision": "a" * 40,
+            }
+        )
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "create_worktree"
+        assert result.job.kwargs["sync_to_remote"] is True
 
     def test_post_review_rebase_reuses_the_writer_stowed_for_read_only_review(
         self, make_ctx: Any, make_work_item: Any
@@ -1684,7 +1708,7 @@ class TestWorktreeAndAdvise:
         item.payload.update(
             {
                 "implementation_remediation": True,
-                "implementation_writer_restored": True,
+                "_impl_source_revision": "a" * 40,
                 "remediation_writer_inspection_inflight": True,
             }
         )
@@ -1699,6 +1723,9 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+change\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "status_sha256": "4" * 64,
+                    "diff_sha256": "5" * 64,
+                    "changed_file_count": 1,
                     "worktree_path": "/tmp/implementation-writer",
                 },
             ),
@@ -1720,7 +1747,7 @@ class TestWorktreeAndAdvise:
         item.payload.update(
             {
                 "implementation_remediation": True,
-                "implementation_writer_restored": True,
+                "_impl_source_revision": "a" * 40,
                 "remediation_writer_inspection_inflight": True,
             }
         )
@@ -1745,6 +1772,93 @@ class TestWorktreeAndAdvise:
             "implementation_reply_failed",
         )
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("status", "x" * (64 * 1024 + 1)),
+            ("diff", "x" * (256 * 1024 + 1)),
+        ],
+    )
+    def test_remediation_inspection_rejects_oversized_prompt_data(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        field: str,
+        value: str,
+    ) -> None:
+        """Writer output cannot put oversized text in an agent prompt."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        inspection = {
+            "outcome": "dirty",
+            "branch": item.branch,
+            "head_sha": "a" * 40,
+            "status": " M module.py\n",
+            "diff": "+change\n",
+            "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            "status_sha256": "4" * 64,
+            "diff_sha256": "5" * 64,
+            "changed_file_count": 1,
+            "worktree_path": item.worktree,
+        }
+        inspection[field] = value
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
+                "remediation_thread_snapshots": [{"id": "thread-1"}],
+                "remediation_failure_diagnostic": "file_change failed",
+                "remediation_writer_inspection": inspection,
+            }
+        )
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
+    def test_remediation_inspection_rejects_a_head_other_than_the_source_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reply mapping cannot bind to a different writer revision."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
+                "remediation_writer_inspection_inflight": True,
+            }
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "outcome": "dirty",
+                    "branch": item.branch,
+                    "head_sha": "b" * 40,
+                    "status": " M module.py\n",
+                    "diff": "+change\n",
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "status_sha256": "4" * 64,
+                    "diff_sha256": "5" * 64,
+                    "changed_file_count": 1,
+                    "worktree_path": item.worktree,
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
     def test_dirty_inspection_uses_one_read_only_validated_reply_job(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1755,6 +1869,7 @@ class TestWorktreeAndAdvise:
         item.payload.update(
             {
                 "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
                 "remediation_thread_snapshots": [
                     {
                         "id": "thread-1",
@@ -1772,6 +1887,9 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+guard\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "status_sha256": "4" * 64,
+                    "diff_sha256": "5" * 64,
+                    "changed_file_count": 1,
                     "worktree_path": "/tmp/implementation-writer",
                 },
             }
@@ -1784,6 +1902,8 @@ class TestWorktreeAndAdvise:
         assert request.job.descr == "recover_remediation_reply"
         assert request.job.allowed_tools == "Read,Glob,Grep"
         assert request.job.sandbox == "read-only"
+        assert request.job.prompt_kwargs["inspection_status"]["status_sha256"] == "4" * 64
+        assert request.job.prompt_kwargs["inspection_status"]["diff_sha256"] == "5" * 64
 
         stage.on_job_done(
             item,
@@ -1799,6 +1919,94 @@ class TestWorktreeAndAdvise:
 
         assert item.attempts["remediation_reply"] == 1
         assert stage.step(item, make_ctx()) == Continue(next_state="TEST_WAIT")
+
+        item.state = "COMMIT_PUSH_WAIT"
+        publish = stage.step(item, make_ctx())
+        assert isinstance(publish, JobRequest)
+        assert isinstance(publish.job, GitJob)
+        assert publish.job.op == "commit_push"
+        assert publish.job.kwargs["expected_recovery_head"] == "a" * 40
+        assert publish.job.kwargs["expected_recovery_content_snapshot"] == (_DIRTY_CONTENT_SNAPSHOT)
+
+    def test_successful_inspection_resets_the_consecutive_git_failure_count(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later Git failure receives a new retry allowance after inspection."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
+                "remediation_writer_inspection_inflight": True,
+                "git_error_retries": GIT_ERROR_RETRY_CAP,
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "outcome": "dirty",
+                    "branch": item.branch,
+                    "head_sha": "a" * 40,
+                    "status": " M module.py\n",
+                    "diff": "+change\n",
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "status_sha256": "4" * 64,
+                    "diff_sha256": "5" * 64,
+                    "changed_file_count": 1,
+                    "worktree_path": item.worktree,
+                },
+            ),
+            make_ctx(),
+        )
+        assert stage.step(item, make_ctx()) == Continue(
+            next_state="REMEDIATION_REPLY_RECOVERY_WAIT"
+        )
+        assert "git_error_retries" not in item.payload
+
+        retry = stage._git_retry(item, "later git failure")
+        assert retry == StageOutcome(Disposition.RETRY, "later git failure")
+        assert item.payload["git_error_retries"] == 1
+
+    def test_inspection_resource_overflow_is_not_retried_or_dispatched(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Oversized writer data terminates without retry amplification."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_writer_inspection_inflight": True,
+                "git_error_retries": 1,
+            }
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={
+                    "outcome": "failed",
+                    "failure_kind": "resource_limit_exceeded",
+                    "cause": "Git output limit exceeded",
+                },
+                error="implementation worktree inspection resource_limit_exceeded",
+            ),
+            make_ctx(),
+        )
+
+        result = stage.step(item, make_ctx())
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_inspection_resource_limit_exceeded",
+        )
+        assert item.payload["git_error_retries"] == 1
 
     def test_recovery_revalidates_persisted_remediation_output(
         self, make_ctx: Any, make_work_item: Any
