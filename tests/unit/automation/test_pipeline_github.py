@@ -2576,21 +2576,68 @@ class TestExactHeadChecks:
     """The merge gate reads complete Check Runs for one commit."""
 
     @staticmethod
+    def _required_check_inventory(*contexts: str) -> SimpleNamespace:
+        """Build one required status-check inventory response."""
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "strict": False,
+                    "contexts": list(contexts),
+                    "checks": [{"context": context, "app_id": None} for context in contexts],
+                }
+            ),
+        )
+
+    @staticmethod
     def _check_run(
         head_sha: str,
         *,
         check_run_id: int = 1,
+        name: str = "required-ci",
         status: str = "completed",
         conclusion: str = "success",
     ) -> dict[str, object]:
         """Build one exact-head Check Run response entry."""
         return {
             "id": check_run_id,
-            "name": "required-ci",
+            "name": name,
             "head_sha": head_sha,
             "status": status,
             "conclusion": conclusion,
         }
+
+    def test_optional_failed_run_does_not_block_successful_required_run(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed optional Check Run cannot block green required checks."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        call_mock = MagicMock(
+            side_effect=[
+                self._required_check_inventory("required-ci"),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 2,
+                            "check_runs": [
+                                self._check_run(head),
+                                self._check_run(
+                                    head,
+                                    check_run_id=2,
+                                    name="optional-ci",
+                                    conclusion="failure",
+                                ),
+                            ],
+                        }
+                    ),
+                ),
+            ]
+        )
+        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+
+        assert adapter.required_checks_pass_for_head(head) is True
 
     def test_accepts_only_complete_successful_runs_for_requested_head(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -2599,24 +2646,41 @@ class TestExactHeadChecks:
         adapter.repo = "repo"
         head = "a" * 40
         call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({"total_count": 1, "check_runs": [self._check_run(head)]}),
-            )
+            side_effect=[
+                self._required_check_inventory("required-ci"),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"total_count": 1, "check_runs": [self._check_run(head)]}),
+                ),
+            ]
         )
         monkeypatch.setattr(transport_mod, "gh_call", call_mock)
 
         assert adapter.required_checks_pass_for_head(head) is True
-        call_mock.assert_called_once_with(
-            [
-                "api",
-                f"/repos/org/repo/commits/{head}/check-runs?per_page=100",
-                "--repo",
-                "org/repo",
-            ],
-            check=False,
-            timeout=120,
-        )
+        assert call_mock.call_args_list == [
+            call(
+                [
+                    "api",
+                    "--method",
+                    "GET",
+                    "/repos/org/repo/branches/main/protection/required_status_checks",
+                    "--repo",
+                    "org/repo",
+                ],
+                check=False,
+                timeout=120,
+            ),
+            call(
+                [
+                    "api",
+                    f"/repos/org/repo/commits/{head}/check-runs?per_page=100",
+                    "--repo",
+                    "org/repo",
+                ],
+                check=False,
+                timeout=120,
+            ),
+        ]
 
     @pytest.mark.parametrize(
         ("returned_head", "status", "conclusion"),
@@ -2641,21 +2705,24 @@ class TestExactHeadChecks:
             transport_mod,
             "gh_call",
             MagicMock(
-                return_value=SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps(
-                        {
-                            "total_count": 1,
-                            "check_runs": [
-                                self._check_run(
-                                    returned_head,
-                                    status=status,
-                                    conclusion=conclusion,
-                                )
-                            ],
-                        }
+                side_effect=[
+                    self._required_check_inventory("required-ci"),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "total_count": 1,
+                                "check_runs": [
+                                    self._check_run(
+                                        returned_head,
+                                        status=status,
+                                        conclusion=conclusion,
+                                    )
+                                ],
+                            }
+                        ),
                     ),
-                )
+                ]
             ),
         )
 
@@ -2670,10 +2737,13 @@ class TestExactHeadChecks:
             transport_mod,
             "gh_call",
             MagicMock(
-                return_value=SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({"total_count": 0, "check_runs": []}),
-                )
+                side_effect=[
+                    self._required_check_inventory("required-ci"),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"total_count": 0, "check_runs": []}),
+                    ),
+                ]
             ),
         )
 
@@ -2702,10 +2772,13 @@ class TestExactHeadChecks:
             transport_mod,
             "gh_call",
             MagicMock(
-                return_value=SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({"total_count": 2, "check_runs": check_runs}),
-                )
+                side_effect=[
+                    self._required_check_inventory("required-ci"),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"total_count": 2, "check_runs": check_runs}),
+                    ),
+                ]
             ),
         )
 
@@ -2727,14 +2800,17 @@ class TestExactHeadChecks:
         ]
         call_mock = MagicMock(
             side_effect=[
-                SimpleNamespace(returncode=0, stdout=json.dumps(response))
-                for response in page_responses
+                self._required_check_inventory("required-ci"),
+                *[
+                    SimpleNamespace(returncode=0, stdout=json.dumps(response))
+                    for response in page_responses
+                ],
             ]
         )
         monkeypatch.setattr(transport_mod, "gh_call", call_mock)
 
         assert adapter.required_checks_pass_for_head(head) is True
-        assert call_mock.call_count == 4
+        assert call_mock.call_count == 5
 
     def test_rejects_check_run_totals_above_the_safety_ceiling(
         self,
@@ -2748,6 +2824,8 @@ class TestExactHeadChecks:
         caplog.set_level("WARNING")
 
         def fake_gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            if "required_status_checks" in args:
+                return self._required_check_inventory("required-ci")
             endpoint = args[1]
             page = 1
             if "&page=" in endpoint:
@@ -2771,7 +2849,7 @@ class TestExactHeadChecks:
         monkeypatch.setattr(transport_mod, "gh_call", call_mock)
 
         assert adapter.required_checks_pass_for_head(head) is False
-        assert call_mock.call_count == 1
+        assert call_mock.call_count == 2
         assert f"Check Runs response exceeds the 2000-run safety ceiling for {head}" in caplog.text
 
 

@@ -40,13 +40,23 @@ def _check_run_page(payload: object, head_sha: str) -> tuple[int, list[object]] 
     return total_count, check_runs
 
 
-def _check_run_snapshot(check_runs: list[object], head_sha: str) -> tuple[object, ...] | None:
+def _check_run_snapshot(
+    check_runs: list[object],
+    head_sha: str,
+    required_names: frozenset[str],
+) -> tuple[object, ...] | None:
     """Return stable identity and status data for a Check Runs traversal."""
-    snapshot: list[tuple[int, str, str, object]] = []
+    snapshot: list[tuple[int, str, str, str, object]] = []
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
             return None
+        name = check_run.get("name")
+        if not isinstance(name, str):
+            logger.warning("Check Run for %s has no valid name", head_sha)
+            return None
+        if name not in required_names:
+            continue
         check_run_id = check_run.get("id")
         if not isinstance(check_run_id, int) or isinstance(check_run_id, bool) or check_run_id <= 0:
             logger.warning("Check Run for %s has no valid identity", head_sha)
@@ -54,12 +64,39 @@ def _check_run_snapshot(check_runs: list[object], head_sha: str) -> tuple[object
         snapshot.append(
             (
                 check_run_id,
+                name,
                 str(check_run.get("status") or "").lower(),
                 str(check_run.get("conclusion") or "").lower(),
                 check_run.get("head_sha"),
             )
         )
     return tuple(sorted(snapshot))
+
+
+def _required_check_runs_pass(
+    check_runs: list[object],
+    head_sha: str,
+    required_names: frozenset[str],
+) -> bool:
+    """Return whether all required names have successful exact-head runs."""
+    saw_success = False
+    matched_names: set[str] = set()
+    for check_run in check_runs:
+        if not isinstance(check_run, dict):
+            return False
+        name = check_run.get("name")
+        if not isinstance(name, str) or name not in required_names:
+            continue
+        if check_run.get("head_sha") != head_sha:
+            logger.warning("Check Run does not match reviewed head %s", head_sha)
+            return False
+        status = str(check_run.get("status") or "").lower()
+        conclusion = str(check_run.get("conclusion") or "").lower()
+        if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
+            return False
+        matched_names.add(name)
+        saw_success = saw_success or conclusion == "success"
+    return matched_names == required_names and saw_success
 
 
 class PipelineGitHubQueries(_PipelineGitHubHost):
@@ -598,18 +635,19 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             return None
 
     def required_checks_pass_for_head(self, head_sha: str) -> bool:
-        """Return whether complete successful Check Runs exist for ``head_sha``.
+        """Return whether required successful Check Runs exist for ``head_sha``.
 
         The endpoint is scoped to the reviewed commit instead of the mutable
-        pull-request ref. GitHub does not mark branch-protection requirements
-        in this response, so every returned Check Run is treated as required.
-        Every run must identify that same commit, must be complete, and must
-        have an allowed conclusion. An empty, malformed, changing, or failed
-        response does not authorize a merge.
+        pull-request ref. The ``main`` protection inventory selects the Check
+        Runs that are required. Each required run must identify that same
+        commit, must be complete, and must have an allowed conclusion. An
+        empty, malformed, changing, missing, or failed required response does
+        not authorize a merge.
         """
         if self._repo_slug is None or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None:
             return False
         try:
+            required_names = self._required_check_names_for_main()
             first = self._check_runs_for_head(head_sha)
         except (
             AttributeError,
@@ -621,10 +659,10 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         ) as exc:
             logger.warning("Check Runs read failed for %s: %s", head_sha, exc)
             return False
-        if first is None or not first:
+        if not required_names or first is None or not first:
             return False
         if len(first) > _CHECK_RUNS_PAGE_SIZE:
-            first_snapshot = _check_run_snapshot(first, head_sha)
+            first_snapshot = _check_run_snapshot(first, head_sha, required_names)
             if first_snapshot is None:
                 return False
             try:
@@ -639,26 +677,40 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             ) as exc:
                 logger.warning("Check Runs stability read failed for %s: %s", head_sha, exc)
                 return False
-            if second is None or _check_run_snapshot(second, head_sha) != first_snapshot:
+            if (
+                second is None
+                or _check_run_snapshot(second, head_sha, required_names) != first_snapshot
+            ):
                 logger.warning("Check Runs changed while reading %s", head_sha)
                 return False
             checks = second
         else:
             checks = first
 
-        saw_success = False
-        for check_run in checks:
-            if not isinstance(check_run, dict):
-                return False
-            if check_run.get("head_sha") != head_sha:
-                logger.warning("Check Run does not match reviewed head %s", head_sha)
-                return False
-            status = str(check_run.get("status") or "").lower()
-            conclusion = str(check_run.get("conclusion") or "").lower()
-            if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
-                return False
-            saw_success = saw_success or conclusion == "success"
-        return saw_success
+        return _required_check_runs_pass(checks, head_sha, required_names)
+
+    def _required_check_names_for_main(self) -> frozenset[str] | None:
+        """Read the exact required status-check names for ``main``."""
+        owner, name = self._owner_name()
+        endpoint = f"/repos/{owner}/{name}/branches/main/protection/required_status_checks"
+        result = self._gh(["api", "--method", "GET", endpoint], check=False)
+        if result.returncode != 0:
+            raise RuntimeError("GitHub returned an error for required status checks")
+        payload = json.loads(result.stdout or "null")
+        if not isinstance(payload, dict):
+            logger.warning("Required status checks response for main is not an object")
+            return None
+        contexts = payload.get("contexts")
+        if not isinstance(contexts, list):
+            logger.warning("Required status checks response for main is malformed")
+            return None
+        required_names: set[str] = set()
+        for context in contexts:
+            if not isinstance(context, str) or not context:
+                logger.warning("Required status checks response for main is malformed")
+                return None
+            required_names.add(context)
+        return frozenset(required_names)
 
     def _check_runs_for_head(self, head_sha: str) -> list[object] | None:
         """Read every Check Runs page for one exact commit."""
