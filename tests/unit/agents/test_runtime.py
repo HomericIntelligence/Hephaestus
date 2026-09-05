@@ -130,6 +130,7 @@ def test_codex_outer_boundary_does_not_resolve_provider_links(tmp_path: Path) ->
 
     with (
         patch("hephaestus.agents.runtime.shutil.which", return_value=str(provider_link)),
+        patch("hephaestus.agents.runtime._verify_codex_automation_capability"),
         patch(
             "hephaestus.agents.runtime.isolated_command", return_value=("sandbox-exec",)
         ) as isolated,
@@ -354,6 +355,25 @@ def test_isolated_codex_session_fails_closed_without_host_boundary(tmp_path: Pat
         )
 
     popen.assert_not_called()
+
+
+def test_codex_automation_capability_rejects_an_unsupported_cli_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An isolated job rejects a provider that cannot prove its required CLI surface."""
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+    monkeypatch.setattr(
+        agent_runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="codex-cli 0.137.9\n", stderr=""
+        ),
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="capability"):
+        agent_runtime._verify_codex_automation_capability(executable, cwd=tmp_path)
 
 
 def test_codex_profile_copies_only_the_auth_bridge_and_admitted_athena(

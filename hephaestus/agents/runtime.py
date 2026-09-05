@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -102,6 +103,7 @@ CODEX_ATHENA_REVISION = "44a22b8dfab986f505a99ce52e8521f645da3e2b"
 CODEX_ATHENA_ARTIFACT_SHA256 = "2c301a67da91b1a5d87116441fc592fc39b9fb86d856fd13e1ef7697348dcac9"
 CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena" / "athena"
 CODEX_AUTOMATION_PERMISSION_PROFILE = "hephaestus-automation"
+CODEX_MIN_AUTOMATION_VERSION = (0, 138, 0)
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
@@ -231,6 +233,48 @@ def requires_plan_scope_guard(agent: str) -> bool:
     return is_codex(agent)
 
 
+def _verify_codex_automation_capability(executable: Path, *, cwd: Path) -> None:
+    """Prove the selected Codex CLI supports the isolated automation contract."""
+    try:
+        version_result = subprocess.run(
+            [str(executable), "--version"],
+            check=False,
+            cwd=cwd,
+            env=build_codex_child_env(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=CODEX_HELP_PROBE_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AgentExecutionError("Codex automation capability probe failed") from exc
+    version_output = version_result.stdout or ""
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version_output)
+    if (
+        version_result.returncode != 0
+        or match is None
+        or tuple(int(part) for part in match.groups()) < CODEX_MIN_AUTOMATION_VERSION
+    ):
+        raise AgentExecutionError("Codex automation capability is unsupported")
+    try:
+        help_result = subprocess.run(
+            [str(executable), "exec", "--help"],
+            check=False,
+            cwd=cwd,
+            env=build_codex_child_env(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=CODEX_HELP_PROBE_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AgentExecutionError("Codex automation capability probe failed") from exc
+    required_flags = ("--config", "--ephemeral", "--output-last-message")
+    help_text = help_result.stdout or ""
+    if help_result.returncode != 0 or any(flag not in help_text for flag in required_flags):
+        raise AgentExecutionError("Codex automation capability is unsupported")
+
+
 def _codex_outer_isolated_command(
     command: list[str], *, cwd: Path, profile_root: Path
 ) -> list[str]:
@@ -254,6 +298,7 @@ def _codex_outer_isolated_command(
         )
     except (MacOSSandboxError, OSError) as exc:
         raise AgentExecutionError("Codex automation host isolation is unavailable") from exc
+    _verify_codex_automation_capability(Path(executable), cwd=cwd)
     return list(wrapped)
 
 
