@@ -73,16 +73,6 @@ class CIDriver:
     """
 
 
-def _setup_logging(verbose: bool = False, log_format: str = "text") -> None:
-    """Configure logging for the CLI.
-
-    Args:
-        verbose: Enable verbose (DEBUG) logging.
-
-    """
-    configure_cli_logging(verbose=verbose, log_format=log_format)
-
-
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for the historical drive-green CLI.
 
@@ -241,7 +231,7 @@ def main() -> int:
     install_sigtstp_only()
     args = _parse_args()
     configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose, args.log_format)
+    configure_cli_logging(verbose=args.verbose, log_format=args.log_format)
     agent = resolve_agent(
         args.agent,
         disable_pi_automation=args.disable_pi_automation,
