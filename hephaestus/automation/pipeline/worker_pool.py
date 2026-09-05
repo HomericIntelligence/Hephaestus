@@ -3861,7 +3861,7 @@ class WorkerPool:
                 error=f"source_workspace_ownership_unavailable: {exc}",
             )
 
-    def _git_create_worktree_with_handoff(
+    def _git_create_worktree_with_handoff(  # noqa: C901
         self,
         job: GitJob,
         source_manager: SourceWorkspaceManager | None,
@@ -3944,6 +3944,29 @@ class WorkerPool:
             kwargs["remote_branch_reserved"] = True
         if implementation_writer_handoff is not None:
             kwargs["implementation_writer_handoff"] = implementation_writer_handoff
+        if (
+            implementation_source_lane
+            and base_sha is not None
+            and source_manager is not None
+            and implementation_writer_handoff is not None
+        ):
+            writer_path = base_dir / source_worktree_name(cast(int, kwargs["issue_number"]), "impl")
+            if writer_path.exists():
+                try:
+                    source_manager.authorize_direct_implementation_writer_transition(
+                        cast(int, kwargs["issue_number"]),
+                        branch=branch_name,
+                        base_sha=base_sha,
+                        handoff=implementation_writer_handoff,
+                    )
+                except SourceWorkspaceError as exc:
+                    return self._creation_receipt_failure(
+                        base_dir=base_dir,
+                        item_number=kwargs.get("issue_number"),
+                        exc=exc,
+                        branch_name=branch_name,
+                        base_sha=base_sha,
+                    )
         created_or_failure = self._create_managed_worktree(
             manager=manager,
             kwargs=kwargs,
