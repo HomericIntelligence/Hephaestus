@@ -4020,6 +4020,13 @@ class TestGitOps:
         assert preserved.revision == predecessor_revision
         assert preserved.detached is True
         assert predecessor.cwd.exists()
+        if mutation == "dirty":
+            assert (predecessor.cwd / "pending-change").read_text(encoding="utf-8") == "preserve\n"
+            assert "?? pending-change" in _git(predecessor.cwd, "status", "--porcelain")
+        elif mutation == "attached":
+            assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == "unexpected-branch"
+        else:
+            assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
 
     def test_implementation_source_lane_rejects_unmaterialized_writer(
         self,
