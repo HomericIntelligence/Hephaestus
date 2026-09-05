@@ -1093,7 +1093,10 @@ class TestGate:
             JobResult(
                 ok=False,
                 error="rebase semantic validation failed: duplicate ADR number 0027",
-                value={"failure_kind": "semantic_validation"},
+                value={
+                    "failure_kind": "semantic_validation",
+                    "rebase_policy": "hephaestus-adr-v1",
+                },
                 stdout_tail="duplicate ADR number 0027",
                 stderr_tail="pytest diagnostics",
             ),
@@ -1102,15 +1105,44 @@ class TestGate:
 
         assert item.payload["rebase_error"] is True
         assert item.payload["rebase_error_kind"] == "semantic_validation"
+        assert item.payload["rebase_error_policy"] == "hephaestus-adr-v1"
         assert item.payload["rebase_error_detail"] == (
             "rebase semantic validation failed: duplicate ADR number 0027"
         )
+        assert "rebase_policy" not in item.payload["rebase_error_detail"]
         assert item.payload["rebase_stdout_tail"] == "duplicate ADR number 0027"
         assert item.payload["rebase_stderr_tail"] == "pytest diagnostics"
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL,
             "rebase semantic validation failed: duplicate ADR number 0027",
         )
+
+    @pytest.mark.parametrize(
+        "policy",
+        ["", "-invalid", "contains space", "x" * 65],
+    )
+    def test_failed_host_rebase_rejects_invalid_policy_diagnostic(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        policy: str,
+    ) -> None:
+        """The stage does not retain an invalid or unbounded policy name."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="host rebase failed",
+                value={"failure_kind": "semantic_validation", "rebase_policy": policy},
+            ),
+            ctx,
+        )
+
+        assert "rebase_error_policy" not in item.payload
 
     def test_failed_host_rebase_redacts_secret_like_tails(
         self, make_ctx: Any, make_work_item: Any

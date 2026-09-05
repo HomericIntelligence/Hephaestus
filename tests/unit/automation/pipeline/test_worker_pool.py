@@ -16,6 +16,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import Future
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, call, patch
@@ -291,8 +292,7 @@ def pool(
     unaffected-layout regression tests below.
     """
     from hephaestus.automation.pipeline.rebase_adr_policy import (
-        REBASE_STRUCTURAL_TEST_ARGV,
-        validate_rebased_adr_tree,
+        select_rebase_policy,
     )
 
     p = WorkerPool(
@@ -300,8 +300,7 @@ def pool(
         shutdown=shutdown_event,
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
-        rebase_adr_validator=validate_rebased_adr_tree,
-        rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+        rebase_policy_selector=partial(select_rebase_policy, "HomericIntelligence"),
     )
     yield p
     p.shutdown()
@@ -2853,7 +2852,11 @@ class TestGitOps:
 
         assert rebase == JobResult(
             ok=True,
-            value={"rebased": False, "published": False, "head_sha": recovered_head},
+            value={
+                "rebased": False,
+                "published": False,
+                "head_sha": recovered_head,
+            },
         )
         remote_head = subprocess.run(
             ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
@@ -5486,7 +5489,10 @@ class TestGitOps:
             fetch_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
         )
         assert result.ok is rebase_clean
-        assert result.value is rebase_clean
+        if rebase_clean:
+            assert result.value is True
+        else:
+            assert result.value is False
         assert result.error == expected_error
 
     def test_remote_git_configuration_preserves_hooks_and_isolates_ssh(
@@ -5822,9 +5828,9 @@ class TestGitOps:
         ]
 
     @staticmethod
-    def _continue_rebase_job(tmp_path: Path) -> GitJob:
+    def _continue_rebase_job(tmp_path: Path, *, repo: str = "Hephaestus") -> GitJob:
         return GitJob(
-            repo="test/repo",
+            repo=repo,
             op="continue_rebase",
             timeout_s=60,
             kwargs={
@@ -5860,53 +5866,7 @@ class TestGitOps:
         assert result.error == "rebase conflict resolution required: agent made no file changes"
         run.assert_not_called()
 
-    def test_rebase_semantic_validation_rejects_duplicate_adr_numbers(
-        self, pool: WorkerPool, tmp_path: Path
-    ) -> None:
-        """A resolved README conflict cannot publish duplicate ADR identities."""
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
-        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
-        (adr_dir / "README.md").write_text(
-            "- [Durable plan review conversations](0027-durable-plan-review-conversations.md)\n"
-            "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
-        )
-
-        result = pool._validate_rebased_tree(tmp_path)
-
-        assert result == JobResult(
-            ok=False,
-            value={"failure_kind": "semantic_validation"},
-            error=(
-                "rebase semantic validation failed: duplicate ADR number 0027 "
-                "(0027-durable-plan-review-conversations.md, "
-                "0027-host-owned-learning-preparation.md)"
-            ),
-        )
-
-    def test_rebase_semantic_validation_rejects_malformed_adr_record(
-        self, pool: WorkerPool, tmp_path: Path
-    ) -> None:
-        """An ADR that bypasses the duplicate check still cannot be published."""
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "0001-first-decision.md").write_text(
-            "# ADR-0001: First decision\n- Status: Accepted\n"
-        )
-        (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
-
-        result = pool._validate_rebased_tree(tmp_path)
-
-        assert result == JobResult(
-            ok=False,
-            value={"failure_kind": "semantic_validation"},
-            error=(
-                "rebase semantic validation failed: malformed ADR record 0001-first-decision.md"
-            ),
-        )
-
-    def test_continue_rebase_does_not_publish_semantically_invalid_tree(
+    def test_continue_rebase_selected_policy_semantic_failure_does_not_publish(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
         """Semantic validation fails closed after Git completes and before push."""
@@ -5915,6 +5875,9 @@ class TestGitOps:
         adr_dir.mkdir(parents=True)
         (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
         (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        structural_test = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        structural_test.parent.mkdir(parents=True)
+        structural_test.write_text("# structural test\n", encoding="utf-8")
         job = self._continue_rebase_job(tmp_path)
         receipt = {
             "conflict_paths": ("x.py",),
@@ -5931,6 +5894,8 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch.object(pool, "_run_immutable_build_test", return_value=JobResult(ok=True)),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
@@ -5938,23 +5903,89 @@ class TestGitOps:
             result = pool._git_continue_rebase(job)
 
         assert result.ok is False
-        assert result.value == {"failure_kind": "semantic_validation"}
+        assert result.value == {
+            "failure_kind": "semantic_validation",
+            "rebase_policy": "hephaestus-adr-v1",
+        }
         assert result.error == (
+            "rebase policy hephaestus-adr-v1 semantic validation failed: "
             "rebase semantic validation failed: duplicate ADR number 0027 "
             "(0027-durable-plan-review-conversations.md, "
             "0027-host-owned-learning-preparation.md)"
         )
         push.assert_not_called()
 
-    def test_continue_rebase_runs_repository_structural_validation_before_publish(
+    def test_continue_rebase_selected_policy_structural_failure_does_not_publish(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """The repository-owned ADR test runs after continuation and before push."""
+        """A selected structural failure stops publication and keeps diagnostics."""
         (tmp_path / "x.py").write_text("resolved\n")
         test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
         test_path.parent.mkdir(parents=True)
         test_path.write_text("# repository-owned structural test\n")
+        failed = JobResult(
+            ok=False,
+            value={"failure_kind": "validation"},
+            error="rc=1",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
         job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="x.py\0")
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=0, stdout="")
+            if argv[:3] == ["git", "rev-list", "--reverse"]:
+                return MagicMock(returncode=0, stdout="c" * 40)
+            if argv[:3] == ["git", "cat-file", "-p"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
+                        "Signed-off-by: Test User <test@example.com>\n"
+                    ),
+                )
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch.object(pool, "_run_immutable_build_test", return_value=failed),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "validation", "rebase_policy": "hephaestus-adr-v1"},
+            error="rebase policy hephaestus-adr-v1 structural validation failed: rc=1",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
+        push.assert_not_called()
+
+    def test_continue_rebase_unconfigured_target_adr_layout_publishes(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An unconfigured target publishes after a valid conflict continuation."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "index.md").write_text("# Index\n", encoding="utf-8")
+        (adr_dir / "0000-template.md").write_text("# Template\n", encoding="utf-8")
+        (adr_dir / "0001-fleet-routing.md").write_text("# Fleet routing\n", encoding="utf-8")
+        job = self._continue_rebase_job(tmp_path, repo="Comet")
         receipt = {
             "conflict_paths": ("x.py",),
             "conflict_snapshot": {"x.py": "after"},
@@ -5986,17 +6017,28 @@ class TestGitOps:
             patch.object(
                 pool,
                 "_run_rebase_structural_validation",
-                create=True,
-                return_value=None,
-            ) as validate,
+                wraps=pool._run_rebase_structural_validation,
+            ) as structural,
+            patch.object(
+                pool, "_validate_rebased_tree", wraps=pool._validate_rebased_tree
+            ) as semantic,
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
             result = pool._git_continue_rebase(job)
 
-        assert result.ok is True
-        validate.assert_called_once_with(tmp_path, timeout=60)
+        assert result == JobResult(
+            ok=True,
+            value={
+                "rebased": True,
+                "published": True,
+                "head_sha": "d" * 40,
+                "rebase_policy": None,
+            },
+        )
+        structural.assert_called_once_with(tmp_path, timeout=60, policy=None)
+        semantic.assert_called_once_with(tmp_path, policy=None)
         push.assert_called_once()
 
     def test_rebase_structural_validation_preserves_bounded_diagnostics(
@@ -6018,44 +6060,20 @@ class TestGitOps:
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch.object(pool, "_run_immutable_build_test", return_value=failed) as run_test,
         ):
-            result = pool._run_rebase_structural_validation(tmp_path, timeout=60)
+            result = pool._run_rebase_structural_validation(
+                tmp_path,
+                timeout=60,
+                policy=pool._select_rebase_policy("Hephaestus"),
+            )
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "validation"},
-            error="rebase structural validation failed",
+            value={"failure_kind": "validation", "rebase_policy": "hephaestus-adr-v1"},
+            error="rebase policy hephaestus-adr-v1 structural validation failed: rc=1",
             stdout_tail="duplicate ADR number 0027",
             stderr_tail="pytest diagnostics",
         )
         run_test.assert_called_once()
-
-    def test_rebase_semantic_validation_unaffected_without_injected_policy(
-        self, shutdown_event: threading.Event, completion_q: CompletionQueue, tmp_path: Path
-    ) -> None:
-        """A different valid ADR layout passes when no repository policy is injected.
-
-        The shared executor must not apply the owning repository's ADR
-        filename/section/README-index contract to another repository.  A
-        policy-free pool leaves a non-4-digit ADR layout with a custom
-        section structure untouched.
-        """
-        policy_free = WorkerPool(
-            size=1,
-            shutdown=shutdown_event,
-            completion_q=completion_q,
-            lock_dir=tmp_path / "locks",
-        )
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "01-fleet-routing.md").write_text(
-            "# ADR-01: Fleet routing\n- Status: Accepted\n- Date: 2026-01-01\n"
-        )
-        (adr_dir / "README.md").write_text("- [Fleet routing](01-fleet-routing.md)\n")
-
-        assert policy_free._validate_rebased_tree(tmp_path) is None
-        assert policy_free._run_rebase_structural_validation(tmp_path, timeout=60) is None
-
-        policy_free.shutdown()
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path
@@ -6321,6 +6339,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
         ):
@@ -6359,6 +6378,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
         ):
@@ -6397,6 +6417,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch.object(
                 pool,
@@ -6424,7 +6445,12 @@ class TestGitOps:
 
         assert result == JobResult(
             ok=True,
-            value={"rebased": True, "published": True, "head_sha": "d" * 40},
+            value={
+                "rebased": True,
+                "published": True,
+                "head_sha": "d" * 40,
+                "rebase_policy": "hephaestus-adr-v1",
+            },
         )
         push.assert_called_once_with(
             "7-auto-impl",

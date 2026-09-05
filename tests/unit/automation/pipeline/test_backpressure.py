@@ -29,31 +29,31 @@ class _RecordingWorkerPool:
         gh_extra_path_root: Path | None = None,
         github_job_runner: Any = None,
         athena_skill_executor: Any = None,
-        rebase_adr_validator: Any = None,
-        rebase_structural_test_argv: Any = None,
+        rebase_policy_selector: Any = None,
         evidence_receipt_dir: Path | None = None,
     ) -> None:
         del lock_dir
-        del rebase_adr_validator, rebase_structural_test_argv
         self.size = size
         self.shutdown_event = shutdown
         self.completion_q = completion_q
         self.gh_extra_path_root = gh_extra_path_root
         self.github_job_runner = github_job_runner
         self.athena_skill_executor = athena_skill_executor
+        self.rebase_policy_selector = rebase_policy_selector
         self.evidence_receipt_dir = evidence_receipt_dir
 
 
 def _config(
     tmp_path: Path,
     *,
+    org: str = "org",
     parallel_repos: int = 2,
     max_workers: int = 3,
     gh_extra_path_root: Path | None = None,
 ) -> PipelineConfig:
     """Build a configuration whose global work capacity is easy to inspect."""
     return PipelineConfig(
-        org="org",
+        org=org,
         repos=["repo-a", "repo-b"],
         parallel_repos=parallel_repos,
         max_workers=max_workers,
@@ -101,6 +101,32 @@ def test_coordinator_passes_extra_gh_root_to_worker_pool(
     coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
     assert coordinator.pool.gh_extra_path_root == tmp_path
+
+
+def test_coordinator_passes_bound_rebase_policy_selector_to_recording_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recording pool receives the selector without a capacity change."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_mod
+
+    monkeypatch.setattr(worker_pool_mod, "WorkerPool", _RecordingWorkerPool)
+    config = _config(tmp_path, org="HomericIntelligence")
+    capacity = config.parallel_repos * config.max_workers
+    coordinator = Coordinator(
+        config,
+        github=FakeStageGitHub(),
+        install_signals=False,
+    )
+
+    assert coordinator.pool.size == capacity
+    assert coordinator.completion_q.maxsize == capacity
+    selector = coordinator.pool.rebase_policy_selector
+    assert callable(selector)
+    policy = selector("Hephaestus")
+    assert policy is not None
+    assert policy.name == "hephaestus-adr-v1"
+    assert selector("Comet") is None
 
 
 def test_admission_rejects_when_global_worker_capacity_is_live(tmp_path: Path) -> None:

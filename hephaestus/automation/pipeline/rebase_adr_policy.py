@@ -13,6 +13,9 @@ import re
 from pathlib import Path
 
 from .job_results import JobResult
+from .rebase_policy import RebaseValidationPolicy
+
+HEPHAESTUS_ADR_REBASE_POLICY_NAME = "hephaestus-adr-v1"
 
 ADR_FILENAME_RE = re.compile(r"^(?P<number>[0-9]{4})-[a-z0-9-]+\.md$")
 ADR_README_LINK_RE = re.compile(r"\(([0-9]{4}-[a-z0-9-]+\.md)\)")
@@ -33,6 +36,14 @@ REBASE_STRUCTURAL_TEST_ARGV = (
     "-q",
     "--tb=short",
 )
+
+
+def select_rebase_policy(org: str, repo: str | None = None) -> RebaseValidationPolicy | None:
+    """Select the exact host policy for one repository identity."""
+    identity = org if repo is None else f"{org}/{repo}"
+    if identity.casefold() != "HomericIntelligence/Hephaestus".casefold():
+        return None
+    return HEPHAESTUS_ADR_REBASE_POLICY
 
 
 def validate_rebased_adr_tree(cwd: Path) -> JobResult | None:
@@ -109,3 +120,10 @@ def validate_rebased_adr_tree(cwd: Path) -> JobResult | None:
             error=f"rebase semantic validation failed: cannot inspect ADR records ({exc})",
         )
     return None
+
+
+HEPHAESTUS_ADR_REBASE_POLICY = RebaseValidationPolicy(
+    name=HEPHAESTUS_ADR_REBASE_POLICY_NAME,
+    semantic_validator=validate_rebased_adr_tree,
+    structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+)

@@ -1904,6 +1904,11 @@ class ImplementationStage(Stage):
         failure_kind = value.get("failure_kind")
         if isinstance(failure_kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", failure_kind):
             item.payload["rebase_error_kind"] = failure_kind
+        policy = value.get("rebase_policy")
+        if isinstance(policy, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", policy):
+            item.payload["rebase_error_policy"] = policy
+        else:
+            item.payload.pop("rebase_error_policy", None)
 
     @staticmethod
     def _record_rebase_conflict(item: WorkItem, result: JobResult) -> None:
