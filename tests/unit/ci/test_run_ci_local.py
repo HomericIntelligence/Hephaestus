@@ -201,6 +201,7 @@ def _run_runner(
     color_environment: dict[str, str] | None = None,
     machine_architecture: str | None = None,
     machine_system: str | None = None,
+    execution_path: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -271,7 +272,7 @@ def _run_runner(
     environment = os.environ | {
         "FAKE_ENGINE_LOG": str(log),
         "FAKE_LICENSE_VIOLATION": "1" if license_violation else "0",
-        "PATH": f"{tmp_path}{os.pathsep}{SYSTEM_PATH}",
+        "PATH": execution_path or f"{tmp_path}{os.pathsep}{SYSTEM_PATH}",
     }
     if engine_name is None:
         environment.pop("CONTAINER_ENGINE", None)
@@ -328,7 +329,22 @@ def test_unavailable_engine_on_macos_does_not_replace_lint(tmp_path: Path) -> No
 
 def test_absent_engine_on_macos_emits_hermetic_handoff(tmp_path: Path) -> None:
     """Engine discovery cannot use an engine from the ambient host path."""
-    result, _ = _run_runner(tmp_path, "all", engine_name=None, machine_system="Darwin")
+    closed_tools = tmp_path / "closed-tools"
+    closed_tools.mkdir()
+    for command in ("bash", "dirname"):
+        executable = shutil.which(command)
+        assert executable is not None
+        (closed_tools / command).symlink_to(executable)
+    closed_path = str(closed_tools)
+    assert shutil.which("podman", path=closed_path) is None
+    assert shutil.which("docker", path=closed_path) is None
+
+    result, _ = _run_runner(
+        tmp_path,
+        "all",
+        engine_name=None,
+        execution_path=closed_path,
+    )
 
     _assert_runner_handoff(result, "container-engine-absent")
 

@@ -294,6 +294,56 @@ HEPHAESTUS_REQUIRED_CHECK_ARGV: tuple[str, ...] = (
     "--rebuild",
 )
 
+#: Host-owned launcher that admits a runner handoff only when the executed
+#: file is the executable blob from the immutable source revision. The
+#: candidate runner still runs its complete suite when its identity differs.
+_HEPHAESTUS_REQUIRED_CHECK_LAUNCHER = r"""
+set -uo pipefail
+trusted_revision="$1"
+runner_shell="$2"
+runner_path="$3"
+shift 3
+trusted_runner=0
+trusted_blob=""
+candidate_blob=""
+trusted_entry=""
+if [[ -n "${trusted_revision}" \
+    && ! -L "${runner_path}" \
+    && -f "${runner_path}" \
+    && -x "${runner_path}" ]]; then
+    trusted_blob="$(
+        GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_NO_REPLACE_OBJECTS=1 \
+        git rev-parse --verify "${trusted_revision}:${runner_path}" 2>/dev/null
+    )" || trusted_blob=""
+    candidate_blob="$(
+        GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_NO_REPLACE_OBJECTS=1 \
+        git hash-object --no-filters -- "${runner_path}" 2>/dev/null
+    )" || candidate_blob=""
+    trusted_entry="$(
+        GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_NO_REPLACE_OBJECTS=1 \
+        git ls-tree "${trusted_revision}" -- "${runner_path}" 2>/dev/null
+    )" || trusted_entry=""
+    if [[ -n "${trusted_blob}" \
+        && "${candidate_blob}" == "${trusted_blob}" \
+        && "${trusted_entry}" == $'100755 blob '"${trusted_blob}"$'\t'"${runner_path}" ]]; then
+        trusted_runner=1
+    fi
+fi
+status=0
+"${runner_shell}" "${runner_path}" "$@" || status=$?
+if [[ "${status}" -eq 75 && "${trusted_runner}" -ne 1 ]]; then
+    printf '%s\n' 'The candidate CI runner cannot authorize native fallback.' >&2
+    exit 1
+fi
+exit "${status}"
+""".strip()
+
 #: The required suite runs CI's formerly parallel jobs serially on a local
 #: host, so it needs a wider bound than one generic pytest invocation.
 HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S = 7200
@@ -310,6 +360,20 @@ def _append_no_commit_reply_warning(reply: str) -> str:
     bounded_suffix = f"\n\n{_TRUNCATED_REPLY_WARNING}{suffix}"
     content_budget = MAX_ADDRESS_REPLY_CHARS - len(bounded_suffix)
     return f"{reply[:content_budget].rstrip()}{bounded_suffix}"
+
+
+def _hephaestus_required_check_job_argv(item: WorkItem) -> tuple[str, ...]:
+    """Return the host-owned launcher and its fixed candidate command."""
+    source_revision = item.payload.get("_impl_source_revision")
+    trusted_revision = source_revision if is_full_commit_sha(source_revision) else ""
+    return (
+        "bash",
+        "-c",
+        _HEPHAESTUS_REQUIRED_CHECK_LAUNCHER,
+        "hephaestus-required-check",
+        trusted_revision,
+        *HEPHAESTUS_REQUIRED_CHECK_ARGV,
+    )
 
 
 def _pre_pr_runner_handoff_reason(result: JobResult) -> str | None:
@@ -1269,18 +1333,21 @@ class ImplementationStage(Stage):
         run_native_fallback = run_hephaestus_pre_pr_checks and native_fallback_authorized
         if run_native_fallback:
             test_argv = PRE_PR_TEST_ARGV
+            receipt_argv = PRE_PR_TEST_ARGV
             test_descr = "pre_pr_tests_native_fallback"
         elif run_hephaestus_pre_pr_checks:
-            test_argv = HEPHAESTUS_REQUIRED_CHECK_ARGV
+            test_argv = _hephaestus_required_check_job_argv(item)
+            receipt_argv = HEPHAESTUS_REQUIRED_CHECK_ARGV
             test_descr = "pre_pr_tests"
             item.payload["pre_pr_runner_mode"] = "container"
             item.payload.pop("pre_pr_fallback_reason", None)
         else:
             test_argv = tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
+            receipt_argv = test_argv
             test_descr = "pre_pr_tests"
             item.payload["pre_pr_runner_mode"] = "configured"
             item.payload.pop("pre_pr_fallback_reason", None)
-        item.payload["test_command"] = shlex.join(test_argv)
+        item.payload["test_command"] = shlex.join(receipt_argv)
         test_job = BuildTestJob(
             repo=item.repo,
             cwd=_worktree_path(item, ctx),
