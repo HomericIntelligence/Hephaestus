@@ -21,12 +21,8 @@ from hephaestus.automation.issue_waves import (
 )
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
-from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import (
-    Continue,
-    JobRequest,
-    StageOutcome,
-)
+from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
+from hephaestus.automation.pipeline.stage_results import Continue, JobRequest
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     _mark_published_plan_pending_review,
