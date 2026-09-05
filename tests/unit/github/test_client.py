@@ -433,9 +433,11 @@ class TestGhCliTimeout:
 
 
 @patch("hephaestus.github.client.time.sleep")
+@patch("hephaestus.github.client.gh_global_throttle_acquire")
 @patch("hephaestus.github.client.run_subprocess")
 def test_removed_per_thread_rate_environment_has_no_effect(
     run_subprocess: Mock,
+    global_throttle: Mock,
     sleep: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -447,6 +449,7 @@ def test_removed_per_thread_rate_environment_has_no_effect(
     gh_call(["api", "rate_limit"], max_retries=1)
 
     sleep.assert_not_called()
+    assert global_throttle.call_count == 2
 
 
 class TestGhCallPublicExports:

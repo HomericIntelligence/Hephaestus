@@ -129,6 +129,7 @@ def test_codex_outer_boundary_does_not_resolve_provider_links(tmp_path: Path) ->
     profile.mkdir()
 
     with (
+        patch("hephaestus.agents.runtime.platform.system", return_value="Darwin"),
         patch("hephaestus.agents.runtime.shutil.which", return_value=str(provider_link)),
         patch("hephaestus.agents.runtime._verify_codex_automation_capability"),
         patch(
