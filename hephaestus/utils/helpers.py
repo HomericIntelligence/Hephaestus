@@ -166,6 +166,13 @@ def _process_group_exists(pgid: int) -> bool:
     return True
 
 
+def _timeout_stream_text(value: str | bytes | None) -> str:
+    """Convert partial timeout output to text."""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
 def _stop_process_group(process: subprocess.Popen[str]) -> tuple[str, str]:
     """Stop an owned process group and reap its direct child."""
     pgid = process.pid
@@ -182,10 +189,18 @@ def _stop_process_group(process: subprocess.Popen[str]) -> tuple[str, str]:
             os.killpg(pgid, signal.SIGKILL)
     try:
         return process.communicate(timeout=_PROCESS_GROUP_TERMINATION_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
+        stdout = _timeout_stream_text(error.output)
+        stderr = _timeout_stream_text(error.stderr)
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                with suppress(OSError):
+                    pipe.close()
         with suppress(ProcessLookupError, OSError):
             process.kill()
-        return process.communicate()
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_PROCESS_GROUP_TERMINATION_GRACE_SECONDS)
+        return stdout, stderr
 
 
 def _format_cmd_for_log(cmd: list[str]) -> str:

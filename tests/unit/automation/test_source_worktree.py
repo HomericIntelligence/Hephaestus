@@ -354,12 +354,128 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
             pass
         assert child_pid.exists()
         assert heartbeat.exists()
+        pid, _pgid = (int(value) for value in child_pid.read_text(encoding="utf-8").split())
+        heartbeat_size = heartbeat.stat().st_size
+        time.sleep(0.15)
+        assert heartbeat.stat().st_size == heartbeat_size
+        child_deadline = monotonic() + 1.0
+        while monotonic() < child_deadline:
+            status_path = Path("/proc") / str(pid) / "stat"
+            if status_path.exists():
+                try:
+                    if status_path.read_text().split()[2] in {"X", "Z"}:
+                        break
+                except FileNotFoundError:
+                    break
+            else:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            time.sleep(0.01)
+        else:
+            pytest.fail("the timed-out Git child process is still running")
+    finally:
+        if child_pid.exists():
+            pid = int(child_pid.read_text(encoding="utf-8").split()[0])
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_bounded_prepare_releases_locks_when_a_pipe_holding_child_escapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Git timeout stays bounded when a child escapes its process group."""
+    if not hasattr(os, "killpg"):
+        pytest.skip("process-group signals are not available")
+
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    child_pid = tmp_path / "escaped-child.pid"
+    heartbeat = tmp_path / "escaped-child.heartbeat"
+    fake_git = fake_bin / "git"
+    child_code = (
+        "import os, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(child_pid)!r}, 'w').write(str(os.getpid())); "
+        f"stream = open({str(heartbeat)!r}, 'ab', buffering=0); "
+        "[(stream.write(b'x'), os.write(1, b'x'), time.sleep(0.02)) "
+        "for _ in iter(int, 1)]"
+    )
+    fake_git.write_text(
+        f"""#!{sys.executable}
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+if sys.argv[1:3] == ["worktree", "add"]:
+    subprocess.Popen(
+        [sys.executable, "-c", {child_code!r}],
+        start_new_session=True,
+    )
+    while not Path({str(child_pid)!r}).exists() or not Path({str(heartbeat)!r}).exists():
+        time.sleep(0.01)
+    time.sleep(4)
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    parent_path = os.environ.get("PATH", os.defpath)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{parent_path}")
+    monotonic = time.monotonic
+    started = monotonic()
+
+    try:
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            manager.prepare_bounded(
+                42,
+                SourceLane.REVIEW,
+                second,
+                deadline=_PreparationDeadline(started + 0.5, monotonic),
+            )
+
+        assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+        assert monotonic() - started < 2.5
+        with file_lock(
+            manager._lane_lock_path(42, SourceLane.REVIEW),
+            blocking=False,
+            require_exclusive=True,
+        ):
+            pass
+        assert child_pid.exists()
+        assert heartbeat.exists()
+        pid = int(child_pid.read_text(encoding="utf-8"))
+        child_deadline = monotonic() + 1.0
+        while monotonic() < child_deadline:
+            status_path = Path("/proc") / str(pid) / "stat"
+            if status_path.exists():
+                try:
+                    if status_path.read_text().split()[2] in {"X", "Z"}:
+                        break
+                except FileNotFoundError:
+                    break
+            else:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            time.sleep(0.01)
+        else:
+            pytest.fail("the escaped Git child process is still running")
         heartbeat_size = heartbeat.stat().st_size
         time.sleep(0.15)
         assert heartbeat.stat().st_size == heartbeat_size
     finally:
         if child_pid.exists():
-            pid = int(child_pid.read_text(encoding="utf-8").split()[0])
+            pid = int(child_pid.read_text(encoding="utf-8"))
             with suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
 
