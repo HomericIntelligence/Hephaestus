@@ -21,9 +21,11 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 When every receipt has `ok: true` and `status: passed` for the reviewed
 `head_sha`, treat the fixed host plan as local execution evidence. A receipt
 with `status: skipped`, the exact unsupported-platform reason, and a non-macOS
-`platform` is not local execution evidence and is an evidence gap. Do NOT run
-local format, lint, type, or test commands in this read-only sandbox. Any
-missing, skipped, or failed receipt does not satisfy the fixed host plan.
+`platform` is an authenticated N/A result. It is not local execution evidence,
+but it is not a failed or missing receipt and does not stop the review. A
+mismatched or unauthenticated skip fails closed. Do NOT run local format, lint,
+type, or test commands in this read-only sandbox. Any missing or failed receipt
+does not satisfy the fixed host plan.
 
 ---
 

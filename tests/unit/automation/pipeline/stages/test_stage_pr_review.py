@@ -2354,6 +2354,12 @@ class TestPrReviewStageStep:
         assert not stage_module._host_verification_receipt_matches(
             {**skipped, "platform": ""}, spec, expected_head
         )
+        assert not stage_module._host_verification_receipt_matches(
+            {**skipped, "error": ""}, spec, expected_head
+        )
+        assert not stage_module._host_verification_receipt_matches(
+            {**skipped, "immutable_source": True}, spec, expected_head
+        )
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any

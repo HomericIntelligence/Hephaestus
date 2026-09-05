@@ -13,17 +13,23 @@ logger = logging.getLogger(__name__)
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _CHECK_RUNS_PAGE_SIZE = 100
-# Limit one exact-head traversal to 2,000 Check Runs.
 _CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
+_RULES_PAGE_SIZE = 100
+_RULES_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_ANY_APP_ID = -1
 _RequiredCheck = tuple[str, int | None]
 
 
-def _valid_app_id(value: object) -> int | None:
-    """Return a valid nullable GitHub App ID."""
+def _valid_app_id(value: object, *, allow_wildcard: bool = False) -> int | None:
+    """Return a valid GitHub App ID, or return ``None``."""
     if value is None:
         return None
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and (value > 0 or (allow_wildcard and value == _ANY_APP_ID))
+    ):
         return value
     raise ValueError("GitHub App ID is malformed")
 
@@ -52,10 +58,13 @@ def _check_run_required_matches(
     except ValueError:
         logger.warning("Check Run for %s has no valid app identity", head_sha)
         return None
+    if app_id is None:
+        logger.warning("Check Run for %s has no valid app identity", head_sha)
+        return None
     return frozenset(
         requirement
         for requirement in named_requirements
-        if requirement[1] is None or requirement[1] == app_id
+        if requirement[1] in (None, _ANY_APP_ID) or requirement[1] == app_id
     )
 
 
@@ -197,12 +206,45 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         classic_endpoint = f"/repos/{owner}/{name}/branches/main/protection/required_status_checks"
         rules_endpoint = f"/repos/{owner}/{name}/rules/branches/main"
         classic = self._gh(["api", "--method", "GET", classic_endpoint], check=False)
-        rules = self._gh(["api", "--method", "GET", rules_endpoint], check=False)
-        if classic.returncode != 0 or rules.returncode != 0:
+        if classic.returncode != 0:
             raise RuntimeError("GitHub returned an error for required status checks")
-        return _classic_required_checks(classic.stdout or "null") | _ruleset_required_checks(
-            rules.stdout or "null"
-        )
+        rules = self._rules_for_main(rules_endpoint)
+        classic_checks = _classic_required_checks(classic.stdout or "null")
+        return classic_checks | _ruleset_required_checks(json.dumps(rules))
+
+    def _rules_for_main(self, endpoint: str) -> list[object]:
+        """Read one complete and stable active-rules snapshot for ``main``."""
+        first = self._rules_for_main_traversal(endpoint)
+        if len(first) < _RULES_PAGE_SIZE:
+            return first
+        second = self._rules_for_main_traversal(endpoint)
+        if second != first:
+            raise RuntimeError("GitHub active rules changed while reading main")
+        return second
+
+    def _rules_for_main_traversal(self, endpoint: str) -> list[object]:
+        """Read every active-rules page for ``main`` or raise."""
+        rules: list[object] = []
+        page_fingerprints: set[str] = set()
+        page = 1
+        while True:
+            page_endpoint = f"{endpoint}?per_page={_RULES_PAGE_SIZE}&page={page}"
+            result = self._gh(["api", "--method", "GET", page_endpoint], check=False)
+            if result.returncode != 0:
+                raise RuntimeError("GitHub returned an error for active rules")
+            payload = json.loads(result.stdout or "null")
+            if not isinstance(payload, list) or len(payload) > _RULES_PAGE_SIZE:
+                raise ValueError("Active rules response for main has a malformed page")
+            fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            if fingerprint in page_fingerprints:
+                raise RuntimeError("GitHub active-rules pagination repeated a page")
+            page_fingerprints.add(fingerprint)
+            rules.extend(payload)
+            if len(rules) > _RULES_MAX_TOTAL_COUNT:
+                raise RuntimeError("GitHub active rules exceed the safety ceiling")
+            if len(payload) < _RULES_PAGE_SIZE:
+                return rules
+            page += 1
 
     def _check_runs_for_head(self, head_sha: str) -> list[object] | None:
         """Read every Check Runs page for one exact commit."""
@@ -263,7 +305,7 @@ def _classic_required_checks(payload_text: str) -> frozenset[_RequiredCheck]:
     if not isinstance(payload, dict):
         raise ValueError("Required status checks response for main is not an object")
     contexts = payload.get("contexts")
-    checks = payload.get("checks")
+    checks = payload.get("checks", [])
     if not isinstance(contexts, list) or not isinstance(checks, list):
         raise ValueError("Required status checks response for main is malformed")
     required_checks: set[_RequiredCheck] = set()
@@ -276,7 +318,7 @@ def _classic_required_checks(payload_text: str) -> frozenset[_RequiredCheck]:
             raise ValueError("Required status checks response for main is malformed")
         context = check.get("context")
         try:
-            app_id = _valid_app_id(check.get("app_id"))
+            app_id = _valid_app_id(check.get("app_id"), allow_wildcard=True)
         except ValueError:
             raise ValueError("Required status checks response for main is malformed") from None
         if not isinstance(context, str) or not context:
@@ -307,7 +349,7 @@ def _ruleset_required_checks(payload_text: str) -> frozenset[_RequiredCheck]:
                 raise ValueError("Active rules response for main is malformed")
             context = check.get("context")
             try:
-                app_id = _valid_app_id(check.get("integration_id"))
+                app_id = _valid_app_id(check.get("integration_id"), allow_wildcard=True)
             except ValueError:
                 raise ValueError("Active rules response for main is malformed") from None
             if not isinstance(context, str) or not context:

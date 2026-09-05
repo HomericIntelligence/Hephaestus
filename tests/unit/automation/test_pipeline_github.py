@@ -2724,6 +2724,113 @@ class TestExactHeadChecks:
         assert any("/rules/branches/main" in call[3] for call in calls)
         assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
 
+    def test_later_rules_page_failed_required_run_blocks_merge(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed requirement on a later rules page prevents a merge."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_rules_page = [{"type": "deletion"} for _index in range(100)]
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if endpoint.endswith("/required_status_checks"):
+                return self._required_check_inventory("classic-ci")
+            if "/rules/branches/main" in endpoint:
+                if "page=2" in endpoint:
+                    return self._ruleset_required_check_inventory("later-ruleset-ci")
+                return SimpleNamespace(returncode=0, stdout=json.dumps(first_rules_page))
+            if "/check-runs?" in endpoint:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 2,
+                            "check_runs": [
+                                self._check_run(head, name="classic-ci"),
+                                self._check_run(
+                                    head,
+                                    check_run_id=2,
+                                    name="later-ruleset-ci",
+                                    conclusion="failure",
+                                ),
+                            ],
+                        }
+                    ),
+                )
+            raise AssertionError(args)
+
+        monkeypatch.setattr(transport_mod, "gh_call", gh_call)
+
+        assert adapter.required_checks_pass_for_head(head) is False
+
+    @pytest.mark.parametrize(
+        ("returncode", "stdout"),
+        [(1, ""), (0, "{}")],
+        ids=("incomplete", "malformed"),
+    )
+    def test_later_rules_page_failure_fails_closed(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        stdout: str,
+    ) -> None:
+        """An incomplete or malformed later rules page prevents a merge."""
+        adapter.repo = "repo"
+        first_rules_page = [{"type": "deletion"} for _index in range(100)]
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if endpoint.endswith("/required_status_checks"):
+                return self._required_check_inventory("required-ci")
+            if "/rules/branches/main" in endpoint:
+                if "page=2" in endpoint:
+                    return SimpleNamespace(returncode=returncode, stdout=stdout)
+                return SimpleNamespace(returncode=0, stdout=json.dumps(first_rules_page))
+            raise AssertionError(args)
+
+        monkeypatch.setattr(transport_mod, "gh_call", gh_call)
+
+        assert adapter.required_checks_pass_for_head("a" * 40) is False
+
+    def test_changing_rules_pagination_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A changed active-rules reread cannot permit a merge."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_rules_page = [{"type": "deletion"} for _index in range(100)]
+        second_page_reads = 0
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            nonlocal second_page_reads
+            endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if endpoint.endswith("/required_status_checks"):
+                return self._required_check_inventory()
+            if "/rules/branches/main" in endpoint:
+                if "page=2" not in endpoint:
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(first_rules_page))
+                second_page_reads += 1
+                context = "first-ruleset-ci" if second_page_reads == 1 else "changed-ruleset-ci"
+                return self._ruleset_required_check_inventory(context)
+            if "/check-runs?" in endpoint:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "check_runs": [self._check_run(head, name="first-ruleset-ci")],
+                        }
+                    ),
+                )
+            raise AssertionError(args)
+
+        monkeypatch.setattr(transport_mod, "gh_call", gh_call)
+
+        assert adapter.required_checks_pass_for_head(head) is False
+        assert second_page_reads == 2
+
     @pytest.mark.parametrize("required_source", ["classic", "ruleset"])
     def test_wrong_required_app_id_blocks_merge_request(
         self,
@@ -2838,6 +2945,140 @@ class TestExactHeadChecks:
 
         assert adapter.required_checks_pass_for_head(head) is True
 
+    @pytest.mark.parametrize("required_source", ["classic", "ruleset"])
+    @pytest.mark.parametrize("check_run_app_id", [17, 18])
+    def test_wildcard_required_app_id_accepts_each_valid_check_run_app(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        required_source: str,
+        check_run_app_id: int,
+    ) -> None:
+        """A wildcard app requirement accepts each valid Check Run app."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        classic = self._required_check_inventory(
+            "required-ci" if required_source == "classic" else "",
+            app_id=-1,
+        )
+        if required_source != "classic":
+            classic = self._required_check_inventory()
+        ruleset = self._ruleset_required_check_inventory(
+            "required-ci" if required_source == "ruleset" else "",
+            integration_id=-1,
+        )
+        if required_source != "ruleset":
+            ruleset = self._ruleset_required_check_inventory()
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    classic,
+                    ruleset,
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "total_count": 1,
+                                "check_runs": [self._check_run(head, app_id=check_run_app_id)],
+                            }
+                        ),
+                    ),
+                ]
+            ),
+        )
+
+        assert adapter.required_checks_pass_for_head(head) is True
+
+    def test_wildcard_required_app_id_rejects_missing_check_run_app_id(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wildcard still requires a valid Check Run app identity."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._required_check_inventory("required-ci", app_id=-1),
+                    self._ruleset_required_check_inventory(),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "total_count": 1,
+                                "check_runs": [self._check_run(head)],
+                            }
+                        ),
+                    ),
+                ]
+            ),
+        )
+
+        assert adapter.required_checks_pass_for_head(head) is False
+
+    def test_context_only_classic_response_satisfies_required_check(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A classic response can omit checks and use its required context."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"strict": False, "contexts": ["required-ci"]}),
+                    ),
+                    self._ruleset_required_check_inventory(),
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "total_count": 1,
+                                "check_runs": [self._check_run(head)],
+                            }
+                        ),
+                    ),
+                ]
+            ),
+        )
+
+        assert adapter.required_checks_pass_for_head(head) is True
+
+    @pytest.mark.parametrize("checks", [None, {}, "required-ci"])
+    def test_present_non_list_classic_checks_fail_closed(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        checks: object,
+    ) -> None:
+        """A present checks value must be a list."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            side_effect=[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "strict": False,
+                            "contexts": ["required-ci"],
+                            "checks": checks,
+                        }
+                    ),
+                ),
+                self._ruleset_required_check_inventory(),
+            ]
+        )
+        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+
+        assert adapter.required_checks_pass_for_head("a" * 40) is False
+        assert call_mock.call_count == 2
+
     def test_optional_failed_run_does_not_block_successful_required_run(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2908,7 +3149,7 @@ class TestExactHeadChecks:
                     "api",
                     "--method",
                     "GET",
-                    "/repos/org/repo/rules/branches/main",
+                    "/repos/org/repo/rules/branches/main?per_page=100&page=1",
                     "--repo",
                     "org/repo",
                 ],
