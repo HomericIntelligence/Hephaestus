@@ -1420,7 +1420,7 @@ jobs:
             "shell-tests", "build", "security-dependency-scan",
             "security-secrets-scan", "security-sast-scan",
             "security-workflow-scan", "schema-validation", "deps-version-sync",
-            "license-scan"]
+            "license-scan", "pi-conformance"]
           ALLOWED_SKIPS: >-
             {"pull_request": [], "push": ["pr-policy"], "merge_group": []}
         run: |
