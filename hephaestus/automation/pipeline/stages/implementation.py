@@ -79,7 +79,6 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.runtime import requires_plan_scope_guard
-from hephaestus.agents.runtime import requires_plan_scope_guard
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import (
     MAX_ADDRESS_REPLY_CHARS,
@@ -142,7 +141,6 @@ from ..reply_handoff import (
     implementation_reply_handoff,
     implementation_reply_handoff_journal_entry,
 )
-from ..admission import _fetch_planned_files
 from ..scope_retraction import is_safe_scope_retraction_path, scope_retraction_paths_for_threads
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -552,6 +550,7 @@ class ImplementationStage(Stage):
             "refresh_base": not adopted and direct_base_sha is None,
             "repo_root": str(ctx.paths.repo_root),
             "source_lane": "impl",
+            "agent": agent_provider(ctx),
         }
         direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
         direct_branch_prefix = f"{issue}-auto-impl-direct-"
@@ -1346,6 +1345,37 @@ class ImplementationStage(Stage):
         )
         return JobRequest(job, on_done_state=TEST_WAIT)
 
+    @staticmethod
+    def _apply_plan_publication_scope(
+        item: WorkItem, ctx: StageContext, agent: str, kwargs: dict[str, object]
+    ) -> StageOutcome | None:
+        """Bind guarded provider publication to frozen canonical file claims."""
+        if not requires_plan_scope_guard(agent):
+            return None
+        kwargs["expected_repo"] = f"{ctx.org}/{item.repo}"
+        kwargs["git_metadata_receipt"] = item.payload.get("git_metadata_receipt")
+        planned_claims = item.payload.get("_implementation_file_claims")
+        if planned_claims is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
+        allowed_paths = tuple(
+            sorted(
+                claim[1]
+                for claim in planned_claims
+                if isinstance(claim, tuple)
+                and len(claim) == 2
+                and claim[0] == (ctx.org, item.repo)
+                and is_safe_scope_retraction_path(claim[1])
+            )
+        )
+        if not allowed_paths:
+            return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
+        remediation_allowed_paths = _allowed_remediation_paths(item, allowed_paths)
+        if remediation_allowed_paths is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "remediation_path_invalid")
+        kwargs["allowed_paths"] = remediation_allowed_paths
+        kwargs["scope_history_base_sha"] = item.payload.get("_impl_source_revision")
+        return None
+
     def _commit_push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """COMMIT_PUSH_WAIT either re-enters test-fix or submits commit+push."""
         issue = _issue_number(item)
@@ -1365,29 +1395,9 @@ class ImplementationStage(Stage):
         }
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
-        if requires_plan_scope_guard(agent):
-            kwargs["expected_repo"] = f"{ctx.org}/{item.repo}"
-            kwargs["git_metadata_receipt"] = item.payload.get("git_metadata_receipt")
-            planned_claims = item.payload.get("_implementation_file_claims")
-            if planned_claims is None:
-                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
-            allowed_paths = tuple(
-                sorted(
-                    claim[1]
-                    for claim in planned_claims
-                    if isinstance(claim, tuple)
-                    and len(claim) == 2
-                    and claim[0] == (ctx.org, item.repo)
-                    and is_safe_scope_retraction_path(claim[1])
-                )
-            )
-            if not allowed_paths:
-                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
-            remediation_allowed_paths = _allowed_remediation_paths(item, allowed_paths)
-            if remediation_allowed_paths is None:
-                return StageOutcome(Disposition.FINISH_FAIL, "remediation_path_invalid")
-            kwargs["allowed_paths"] = remediation_allowed_paths
-            kwargs["scope_history_base_sha"] = item.payload.get("_impl_source_revision")
+        scope_outcome = self._apply_plan_publication_scope(item, ctx, agent, kwargs)
+        if scope_outcome is not None:
+            return scope_outcome
         publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
             "_synced_default_branch_sha"
         )

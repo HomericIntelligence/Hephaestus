@@ -702,6 +702,7 @@ class TestGate:
             "refresh_base": False,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
+            "agent": "claude",
             "sync_to_remote": True,
             "pr_number": 1001,
             "implementation_adoption_head": "a" * 40,
@@ -1645,6 +1646,7 @@ class TestWorktreeAndAdvise:
             "refresh_base": True,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
+            "agent": "claude",
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
@@ -1757,6 +1759,7 @@ class TestWorktreeAndAdvise:
             "refresh_base": False,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
+            "agent": "claude",
             "base_sha": "a" * 40,
         }
 
@@ -1810,6 +1813,7 @@ class TestWorktreeAndAdvise:
             "refresh_base": False,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
+            "agent": "claude",
             "direct_worktree_nonce": run_nonce,
             "sync_to_remote": True,
             "pr_number": 1001,

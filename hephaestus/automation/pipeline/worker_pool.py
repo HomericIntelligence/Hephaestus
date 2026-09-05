@@ -45,6 +45,7 @@ from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingEr
 from hephaestus.agents.runtime import (
     AgentExecutionError,
     allows_unbound_session_resume,
+    requires_plan_scope_guard,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
@@ -3838,7 +3839,7 @@ class WorkerPool:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
-        source_lane = str(kwargs.get("source_lane") or "")
+        source_agent = kwargs.pop("agent", None)
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
@@ -3975,6 +3976,7 @@ class WorkerPool:
             sync_to_remote=sync_to_remote,
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
+            source_agent=source_agent,
             item_number=kwargs.get("issue_number"),
             writer_authority=writer_authority,
             worktree_manager=manager,
@@ -4128,6 +4130,7 @@ class WorkerPool:
         pr_number: object,
         timeout_s: int,
         source_lane: object = None,
+        source_agent: object = None,
         item_number: object = None,
         writer_authority: ImplementationWriterAuthority | None = None,
         worktree_manager: WorktreeManager | None = None,
@@ -4275,29 +4278,32 @@ class WorkerPool:
             )
         if not dirty and not sync_to_remote and base_sha is None:
             if source_lane == "impl":
+                value: dict[str, object] = {
+                    "path": str(worktree_path),
+                    "impl_source_revision": binding.revision,
+                }
+                if requires_plan_scope_guard(str(source_agent or "")):
+                    metadata_receipt = self._trusted_git_metadata_receipt(
+                        worktree_path, timeout_s=timeout_s
+                    )
+                    if isinstance(metadata_receipt, JobResult):
+                        return metadata_receipt
+                    value.update(metadata_receipt)
+                return JobResult(
+                    ok=True,
+                    value=value,
+                )
+            return JobResult(ok=True, value=str(worktree_path))
+        value: dict[str, object] = {"path": str(worktree_path)}
+        if source_lane == "impl" and not dirty:
+            value["impl_source_revision"] = binding.revision
+            if requires_plan_scope_guard(str(source_agent or "")):
                 metadata_receipt = self._trusted_git_metadata_receipt(
                     worktree_path, timeout_s=timeout_s
                 )
                 if isinstance(metadata_receipt, JobResult):
                     return metadata_receipt
-                return JobResult(
-                    ok=True,
-                    value={
-                        "path": str(worktree_path),
-                        "impl_source_revision": binding.revision,
-                        **metadata_receipt,
-                    },
-                )
-            return JobResult(ok=True, value=str(worktree_path))
-        value: dict[str, object] = {"path": str(worktree_path)}
-        if source_lane == "impl" and not dirty:
-            metadata_receipt = self._trusted_git_metadata_receipt(
-                worktree_path, timeout_s=timeout_s
-            )
-            if isinstance(metadata_receipt, JobResult):
-                return metadata_receipt
-            value["impl_source_revision"] = binding.revision
-            value.update(metadata_receipt)
+                value.update(metadata_receipt)
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
         if dirty:
@@ -4369,7 +4375,6 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot receipt publication Git metadata")
         return {"git_metadata_receipt": digest.hexdigest()}
 
-    @staticmethod
     def _prepare_direct_scope_worktree(
         self,
         *,

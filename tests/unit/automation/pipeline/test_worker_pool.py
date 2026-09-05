@@ -968,17 +968,17 @@ class TestWorkerPoolSubmitComplete:
         assert "Pi default model configuration" in (result.error or "")
         assert calls == []
 
-    def test_non_claude_agent_job_resumes_a_saved_session(
+    def test_non_codex_agent_job_resumes_a_saved_session(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
         """A later direct-agent turn resumes, rather than starts afresh."""
-        job = _agent_job(agent="codex", resume_session_id="saved-codex-session")
-        session_result = MagicMock(stdout="continued", session_id="saved-codex-session")
+        job = _agent_job(agent="opencode", resume_session_id="saved-opencode-session")
+        session_result = MagicMock(stdout="continued", session_id="saved-opencode-session")
 
         with (
-            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(f"{_WP}.resolve_agent", return_value="opencode"),
             patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
             patch(f"{_WP}.run_agent_session") as run,
         ):
@@ -986,8 +986,8 @@ class TestWorkerPoolSubmitComplete:
             _handle, result = completion_q.get(timeout=10)
 
         resume.assert_called_once_with(
-            agent="codex",
-            session_id="saved-codex-session",
+            agent="opencode",
+            session_id="saved-opencode-session",
             prompt="test prompt",
             cwd=job.cwd,
             timeout=job.timeout_s,
@@ -1003,7 +1003,7 @@ class TestWorkerPoolSubmitComplete:
         run.assert_not_called()
         assert result.ok is True
         assert result.value == "continued"
-        assert result.session_id == "saved-codex-session"
+        assert result.session_id == "saved-opencode-session"
 
     def test_pi_agent_job_uses_its_binding_instead_of_a_raw_resume_id(
         self,
@@ -4268,6 +4268,7 @@ class TestGitOps:
                 "branch_name": "7-auto",
                 "repo_root": str(tmp_path),
                 "source_lane": "impl",
+                "agent": "codex",
             },
         )
         worktree_manager = MagicMock()
@@ -4280,6 +4281,11 @@ class TestGitOps:
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch.object(
+                WorkerPool,
+                "_trusted_git_metadata_receipt",
+                return_value={"git_metadata_receipt": "b" * 64},
+            ),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -4301,6 +4307,7 @@ class TestGitOps:
         assert result.value == {
             "path": str(writer_path),
             "impl_source_revision": "b" * 40,
+            "git_metadata_receipt": "b" * 64,
         }
 
     def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
