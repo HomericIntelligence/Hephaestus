@@ -144,6 +144,7 @@ def _status_snapshot(
             or not isinstance(context, str)
             or not context
             or state not in _STATUS_STATES
+            or status.get("sha") != head_sha
         ):
             logger.warning("Commit status for %s is malformed", head_sha)
             return None

@@ -744,7 +744,7 @@ def test_all_allowed_required_check_conclusions_satisfy_policy(
     )
 
 
-def test_required_check_gate_rejects_calls_without_a_frozen_policy(
+def test_required_check_gate_rejects_a_non_frozen_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The check gate has no second policy-discovery authority path."""
@@ -752,8 +752,15 @@ def test_required_check_gate_rejects_calls_without_a_frozen_policy(
     call_mock = MagicMock()
     monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
 
-    with pytest.raises(TypeError):
-        adapter.required_checks_pass_for_head("a" * 40)  # type: ignore[call-arg]
+    assert (
+        adapter.required_checks_pass_for_head(
+            "a" * 40,
+            None,  # type: ignore[arg-type]
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=threading.Event(),
+        )
+        is False
+    )
 
     call_mock.assert_not_called()
 

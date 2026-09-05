@@ -3116,6 +3116,35 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
 
+    def test_commit_status_entry_must_bind_to_the_reviewed_head(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A status entry for another commit cannot satisfy an exact-head gate."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        empty_runs = {"total_count": 0, "check_runs": []}
+        status_entry = self._commit_status(head)
+        status_entry["sha"] = "b" * 40
+        status = {
+            "sha": head,
+            "total_count": 1,
+            "statuses": [status_entry],
+        }
+        monkeypatch.setattr(
+            github_api_mod,
+            "gh_call",
+            MagicMock(
+                side_effect=[
+                    self._json_response(empty_runs),
+                    self._json_response(empty_runs),
+                    self._json_response(status),
+                    self._json_response(status),
+                ]
+            ),
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
     def test_same_name_failed_status_blocks_a_successful_check_run(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
