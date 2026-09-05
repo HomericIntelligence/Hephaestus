@@ -31,6 +31,7 @@ from hephaestus.automation.worktree_manager import (
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 
@@ -159,6 +160,16 @@ def _git(
     """Run Git, applying the shared preparation deadline when supplied."""
     timeout = deadline.remaining() if deadline is not None else None
     try:
+        if timeout is not None:
+            return run_subprocess(
+                ["git", *args],
+                cwd=cwd,
+                check=check,
+                timeout=timeout,
+                env=build_git_signing_env(),
+                log_on_error=False,
+                track_process_group=True,
+            )
         return subprocess.run(
             ["git", *args],
             cwd=cwd,

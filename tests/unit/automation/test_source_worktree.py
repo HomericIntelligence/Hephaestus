@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import queue
+import signal
 import subprocess
+import sys
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -13,7 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import implementation_writer
+from hephaestus.automation import implementation_writer, source_worktree
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -24,6 +28,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,
+    _git as _source_worktree_git,
     _PreparationDeadline,
 )
 from hephaestus.automation.worktree_manager import (
@@ -138,15 +143,31 @@ def test_bounded_prepare_times_out_stalled_git_without_receipt(
     deadline = _PreparationDeadline(10.0, lambda: next(ticks))
     real_run = subprocess.run
 
-    def delayed_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        timeout = kwargs.get("timeout")
-        assert isinstance(timeout, float)
+    def delayed_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        timeout: float,
+        env: dict[str, str],
+        log_on_error: bool,
+        track_process_group: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert not log_on_error
+        assert track_process_group
         calls.append(timeout)
-        if args and isinstance(args[0], list) and args[0][1:3] == ["worktree", "add"]:
-            raise subprocess.TimeoutExpired(args[0], timeout)
-        return real_run(*args, **kwargs)
+        if command[1:3] == ["worktree", "add"]:
+            raise subprocess.TimeoutExpired(command, timeout)
+        return real_run(
+            command,
+            cwd=cwd,
+            check=check,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
-    monkeypatch.setattr(subprocess, "run", delayed_run)
+    monkeypatch.setattr(source_worktree, "run_subprocess", delayed_run)
 
     with pytest.raises(SourceWorkspacePreparationError) as raised:
         manager.prepare_bounded(
@@ -160,6 +181,106 @@ def test_bounded_prepare_times_out_stalled_git_without_receipt(
     assert calls == [10.0, 8.0]
     assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
     assert not manager.path_for(42, SourceLane.REVIEW).exists()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc").is_dir(),
+    reason="requires POSIX process groups and process state",
+)
+def test_bounded_git_timeout_stops_child_and_reaps_group_leader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded Git timeout stops a child before it reports the timeout."""
+    child_pid_path = tmp_path / "child.pid"
+    child_ready_path = tmp_path / "child.ready"
+    real_popen = subprocess.Popen
+    processes: list[subprocess.Popen[str]] = []
+    parent_script = '''
+import pathlib
+import subprocess
+import sys
+import time
+
+child_script = """
+import pathlib
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text("ready", encoding="utf-8")
+time.sleep(30)
+"""
+child = subprocess.Popen(
+    [sys.executable, "-c", child_script, sys.argv[2]],
+)
+ready = pathlib.Path(sys.argv[2])
+while not ready.exists():
+    time.sleep(0.01)
+pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+time.sleep(30)
+'''
+
+    def spawn_process(**kwargs: Any) -> subprocess.Popen[str]:
+        process = real_popen(
+            [
+                sys.executable,
+                "-c",
+                parent_script,
+                str(child_pid_path),
+                str(child_ready_path),
+            ],
+            cwd=kwargs.get("cwd"),
+            env=kwargs.get("env"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        processes.append(process)
+        limit = time.monotonic() + 2.0
+        while not child_pid_path.exists() and time.monotonic() < limit:
+            time.sleep(0.01)
+        assert child_pid_path.exists(), "test child did not start"
+        return process
+
+    def substitute_popen(*_args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        assert kwargs.get("start_new_session") is True
+        return spawn_process(**kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", substitute_popen)
+    try:
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            _source_worktree_git(
+                tmp_path,
+                "worktree",
+                "add",
+                deadline=_PreparationDeadline(time.monotonic() + 0.1, time.monotonic),
+            )
+
+        assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+        assert processes[0].returncode is not None
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        limit = time.monotonic() + 1.0
+        while time.monotonic() < limit:
+            status_path = Path("/proc") / str(child_pid) / "stat"
+            try:
+                state = status_path.read_text().split()[2]
+            except FileNotFoundError:
+                break
+            if state in {"X", "Z"}:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("timed-out Git child process is still running")
+    finally:
+        for process in processes:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            if process.returncode is None:
+                process.wait(timeout=1.0)
 
 
 def test_bounded_prepare_restarts_after_replacement_timeout(
