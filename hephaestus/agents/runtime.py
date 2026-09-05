@@ -299,7 +299,18 @@ def _validate_athena_plugin_metadata(root: Path) -> None:
             for child in value:
                 yield from keys(child)
 
-    forbidden = {"mcp", "mcp_servers", "connector", "connectors", "application", "applications"}
+    forbidden = {
+        "application",
+        "applications",
+        "command",
+        "commands",
+        "connector",
+        "connectors",
+        "env",
+        "environment",
+        "mcp",
+        "mcp_servers",
+    }
     if forbidden & set(keys(plugin)):
         raise AgentExecutionError("Codex automation Athena plugin adds an unadmitted surface")
 

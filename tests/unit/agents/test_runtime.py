@@ -395,6 +395,31 @@ def test_codex_profile_copies_only_the_auth_bridge_and_admitted_athena(
     assert (profile_home / agent_runtime.CODEX_ATHENA_CACHE_RELATIVE_PATH / "0.5.0").is_dir()
 
 
+@pytest.mark.parametrize("forbidden_key", ["command", "commands", "env", "environment"])
+def test_athena_metadata_rejects_plugin_launch_or_environment_surfaces(
+    tmp_path: Path, forbidden_key: str
+) -> None:
+    """An admitted plugin cannot add an executable or inherited environment surface."""
+    artifact = tmp_path / "athena"
+    (artifact / ".codex-plugin").mkdir(parents=True)
+    (artifact / "package.json").write_text(
+        '{"name":"@homericintelligence/athena","version":"0.5.0"}', encoding="utf-8"
+    )
+    (artifact / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "athena",
+                "version": "0.5.0",
+                forbidden_key: "untrusted-value",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="unadmitted surface"):
+        agent_runtime._validate_athena_plugin_metadata(artifact)
+
+
 def test_run_codex_session_tracks_a_dedicated_process_group(tmp_path: Path) -> None:
     """An automation caller can reap the complete Codex process group on shutdown."""
     popen_kwargs: dict[str, Any] = {}
