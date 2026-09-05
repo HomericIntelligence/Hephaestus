@@ -45,6 +45,11 @@ EXPECTED_SCOPES = {
         "_dirty_decision_wait",
         "get_dirty_reused_worktree_decision_prompt",
     ): READ_ONLY,
+    (
+        "stages/implementation.py",
+        "_remediation_reply_recovery_wait",
+        "get_remediation_reply_recovery_prompt",
+    ): READ_ONLY,
     ("stages/implementation.py", "_implement_wait", "get_address_review_prompt"): ADDRESS,
     ("stages/implementation.py", "_implement_wait", "build_implementation_prompt"): WRITE,
     (

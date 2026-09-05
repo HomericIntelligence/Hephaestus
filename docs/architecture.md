@@ -1011,6 +1011,11 @@ stateDiagram-v2
     Adopt --> RecoverDirty: reused workspace is dirty
     RecoverDirty --> Prepare: exact COMMIT or STASH recovery succeeds
     RecoverDirty --> Failed: identity, recovery, or postflight check fails
+    Implement --> ReplyInspection: remediation fails after a writer change
+    ReplyInspection --> ReplyRecovery: dirty writer
+    ReplyInspection --> Failed: clean or invalid writer
+    ReplyRecovery --> Implement: one valid exhaustive reply mapping
+    ReplyRecovery --> Failed: invalid, incomplete, or exhausted mapping
     Adopt --> Prepare: clean workspace is safe to continue
     Adopt --> Failed: unsafe adoption
     Prepare --> Implement: workspace ready
@@ -1048,6 +1053,23 @@ Architectural contract:
   either branch head. A clean-tree and head postflight must succeed before the
   implementation source revision is rebound. All failures preserve the writer
   worktree and any commit or stash evidence for diagnosis.
+- A failed remediation event is the only trigger for reply inspection. A
+  normal restored writer continues to writable remediation. After a failed
+  remediation, the implementation stage asks the Git worker to inspect the
+  registered repository path, branch, and expected head without a change. The
+  worker rejects executable or path-redirection Git configuration before it
+  reads the writer. Fixed byte, file-count, and snapshot limits bound the
+  inspection. A clean, invalid, or oversized inspection finishes with
+  `implementation_reply_failed`. A dirty inspection permits one read-only
+  reply-recovery turn with `Read,Glob,Grep`. That turn cannot edit, run Git,
+  publish, call GitHub, or resolve threads. It must produce one valid exhaustive
+  thread-reply mapping before tests, commits, pushes, or review can continue.
+  The commit worker compares the captured head and content snapshot immediately
+  before the commit. An ambiguous or false commit result fails and preserves
+  the dirty writer. It cannot prepare a reply handoff for the unchanged head.
+  The worker binds the new head and content snapshot again before the push. The
+  stage preserves the writer, snapshots, and diagnostic on every recovery
+  failure.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That
   metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot
@@ -1166,6 +1188,11 @@ Architectural contract:
   parser treats a missing, malformed, `NOGO`, or `BLOCKED` verdict as a failed
   closed audit before any label write. The letter grade is audit metadata only.
 - The implementation agent replies to every fixed open thread but never resolves it.
+- A remediation provider failure stores only a redacted diagnostic of at most
+  500 characters. The recovery prompt fences the retained thread snapshots,
+  inspection status, diff, and diagnostic. A missing, invalid, partial, or
+  exhausted mapping fails before publication; a pushed branch cannot return to
+  review without the valid mapping.
 - The implementation stage rebases and lease-publishes the writer branch before
   review; a rebase is never performed by a reviewer checkout.
 - When that host rebase conflicts, it remains paused under the captured base and

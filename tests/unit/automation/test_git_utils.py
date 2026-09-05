@@ -354,6 +354,19 @@ class TestPushBranch:
             timeout=42,
         )
 
+    def test_pushes_an_exact_commit_to_the_branch(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A bound publication uses an immutable commit as its source."""
+        source_sha = "a" * 40
+
+        push_branch("123-auto-impl", tmp_path, source_sha=source_sha)
+
+        git_utils_mocks.run.assert_called_once_with(
+            ["git", "push", "origin", f"{source_sha}:refs/heads/123-auto-impl"],
+            cwd=tmp_path,
+        )
+
 
 class TestDirectScopeBranchReservation:
     """Atomic server-side ownership checks for direct-scope implementation branches."""
@@ -457,6 +470,26 @@ class TestDirectScopeBranchReservation:
             push_branch_if_remote_matches("2452-auto-impl", "a" * 40, tmp_path)
 
         assert git_utils_mocks.run.call_count == 1
+
+    def test_strict_publish_can_bind_an_exact_local_commit(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A leased publication can use one immutable local source."""
+        pin = "a" * 40
+        source_sha = "b" * 40
+        git_utils_mocks.run.side_effect = [Mock(returncode=0), Mock(returncode=0)]
+
+        push_branch_if_remote_matches(
+            "2452-auto-impl",
+            pin,
+            tmp_path,
+            source_sha=source_sha,
+        )
+
+        assert git_utils_mocks.run.call_args_list[0].args[0][-1] == source_sha
+        assert git_utils_mocks.run.call_args_list[1].args[0][-1] == (
+            f"{source_sha}:refs/heads/2452-auto-impl"
+        )
 
     def test_release_requires_the_original_reservation_sha(
         self, git_utils_mocks: Any, tmp_path: Path

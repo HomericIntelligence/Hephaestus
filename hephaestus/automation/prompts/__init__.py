@@ -60,6 +60,7 @@ from .address_review import (
     build_scope_retraction_directive,
     build_unaddressed_directive,
     get_address_review_prompt,
+    get_remediation_reply_recovery_prompt,
 )
 from .advise import (
     get_advise_prompt,
@@ -175,6 +176,7 @@ __all__ = [
     "get_plan_review_prompt",
     "get_pr_description",
     "get_pr_review_analysis_prompt",
+    "get_remediation_reply_recovery_prompt",
     "get_review_validation_prompt",
     "get_terse_output_directive",
     "get_untrusted_notice",
