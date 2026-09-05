@@ -488,29 +488,57 @@ def _without_duplicate_live_findings(
 
 def _normalize_remediation_threads(
     threads: list[dict[str, Any]],
+    *,
+    reviewed_head_sha: str,
 ) -> list[dict[str, Any]]:
-    """Normalize every live review thread for implementation remediation.
+    """Normalize only authoritative live review threads for remediation.
 
-    The reviewer audit contains proposed findings, not durable GitHub thread
-    identities. Address jobs must instead consume the live post/read-back
-    snapshot so every open thread—regardless of author—is investigated.  The
-    implementation agent replies against the verified current head; the
-    reviewer later performs a fresh review and resolves or returns the exact
-    thread. No-commit replies are explicitly marked for thorough analysis.
+    An unresolved review thread can expand temporary writer scope only when
+    its originating comment is from the loop or a trusted repository member,
+    belongs to the exact reviewed head, and remains attached to the current
+    open pull request.  Thread prose is untrusted task data, not authority.
     """
+    trusted_associations = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
     normalized: list[dict[str, Any]] = []
     for thread in threads:
         thread_id = str(thread.get("id") or thread.get("thread_id") or "").strip()
-        if not thread_id:
+        comments = thread.get("comments")
+        pr_state = thread.get("pr_state")
+        if (
+            not thread_id
+            or thread.get("isResolved") is not False
+            or not isinstance(comments, list)
+            or not comments
+            or not isinstance(pr_state, dict)
+            or pr_state.get("state") != "OPEN"
+            or pr_state.get("headRefOid") != reviewed_head_sha
+        ):
+            continue
+        origin = comments[0]
+        if not isinstance(origin, dict):
+            continue
+        origin_is_loop = origin.get("viewer_did_author") is True
+        origin_is_trusted_member = (
+            origin.get("author_type") == "User"
+            and origin.get("author_association") in trusted_associations
+        )
+        if (
+            not (origin_is_loop or origin_is_trusted_member)
+            or not isinstance(origin.get("id"), str)
+            or not origin.get("id")
+            or not isinstance(origin.get("review_id"), str)
+            or not origin.get("review_id")
+            or origin.get("review_state") not in {"COMMENTED", "PENDING"}
+            or origin.get("review_commit_sha") != reviewed_head_sha
+        ):
             continue
         line = thread.get("line")
         body = str(thread.get("body") or "")
-        comments = thread.get("comments")
         # The first thread body is already supplied above.  Once a reviewer
         # leaves a follow-up, retain the entire conversation in the next
         # implementer prompt so the agent can act on the precise remaining
         # defect rather than trying the original fix again.
-        if isinstance(comments, list) and len(comments) > 1:
+        if len(comments) > 1:
             rendered_comments: list[str] = []
             for comment in comments[1:]:
                 if not isinstance(comment, dict):

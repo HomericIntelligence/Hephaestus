@@ -606,6 +606,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                         or not isinstance(author, str)
                         or not isinstance(author_type, str)
                         or not isinstance(comment.get("viewerDidAuthor"), bool)
+                        or not isinstance(comment.get("authorAssociation"), str)
                         or not isinstance(review_id, str)
                         or not isinstance(review_state, str)
                         or not isinstance(review_body, str)
@@ -621,6 +622,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                             "body": body,
                             "author": author,
                             "author_type": author_type,
+                            "author_association": comment["authorAssociation"],
                             "viewer_did_author": comment["viewerDidAuthor"],
                             "review_id": review_id,
                             "review_state": review_state,
