@@ -25,6 +25,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.pi_plugins import package_tree_digest
 
 PI_SMOKE_COMMAND_PREFIX = [
     "pi",
@@ -366,7 +367,7 @@ def test_codex_automation_capability_rejects_an_unsupported_cli_contract(
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o700)
     monkeypatch.setattr(
-        agent_runtime.subprocess,
+        subprocess,
         "run",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(
             args=[], returncode=0, stdout="codex-cli 0.137.9\n", stderr=""
@@ -394,7 +395,7 @@ def test_codex_profile_copies_only_the_auth_bridge_and_admitted_athena(
     (artifact / ".codex-plugin" / "plugin.json").write_text(
         '{"name":"athena","version":"0.5.0"}', encoding="utf-8"
     )
-    digest = agent_runtime.package_tree_digest(artifact)
+    digest = package_tree_digest(artifact)
     monkeypatch.setattr(agent_runtime, "CODEX_ATHENA_ARTIFACT_SHA256", digest)
     monkeypatch.setattr(agent_runtime, "_codex_child_env", lambda: {"CODEX_HOME": str(source_home)})
     monkeypatch.setattr(agent_runtime, "_validated_athena_artifact", lambda _home: artifact)

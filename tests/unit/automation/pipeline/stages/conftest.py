@@ -354,6 +354,7 @@ class FakeStageGitHub(FakeGitHub):
             if self.reviews.get(pr_number)
             else []
         )
+        current_pr_state = dict(self._pr_state) if isinstance(self._pr_state, dict) else {}
         threads: list[dict[str, Any]] = []
         cursor = 0
         for count, author, severity in (
@@ -385,7 +386,7 @@ class FakeStageGitHub(FakeGitHub):
                         "author_association": "MEMBER",
                         "authors": [origin_author],
                         "review_id": f"review-{pr_number}-{cursor}",
-                        "pr_state": dict(self._pr_state),
+                        "pr_state": current_pr_state,
                         "comments": [
                             {
                                 "id": f"comment-{thread_id}",
@@ -395,7 +396,7 @@ class FakeStageGitHub(FakeGitHub):
                                 "body": posted_comment.get("body") or "finding",
                                 "review_id": f"review-{pr_number}-{cursor}",
                                 "review_state": "COMMENTED",
-                                "review_commit_sha": self._pr_state["headRefOid"],
+                                "review_commit_sha": current_pr_state.get("headRefOid", ""),
                                 "viewer_did_author": not author,
                             },
                             *self._thread_replies.get(thread_id, []),
