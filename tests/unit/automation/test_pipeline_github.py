@@ -2636,10 +2636,44 @@ class TestExactHeadChecks:
     def test_ruleset_only_failed_required_run_blocks_merge(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed active-rules requirement cannot be treated as optional."""
+        """A failed active-rules requirement prevents the merge request."""
+        from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+        from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
         adapter.repo = "repo"
         head = "a" * 40
         calls: list[list[str]] = []
+
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            },
+        )
+        monkeypatch.setattr(
+            adapter,
+            "pr_has_implementation_state_label",
+            lambda _pr: (True, False),
+        )
+        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
+        monkeypatch.setattr(
+            adapter,
+            "base_branch_requires_conversation_resolution",
+            lambda _pr, _base: True,
+        )
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_merge_readiness",
+            lambda _pr: {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            },
+        )
 
         def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(args)
@@ -2666,40 +2700,115 @@ class TestExactHeadChecks:
                         }
                     ),
                 )
+            if args[1:3] == ["--method", "PUT"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout='HTTP/2.0 200 OK\n\n{"merged": true}',
+                )
             raise AssertionError(args)
 
         monkeypatch.setattr(transport_mod, "gh_call", gh_call)
+        monkeypatch.setattr(pg, "gh_call", gh_call)
 
-        assert adapter.required_checks_pass_for_head(head) is False
-        assert any("/rules/branches/main" in call[3] for call in calls)
-
-    def test_wrong_required_app_id_does_not_satisfy_check_context(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A matching context from a different GitHub App cannot permit merging."""
-        adapter.repo = "repo"
-        head = "a" * 40
-        monkeypatch.setattr(
-            transport_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._required_check_inventory("required-ci", app_id=17),
-                    self._ruleset_required_check_inventory(),
-                    SimpleNamespace(
-                        returncode=0,
-                        stdout=json.dumps(
-                            {
-                                "total_count": 1,
-                                "check_runs": [self._check_run(head, app_id=18)],
-                            }
-                        ),
-                    ),
-                ]
+        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+            RunMergeWaitCycleRequest(
+                pr_number=7,
+                reviewed_head_sha=head,
+                proof_generation=2,
+                declined_readiness_fingerprint=None,
             ),
+            adapter,
         )
 
-        assert adapter.required_checks_pass_for_head(head) is False
+        assert receipt.outcome == "required_checks_not_green"
+        assert any("/rules/branches/main" in call[3] for call in calls)
+        assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
+
+    @pytest.mark.parametrize("required_source", ["classic", "ruleset"])
+    def test_wrong_required_app_id_blocks_merge_request(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        required_source: str,
+    ) -> None:
+        """A same-name Check Run from another GitHub App cannot cause a merge."""
+        from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+        from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+        adapter.repo = "repo"
+        head = "a" * 40
+        calls: list[list[str]] = []
+
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            },
+        )
+        monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: (True, False))
+        monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
+        monkeypatch.setattr(
+            adapter,
+            "base_branch_requires_conversation_resolution",
+            lambda _pr, _base: True,
+        )
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_merge_readiness",
+            lambda _pr: {
+                "headRefOid": head,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            },
+        )
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(args)
+            endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if endpoint.endswith("/required_status_checks"):
+                if required_source == "classic":
+                    return self._required_check_inventory("required-ci", app_id=17)
+                return self._required_check_inventory()
+            if "/rules/branches/main" in endpoint:
+                if required_source == "ruleset":
+                    return self._ruleset_required_check_inventory("required-ci", integration_id=17)
+                return self._ruleset_required_check_inventory()
+            if "/check-runs?" in endpoint:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "check_runs": [self._check_run(head, app_id=18)],
+                        }
+                    ),
+                )
+            if args[1:3] == ["--method", "PUT"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout='HTTP/2.0 200 OK\n\n{"merged": true}',
+                )
+            raise AssertionError(args)
+
+        monkeypatch.setattr(transport_mod, "gh_call", gh_call)
+        monkeypatch.setattr(pg, "gh_call", gh_call)
+
+        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+            RunMergeWaitCycleRequest(
+                pr_number=7,
+                reviewed_head_sha=head,
+                proof_generation=2,
+                declined_readiness_fingerprint=None,
+            ),
+            adapter,
+        )
+
+        assert receipt.outcome == "required_checks_not_green"
+        assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
 
     def test_matching_required_app_id_satisfies_check_context(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
