@@ -1019,7 +1019,18 @@ class PipelineGitHubJobRunner:
 
         # Complete all mutable GitHub traversals before final admission. The
         # returned admission then binds the immediate conditional PUT.
-        unsafe = policy_safety(policy)
+        try:
+            current_policy = github.effective_merge_policy(
+                request.pr_number,
+                base_branch,
+                deadline_s=request.deadline_s,
+                cancellation=request.cancellation,
+            )
+        except Exception:
+            current_policy = None
+        if not isinstance(current_policy, EffectiveMergePolicy) or current_policy != policy:
+            return complete("merge_policy_unavailable")
+        unsafe = policy_safety(current_policy)
         if unsafe is not None:
             return complete(unsafe)
 

@@ -50,10 +50,12 @@ exact-head status evidence ─────► current CI merge gate
    pending, failed, stale, or changing required evidence fails closed.
 5. Each source uses complete, bounded, exact-head, stable double reads. Policy,
    Check Run, and commit-status pagination share one aggregate deadline and
-   cancellation signal. The queue completes all mutable traversals, reads
-   unresolved threads, and then repeats the open-head-label admission. It sends
-   the conditional request immediately after that admission, with no intervening
-   mutable read.
+   cancellation signal. After the status evidence passes, the queue repeats the
+   stable effective-policy read. The second typed policy must equal the policy
+   that supplied the required-check inventory. The queue applies bypass and
+   conversation safety to this fresh equal policy. It then repeats the
+   open-head-label admission. It sends the conditional request immediately after
+   that admission, with no intervening mutable read.
 6. The queue sends one normal REST merge request with `sha=<reviewed head>` and
    `merge_method=squash`. The request is the only merge-state mutation owned by
    the queue. The queue does not enable or manage native auto-merge.

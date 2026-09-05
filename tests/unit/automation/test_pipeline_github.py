@@ -166,6 +166,7 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
         "threads",
         "readiness",
         f"checks:{head}",
+        "policy",
         "threads",
         "state:2",
         "label",
@@ -308,11 +309,57 @@ def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> No
         "threads",
         "readiness",
         "checks",
+        "policy",
         "threads",
         "state",
         "label",
         "merge",
         "state",
+    ]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        pytest.param("bypassable", id="actor-bypass"),
+        pytest.param("required-checks", id="required-check-inventory"),
+    ],
+)
+def test_policy_drift_after_status_evidence_blocks_merge(drift: str) -> None:
+    """A changed policy after status validation prevents the merge request."""
+
+    class PolicyDriftGitHub(_RulesetBypassGitHub):
+        policy_reads = 0
+
+        def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
+            policy = super().effective_merge_policy(*_args, **_kwargs)
+            self.policy_reads += 1
+            if self.policy_reads == 1:
+                return policy
+            if drift == "bypassable":
+                return replace(policy, bypassable_ruleset_ids=(15556494,))
+            return replace(
+                policy,
+                required_checks=(RequiredCheck("replacement-ci", 15368),),
+            )
+
+    github = PolicyDriftGitHub(
+        bypassable_ruleset_ids=(),
+        conversation_resolution_enforced=True,
+    )
+
+    receipt = _run_ruleset_bypass_cycle(github)
+
+    assert receipt.outcome == "merge_policy_unavailable"
+    assert receipt.attempted is False
+    assert github.events == [
+        "state",
+        "label",
+        "policy",
+        "threads",
+        "readiness",
+        "checks",
+        "policy",
     ]
 
 

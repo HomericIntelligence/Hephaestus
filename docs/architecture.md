@@ -81,6 +81,9 @@ neither writes `state:skip` during seeding.
  of SHA-conditional ordinary REST squash merges. Each request also requires
  complete passing required status evidence for that exact head. The evidence
  is an independent merge gate, not a substitute for the structural review proof.
+ After the evidence passes, `merge_wait` reads the stable effective policy again.
+ The new typed policy must equal the policy that supplied the required-check
+ inventory. The stage applies bypass and conversation safety to the new policy.
  Before a request, it may make
  a bounded read-only readiness wait (15 minutes per fresh reviewed-head proof) without
  spending a merge attempt; readiness is not authorization, and each request
@@ -1242,9 +1245,12 @@ each conditional on that SHA. Admission for every request requires an open
 `main` PR, an explicitly unarmed record, an exclusive implementation-GO
 label, the current-process reviewed-head proof, no unresolved review threads,
 and complete passing required status evidence for that head. A read-only
-readiness wait may park for up to 15 minutes per reviewed head before a request, without
-consuming the merge budget or authorizing a merge. The direct adapter performs
-one request per call and never retries.
+readiness wait may park for up to 15 minutes per reviewed head before a request,
+without consuming the merge budget or authorizing a merge. After status evidence
+passes, merge wait reads the stable effective policy again. The new typed policy
+must equal the policy that supplied the required-check inventory. The stage
+applies bypass and conversation safety to the new policy before final admission.
+The direct adapter performs one request per call and never retries.
 Merge wait does not invoke `gh pr merge`,
 create, disable, adopt, or poll native auto-merge, manage a merge queue, or use
 an administrator bypass; an existing request is external ownership and is left
