@@ -74,6 +74,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from hephaestus.agents.model_selection import (
+    GPT_6_ASTRA,
     IFM_MODELS,
     K2_HORIZON_09B,
     K2_HORIZON_7B,
@@ -81,7 +82,6 @@ from hephaestus.agents.model_selection import (
     K2_HORIZON_37B,
     K2_HORIZON_375B_A23B,
     K2_HORIZON_MOVA_36B_A4B,
-    GPT_6_ASTRA,
     AgentModelSelection,
     normalize_model_reference,
     parse_model_selection,
