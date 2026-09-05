@@ -38,7 +38,6 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.pipeline.coordinator import PipelineConfig
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -55,18 +54,6 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageContext
-from hephaestus.automation.pipeline.stages.implementation import (
-    ADVISE_WAIT,
-    IMPLEMENT_WAIT,
-    WORKTREE_WAIT,
-    ImplementationStage,
-)
-from hephaestus.automation.pipeline.stages.repo import (
-    DIRECT_SCOPE_BASE_SHA_KEY,
-    DIRECT_SCOPE_RESERVATION_KEY,
-)
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _confirmed_pytest_failure,
@@ -99,6 +86,7 @@ from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     ImplementationWriterAuthority,
     WorktreeCreationReceiptError,
+    consume_implementation_writer_authority,
 )
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.prompts import PromptCatalog
@@ -3906,7 +3894,7 @@ class TestGitOps:
             "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
         }
 
-    def test_direct_impl_writer_worker_promotes_predecessor_before_agent_dispatch(
+    def test_direct_pinned_impl_writer_promotes_owned_detached_predecessor(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
@@ -3958,66 +3946,8 @@ class TestGitOps:
         assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
         assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == branch
 
-        stage = ImplementationStage()
-        item = WorkItem(
-            repo="Hephaestus",
-            kind=ItemKind.ISSUE,
-            issue=7,
-            stage=StageName.IMPLEMENTATION,
-            state=WORKTREE_WAIT,
-        )
-        item.branch = branch
-        item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = base_revision
-        ctx = StageContext(
-            config=PipelineConfig(
-                org="HomericIntelligence",
-                repos=["Hephaestus"],
-                no_advise=True,
-            ),
-            org="HomericIntelligence",
-            dry_run=False,
-            github=MagicMock(),
-            paths=MagicMock(
-                repo_root=repo,
-                worktree=predecessor.cwd,
-                source_workspaces=source_manager,
-            ),
-        )
-        stage.on_job_done(item, result, ctx)
-
-        assert item.worktree == str(predecessor.cwd)
-        assert item.payload["_impl_source_revision"] == base_revision
-        assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == {
-            "branch": branch,
-            "base_sha": base_revision,
-        }
-
-        item.state = "DIRTY_DECISION_WAIT"
-        dirty_transition = stage.step(item, ctx)
-        assert dirty_transition == Continue(next_state=ADVISE_WAIT)
-        item.state = dirty_transition.next_state
-        advise_transition = stage.step(item, ctx)
-        assert advise_transition == Continue(next_state=IMPLEMENT_WAIT)
-        item.state = advise_transition.next_state
-        assert item.state == IMPLEMENT_WAIT
-
-        request = stage.step(item, ctx)
-        assert isinstance(request, JobRequest)
-        assert isinstance(request.job, AgentJob)
-        assert request.job.cwd == predecessor.cwd
-        assert request.job.workspace is not None
-        assert request.job.workspace.cwd == predecessor.cwd
-        assert request.job.workspace.revision == base_revision
-
-        with patch.object(pool, "_run_agent", return_value=JobResult(ok=True)) as run_agent:
-            pool.submit(request.job, request.on_done_state)
-            _, agent_result = completion_q.get(timeout=10)
-
-        assert agent_result.ok is True
-        run_agent.assert_called_once_with(request.job)
-
     @pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift"])
-    def test_direct_impl_writer_worker_preserves_invalid_predecessor(
+    def test_direct_pinned_impl_writer_preserves_invalid_predecessor(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
@@ -4092,15 +4022,87 @@ class TestGitOps:
             assert dirty_path.read_text(encoding="utf-8") == expected_dirty_content
             assert _git(predecessor.cwd, "status", "--porcelain") == expected_dirty_status
             assert "?? pending-change" in expected_dirty_status
+            assert _git(predecessor.cwd, "rev-parse", "HEAD") == predecessor_revision
+            assert _git(predecessor.cwd, "branch", "--show-current") == ""
         elif mutation == "attached":
             assert expected_branch is not None
             assert expected_branch == "unexpected-branch"
             assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == expected_branch
+            assert _git(predecessor.cwd, "rev-parse", "HEAD") == predecessor_revision
         else:
             assert expected_head is not None
             assert expected_head == base_revision
             assert _git(predecessor.cwd, "rev-parse", "HEAD") == expected_head
             assert _git(predecessor.cwd, "branch", "--show-current") == ""
+            assert _git(predecessor.cwd, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+
+    def test_direct_pinned_impl_writer_promotion_failure_preserves_writer_and_reservation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Invalid consumed evidence preserves the materialized direct writer."""
+        repo, predecessor_revision, base_revision = _worker_repository(tmp_path)
+        source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+        _git(repo, "reset", "--hard", predecessor_revision)
+        predecessor = source_manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor_revision)
+        _git(repo, "reset", "--hard", base_revision)
+        nonce = "c" * 32
+        branch = f"7-auto-impl-direct-{nonce}"
+        job = GitJob(
+            repo="Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": base_revision,
+                "direct_worktree_nonce": nonce,
+            },
+        )
+        real_consume = consume_implementation_writer_authority
+
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
+            ),
+            patch(
+                "hephaestus.automation.source_worktree.consume_implementation_writer_authority",
+                side_effect=lambda *args, **kwargs: (
+                    real_consume(*args, **kwargs),
+                    object(),
+                )[1],
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == (
+            "source_workspace_ownership_unavailable: "
+            "implementation writer direct transition evidence is invalid"
+        )
+        assert result.value == {
+            "path": str(predecessor.cwd),
+            WORKTREE_MATERIALIZED_KEY: True,
+            "direct_scope_reservation": {"branch": branch, "base_sha": base_revision},
+        }
+        preserved = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+        assert preserved is not None
+        assert preserved.path == predecessor.cwd
+        assert preserved.revision == predecessor.revision
+        assert preserved.generation == predecessor.generation
+        assert preserved.detached is True
+        assert preserved.branch is None
+        assert predecessor.cwd.exists()
+        assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
+        assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == branch
 
     def test_implementation_source_lane_rejects_unmaterialized_writer(
         self,
