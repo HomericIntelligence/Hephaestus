@@ -29,6 +29,7 @@ def get_implementation_prompt(
     issue_body: str = "",
     branch_name: str = "",
     worktree_path: str = "",
+    approved_plan: str = "",
     repo_root: str | None = None,
 ) -> str:
     """Get the implementation prompt for an issue.
@@ -39,6 +40,7 @@ def get_implementation_prompt(
         issue_body: Issue body/description (optional, for backward compatibility)
         branch_name: Git branch name (optional, for backward compatibility)
         worktree_path: Working directory path (optional, for backward compatibility)
+        approved_plan: Canonical approved plan, supplied as untrusted task data.
         repo_root: Absolute path to the repository root.  When provided,
             *worktree_path* is relativized to avoid leaking the operator's
             filesystem layout into the prompt.
@@ -56,6 +58,9 @@ def get_implementation_prompt(
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         branch_name=branch_name,
         worktree_path=safe_worktree_path,
+        approved_plan_block=fenced.fence(
+            "CANONICAL_APPROVED_PLAN", approved_plan or "_(unavailable)_"
+        ),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )

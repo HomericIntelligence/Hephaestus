@@ -171,7 +171,8 @@ class TestCompactSession:
 class TestCompactAgentSession:
     """Provider-neutral compaction preserves direct-runner context."""
 
-    def test_codex_compact_resumes_the_persisted_session(self, tmp_path: Path) -> None:
+    def test_codex_compact_does_not_resume_the_persisted_session(self, tmp_path: Path) -> None:
+        """Codex automation must not recreate an unbound conversation."""
         with patch("hephaestus.automation.learn.resume_agent_session") as resume:
             compacted = compact_agent_session(
                 repo="test-repo",
@@ -185,19 +186,8 @@ class TestCompactAgentSession:
                 sandbox="read-only",
             )
 
-        assert compacted is True
-        resume.assert_called_once_with(
-            agent="codex",
-            session_id="codex-session",
-            prompt="/compact",
-            cwd=tmp_path,
-            timeout=60,
-            model="gpt-5.6",
-            sandbox="read-only",
-            approval="never",
-            disable_pi_automation=False,
-            pi_dir=None,
-        )
+        assert compacted is False
+        resume.assert_not_called()
 
     def test_direct_compact_without_a_session_is_a_safe_noop(self, tmp_path: Path) -> None:
         with patch("hephaestus.automation.learn.resume_agent_session") as resume:

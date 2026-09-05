@@ -70,15 +70,41 @@ class TestParsePlannedFiles:
         )
         assert _parse_planned_files(body) == {"hephaestus/automation/ci_driver.py"}
 
-    def test_parse_planned_files_bare_filenames_not_captured(self) -> None:
-        """Bare filenames without directory (e.g., `pyproject.toml`) are NOT captured."""
+    def test_parse_planned_files_captures_safe_bare_filenames(self) -> None:
+        """A safe top-level path remains part of the approved manifest."""
         body = "# Implementation Plan\n\n## Files to Modify\n\n- `pyproject.toml`\n"
-        assert _parse_planned_files(body) == set()
+        assert _parse_planned_files(body) == {"pyproject.toml"}
 
     def test_parse_planned_files_case_insensitive_heading(self) -> None:
         """## Files to Modify/Create headings are case-insensitive."""
         body = "# Implementation Plan\n\n## FILES TO MODIFY\n\n- `hephaestus/automation/test.py`\n"
         assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            "/etc/passwd",
+            "../outside.py",
+            "hephaestus/../outside.py",
+            ":(glob)hephaestus/**/*.py",
+            "hephaestus/*.py",
+            "hephaestus\\runtime.py",
+        ),
+    )
+    def test_parse_planned_files_rejects_unsafe_manifest_entries(self, path: str) -> None:
+        """Traversal, pathspec, glob, and platform-escape syntax has no authority."""
+        body = f"# Implementation Plan\n\n## Files to Modify\n\n- `{path}`\n"
+        assert _parse_planned_files(body) == set()
+
+    def test_parse_planned_files_ignores_backticks_in_explanatory_prose(self) -> None:
+        """Only declared list entries and file subheadings create modification authority."""
+        body = (
+            "# Implementation Plan\n\n"
+            "## Files to Modify\n\n"
+            "Use `hephaestus/automation/unapproved.py` only as an example.\n"
+            "- `hephaestus/automation/approved.py`\n"
+        )
+        assert _parse_planned_files(body) == {"hephaestus/automation/approved.py"}
 
 
 class TestCoordinatorCapOwnership:
