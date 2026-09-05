@@ -227,11 +227,11 @@ def test_issue_body_editor_must_match_authenticated_viewer(
     assert variables == {"owner": "org", "name": "repo", "number": "2795"}
 
 
-@pytest.mark.parametrize("issue_number", [0, -1, True])
+@pytest.mark.parametrize("issue_number", [0, -1, True, 1.5, "2795"])
 def test_issue_body_editor_rejects_invalid_number_before_github_io(
     adapter: pg.PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
-    issue_number: int,
+    issue_number: Any,
 ) -> None:
     """Invalid issue numbers are rejected before the transport is called."""
     adapter.repo = "repo"
