@@ -2493,6 +2493,129 @@ class TestGitOps:
             "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
         }
 
+    def test_inspect_implementation_worktree_returns_dirty_read_only_receipt(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """Inspection identifies a dirty registered writer without mutation."""
+        repo = tmp_path / "repo"
+        branch = "2973-auto-impl"
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        repo.mkdir()
+        git("init", "-q", "-b", branch)
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        tracked.write_text("changed\n", encoding="utf-8")
+
+        result = pool._git_inspect_implementation_worktree(
+            GitJob(
+                repo="test/repo",
+                op="inspect_implementation_worktree",
+                timeout_s=60,
+                kwargs={
+                    "repo_root": str(repo),
+                    "worktree_path": str(repo),
+                    "branch": branch,
+                    "expected_head": head,
+                },
+            )
+        )
+
+        assert result.ok is True
+        assert result.value == {
+            "outcome": "dirty",
+            "branch": branch,
+            "head_sha": head,
+            "status": " M tracked.txt\n",
+            "diff": git("diff").stdout,
+            "content_snapshot": _dirty_worktree_content_snapshot(repo, timeout=60),
+            "worktree_path": str(repo),
+        }
+        assert git("status", "--short").stdout == " M tracked.txt\n"
+
+    def test_inspect_implementation_worktree_returns_clean_receipt(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """Inspection returns a clean receipt without a content snapshot."""
+        repo = tmp_path / "repo"
+        branch = "2973-auto-impl"
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        repo.mkdir()
+        git("init", "-q", "-b", branch)
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+
+        result = pool._git_inspect_implementation_worktree(
+            GitJob(
+                repo="test/repo",
+                op="inspect_implementation_worktree",
+                timeout_s=60,
+                kwargs={
+                    "repo_root": str(repo),
+                    "worktree_path": str(repo),
+                    "branch": branch,
+                    "expected_head": head,
+                },
+            )
+        )
+
+        assert result.ok is True
+        assert result.value == {
+            "outcome": "clean",
+            "branch": branch,
+            "head_sha": head,
+            "status": "",
+            "diff": "",
+            "worktree_path": str(repo),
+        }
+
+    def test_inspect_implementation_worktree_rejects_malformed_request(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Inspection fails closed before it reads an incomplete request."""
+        result = pool._git_inspect_implementation_worktree(
+            GitJob(
+                repo="test/repo",
+                op="inspect_implementation_worktree",
+                timeout_s=60,
+                kwargs={"repo_root": str(tmp_path), "worktree_path": str(tmp_path)},
+            )
+        )
+
+        assert result.ok is False
+        assert result.value["outcome"] == "failed"
+        assert result.value["failure_kind"] == "invalid_request"
+
     @pytest.mark.parametrize("changed_kind", ["staged", "untracked", "untracked_newline"])
     def test_recover_dirty_worktree_rejects_byte_drift_with_unchanged_status(
         self,

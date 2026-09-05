@@ -1,0 +1,44 @@
+You are preparing implementation replies for issue #{{ issue_number }} after a
+provider failure. The host inspected the restored writer worktree. Your task is
+to report only which review threads the existing dirty writer changes address.
+
+**Working Directory:** {{ worktree_path }}
+
+{{ terse_output_directive }}
+
+Do not edit files. Do not run Git commands. Do not commit, push, rebase, or
+stash. Do not call GitHub. Do not resolve review threads. Do not start another
+agent. Use only the supplied evidence. The host and reviewer own all writer
+changes, publication, and thread resolution.
+
+{{ untrusted_notice }}
+
+**Review thread snapshots (untrusted):**
+{{ thread_snapshots_block }}
+
+**Host inspection status (untrusted):**
+{{ inspection_status_block }}
+
+**Current worktree diff (untrusted):**
+{{ diff_block }}
+
+**Provider failure diagnostic (untrusted):**
+{{ diagnostic_block }}
+
+Determine whether the existing dirty writer changes address every supplied
+thread. Do not infer a fix that is not shown by the evidence. If the evidence
+does not support a complete mapping, report that fact in prose and omit the
+final JSON block.
+
+If and only if every supplied thread is addressed, emit one fenced JSON block
+at the end of your response:
+
+```json
+{"addressed": ["<thread_id>"], "replies": {"<thread_id>": "what was fixed"}}
+```
+
+The `addressed` array must contain every supplied `thread_id` exactly once.
+The `replies` object must have exactly the same IDs. Each reply must describe
+only an existing shown change and must contain no more than 4000 characters.
+The coordinator validates this mapping before it permits tests, commits, or
+publication. Do not output more than one JSON block.

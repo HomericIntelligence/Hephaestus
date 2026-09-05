@@ -1609,10 +1609,10 @@ class TestWorktreeAndAdvise:
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
-    def test_remediation_reuses_the_writer_stowed_for_read_only_review(
+    def test_remediation_inspects_the_writer_stowed_for_read_only_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A review handoff never creates a second worktree for the PR branch."""
+        """A review handoff inspects its restored writer before remediation."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
@@ -1622,14 +1622,23 @@ class TestWorktreeAndAdvise:
             {
                 "implementation_remediation": True,
                 "implementation_writer_restored": True,
+                "_impl_source_revision": "a" * 40,
             }
         )
 
         result = stage.step(item, ctx)
 
-        assert result == Continue(next_state="DIRTY_DECISION_WAIT")
-        assert item.payload["worktree_dirty"] is False
-        assert "implementation_writer_restored" not in item.payload
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "inspect_implementation_worktree"
+        assert result.job.kwargs == {
+            "repo_root": "/tmp/repo",
+            "worktree_path": "/tmp/implementation-writer",
+            "branch": "1-auto-impl",
+            "expected_head": "a" * 40,
+        }
+        assert result.on_done_state == "DIRTY_DECISION_WAIT"
+        assert item.payload["implementation_writer_restored"] is True
 
     def test_post_review_rebase_reuses_the_writer_stowed_for_read_only_review(
         self, make_ctx: Any, make_work_item: Any
@@ -1663,6 +1672,133 @@ class TestWorktreeAndAdvise:
         assert isinstance(rebase.job, GitJob)
         assert rebase.job.kwargs["sync_to_expected_remote_head"] is True
         assert rebase.job.kwargs["pr_number"] == 1001
+
+    def test_dirty_remediation_inspection_routes_to_read_only_reply_recovery(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A dirty failed-remediation writer gets one mapping-only recovery turn."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "implementation_writer_restored": True,
+                "remediation_writer_inspection_inflight": True,
+            }
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "outcome": "dirty",
+                    "branch": "1-auto-impl",
+                    "head_sha": "a" * 40,
+                    "status": " M module.py\n",
+                    "diff": "+change\n",
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "worktree_path": "/tmp/implementation-writer",
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert stage.step(item, make_ctx()) == Continue(
+            next_state="REMEDIATION_REPLY_RECOVERY_WAIT"
+        )
+
+    def test_clean_remediation_inspection_finishes_without_writable_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A clean failed-remediation writer ends without another edit turn."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "implementation_writer_restored": True,
+                "remediation_writer_inspection_inflight": True,
+            }
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "outcome": "clean",
+                    "branch": "1-auto-impl",
+                    "head_sha": "a" * 40,
+                    "status": "",
+                    "diff": "",
+                    "worktree_path": "/tmp/implementation-writer",
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
+    def test_dirty_inspection_uses_one_read_only_validated_reply_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A dirty writer can continue only after one valid read-only mapping."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "module.py",
+                        "line": 1,
+                        "body": "Fix the guard.",
+                        "comments": [],
+                    }
+                ],
+                "remediation_failure_diagnostic": "file_change failed",
+                "remediation_writer_inspection": {
+                    "outcome": "dirty",
+                    "branch": "1-auto-impl",
+                    "head_sha": "a" * 40,
+                    "status": " M module.py\n",
+                    "diff": "+guard\n",
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "worktree_path": "/tmp/implementation-writer",
+                },
+            }
+        )
+
+        request = stage.step(item, make_ctx())
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.descr == "recover_remediation_reply"
+        assert request.job.allowed_tools == "Read,Glob,Grep"
+        assert request.job.sandbox == "read-only"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "Added the guard."},
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert item.attempts["remediation_reply"] == 1
+        assert stage.step(item, make_ctx()) == Continue(next_state="TEST_WAIT")
 
     def test_restored_writer_head_drift_returns_to_fresh_review(
         self, make_ctx: Any, make_work_item: Any
@@ -2657,6 +2793,44 @@ class TestImplementBudget:
         assert result.disposition == Disposition.RETRY
         assert result.note == "agent_error"
 
+    def test_invalid_remediation_mapping_stops_before_tests_or_publication(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A malformed remediation mapping cannot reach test or publish work."""
+        item = make_work_item(issue=1, pr=1001, state="TEST_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_reply_error": True,
+            }
+        )
+
+        assert ImplementationStage().step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
+    def test_empty_remediation_output_stops_before_tests_or_publication(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty successful remediation response is not a valid mapping."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [{"id": "thread-1"}],
+            }
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value=""), make_ctx())
+        item.state = "TEST_WAIT"
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
     def test_agent_tool_failure_with_no_diff_never_enters_no_commit_cleanup(
         self,
         make_ctx: Any,
@@ -3053,10 +3227,10 @@ class TestTestsAndFix:
 class TestCommitPushAndPrCreate:
     """COMMIT_PUSH_WAIT / PR_CREATE: durable journal entry + deferral order."""
 
-    def test_pushed_remediation_with_malformed_reply_mapping_returns_to_review(
+    def test_pushed_remediation_with_malformed_reply_mapping_fails_closed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A valid pushed head survives a malformed exact-thread reply mapping."""
+        """A pushed remediation cannot return to review without valid replies."""
         stage = ImplementationStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -3086,19 +3260,17 @@ class TestCommitPushAndPrCreate:
             ctx,
         )
 
-        assert "remediation_reply_error" not in item.payload
+        assert item.payload["remediation_reply_error"] is True
         assert item.payload["_impl_source_revision"] == "b" * 40
         assert item.payload["_post_remediation_review_head_sha"] == "b" * 40
         assert "pending_implementation_reply_handoff" not in item.payload
-        assert "implementation_remediation" not in item.payload
-        assert "remediation_output" not in item.payload
         assert not any(
             name == "post_implementation_thread_replies" for name, _ in github.mutation_log
         )
 
         item.state = "PR_CREATE"
         assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
-            Disposition.ADVANCE, "PR #1001 ready for review"
+            Disposition.FINISH_FAIL, "implementation_reply_failed"
         )
 
     def test_no_commit_remediation_with_malformed_reply_mapping_fails_closed(

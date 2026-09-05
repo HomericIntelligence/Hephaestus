@@ -2656,6 +2656,9 @@ class WorkerPool:
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
 
+        elif job.op == "inspect_implementation_worktree":
+            return self._git_inspect_implementation_worktree(job)
+
         elif job.op == "recover_dirty_worktree":
             return self._git_recover_dirty_worktree(job)
 
@@ -4496,6 +4499,88 @@ class WorkerPool:
         from .git_cleanup import run_cleanup_job
 
         return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
+
+    def _git_inspect_implementation_worktree(self, job: GitJob) -> JobResult:
+        """Inspect an identity-bound writer without changing its contents."""
+        worktree = Path(str(job.kwargs.get("worktree_path") or ""))
+        repo_root = Path(str(job.kwargs.get("repo_root") or ""))
+        branch = str(job.kwargs.get("branch") or "")
+        expected_head = str(job.kwargs.get("expected_head") or "")
+
+        def fail(kind: str, cause: str) -> JobResult:
+            return JobResult(
+                ok=False,
+                error=f"implementation worktree inspection {kind}",
+                value={
+                    "outcome": "failed",
+                    "failure_kind": kind,
+                    "cause": bounded_git_diagnostic(cause, limit=_ERR_MAX),
+                },
+            )
+
+        if not branch or not _is_full_commit_sha(expected_head):
+            return fail("invalid_request", "inspection requires branch and exact head")
+        try:
+            confined_root = repo_root.resolve(strict=True)
+            confined_worktree = worktree.resolve(strict=True)
+        except OSError as exc:
+            return fail("worktree_unavailable", str(exc))
+        if (
+            worktree.is_symlink()
+            or not confined_worktree.is_dir()
+            or not (confined_worktree / ".git").exists()
+            or (
+                confined_worktree != confined_root
+                and confined_root not in confined_worktree.parents
+            )
+        ):
+            return fail("worktree_unconfined", "worktree is outside the repository root")
+        try:
+            listing = git_utils.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=confined_root,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            ).stdout
+            expected_block = (
+                f"worktree {confined_worktree}\nHEAD {expected_head}\nbranch refs/heads/{branch}\n"
+            )
+            if expected_block not in f"{listing.rstrip()}\n":
+                return fail("worktree_identity_drift", "registered worktree identity changed")
+            head_sha = git_utils.run(
+                ["git", "rev-parse", "HEAD"], cwd=confined_worktree, timeout=job.timeout_s
+            ).stdout.strip()
+            current_branch = git_utils.run(
+                ["git", "branch", "--show-current"],
+                cwd=confined_worktree,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+            if head_sha != expected_head or current_branch != branch:
+                return fail("worktree_identity_drift", "worktree branch or head changed")
+            status = git_utils.run(
+                ["git", "status", "--short"], cwd=confined_worktree, timeout=job.timeout_s
+            ).stdout
+            diff = git_utils.run(
+                ["git", "diff"], cwd=confined_worktree, timeout=job.timeout_s
+            ).stdout
+            receipt: dict[str, object] = {
+                "outcome": "dirty" if status.strip() else "clean",
+                "branch": branch,
+                "head_sha": head_sha,
+                "status": status,
+                "diff": diff,
+                "worktree_path": str(confined_worktree),
+            }
+            if status.strip():
+                receipt["content_snapshot"] = _dirty_worktree_content_snapshot(
+                    confined_worktree,
+                    timeout=job.timeout_s,
+                )
+            return JobResult(ok=True, value=receipt)
+        except subprocess.TimeoutExpired as exc:
+            return fail("timeout", str(exc))
+        except subprocess.CalledProcessError as exc:
+            return fail("git_error", str(exc))
 
     def _git_recover_dirty_worktree(self, job: GitJob) -> JobResult:  # noqa: C901
         """Preserve one identity-bound dirty writer by commit or stash."""

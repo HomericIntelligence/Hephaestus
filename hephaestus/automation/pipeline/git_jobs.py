@@ -11,6 +11,7 @@ GIT_OPS: frozenset[str] = frozenset(
         "sync_checkout",
         "verify_issue_wave_ancestry",
         "create_worktree",
+        "inspect_implementation_worktree",
         "recover_dirty_worktree",
         "verify_pr_review_checkout",
         "remove_worktree",

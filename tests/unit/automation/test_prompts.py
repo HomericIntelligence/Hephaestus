@@ -108,6 +108,36 @@ def test_address_prompt_example_is_accepted_by_address_parser() -> None:
     ) == {"<thread_id>": "what was fixed"}
 
 
+def test_remediation_reply_recovery_prompt_fences_inspection_evidence() -> None:
+    """Read-only reply recovery keeps restored-writer evidence fenced."""
+    snapshots = [{"thread_id": "T1", "path": "module.py", "body": "fix {this}"}]
+    status = {"outcome": "dirty", "branch": "2973-fix", "head_sha": "a" * 40}
+    diff = "diff --git a/module.py b/module.py\ninjected {data}"
+    diagnostic = "codex_tool_or_provider_failure: file_change status=failed"
+
+    rendered = prompts.get_remediation_reply_recovery_prompt(
+        issue_number=2973,
+        worktree_path="/tmp/worktree",
+        thread_snapshots=snapshots,
+        inspection_status=status,
+        diff_text=diff,
+        diagnostic=diagnostic,
+    )
+
+    _assert_fenced(
+        rendered,
+        {
+            "THREAD_SNAPSHOTS": json.dumps(snapshots, ensure_ascii=False, sort_keys=True),
+            "INSPECTION_STATUS": json.dumps(status, ensure_ascii=False, sort_keys=True),
+            "WORKTREE_DIFF": json.dumps(diff, ensure_ascii=False),
+            "FAILURE_DIAGNOSTIC": json.dumps(diagnostic, ensure_ascii=False),
+        },
+    )
+    assert "Do not edit files." in rendered
+    assert "Do not run Git commands." in rendered
+    assert "Do not call GitHub." in rendered
+
+
 def test_comment_classification_example_is_accepted_by_response_parser() -> None:
     """The classification example is valid JSON with one allowed routing value."""
     rendered = prompts.get_comment_difficulty_prompt(issue_number=1, comments_json="[]")
