@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -34,6 +35,14 @@ from hephaestus.utils.worktree_identity import source_worktree_name
 
 class SourceWorkspaceError(RuntimeError):
     """Raised when a source lane cannot be prepared safely."""
+
+
+def _is_direct_implementation_branch(item_number: int, branch: str | None) -> bool:
+    """Return whether *branch* is the exact managed direct-writer form."""
+    return (
+        branch is not None
+        and re.fullmatch(rf"{item_number}-auto-impl-direct-[0-9a-f]{{32}}", branch) is not None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,7 +317,18 @@ class SourceWorkspaceManager:
         self._reject_foreign_owner(old, item_number, lane)
         if old is not None and old.path.resolve() != expected_path:
             raise SourceWorkspaceError("incompatible source workspace receipt")
-        if old is not None and not old.detached and old.branch != branch:
+        replacing_direct_writer = (
+            old is not None
+            and not old.detached
+            and old.branch != branch
+            and _is_direct_implementation_branch(item_number, old.branch)
+        )
+        if (
+            old is not None
+            and not old.detached
+            and old.branch != branch
+            and not replacing_direct_writer
+        ):
             raise SourceWorkspaceError("incompatible source workspace receipt")
         if not expected_path.exists():
             raise SourceWorkspaceError("implementation writer worktree does not exist")
@@ -349,7 +369,7 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError(
                 f"implementation writer authority is invalid: {exc}"
             ) from exc
-        if old is not None and old.detached:
+        if old is not None and (old.detached or replacing_direct_writer):
             try:
                 handoff._validate_consumed_direct_transition(
                     predecessor_evidence,
@@ -376,7 +396,7 @@ class SourceWorkspaceManager:
         base_sha: str,
         handoff: ImplementationWriterHandoff | None,
     ) -> None:
-        """Arm one exact detached predecessor transition for a direct writer."""
+        """Arm one exact controlled predecessor transition for a direct writer."""
         lane = SourceLane.IMPLEMENTATION
         expected_path = self.path_for(item_number, lane).resolve()
         if handoff is None:
@@ -391,14 +411,19 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError(str(exc)) from exc
         old = self._read_receipt(item_number, lane)
         self._reject_foreign_owner(old, item_number, lane)
+        if old is None or old.path.resolve() != expected_path or not expected_path.exists():
+            raise SourceWorkspaceError("detached implementation writer predecessor is invalid")
+        detached_predecessor = (
+            old.detached and old.branch is None and self._head_branch(expected_path) is None
+        )
+        direct_writer_predecessor = (
+            not old.detached
+            and _is_direct_implementation_branch(item_number, old.branch)
+            and self._head_branch(expected_path) == f"refs/heads/{old.branch}"
+        )
         if (
-            old is None
-            or old.path.resolve() != expected_path
-            or not old.detached
-            or old.branch is not None
-            or not expected_path.exists()
+            not (detached_predecessor or direct_writer_predecessor)
             or self._is_dirty(expected_path)
-            or self._head_branch(expected_path) is not None
             or self._head_revision(expected_path) != old.revision
         ):
             raise SourceWorkspaceError("detached implementation writer predecessor is invalid")

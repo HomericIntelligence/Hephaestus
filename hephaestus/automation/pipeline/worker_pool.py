@@ -3954,10 +3954,13 @@ class WorkerPool:
             kwargs["implementation_writer_handoff"] = implementation_writer_handoff
         if (
             implementation_source_lane
+            and not adopting_implementation_writer
             and base_sha is not None
             and source_manager is not None
             and implementation_writer_handoff is not None
         ):
+            # An adopted writer is authenticated from its exact remote PR head.
+            # It must not consume a direct-cursor transition.
             writer_path = base_dir / source_worktree_name(cast(int, kwargs["issue_number"]), "impl")
             if writer_path.exists():
                 try:
