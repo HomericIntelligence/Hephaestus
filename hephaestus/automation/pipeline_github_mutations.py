@@ -15,16 +15,18 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization,
+        authorization: MergeAuthorization | None = None,
     ) -> ConditionalMergeResult:
         """Attempt one immediate squash merge conditional on the reviewed SHA.
 
-        The request deliberately avoids the GitHub CLI PR-merge subcommand,
+        The stage owns review and check admission. This adapter only enforces
+        the SHA condition and performs the merge request. The request
+        deliberately avoids the GitHub CLI PR-merge subcommand,
         native auto-merge, merge queues, administrator flags, and retries. A
         stage-owned lifecycle read decides whether an ambiguous request may be
         retried later.
         """
-        if (
+        if authorization is not None and (
             not isinstance(authorization, MergeAuthorization)
             or authorization.repository != self._repo_slug
             or authorization.pr_number != pr_number

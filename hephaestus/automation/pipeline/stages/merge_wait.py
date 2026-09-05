@@ -3,15 +3,15 @@
 ``pr_review`` owns the loop's automated implementation-eligibility decision.
 This stage may perform one ordinary REST squash merge only after it observes
 the exact active-run reviewed head, an exclusive implementation-GO label, an
-open ``main`` PR, an explicitly absent auto-merge request, and exactly one
-trusted, unedited marked ``APPROVED`` native review for that head. It never
-enables, disables, adopts, or polls native auto-merge.
+open ``main`` PR, an explicitly absent auto-merge request, no unresolved
+review threads, and green Check Runs for that head. It never enables,
+disables, adopts, or polls native auto-merge.
 
 The implemented mini-state graph is:
 
 - ``ENTER -> MERGE``. An open PR is admitted only with the current-process
-  reviewed-head proof, the PR-level implementation-GO label, and the exact-head
-  operator authorization; readiness may retry ``MERGE`` within its bounded wait.
+  reviewed-head proof and the PR-level implementation-GO label. Readiness may
+  retry ``MERGE`` within its bounded wait.
 - A PR observed as already merged, or a conditional merge freshly confirmed as
   merged, emits one immutable post-merge learning intent. The coordinator
   transfers that intent to the auxiliary lane after the confirmed pass.
@@ -211,17 +211,8 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "closed")
         if outcome == "auto_merge_already_armed":
             return StageOutcome(Disposition.BLOCKED, outcome)
-        if outcome in {
-            "merge_authorization_absent",
-            "merge_authorization_stale",
-            "merge_authorization_ambiguous",
-            "merge_authorization_replayed",
-            "merge_authorization_revoked",
-            "merge_authorization_untrusted",
-        }:
+        if outcome == "required_checks_not_green":
             return StageOutcome(Disposition.BLOCKED, outcome)
-        if outcome in {"merge_authorization_unavailable", "merge_authorization_changed"}:
-            return StageOutcome(Disposition.FINISH_FAIL, outcome)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome in {"merge_conflicting", "post_review_rebase_required"}:

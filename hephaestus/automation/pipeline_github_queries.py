@@ -1,6 +1,7 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 import json
+import re
 import subprocess
 from urllib.parse import quote
 
@@ -13,6 +14,50 @@ from .review_journal import (
     discover_plan_from_comments,
     normalize_issue_comments,
 )
+
+_FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_CHECK_RUNS_PAGE_SIZE = 100
+_CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+
+
+def _check_run_page(payload: object, head_sha: str) -> tuple[int, list[object]] | None:
+    """Validate one exact-head Check Runs response page."""
+    if not isinstance(payload, dict):
+        logger.warning("Check Runs response for %s is not an object", head_sha)
+        return None
+    total_count = payload.get("total_count")
+    check_runs = payload.get("check_runs")
+    if (
+        not isinstance(total_count, int)
+        or isinstance(total_count, bool)
+        or total_count < 0
+        or not isinstance(check_runs, list)
+    ):
+        logger.warning("Check Runs response for %s is malformed", head_sha)
+        return None
+    return total_count, check_runs
+
+
+def _check_run_snapshot(check_runs: list[object], head_sha: str) -> tuple[object, ...] | None:
+    """Return stable identity and status data for a Check Runs traversal."""
+    snapshot: list[tuple[int, str, str, object]] = []
+    for check_run in check_runs:
+        if not isinstance(check_run, dict):
+            logger.warning("Check Run for %s is not an object", head_sha)
+            return None
+        check_run_id = check_run.get("id")
+        if not isinstance(check_run_id, int) or isinstance(check_run_id, bool) or check_run_id <= 0:
+            logger.warning("Check Run for %s has no valid identity", head_sha)
+            return None
+        snapshot.append(
+            (
+                check_run_id,
+                str(check_run.get("status") or "").lower(),
+                str(check_run.get("conclusion") or "").lower(),
+                check_run.get("head_sha"),
+            )
+        )
+    return tuple(sorted(snapshot))
 
 
 class PipelineGitHubQueries(_PipelineGitHubHost):
@@ -507,8 +552,9 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         merge_wait use it to bind and verify a reviewed head on a confirmed,
         unarmed PR. It deliberately excludes
         GitHub merge-readiness and check-status fields: this accessor does not
-        use CI/CD as automation-loop authorization, and no queue stage uses it
-        to mutate or poll auto-merge.
+        use CI/CD as structural-review authorization, and no queue stage uses
+        it to mutate or poll auto-merge. The separate
+        :meth:`required_checks_pass_for_head` method is the final merge gate.
         """
         try:
             result = self._gh(
@@ -548,6 +594,119 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: merge readiness read failed: %s", pr_number, exc)
             return None
+
+    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+        """Return whether complete successful Check Runs exist for ``head_sha``.
+
+        The endpoint is scoped to the reviewed commit instead of the mutable
+        pull-request ref. GitHub does not mark branch-protection requirements
+        in this response, so every returned Check Run is treated as required.
+        Every run must identify that same commit, must be complete, and must
+        have an allowed conclusion. An empty, malformed, changing, or failed
+        response does not authorize a merge.
+        """
+        if self._repo_slug is None or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None:
+            return False
+        try:
+            first = self._check_runs_for_head(head_sha)
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+        ) as exc:
+            logger.warning("Check Runs read failed for %s: %s", head_sha, exc)
+            return False
+        if first is None or not first:
+            return False
+        if len(first) > _CHECK_RUNS_PAGE_SIZE:
+            first_snapshot = _check_run_snapshot(first, head_sha)
+            if first_snapshot is None:
+                return False
+            try:
+                second = self._check_runs_for_head(head_sha)
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+                subprocess.SubprocessError,
+                RuntimeError,
+                OSError,
+            ) as exc:
+                logger.warning("Check Runs stability read failed for %s: %s", head_sha, exc)
+                return False
+            if second is None or _check_run_snapshot(second, head_sha) != first_snapshot:
+                logger.warning("Check Runs changed while reading %s", head_sha)
+                return False
+            checks = second
+        else:
+            checks = first
+
+        saw_success = False
+        for check_run in checks:
+            if not isinstance(check_run, dict):
+                return False
+            if check_run.get("head_sha") != head_sha:
+                logger.warning("Check Run does not match reviewed head %s", head_sha)
+                return False
+            status = str(check_run.get("status") or "").lower()
+            conclusion = str(check_run.get("conclusion") or "").lower()
+            if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
+                return False
+            saw_success = saw_success or conclusion == "success"
+        return saw_success
+
+    def _check_runs_for_head(self, head_sha: str) -> list[object] | None:
+        """Read every Check Runs page for one exact commit."""
+        owner, name = self._owner_name()
+        endpoint = (
+            f"/repos/{owner}/{name}/commits/{head_sha}/check-runs?per_page={_CHECK_RUNS_PAGE_SIZE}"
+        )
+        check_runs: list[object] = []
+        expected_count: int | None = None
+        check_run_ids: set[int] | None = None
+        page = 1
+        while expected_count is None or len(check_runs) < expected_count:
+            page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
+            result = self._gh(["api", page_endpoint], check=False)
+            if result.returncode != 0:
+                raise RuntimeError("GitHub returned an error for Check Runs")
+            payload = json.loads(result.stdout or "null")
+            parsed = _check_run_page(payload, head_sha)
+            if parsed is None:
+                return None
+            total_count, page_runs = parsed
+            if expected_count is None:
+                expected_count = total_count
+                if expected_count > len(page_runs):
+                    check_run_ids = set()
+            elif total_count != expected_count:
+                logger.warning("Check Runs count changed for %s", head_sha)
+                return None
+
+            if check_run_ids is not None:
+                for check_run in page_runs:
+                    check_run_id = check_run.get("id") if isinstance(check_run, dict) else None
+                    if (
+                        not isinstance(check_run_id, int)
+                        or isinstance(check_run_id, bool)
+                        or check_run_id <= 0
+                        or check_run_id in check_run_ids
+                    ):
+                        logger.warning("Check Runs page has invalid identity for %s", head_sha)
+                        return None
+                    check_run_ids.add(check_run_id)
+
+            check_runs.extend(page_runs)
+            if len(check_runs) > expected_count or (
+                not page_runs and len(check_runs) < expected_count
+            ):
+                logger.warning("Check Runs pages are incomplete for %s", head_sha)
+                return None
+            page += 1
+        return check_runs
 
     def base_branch_requires_conversation_resolution(
         self, pr_number: int, base_branch: str

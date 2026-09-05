@@ -138,9 +138,8 @@ class FakeStageGitHub(FakeGitHub):
                 discovery.
             journal_read_error: Optional failure returned by review-journal
                 discovery.
-            authorization_reviews: Exact-head native reviews; ``None`` uses
-                one stable trusted operator approval, while an empty tuple
-                models absent authorization.
+            authorization_reviews: Native review data for scope and thread
+                tests; an empty tuple models absent review data.
             actor_permissions: Current collaborator permissions for review
                 authors.
 
@@ -708,9 +707,14 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
 
+    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+        """Return a green result for the requested exact head by default."""
+        del head_sha
+        return True
+
     @property
     def _repo_slug(self) -> str:
-        """Return the stable repository identity used by merge authorization."""
+        """Return the stable repository identity used by GitHub queries."""
         return "org/repo-a"
 
     def _viewer_login(self) -> str:
@@ -737,11 +741,12 @@ class FakeStageGitHub(FakeGitHub):
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization,
+        authorization: MergeAuthorization | None = None,
     ) -> ConditionalMergeResult:
         """Mirror one successful SHA-conditional normal merge request."""
-        self.merge_attempts.append((pr_number, reviewed_sha, authorization.review_id))
-        self._log("merge_pr_if_head", pr_number, reviewed_sha, authorization.review_id)
+        review_id = authorization.review_id if authorization is not None else "R1"
+        self.merge_attempts.append((pr_number, reviewed_sha, review_id))
+        self._log("merge_pr_if_head", pr_number, reviewed_sha, review_id)
         self._pr_state = {"state": "MERGED"}
         return ConditionalMergeResult(status=200, body={"merged": True})
 

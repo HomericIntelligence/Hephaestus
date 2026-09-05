@@ -1202,10 +1202,10 @@ class TestMergeAuthorizationRestart:
         assert reviewed.result is not None
         assert reviewed.result.passed is True
 
-    def test_changed_head_makes_durable_authorization_stale_without_put(
+    def test_reviewed_head_merges_without_native_approval(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An exact-head review cannot authorize a later PR head."""
+        """A current reviewed head does not require a native approval."""
         github = FakeStageGitHub(
             pr_impl_state=(True, False),
             pr_state={
@@ -1216,7 +1216,6 @@ class TestMergeAuthorizationRestart:
                 "mergeStateStatus": "CLEAN",
                 "mergeable": "MERGEABLE",
             },
-            authorization_reviews=(_authorization_review("R1", "a" * 40),),
         )
         runner = PipelineGitHubJobRunner(org="org", dry_run=False)
         monkeypatch.setattr(
@@ -1238,9 +1237,9 @@ class TestMergeAuthorizationRestart:
         coordinator._drain_queues()
         coordinator._drain_completions()
 
-        assert github.merge_attempts == []
+        assert github.merge_attempts == [(12, "b" * 40, "R1")]
         assert item.result is not None
-        assert item.result.reason == "blocked: merge_authorization_stale"
+        assert item.result.passed is True
 
 
 class TestRateBudget:

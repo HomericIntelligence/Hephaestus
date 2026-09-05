@@ -14,7 +14,7 @@ A piece of work is **done** when every item below is true.
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
 | 3 | Every commit is cryptographically signed and DCO-signed (`git commit -S -s`) | `homeric-main-baseline` ruleset (`required_signatures`) + CI `pr-policy` DCO check |
-| 4 | `pr_review` writes loop-owned `state:implementation-go` only after the typed reviewer verdict is `GO`. Fresh GitHub facts must also confirm the exact open, unarmed reviewed head, complete thread state, and exclusive-label readback. A missing, malformed, `NOGO`, or `BLOCKED` verdict fails closed. A grade is audit metadata only. The label is automated implementation eligibility, not operator authorization. Immediately before each individual SHA-conditional ordinary REST squash-merge request, `merge_wait` requires that label, the current-process reviewed-head proof, and exactly one trusted, unedited marked `APPROVED` GitHub review bound to the exact head. CI readiness and review prose never authorize merging. The merge budget (default: five) bounds actual requests and transport-ambiguity retries, not readiness polling. No queue stage uses `gh pr merge`, mutates native auto-merge, manages a merge queue, or bypasses protection. | Queue gate and human review |
+| 4 | `pr_review` writes loop-owned `state:implementation-go` only after the typed reviewer verdict is `GO`. Fresh GitHub facts must also confirm the exact open, unarmed reviewed head, complete thread state, and exclusive-label readback. A missing, malformed, `NOGO`, or `BLOCKED` verdict fails closed. A grade is audit metadata only. Immediately before each individual SHA-conditional ordinary REST squash-merge request, `merge_wait` requires that label, the current-process reviewed-head proof, no unresolved review threads, and complete successful Check Runs for the exact head. A second GitHub user and a marked `APPROVED` review are not required. Check Runs are a separate merge gate and do not authorize review or replace the reviewed-head proof. The merge budget (default: five) bounds actual requests and transport-ambiguity retries, not readiness polling. No queue stage uses `gh pr merge`, mutates native auto-merge, manages a merge queue, or bypasses protection. | Queue gate and exact-head CI gate |
 | 5 | The PR title uses an authored Conventional Commit form because it becomes the squash subject; each branch commit uses that form or a recognized Git-generated machinery form | CI gate `pr-policy` (Check 2) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
@@ -61,9 +61,10 @@ and every later squash-merge title must satisfy the authored form above.
 > audit evidence only;
 > `state:implementation-go` is automated implementation eligibility, not the
 > complete merge authority. `merge_wait` additionally requires its
-> current-process reviewed-head proof and exactly one trusted, unedited marked
-> operator approval for the exact head before conditional merge admission.
-> Reporting checks do not create operator authorization.
+> current-process reviewed-head proof, no unresolved review threads, and
+> complete successful Check Runs for the exact head before conditional merge
+> admission. Reporting checks do not create review authorization; they are a
+> separate merge gate.
 
 ## For new features
 

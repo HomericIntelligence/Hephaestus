@@ -8,10 +8,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.merge_authorization import (
-    MERGE_AUTHORIZATION_MARKER,
-    MergeAuthorization,
-)
+from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, RunMergeWaitCycleRequest
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
@@ -26,31 +23,6 @@ from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 MERGE = "MERGE"
-
-
-def _authorization_review(
-    review_id: str = "R1",
-    *,
-    head: str = "a" * 40,
-    author: str = "operator",
-    author_type: str = "User",
-    state: str = "APPROVED",
-    includes_created_edit: bool = False,
-) -> dict[str, object]:
-    """Build one native review candidate for merge-wait admission tests."""
-    return {
-        "id": review_id,
-        "fullDatabaseId": 1,
-        "body": MERGE_AUTHORIZATION_MARKER,
-        "state": state,
-        "submittedAt": "2026-08-08T00:00:00Z",
-        "updatedAt": "2026-08-08T00:00:00Z",
-        "includesCreatedEdit": includes_created_edit,
-        "lastEditedAt": None,
-        "viewerDidAuthor": False,
-        "author": {"login": author, "__typename": author_type},
-        "commit": {"oid": head},
-    }
 
 
 def _open_pr(
@@ -79,7 +51,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         merge_results: list[ConditionalMergeResult] | None = None,
         readiness: dict[str, object] | list[dict[str, object]] | None = None,
         conversation_resolution: bool = True,
-        authorization_snapshots: list[tuple[dict[str, object], ...]] | None = None,
+        required_checks_green: bool = True,
     ) -> None:
         scripted_states = states or [_open_pr()]
         super().__init__(
@@ -87,7 +59,6 @@ class _ConditionalGitHub(FakeStageGitHub):
             pr_state=scripted_states[0],
             conversation_resolution=conversation_resolution,
         )
-        self._authorization_snapshots = list(authorization_snapshots or [])
         self._states = list(scripted_states)
         self._merge_results = list(
             merge_results
@@ -113,6 +84,9 @@ class _ConditionalGitHub(FakeStageGitHub):
             list(readiness) if isinstance(readiness, list) else [readiness or default_readiness]
         )
         self.merge_attempts: list[tuple[int, str, str]] = []
+        self._required_checks_green = required_checks_green
+        self.checked_heads: list[str] = []
+        self.events: list[str] = []
 
     def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
         del pr_number
@@ -120,22 +94,16 @@ class _ConditionalGitHub(FakeStageGitHub):
             return self._states.pop(0)
         return self._states[0]
 
-    def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
-        """Return the next scripted authorization snapshot."""
-        del pr_number
-        if len(self._authorization_snapshots) > 1:
-            return tuple(dict(review) for review in self._authorization_snapshots.pop(0))
-        if self._authorization_snapshots:
-            return tuple(dict(review) for review in self._authorization_snapshots[0])
-        return super().merge_authorization_reviews(0)
-
     def merge_pr_if_head(
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization,
+        authorization: MergeAuthorization | None = None,
     ) -> ConditionalMergeResult:
-        self.merge_attempts.append((pr_number, reviewed_sha, authorization.review_id))
+        self.events.append(f"merge:{reviewed_sha}")
+        self.merge_attempts.append(
+            (pr_number, reviewed_sha, authorization.review_id if authorization else "R1")
+        )
         return self._merge_results.pop(0)
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
@@ -143,6 +111,12 @@ class _ConditionalGitHub(FakeStageGitHub):
         if len(self._readiness) > 1:
             return dict(self._readiness.pop(0))
         return dict(self._readiness[0])
+
+    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+        """Return the scripted exact-head check result."""
+        self.events.append(f"checks:{head_sha}")
+        self.checked_heads.append(head_sha)
+        return self._required_checks_green
 
 
 def _reviewed_item(make_work_item: Any, *, head: str = "a" * 40) -> Any:
@@ -176,128 +150,47 @@ def _complete_merge_cycle(stage: MergeWaitStage, item: Any, ctx: Any) -> Any:
     return applied
 
 
-@pytest.mark.parametrize(
-    ("reviews", "reason"),
-    [
-        ((), "merge_authorization_absent"),
-        ((_authorization_review(head="b" * 40),), "merge_authorization_stale"),
-        (
-            (_authorization_review("R1"), _authorization_review("R2")),
-            "merge_authorization_ambiguous",
-        ),
-        (
-            (_authorization_review(includes_created_edit=True),),
-            "merge_authorization_replayed",
-        ),
-        (
-            (_authorization_review(state="DISMISSED"),),
-            "merge_authorization_revoked",
-        ),
-        (
-            (_authorization_review(author="service[bot]", author_type="Bot"),),
-            "merge_authorization_untrusted",
-        ),
-    ],
-)
-def test_non_authorized_resolution_never_reaches_conditional_put(
-    reviews: tuple[dict[str, object], ...],
-    reason: str,
-    make_ctx: Any,
-    make_work_item: Any,
-) -> None:
-    """Every operator-correctable authorization state blocks the PUT."""
-    github = _ConditionalGitHub(authorization_snapshots=[reviews])
+def test_missing_implementation_go_label_is_blocked(make_ctx: Any, make_work_item: Any) -> None:
+    """A missing implementation-go label routes back to review."""
+    github = _ConditionalGitHub(labels=(False, False))
 
     result = _complete_merge_cycle(
         MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
     )
 
-    assert result == StageOutcome(Disposition.BLOCKED, reason)
+    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
     assert github.merge_attempts == []
 
 
-def test_implementation_go_without_operator_authorization_is_blocked(
+def test_green_exact_head_checks_allow_merge_without_operator_review(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """The automated GO label alone cannot authorize a conditional merge."""
-    github = _ConditionalGitHub(authorization_snapshots=[()])
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.BLOCKED, "merge_authorization_absent")
-    assert github.merge_attempts == []
-
-
-def test_trusted_operator_authorization_permits_conditional_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """One trusted unedited current-head approval reaches the conditional PUT."""
-    github = _ConditionalGitHub(
-        authorization_snapshots=[(_authorization_review("R1"),)],
-        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
-    )
+    """A current GO label and green exact-head checks can reach the merge."""
+    head = "a" * 40
+    github = _ConditionalGitHub(states=[_open_pr(head), _open_pr(head), {"state": "MERGED"}])
     ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
 
-    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
+    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item, head=head), ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40, "R1")]
+    assert github.checked_heads == [head]
+    assert github.events == [f"checks:{head}", f"merge:{head}"]
+    assert len(github.merge_attempts) == 1
 
 
-def test_malformed_trusted_candidate_with_valid_approval_blocks_put(
+def test_failed_exact_head_checks_block_merge_without_operator_review(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A replayed candidate vetoes a valid approval before the PUT."""
-    malformed = _authorization_review("R2")
-    malformed["submittedAt"] = None
-    github = _ConditionalGitHub(authorization_snapshots=[(_authorization_review("R1"), malformed)])
+    """Failed current-head checks stop merge admission without a review."""
+    head = "a" * 40
+    github = _ConditionalGitHub(required_checks_green=False)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item, head=head), make_ctx(github=github)
     )
 
-    assert result == StageOutcome(Disposition.BLOCKED, "merge_authorization_replayed")
-    assert github.merge_attempts == []
-
-
-def test_authorization_read_failure_is_terminal_without_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A review or permission adapter failure is classified as unavailable."""
-
-    class UnavailableGitHub(_ConditionalGitHub):
-        def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
-            del pr_number
-            raise RuntimeError("review service unavailable")
-
-    github = UnavailableGitHub()
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_authorization_unavailable")
-    assert github.merge_attempts == []
-
-
-def test_authorization_identity_change_before_put_fails_closed(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """The final read must identify the same durable review as the first."""
-    github = _ConditionalGitHub(
-        authorization_snapshots=[
-            (_authorization_review("R1"),),
-            (_authorization_review("R2"),),
-        ]
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_authorization_changed")
+    assert result == StageOutcome(Disposition.BLOCKED, "required_checks_not_green")
+    assert github.checked_heads == [head]
     assert github.merge_attempts == []
 
 
@@ -551,9 +444,11 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
             self,
             pr_number: int,
             reviewed_sha: str,
-            authorization: MergeAuthorization,
+            authorization: MergeAuthorization | None = None,
         ) -> ConditionalMergeResult:
-            self.merge_attempts.append((pr_number, reviewed_sha, authorization.review_id))
+            self.merge_attempts.append(
+                (pr_number, reviewed_sha, authorization.review_id if authorization else "R1")
+            )
             self.merged = True
             return ConditionalMergeResult(
                 status=200,
@@ -697,10 +592,12 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
             self,
             pr_number: int,
             reviewed_sha: str,
-            authorization: MergeAuthorization,
+            authorization: MergeAuthorization | None = None,
         ) -> ConditionalMergeResult:
             assert self._thread_appeared_after_local_read
-            self.merge_attempts.append((pr_number, reviewed_sha, authorization.review_id))
+            self.merge_attempts.append(
+                (pr_number, reviewed_sha, authorization.review_id if authorization else "R1")
+            )
             return ConditionalMergeResult(
                 status=405,
                 body={"message": "review conversations must be resolved"},

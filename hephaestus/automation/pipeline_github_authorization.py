@@ -1,4 +1,4 @@
-"""Repository-scoped GitHub reads that authorize a conditional merge."""
+"""Repository-scoped GitHub reads for native review and scope data."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from .pipeline_github_transport import _parse_included_http_response
 
 
 class PipelineGitHubAuthorization(_PipelineGitHubHost):
-    """Own complete native-review and collaborator-permission snapshots."""
+    """Provide complete native-review and collaborator-permission snapshots."""
 
     def _review_commit_id(self, pr_number: int, review_database_id: int) -> str:
         """Return the REST review's immutable commit ID or fail closed."""

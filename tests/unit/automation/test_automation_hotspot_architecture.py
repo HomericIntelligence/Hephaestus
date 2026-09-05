@@ -28,7 +28,9 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github_contract.py": 125,
     "hephaestus/automation/pipeline_github_transport.py": 425,
     "hephaestus/automation/pipeline_github_authorization.py": 300,
-    "hephaestus/automation/pipeline_github_queries.py": 650,
+    # Exact-head Check Runs use a complete paginated double-read. Keep this
+    # one repository-scoped query collaborator below the documented ceiling.
+    "hephaestus/automation/pipeline_github_queries.py": 800,
     "hephaestus/automation/pipeline_github_reviews.py": 1_475,
     "hephaestus/automation/pipeline_github_mutations.py": 475,
     "hephaestus/automation/pipeline/stages/pr_review.py": 550,

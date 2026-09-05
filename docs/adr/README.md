@@ -36,7 +36,7 @@ numbered, and listed here.
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Superseded by ADR-0031 |
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
-| [0024](0024-explicit-operator-merge-authorization.md) | Explicit operator authorization before queue merge | Accepted |
+| [0024](0024-explicit-operator-merge-authorization.md) | Explicit operator authorization before queue merge | Accepted (historical; superseded by 0037) |
 | [0025](0025-athena-mnemosyne-pi-semantics.md) | Provider-neutral Athena and Mnemosyne semantics | Accepted |
 | [0026](0026-auxiliary-host-learning-lane.md) | Auxiliary host-learning lane | Accepted |
 | [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Accepted |
@@ -49,3 +49,4 @@ numbered, and listed here.
 | [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |
 | [0035](0035-provider-aware-ifm-model-selection.md) | Provider-aware IFM model selection | Partly superseded by ADR-0036 |
 | [0036](0036-free-form-model-effort-selection.md) | Free-form model effort selection | Accepted |
+| [0037](0037-reviewed-head-ci-merge-gate.md) | Reviewed-head CI gate authorizes queue merge | Accepted |

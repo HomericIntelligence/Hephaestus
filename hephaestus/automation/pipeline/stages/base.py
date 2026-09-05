@@ -557,8 +557,12 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness without granting authorization."""
         pass
 
+    def required_checks_pass_for_head(self, head_sha: str) -> bool:
+        """Return whether complete successful Check Runs exist for ``head_sha``."""
+        pass
+
     def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
-        """Return one stable native-review authorization snapshot."""
+        """Return one stable native-review snapshot for review-data callers."""
         pass
 
     def repository_permission_for_actor(self, login: str) -> str:
@@ -583,9 +587,9 @@ class StageGitHub(Protocol):
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization,
+        authorization: MergeAuthorization | None = None,
     ) -> ConditionalMergeResult:
-        """Perform one authorized normal merge conditional on ``reviewed_sha``."""
+        """Perform one normal merge conditional on ``reviewed_sha``."""
         pass
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:

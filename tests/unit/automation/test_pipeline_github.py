@@ -63,6 +63,86 @@ from hephaestus.utils.file_lock import LockUnavailableError
 _BATCH_NONCE = "b" * 32
 
 
+def test_merge_cycle_reads_checks_before_final_admission() -> None:
+    """The conditional merge has no external read after final admission."""
+    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    head = "a" * 40
+    events: list[str] = []
+
+    class OrderedGitHub:
+        def __init__(self) -> None:
+            self._state_reads = 0
+
+        def gh_pr_state(self, _pr: int) -> dict[str, object]:
+            self._state_reads += 1
+            events.append(f"state:{self._state_reads}")
+            if self._state_reads == 3:
+                return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
+            return {
+                "state": "OPEN",
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+                "headRefOid": head,
+            }
+
+        def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
+            events.append("label")
+            return True, False
+
+        def list_unresolved_review_threads(self, _pr: int) -> list[object]:
+            events.append("threads")
+            return []
+
+        def base_branch_requires_conversation_resolution(self, _pr: int, _base: str) -> bool:
+            events.append("conversation")
+            return True
+
+        def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
+            events.append("readiness")
+            return {"headRefOid": head, "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}
+
+        def required_checks_pass_for_head(self, check_head: str) -> bool:
+            events.append(f"checks:{check_head}")
+            return check_head == head
+
+        def merge_pr_if_head(self, _pr: int, reviewed_head: str) -> SimpleNamespace:
+            events.append(f"merge:{reviewed_head}")
+            return SimpleNamespace(
+                dry_run=False,
+                malformed=False,
+                transport_error=False,
+                status=200,
+                body={"merged": True},
+            )
+
+    request = RunMergeWaitCycleRequest(
+        pr_number=7,
+        reviewed_head_sha=head,
+        proof_generation=2,
+        declined_readiness_fingerprint=None,
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, OrderedGitHub())
+
+    assert receipt.outcome == "merged"
+    assert events == [
+        "state:1",
+        "label",
+        "threads",
+        "conversation",
+        "readiness",
+        f"checks:{head}",
+        "threads",
+        "conversation",
+        "state:2",
+        "label",
+        f"merge:{head}",
+        "state:3",
+    ]
+
+
 def _authorization(pr_number: int = 7, head_sha: str = "a" * 40) -> MergeAuthorization:
     """Return a valid test-only exact-head merge capability."""
     return MergeAuthorization(
@@ -2375,6 +2455,24 @@ class TestConditionalMerge:
         assert result.body == {"message": "head changed"}
         assert result.transport_error is False
 
+    def test_conditional_put_does_not_require_a_native_review_capability(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stage, not the mutation adapter, owns review authorization."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout='HTTP/2.0 200 OK\n\n{"merged": true}',
+                returncode=0,
+            )
+        )
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        result = adapter.merge_pr_if_head(7, "a" * 40)
+
+        assert result.status == 200
+        call_mock.assert_called_once()
+
     def test_transport_exception_is_explicit_and_never_retried_by_adapter(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2401,6 +2499,139 @@ class TestConditionalMerge:
 
         assert result.dry_run is True
         call_mock.assert_not_called()
+
+
+class TestExactHeadChecks:
+    """The merge gate reads complete Check Runs for one commit."""
+
+    @staticmethod
+    def _check_run(
+        head_sha: str,
+        *,
+        check_run_id: int = 1,
+        status: str = "completed",
+        conclusion: str = "success",
+    ) -> dict[str, object]:
+        """Build one exact-head Check Run response entry."""
+        return {
+            "id": check_run_id,
+            "name": "required-ci",
+            "head_sha": head_sha,
+            "status": status,
+            "conclusion": conclusion,
+        }
+
+    def test_accepts_only_complete_successful_runs_for_requested_head(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A completed successful Check Run for the reviewed SHA permits merging."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"total_count": 1, "check_runs": [self._check_run(head)]}),
+            )
+        )
+        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+
+        assert adapter.required_checks_pass_for_head(head) is True
+        call_mock.assert_called_once_with(
+            [
+                "api",
+                f"/repos/org/repo/commits/{head}/check-runs?per_page=100",
+                "--repo",
+                "org/repo",
+            ],
+            check=False,
+            timeout=120,
+        )
+
+    @pytest.mark.parametrize(
+        ("returned_head", "status", "conclusion"),
+        [
+            ("b" * 40, "completed", "success"),
+            ("a" * 40, "in_progress", ""),
+            ("a" * 40, "completed", "failure"),
+        ],
+    )
+    def test_rejects_stale_pending_or_failed_check_runs(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        returned_head: str,
+        status: str,
+        conclusion: str,
+    ) -> None:
+        """Stale, pending, and failed evidence cannot authorize a merge."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "check_runs": [
+                                self._check_run(
+                                    returned_head,
+                                    status=status,
+                                    conclusion=conclusion,
+                                )
+                            ],
+                        }
+                    ),
+                )
+            ),
+        )
+
+        assert adapter.required_checks_pass_for_head(head) is False
+
+    def test_empty_check_run_response_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing Check Runs do not count as green required checks."""
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"total_count": 0, "check_runs": []}),
+                )
+            ),
+        )
+
+        assert adapter.required_checks_pass_for_head("a" * 40) is False
+
+    def test_paginates_and_rechecks_large_check_run_snapshots(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A large Check Runs response must be complete and stable."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_page = [self._check_run(head, check_run_id=index) for index in range(1, 101)]
+        final_page = [self._check_run(head, check_run_id=101)]
+        page_responses = [
+            {"total_count": 101, "check_runs": first_page},
+            {"total_count": 101, "check_runs": final_page},
+            {"total_count": 101, "check_runs": first_page},
+            {"total_count": 101, "check_runs": final_page},
+        ]
+        call_mock = MagicMock(
+            side_effect=[
+                SimpleNamespace(returncode=0, stdout=json.dumps(response))
+                for response in page_responses
+            ]
+        )
+        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+
+        assert adapter.required_checks_pass_for_head(head) is True
+        assert call_mock.call_count == 4
 
 
 def _authorization_review_node(

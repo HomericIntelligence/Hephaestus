@@ -670,7 +670,7 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
     merge_wait, drive-green = pr_review+merge_wait. The overlap
     lets either operational entry point resume an already-eligible PR through
     merge-wait, where the loop re-reads its eligibility label, live PR head,
-    and separate operator authorization before conditional merge; it still
+    and green exact-head Check Runs before conditional merge; it still
     requires the ephemeral current-process review proof.
     """
     selected = set(phases)

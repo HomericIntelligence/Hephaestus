@@ -14,10 +14,11 @@ or `pull_request_target` events. `pr_review` applies
 `state:implementation-go` only after a structural audit and fresh live GitHub
 facts confirm the exact open, unarmed reviewed head, complete thread state, and
 exclusive label transition by readback. `merge_wait` consumes that loop-owned
-label with its process-local reviewed-head proof and one trusted, unedited
-marked `APPROVED` GitHub review for that exact SHA; restarted labels re-enter
-review because the process-local proof is not durable. CI/CD never creates
-operator authorization or independently produces the native review artifact.
+label with its process-local reviewed-head proof and complete successful Check
+Runs for that exact SHA; restarted labels re-enter review because the
+process-local proof is not durable. Check Runs do not create review
+authorization or replace the structural review. The merge gate does not
+require a second GitHub user or a marked `APPROVED` review.
 
 ## Queue pre-PR source checks
 
