@@ -52,6 +52,33 @@ def private_pi_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return temp_dir
 
 
+@pytest.fixture(autouse=True)
+def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give mocked Codex processes the same minimal profile source as production."""
+    source_home = tmp_path / "codex-home"
+    artifact = (
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
+    )
+    artifact.mkdir(parents=True)
+    (artifact / ".codex-marketplace-install.json").write_text(
+        json.dumps({"revision": agent_runtime.CODEX_ATHENA_MARKETPLACE_REF}), encoding="utf-8"
+    )
+    (artifact / "package.json").write_text(
+        json.dumps({"version": agent_runtime.CODEX_ATHENA_VERSION}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "CODEX_ATHENA_ARTIFACT_SHA256",
+        agent_runtime.package_tree_digest(artifact),
+    )
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+
 def test_pi_capability_contract_separates_native_packages_and_unsupported_controls() -> None:
     """Pi's runtime boundary must expose its fail-closed parity contract."""
     capabilities = agent_runtime.AGENT_CAPABILITIES["pi"]
@@ -256,6 +283,11 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "hephaestus.agents.runtime.macos_isolated_command",
+            side_effect=lambda argv, **_kwargs: list(argv),
+        ),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
         result = agent_runtime.run_codex_session(
@@ -263,6 +295,7 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
             cwd=tmp_path,
             timeout=30,
             sandbox="workspace-write",
+            isolate_automation_profile=True,
         )
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
@@ -1000,6 +1033,11 @@ def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> 
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "hephaestus.agents.runtime.macos_isolated_command",
+            side_effect=lambda argv, **_kwargs: list(argv),
+        ),
         patch.dict("os.environ", {"CODEX_THREAD_ID": "parent-thread"}, clear=False),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
@@ -1008,10 +1046,16 @@ def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> 
             cwd=tmp_path,
             timeout=30,
             sandbox="workspace-write",
+            isolate_automation_profile=True,
         )
 
     assert "CODEX_THREAD_ID" not in captured_env
-    assert captured_env["CODEX_HOME"]
+    profile = Path(captured_env["CODEX_HOME"])
+    assert captured_env["HOME"] == str(profile)
+    assert captured_env["XDG_CONFIG_HOME"].startswith(f"{profile}/")
+    assert captured_env["XDG_CACHE_HOME"].startswith(f"{profile}/")
+    assert captured_env["XDG_DATA_HOME"].startswith(f"{profile}/")
+    assert captured_env["TMPDIR"].startswith(f"{profile}/")
 
 
 def test_codex_base_cmd_adds_git_common_dir_for_worktree_metadata(tmp_path: Path) -> None:
@@ -1034,6 +1078,53 @@ def test_codex_base_cmd_adds_git_common_dir_for_worktree_metadata(tmp_path: Path
     assert "--add-dir" in cmd
     add_dir_index = cmd.index("--add-dir")
     assert cmd[add_dir_index + 1] == str(git_common_dir)
+
+
+def test_codex_automation_command_uses_no_legacy_sandbox_or_git_metadata(
+    tmp_path: Path,
+) -> None:
+    """The isolated profile is the sole Codex command sandbox authority."""
+    worktree = tmp_path / "repo" / "build" / ".worktrees" / "issue-1"
+    worktree.mkdir(parents=True)
+
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(
+            cwd=worktree,
+            sandbox="workspace-write",
+            automation_profile=True,
+        )
+
+    assert "--sandbox" not in cmd
+    assert "--add-dir" not in cmd
+
+
+def test_isolated_codex_session_applies_host_read_boundary(tmp_path: Path) -> None:
+    """A new automation session must enter the host boundary before execution."""
+    captured: dict[str, Any] = {}
+
+    def fake_boundary(argv: list[str], **kwargs: object) -> list[str]:
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return argv
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = '{"type":"session_meta","payload":{"id":"session-123"}}\n'
+        return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="done", **kwargs)
+
+    with (
+        patch("hephaestus.agents.runtime.macos_isolated_command", side_effect=fake_boundary),
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/usr/bin/codex"),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt", cwd=tmp_path, timeout=30, isolate_automation_profile=True
+        )
+
+    assert captured["read_roots"][0] == tmp_path
+    assert captured["write_roots"][0] == tmp_path
+    assert captured["allow_network"] is True
+    assert Path(captured["argv"][0]).is_absolute()
 
 
 def test_codex_base_cmd_does_not_add_git_common_dir_for_read_only(
@@ -1087,6 +1178,140 @@ def test_codex_base_cmd_resume_without_model_preserves_session_model() -> None:
     ]
 
 
+def test_codex_base_cmd_limits_ignored_rules_to_automation_profiles(tmp_path: Path) -> None:
+    """Legacy callers retain rules while isolated automation owns its policy."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        legacy = agent_runtime._codex_base_cmd(cwd=tmp_path, sandbox="read-only")
+        isolated = agent_runtime._codex_base_cmd(
+            cwd=tmp_path, sandbox="read-only", automation_profile=True
+        )
+
+    assert "--ignore-rules" not in legacy
+    assert "--ignore-rules" in isolated
+
+
+def test_codex_automation_profile_admits_only_auth_and_athena(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The isolated profile retains auth plus the explicitly admitted Athena plugin."""
+    source_home = tmp_path / "source-codex-home"
+    plugin_cache = (
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
+    )
+    plugin_cache.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    (plugin_cache / "marker.txt").write_text("athena\n", encoding="utf-8")
+    (plugin_cache / ".codex-marketplace-install.json").write_text(
+        json.dumps({"revision": agent_runtime.CODEX_ATHENA_MARKETPLACE_REF}),
+        encoding="utf-8",
+    )
+    (plugin_cache / "package.json").write_text(
+        json.dumps({"version": agent_runtime.CODEX_ATHENA_VERSION}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "CODEX_ATHENA_ARTIFACT_SHA256",
+        agent_runtime.package_tree_digest(plugin_cache),
+    )
+    (source_home / "sessions" / "podman-task.jsonl").parent.mkdir(parents=True)
+    (source_home / "sessions" / "podman-task.jsonl").write_text(
+        "unrelated Podman task context\n", encoding="utf-8"
+    )
+    (source_home / "config.toml").write_text("[interactive]\n", encoding="utf-8")
+    (source_home / "plugins" / "cache" / "unrelated").mkdir(parents=True)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+    with agent_runtime._codex_automation_profile() as environment:
+        profile = Path(environment["CODEX_HOME"])
+        assert environment["HOME"] == str(profile)
+        assert environment["XDG_CONFIG_HOME"].startswith(f"{profile}/")
+        assert environment["TMPDIR"].startswith(f"{profile}/")
+        assert (profile / "auth.json").read_text(encoding="utf-8") == '{"auth": "test"}\n'
+        assert (
+            profile
+            / "plugins"
+            / "cache"
+            / "athena"
+            / "athena"
+            / agent_runtime.CODEX_ATHENA_VERSION
+            / "marker.txt"
+        ).read_text(encoding="utf-8") == "athena\n"
+        config = (profile / "config.toml").read_text(encoding="utf-8")
+        assert '[plugins."athena@athena"]' in config
+        assert "enabled = true" in config
+        assert 'default_permissions = "hephaestus-automation"' in config
+        assert 'extends = ":workspace"' in config
+        assert "enabled = false" in config
+        assert f'"{profile / "auth.json"}" = "deny"' in config
+        assert not (profile / "plugins" / "cache" / "unrelated").exists()
+        assert not (profile / "sessions" / "podman-task.jsonl").exists()
+        assert "[interactive]" not in config
+
+
+def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The admitted plugin copy must not follow a nested external link."""
+    source_home = tmp_path / "source-codex-home"
+    plugin_cache = (
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
+    )
+    plugin_cache.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.write_text("unrelated\n", encoding="utf-8")
+    (plugin_cache / "nested-link").symlink_to(outside)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="rejects symlinks"):
+        with agent_runtime._codex_automation_profile():
+            pass
+
+
+def test_athena_artifact_digest_ignores_generated_bytecode(tmp_path: Path) -> None:
+    """Machine-local bytecode must not change the admitted plugin source digest."""
+    artifact = tmp_path / "athena"
+    artifact.mkdir()
+    (artifact / "skill.md").write_text("skill\n", encoding="utf-8")
+    expected = agent_runtime._athena_artifact_digest(artifact)
+    bytecode = artifact / "__pycache__"
+    bytecode.mkdir()
+    (bytecode / "skill.cpython-313.pyc").write_bytes(b"generated")
+
+    assert agent_runtime._athena_artifact_digest(artifact) == expected
+
+
+def test_codex_automation_profile_rejects_non_object_artifact_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Malformed-but-valid JSON must fail through the controlled runtime error."""
+    source_home = tmp_path / "source-codex-home"
+    plugin_cache = (
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
+    )
+    plugin_cache.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    (plugin_cache / ".codex-marketplace-install.json").write_text("[]", encoding="utf-8")
+    (plugin_cache / "package.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="must be JSON objects"):
+        with agent_runtime._codex_automation_profile():
+            pass
+
+
 def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
     """Codex feedback loops must resume the captured non-interactive session."""
     captured_cmd: list[str] = []
@@ -1112,6 +1337,31 @@ def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
     ]
     assert result.stdout == "resumed"
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
+
+
+def test_resume_agent_session_rejects_unbound_codex_session(tmp_path: Path) -> None:
+    """Automation must not reuse a raw Codex session without a binding."""
+    with pytest.raises(
+        agent_runtime.AgentExecutionError,
+        match="Codex session resume is disabled without a bound session contract",
+    ):
+        agent_runtime.resume_agent_session(
+            "codex",
+            "thread-123",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+
+def test_agent_dispatch_leaves_isolation_to_the_implementation_boundary(tmp_path: Path) -> None:
+    """Neutral direct-session callers retain their existing platform behavior."""
+    expected = agent_runtime.AgentRunResult(stdout="done", stderr="", session_id="session-123")
+    with patch("hephaestus.agents.runtime.run_codex_session", return_value=expected) as runner:
+        result = agent_runtime.run_agent_session("codex", "prompt", cwd=tmp_path, timeout=30)
+
+    assert result is expected
+    assert runner.call_args.kwargs["isolate_automation_profile"] is False
 
 
 def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_path: Path) -> None:
@@ -2326,6 +2576,7 @@ def test_pi_default_role_effort_uses_config_for_an_unknown_model(tmp_path: Path)
         '{"defaultProvider":"configured","defaultModel":"other","defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
     selected = agent_runtime.apply_agent_model_reasoning_effort(
         "pi", "private/provider:model", "default"
     )
@@ -2349,6 +2600,7 @@ def test_pi_default_model_resolves_from_operator_settings(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-0.9B:high"
@@ -2363,6 +2615,7 @@ def test_pi_default_reasoning_replaces_an_inline_reasoning_value(tmp_path: Path)
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-7B","defaultThinkingLevel":"medium"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
 
     assert (
         agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-0.9B:default", pi_dir=pi_dir)
@@ -2379,6 +2632,7 @@ def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path) -> 
         '"defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
 
     assert agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-7B", pi_dir=pi_dir) == (
         "IFM/K2-Horizon-7B:high"
@@ -2524,6 +2778,7 @@ def test_pi_default_model_does_not_read_project_settings(
     (pi_dir / "settings.json").write_text(
         '{"defaultProvider":"global","defaultModel":"model"}', encoding="utf-8"
     )
+    (pi_dir / "settings.json").chmod(0o600)
     project_dir = tmp_path / "project"
     (project_dir / ".pi").mkdir(parents=True)
     (project_dir / ".pi" / "settings.json").write_text(

@@ -78,6 +78,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.runtime import requires_plan_scope_guard
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import (
     MAX_ADDRESS_REPLY_CHARS,
@@ -335,6 +336,7 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
+    approved_plan: str = "",
     rebase_conflict: bool = False,
     rebase_conflict_paths: tuple[str, ...] = (),
 ) -> str:
@@ -368,6 +370,7 @@ def build_implementation_prompt(
         issue_body=issue_body,
         branch_name=branch_name,
         worktree_path=worktree_path,
+        approved_plan=approved_plan,
     )
     if not advise_findings and not rebase_conflict:
         return prompt
@@ -388,7 +391,17 @@ def build_implementation_prompt(
     return "".join(blocks)
 
 
-def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
+def build_test_fix_prompt(
+    issue_number: int,
+    prev_iteration: int,
+    test_output: str,
+    *,
+    issue_title: str = "",
+    issue_body: str = "",
+    branch_name: str = "",
+    worktree_path: str = "",
+    approved_plan: str = "",
+) -> str:
     """Compose the resume prompt that feeds failing pre-PR test output back.
 
     Reuses :func:`get_impl_resume_feedback_prompt` verbatim (doc section 4
@@ -407,11 +420,45 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
     review_feedback = PromptCatalog.current().render(
         "implementation/test_failure_review.j2", test_output=test_output
     )
-    return get_impl_resume_feedback_prompt(
+    prompt = get_implementation_prompt(
+        issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        branch_name=branch_name,
+        worktree_path=worktree_path,
+        approved_plan=approved_plan,
+    )
+    feedback = get_impl_resume_feedback_prompt(
         issue_number=issue_number,
         prev_iteration=prev_iteration,
         review_feedback=review_feedback,
     )
+    return prompt + feedback
+
+
+def _allowed_remediation_paths(
+    item: WorkItem,
+    allowed_paths: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    """Validate review remediations remain inside the canonical plan scope."""
+    if not item.payload.get("implementation_remediation"):
+        return allowed_paths
+    remediation_threads = item.payload.get("remediation_threads")
+    trusted_thread_ids = item.payload.get("trusted_remediation_thread_ids")
+    if not isinstance(remediation_threads, list) or not isinstance(trusted_thread_ids, list):
+        return None
+    trusted_ids = {value for value in trusted_thread_ids if isinstance(value, str) and value}
+    remediation_paths: set[str] = set()
+    for thread in remediation_threads:
+        if not isinstance(thread, dict) or thread.get("thread_id") not in trusted_ids:
+            return None
+        path = thread.get("path")
+        if not is_safe_scope_retraction_path(path):
+            return None
+        remediation_paths.add(path)
+    if not remediation_threads:
+        return None
+    return tuple(sorted(set(allowed_paths) | remediation_paths))
 
 
 class ImplementationStage(Stage):
@@ -436,6 +483,7 @@ class ImplementationStage(Stage):
         if not item.issue:
             logger.warning("implementation: work item has no issue number")
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -502,6 +550,7 @@ class ImplementationStage(Stage):
             "refresh_base": not adopted and direct_base_sha is None,
             "repo_root": str(ctx.paths.repo_root),
             "source_lane": "impl",
+            "agent": agent_provider(ctx),
         }
         direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
         direct_branch_prefix = f"{issue}-auto-impl-direct-"
@@ -1124,6 +1173,7 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "approved_plan": item.payload.get("plan_text", ""),
                 "rebase_conflict": bool(item.payload.get("rebase_conflict")),
                 "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
@@ -1274,17 +1324,57 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.TEST_FIX,
-                SessionLifecycle.RESUME_REQUIRED,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_IMPLEMENTER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.attempts.get("test_fix", 0),
                 "test_output": item.payload.get("test_output", ""),
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "branch_name": item.branch,
+                "worktree_path": item.worktree,
+                "approved_plan": item.payload.get("plan_text", ""),
             },
             descr="test_fix",
         )
         return JobRequest(job, on_done_state=TEST_WAIT)
+
+    @staticmethod
+    def _apply_plan_publication_scope(
+        item: WorkItem, ctx: StageContext, agent: str, kwargs: dict[str, object]
+    ) -> StageOutcome | None:
+        """Bind guarded provider publication to frozen canonical file claims."""
+        if not requires_plan_scope_guard(agent):
+            return None
+        kwargs["expected_repo"] = f"{ctx.org}/{item.repo}"
+        kwargs["git_metadata_receipt"] = item.payload.get("git_metadata_receipt")
+        planned_claims = item.payload.get("_implementation_file_claims")
+        if planned_claims is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
+        allowed_paths = tuple(
+            sorted(
+                claim[1]
+                for claim in planned_claims
+                if isinstance(claim, tuple)
+                and len(claim) == 2
+                and claim[0] == (ctx.org, item.repo)
+                and is_safe_scope_retraction_path(claim[1])
+            )
+        )
+        if not allowed_paths:
+            return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
+        remediation_allowed_paths = _allowed_remediation_paths(item, allowed_paths)
+        if remediation_allowed_paths is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "remediation_path_invalid")
+        kwargs["allowed_paths"] = remediation_allowed_paths
+        kwargs["scope_history_base_sha"] = item.payload.get("_impl_source_revision")
+        return None
 
     def _commit_push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """COMMIT_PUSH_WAIT either re-enters test-fix or submits commit+push."""
@@ -1305,6 +1395,9 @@ class ImplementationStage(Stage):
         }
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
+        scope_outcome = self._apply_plan_publication_scope(item, ctx, agent, kwargs)
+        if scope_outcome is not None:
+            return scope_outcome
         publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
             "_synced_default_branch_sha"
         )
@@ -1334,6 +1427,13 @@ class ImplementationStage(Stage):
                 return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
             kwargs["scope_retraction_paths"] = scope_retraction_paths
             kwargs["scope_retraction_base_sha"] = base_sha
+            if requires_plan_scope_guard(agent):
+                kwargs["allowed_paths"] = tuple(
+                    sorted(
+                        set(cast(tuple[str, ...], kwargs["allowed_paths"]))
+                        | set(scope_retraction_paths)
+                    )
+                )
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",
@@ -2084,6 +2184,12 @@ class ImplementationStage(Stage):
             source_revision = value.get("impl_source_revision")
             if is_full_commit_sha(source_revision):
                 item.payload["_impl_source_revision"] = source_revision
+            elif is_full_commit_sha(value.get("head_sha")):
+                head_sha = cast(str, value["head_sha"])
+                item.payload["_impl_source_revision"] = head_sha
+            receipt = value.get("git_metadata_receipt")
+            if isinstance(receipt, str):
+                item.payload["git_metadata_receipt"] = receipt
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))

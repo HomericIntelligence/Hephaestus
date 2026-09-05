@@ -35,10 +35,17 @@ from typing import Any, TypeGuard, cast
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_policy
+from hephaestus.agents.execution_policy import (
+    ExecutionPolicyError,
+    SessionLifecycle,
+    resolve_policy,
+)
+from hephaestus.agents.macos_sandbox import macos_sandbox_profile
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
+    allows_unbound_session_resume,
+    requires_plan_scope_guard,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
@@ -690,65 +697,17 @@ def _host_verification_profile(
     executable: Path,
 ) -> str:
     """Build the macOS profile; only the declared scratch tree is writable."""
-    allowed_roots = (
-        Path("/bin"),
-        Path("/sbin"),
-        Path("/usr"),
-        Path("/System"),
-        Path("/opt/homebrew"),
-        Path("/usr/local"),
-    )
     canonical_tmp = Path(os.path.sep) / "tmp"
-    return "\n".join(
-        (
-            "(version 1)",
-            "(deny default)",
-            # ``system.sb`` supplies the macOS runtime IPC, loader, and
-            # device-read allowances needed even by /usr/bin/true. It does
-            # not grant user-workspace writes; this profile still grants
-            # writes only to the disposable scratch directory below.
-            '(import "system.sb")',
-            "(allow process*)",
-            # Every process in this one-off sandbox instance belongs to the
-            # verifier command. Permit process-group cleanup across descendants
-            # without granting signals to unrelated host processes.
-            "(allow signal (target same-sandbox))",
-            # Python multiprocessing names its spawned semaphores ``/mp-``.
-            # Limit cross-process synchronization to that private namespace.
-            '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))',
-            "(allow file-read*",
-            f'  (subpath "{_sandbox_string(source)}")',
-            f'  (subpath "{_sandbox_string(scratch)}")',
-            f'  (subpath "{_sandbox_string(runtime_environment)}")',
-            f'  (subpath "{_sandbox_string(git_metadata)}")',
-            f'  (subpath "{_sandbox_string(pi_smoke_logs)}")',
-            f'  (literal "{_sandbox_string(executable)}")',
-            *(f'  (subpath "{_sandbox_string(root)}")' for root in allowed_roots),
-            ")",
-            # ``getcwd`` and dynamic-loader path checks need metadata on the
-            # ancestors of the explicitly allowed paths, not read access to
-            # their contents. Without these, macOS reports a nonexistent CWD.
-            *(
-                f'(allow file-read-metadata (path-ancestors "{_sandbox_string(path)}"))'
-                for path in (
-                    source,
-                    scratch,
-                    runtime_environment,
-                    git_metadata,
-                    pi_smoke_logs,
-                    executable,
-                )
-            ),
-            # Tests and validation helpers commonly use the stable ``/tmp``
-            # spelling for inert fixture paths.  macOS resolves that symlink
-            # through ``/private/tmp`` before a mocked boundary can observe
-            # it, so permit metadata for the directory itself without
-            # granting reads of its contents.
-            f'(allow file-read-metadata (literal "{_sandbox_string(canonical_tmp)}"))',
-            f'(allow file-write* (subpath "{_sandbox_string(scratch)}"))',
-            f'(allow file-write* (subpath "{_sandbox_string(pi_smoke_logs)}"))',
-            "(deny network*)",
-        )
+    return macos_sandbox_profile(
+        read_roots=tuple(
+            path.resolve()
+            for path in (source, scratch, runtime_environment, git_metadata, pi_smoke_logs)
+        ),
+        write_roots=(scratch.resolve(), pi_smoke_logs.resolve()),
+        executable=executable.resolve(),
+        allow_network=False,
+        literal_metadata_roots=(canonical_tmp.resolve(),),
+        ipc_posix_sem_prefix="/mp-",
     )
 
 
@@ -2239,6 +2198,15 @@ class WorkerPool:
                         ),
                     )
                     return stdout, claude_session_id, None, ()
+                if (
+                    job.execution_request is not None
+                    and job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
+                    and job.resume_binding is None
+                    and not (job.resume_session_id and allows_unbound_session_resume(agent))
+                ):
+                    raise AgentExecutionError(
+                        "required agent session has no verified resume binding"
+                    )
                 if job.resume_binding is not None:
                     agent_result = resume_agent_session(
                         agent=agent,
@@ -2255,7 +2223,7 @@ class WorkerPool:
                         disable_pi_automation=job.disable_pi_automation,
                         pi_dir=job.pi_dir,
                     )
-                elif job.resume_session_id:
+                elif job.resume_session_id and allows_unbound_session_resume(agent):
                     agent_result = resume_agent_session(
                         agent=agent,
                         session_id=job.resume_session_id,
@@ -2285,6 +2253,7 @@ class WorkerPool:
                         resume_binding=job.resume_binding,
                         disable_pi_automation=job.disable_pi_automation,
                         pi_dir=job.pi_dir,
+                        isolate_codex_automation_profile=True,
                     )
                 # A resumed command may not repeat the session-start event;
                 # retain the known id in that case.
@@ -3870,6 +3839,7 @@ class WorkerPool:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
+        source_agent = kwargs.pop("agent", None)
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
@@ -4006,6 +3976,7 @@ class WorkerPool:
             sync_to_remote=sync_to_remote,
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
+            source_agent=source_agent,
             item_number=kwargs.get("issue_number"),
             writer_authority=writer_authority,
             worktree_manager=manager,
@@ -4159,6 +4130,7 @@ class WorkerPool:
         pr_number: object,
         timeout_s: int,
         source_lane: object = None,
+        source_agent: object = None,
         item_number: object = None,
         writer_authority: ImplementationWriterAuthority | None = None,
         worktree_manager: WorktreeManager | None = None,
@@ -4306,17 +4278,32 @@ class WorkerPool:
             )
         if not dirty and not sync_to_remote and base_sha is None:
             if source_lane == "impl":
+                initial_value: dict[str, object] = {
+                    "path": str(worktree_path),
+                    "impl_source_revision": binding.revision,
+                }
+                if requires_plan_scope_guard(str(source_agent or "")):
+                    metadata_receipt = self._trusted_git_metadata_receipt(
+                        worktree_path, timeout_s=timeout_s
+                    )
+                    if isinstance(metadata_receipt, JobResult):
+                        return metadata_receipt
+                    initial_value.update(metadata_receipt)
                 return JobResult(
                     ok=True,
-                    value={
-                        "path": str(worktree_path),
-                        "impl_source_revision": binding.revision,
-                    },
+                    value=initial_value,
                 )
             return JobResult(ok=True, value=str(worktree_path))
         value: dict[str, object] = {"path": str(worktree_path)}
         if source_lane == "impl" and not dirty:
             value["impl_source_revision"] = binding.revision
+            if requires_plan_scope_guard(str(source_agent or "")):
+                metadata_receipt = self._trusted_git_metadata_receipt(
+                    worktree_path, timeout_s=timeout_s
+                )
+                if isinstance(metadata_receipt, JobResult):
+                    return metadata_receipt
+                value.update(metadata_receipt)
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
         if dirty:
@@ -4347,6 +4334,46 @@ class WorkerPool:
                 "base_sha": base_sha,
             }
         return JobResult(ok=True, value=value)
+
+    @staticmethod
+    def _trusted_git_metadata_receipt(
+        worktree_path: Path, *, timeout_s: int
+    ) -> dict[str, str] | JobResult:
+        """Digest Git controls that an implementation agent could replace."""
+        try:
+            common = git_utils.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout_s,
+                env=_controlled_git_env(),
+            ).stdout.strip()
+            common_dir = Path(common).resolve(strict=True)
+            if not common_dir.is_dir():
+                raise OSError("common Git metadata is not a directory")
+            digest = hashlib.sha256()
+            for candidate in (common_dir / "config", common_dir / "config.worktree"):
+                if candidate.exists() or candidate.is_symlink():
+                    digest.update(candidate.relative_to(common_dir).as_posix().encode())
+                    digest.update(b"\0")
+                    digest.update(candidate.read_bytes())
+                    digest.update(b"\0")
+            hooks = common_dir / "hooks"
+            if hooks.exists():
+                for candidate in sorted(hooks.rglob("*")):
+                    if candidate.is_dir():
+                        continue
+                    digest.update(candidate.relative_to(common_dir).as_posix().encode())
+                    digest.update(b"\0")
+                    if candidate.is_symlink():
+                        digest.update(b"symlink\0")
+                        digest.update(os.readlink(candidate).encode())
+                    else:
+                        digest.update(candidate.read_bytes())
+                    digest.update(b"\0")
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot receipt publication Git metadata")
+        return {"git_metadata_receipt": digest.hexdigest()}
 
     def _prepare_direct_scope_worktree(
         self,
@@ -4767,6 +4794,9 @@ class WorkerPool:
             str(job.kwargs.get("agent", "claude")),
         )
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+        boundary = self._validate_publish_boundary(job, Path(worktree_path), allowed_paths)
+        if boundary is not None:
+            return boundary
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         changed = self._commit_if_changes_with_controlled_signing(
@@ -4806,7 +4836,24 @@ class WorkerPool:
         scope_retraction = self._verify_scope_retraction(job, Path(worktree_path))
         if scope_retraction is not None:
             return scope_retraction
+        boundary = self._validate_publish_boundary(job, Path(worktree_path), allowed_paths)
+        if boundary is not None:
+            return boundary
         return self._publish_commit_push(job, branch, Path(worktree_path))
+
+    def _validate_publish_boundary(
+        self, job: GitJob, worktree_path: Path, allowed_paths: Collection[str] | None
+    ) -> JobResult | None:
+        """Validate agent-writable Git controls before every host publication action."""
+        metadata_scope = self._verify_publish_git_metadata(job, worktree_path)
+        if metadata_scope is not None:
+            return metadata_scope
+        return self._verify_allowed_edit_scope(
+            worktree_path,
+            allowed_paths=allowed_paths,
+            history_base_sha=job.kwargs.get("scope_history_base_sha"),
+            timeout=job.timeout_s,
+        )
 
     @staticmethod
     def _commit_if_changes_with_controlled_signing(
@@ -4843,6 +4890,151 @@ class WorkerPool:
                 value={"failure_kind": "signing_configuration"},
                 error=str(exc),
             )
+
+    @staticmethod
+    def _verify_publish_git_metadata(job: GitJob, worktree_path: Path) -> JobResult | None:
+        """Fail closed if agent-writable common Git metadata redirects publication.
+
+        Codex implementation worktrees need their shared Git metadata directory
+        for normal commits.  Immediately before a host commit or push, resolve
+        that directory through Git and re-check the two execution-affecting
+        controls an agent could otherwise alter: hooksPath and origin.
+        """
+        if job.kwargs.get("allowed_paths") is None:
+            return None
+        expected_repo = job.kwargs.get("expected_repo")
+        expected_receipt = job.kwargs.get("git_metadata_receipt")
+        if (
+            not isinstance(expected_repo, str)
+            or not expected_repo
+            or not isinstance(expected_receipt, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_receipt)
+        ):
+            return JobResult(ok=False, error="publication Git metadata authority is unavailable")
+        actual_receipt = WorkerPool._trusted_git_metadata_receipt(
+            worktree_path, timeout_s=job.timeout_s
+        )
+        if isinstance(actual_receipt, JobResult):
+            return actual_receipt
+        if actual_receipt["git_metadata_receipt"] != expected_receipt:
+            return JobResult(ok=False, error="publication Git metadata changed after agent run")
+        try:
+            common = git_utils.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            ).stdout.strip()
+            common_dir = Path(common).resolve(strict=True)
+            if not common_dir.is_dir():
+                raise OSError("common Git metadata is not a directory")
+            hooks_path = git_utils.run(
+                ["git", "config", "--local", "--get", "core.hooksPath"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            if hooks_path.returncode == 0 and hooks_path.stdout.strip():
+                return JobResult(ok=False, error="publication Git hooksPath is not allowed")
+            push_url = git_utils.run(
+                ["git", "config", "--get-all", "remote.origin.pushurl"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            rewrites = git_utils.run(
+                ["git", "config", "--get-regexp", r"^url\..*\.insteadOf$"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            if push_url.returncode == 0 and push_url.stdout.strip():
+                return JobResult(ok=False, error="publication Git pushurl is not allowed")
+            if rewrites.returncode == 0 and rewrites.stdout.strip():
+                return JobResult(ok=False, error="publication Git URL rewrites are not allowed")
+            origin = (
+                git_utils.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=job.timeout_s,
+                    env=_controlled_git_env(),
+                )
+                .stdout.strip()
+                .rstrip("/")
+                .removesuffix(".git")
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate publication Git metadata")
+        expected_origins = {
+            f"https://github.com/{expected_repo}",
+            f"ssh://git@github.com/{expected_repo}",
+            f"git@github.com:{expected_repo}",
+        }
+        if origin not in expected_origins:
+            return JobResult(
+                ok=False,
+                error="publication origin does not match approved repository",
+            )
+        return None
+
+    @staticmethod
+    def _verify_allowed_edit_scope(
+        worktree_path: Path,
+        *,
+        allowed_paths: Collection[str] | None,
+        history_base_sha: object,
+        timeout: int,
+    ) -> JobResult | None:
+        """Reject an implementation edit outside its host-derived path allowlist."""
+        if allowed_paths is None:
+            return None
+        allowed = set(allowed_paths)
+        if not allowed:
+            return JobResult(ok=False, error="implementation approved scope is unavailable")
+        probes = (
+            ["git", "diff", "--no-renames", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        try:
+            changed: set[str] = set()
+            for argv in probes:
+                result = git_utils.run(
+                    argv,
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                changed.update(path for path in result.stdout.split("\0") if path)
+            if not _is_full_commit_sha(history_base_sha):
+                return JobResult(ok=False, error="cannot validate implementation edit scope")
+            history = git_utils.run(
+                [
+                    "git",
+                    "diff",
+                    "--no-renames",
+                    "--name-only",
+                    "-z",
+                    f"{history_base_sha}..HEAD",
+                ],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            )
+            changed.update(path for path in history.stdout.split("\0") if path)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        if not changed.issubset(allowed):
+            return JobResult(ok=False, error="implementation changed paths outside approved scope")
+        return None
 
     @staticmethod
     def _verify_scope_retraction(job: GitJob, worktree_path: Path) -> JobResult | None:

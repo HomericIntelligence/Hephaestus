@@ -92,6 +92,20 @@ from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 
+
+@pytest.fixture(autouse=True)
+def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give mocked Codex processes the minimal admitted profile source."""
+    source_home = tmp_path / "codex-home"
+    (source_home / "plugins" / "cache" / "athena").mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
@@ -868,10 +882,41 @@ class TestWorkerPoolSubmitComplete:
             resume_binding=None,
             disable_pi_automation=False,
             pi_dir=None,
+            isolate_codex_automation_profile=True,
         )
         assert result.ok is True
         assert result.value == "codex output"
         assert result.session_id == "new-codex-session"
+
+    def test_codex_required_resume_rejects_an_unbound_raw_session(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A required Codex resume cannot silently discard its session context."""
+        job = _agent_job(
+            agent="codex",
+            resume_session_id="saved-codex-session",
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.TEST_FIX,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+        )
+        session_result = MagicMock(stdout="continued", session_id="saved-codex-session")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
+            patch(f"{_WP}.run_agent_session", return_value=session_result) as run,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _handle, result = completion_q.get(timeout=10)
+
+        resume.assert_not_called()
+        run.assert_not_called()
+        assert result.ok is False
+        assert result.error == "agent_error: required agent session has no verified resume binding"
 
     def test_pi_default_fails_before_worker_agent_admission(
         self,
@@ -923,17 +968,17 @@ class TestWorkerPoolSubmitComplete:
         assert "Pi default model configuration" in (result.error or "")
         assert calls == []
 
-    def test_non_claude_agent_job_resumes_a_saved_session(
+    def test_non_codex_agent_job_resumes_a_saved_session(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
         """A later direct-agent turn resumes, rather than starts afresh."""
-        job = _agent_job(agent="codex", resume_session_id="saved-codex-session")
-        session_result = MagicMock(stdout="continued", session_id="saved-codex-session")
+        job = _agent_job(agent="opencode", resume_session_id="saved-opencode-session")
+        session_result = MagicMock(stdout="continued", session_id="saved-opencode-session")
 
         with (
-            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(f"{_WP}.resolve_agent", return_value="opencode"),
             patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
             patch(f"{_WP}.run_agent_session") as run,
         ):
@@ -941,8 +986,8 @@ class TestWorkerPoolSubmitComplete:
             _handle, result = completion_q.get(timeout=10)
 
         resume.assert_called_once_with(
-            agent="codex",
-            session_id="saved-codex-session",
+            agent="opencode",
+            session_id="saved-opencode-session",
             prompt="test prompt",
             cwd=job.cwd,
             timeout=job.timeout_s,
@@ -958,7 +1003,7 @@ class TestWorkerPoolSubmitComplete:
         run.assert_not_called()
         assert result.ok is True
         assert result.value == "continued"
-        assert result.session_id == "saved-codex-session"
+        assert result.session_id == "saved-opencode-session"
 
     def test_pi_agent_job_uses_its_binding_instead_of_a_raw_resume_id(
         self,
@@ -2079,6 +2124,7 @@ class TestAgentErrorHandling:
     def test_codex_skills_budget_notice_does_not_open_agent_breaker(
         self,
         pool: WorkerPool,
+        tmp_path: Path,
     ) -> None:
         """An informational Codex notice remains successful across the worker boundary."""
         job = _agent_job(agent="codex")
@@ -2127,6 +2173,18 @@ class TestAgentErrorHandling:
             patch(
                 "hephaestus.agents.runtime._codex_extra_writable_dirs",
                 return_value=[],
+            ),
+            patch(
+                "hephaestus.agents.runtime.shutil.which",
+                return_value="/usr/bin/codex",
+            ),
+            patch(
+                "hephaestus.agents.runtime._codex_automation_profile",
+                return_value=nullcontext({"CODEX_HOME": str(tmp_path), "PATH": os.environ["PATH"]}),
+            ),
+            patch(
+                "hephaestus.agents.runtime.macos_isolated_command",
+                side_effect=lambda argv, **_kwargs: list(argv),
             ),
             patch(
                 "hephaestus.agents.runtime.subprocess.Popen",
@@ -4210,6 +4268,7 @@ class TestGitOps:
                 "branch_name": "7-auto",
                 "repo_root": str(tmp_path),
                 "source_lane": "impl",
+                "agent": "codex",
             },
         )
         worktree_manager = MagicMock()
@@ -4222,6 +4281,11 @@ class TestGitOps:
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch.object(
+                WorkerPool,
+                "_trusted_git_metadata_receipt",
+                return_value={"git_metadata_receipt": "b" * 64},
+            ),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -4243,6 +4307,7 @@ class TestGitOps:
         assert result.value == {
             "path": str(writer_path),
             "impl_source_revision": "b" * 40,
+            "git_metadata_receipt": "b" * 64,
         }
 
     def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
@@ -7227,6 +7292,112 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
+    def test_commit_push_rejects_precommitted_unplanned_2472_edit_before_push(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A host allowlist blocks #2472 even when the agent committed it first."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2472,
+                "worktree_path": tmp_path,
+                "branch": "2472-auto-impl",
+                "agent": "codex",
+                "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+                "scope_history_base_sha": "a" * 40,
+            },
+        )
+        with (
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout="scripts/run_ci_local.sh\0"),
+                ],
+            ),
+            patch("hephaestus.automation.pr_manager.commit_changes") as commit,
+            patch("hephaestus.automation.git_utils.push_branch") as push,
+            patch.object(pool, "_verify_publish_git_metadata", return_value=None),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "implementation changed paths outside approved scope"
+        commit.assert_not_called()
+        push.assert_not_called()
+
+    def test_direct_scope_commit_push_uses_its_base_pin_without_an_upstream(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A newly reserved direct writer validates committed paths from its base pin."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2472,
+                "worktree_path": tmp_path,
+                "branch": "2472-auto-impl",
+                "agent": "codex",
+                "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+                "expected_repo": "test/repo",
+                "git_metadata_receipt": "b" * 64,
+                "expected_remote_sha": pin,
+                "scope_history_base_sha": pin,
+            },
+        )
+        with (
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess(
+                        [], 0, stdout="hephaestus/automation/claude_invoke.py\0"
+                    ),
+                    subprocess.CompletedProcess([], 0, stdout=f"{tmp_path}\n"),
+                    subprocess.CompletedProcess([], 1, stdout=""),
+                    subprocess.CompletedProcess([], 1, stdout=""),
+                    subprocess.CompletedProcess([], 1, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout="https://github.com/test/repo.git\n"),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as push,
+            patch.object(pool, "_validate_publish_boundary", return_value=None),
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch.object(
+                WorkerPool,
+                "_trusted_git_metadata_receipt",
+                return_value={"git_metadata_receipt": "b" * 64},
+            ),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        push.assert_called_once_with(
+            "2472-auto-impl",
+            pin,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
+
     def test_commit_push_fails_before_commit_when_signing_is_unavailable(
         self,
         pool: WorkerPool,
@@ -7263,6 +7434,29 @@ class TestGitOps:
         assert result.ok is False
         assert result.value == {"failure_kind": "signing_configuration"}
         assert result.error == "host signing configuration unavailable"
+
+    def test_publish_rejects_git_metadata_changed_after_agent_run(self, tmp_path: Path) -> None:
+        """A Codex job cannot alter common Git controls before host publication."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "allowed_paths": ("hephaestus/automation/guard.py",),
+                "expected_repo": "test/repo",
+                "git_metadata_receipt": "a" * 64,
+            },
+        )
+
+        with patch.object(
+            WorkerPool,
+            "_trusted_git_metadata_receipt",
+            return_value={"git_metadata_receipt": "b" * 64},
+        ):
+            result = WorkerPool._verify_publish_git_metadata(job, tmp_path)
+
+        assert result is not None
+        assert result.error == "publication Git metadata changed after agent run"
 
     def test_commit_push_rejects_incomplete_scope_retraction_before_publish(
         self,
@@ -9424,6 +9618,14 @@ class TestShutdownReapsSubprocess:
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
             patch("hephaestus.agents.runtime._codex_base_cmd", return_value=sleeper),
+            patch(
+                "hephaestus.agents.runtime._codex_automation_profile",
+                return_value=nullcontext({"CODEX_HOME": str(tmp_path), "PATH": os.defpath}),
+            ),
+            patch(
+                "hephaestus.agents.runtime.macos_isolated_command",
+                side_effect=lambda argv, **_kwargs: list(argv),
+            ),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             deadline = time.monotonic() + 10

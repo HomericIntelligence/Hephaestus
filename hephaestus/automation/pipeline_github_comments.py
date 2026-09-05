@@ -4,6 +4,7 @@ import subprocess
 from collections.abc import Callable
 
 from hephaestus.automation.comment_identity import (
+    CommentAliasConflictError,
     has_marker_alias,
     is_current_planning_marker,
     is_planning_marker,
@@ -12,6 +13,10 @@ from hephaestus.automation.comment_identity import (
     validate_planning_comment_identities,
 )
 from hephaestus.automation.protocol import comment_marker_aliases
+from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX,
+    parse_recovery_provenance,
+)
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
@@ -31,6 +36,63 @@ def _validate_shared_planning_identities(
             body_of=lambda comment: str(comment.get("body", "")),
             owned_of=owned_of,
         )
+
+
+def _has_valid_leading_marker(body: str, marker: str) -> bool:
+    """Validate fixed markers and the sealed recovery-provenance prefix."""
+    if marker == RECOVERY_PROVENANCE_PREFIX:
+        return body.startswith(marker) and parse_recovery_provenance(body) is not None
+    return has_exact_leading_marker(body, marker)
+
+
+def _select_owned_comment(
+    comments: list[dict[str, Any]],
+    *,
+    marker: str,
+    aliases: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """Select one owned comment for a fixed marker or sealed recovery prefix."""
+    if marker == RECOVERY_PROVENANCE_PREFIX:
+        if len(comments) > 1:
+            raise CommentAliasConflictError(
+                f"ambiguous actor-owned comment aliases for {marker!r}; manual recovery is required"
+            )
+        return comments[0] if comments else None
+    return select_unambiguous_comment(
+        comments,
+        marker=marker,
+        aliases=aliases,
+        body_of=lambda comment: str(comment.get("body", "")),
+    )
+
+
+def _reject_malformed_owned_recovery_provenance(
+    comments: list[dict[str, Any]],
+    *,
+    owned_of: Callable[[dict[str, Any]], bool],
+) -> None:
+    """Fail closed when an actor-owned recovery prefix has an invalid seal."""
+    for comment in comments:
+        body = str(comment.get("body", ""))
+        if (
+            body.startswith(RECOVERY_PROVENANCE_PREFIX)
+            and owned_of(comment)
+            and parse_recovery_provenance(body) is None
+        ):
+            raise RuntimeError(
+                "malformed actor-owned recovery provenance; manual recovery is required"
+            )
+
+
+def _validate_recovery_provenance_comments(
+    marker: str,
+    comments: list[dict[str, Any]],
+    *,
+    owned_of: Callable[[dict[str, Any]], bool],
+) -> None:
+    """Validate recovery-specific comment authority when that role is selected."""
+    if marker == RECOVERY_PROVENANCE_PREFIX:
+        _reject_malformed_owned_recovery_provenance(comments, owned_of=owned_of)
 
 
 class PipelineGitHubIssueComments(_PipelineGitHubHost):
@@ -97,43 +159,43 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             return [
                 comment
                 for comment in comments
-                if has_marker_alias(str(comment.get("body", "")), markers)
+                if (
+                    _has_valid_leading_marker(str(comment.get("body", "")), marker)
+                    if marker == RECOVERY_PROVENANCE_PREFIX
+                    else has_marker_alias(str(comment.get("body", "")), markers)
+                )
                 and self._comment_owned_by_viewer(comment)
             ]
 
-        if not has_exact_leading_marker(body, marker):
+        if not _has_valid_leading_marker(body, marker):
             raise ValueError(f"canonical comment body must start with marker {marker!r}")
         validate_planning_body_for_write(marker, body)
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
         comments = self._repo_issue_comments(issue_number)
+        _validate_recovery_provenance_comments(
+            marker, comments, owned_of=self._comment_owned_by_viewer
+        )
         _validate_shared_planning_identities(
             comments,
             planning_marker=planning_marker,
             owned_of=self._comment_owned_by_viewer,
         )
         owned = owned_matching(comments)
-        target = select_unambiguous_comment(
-            owned,
-            marker=marker,
-            aliases=markers,
-            body_of=lambda comment: str(comment.get("body", "")),
-        )
+        target = _select_owned_comment(owned, marker=marker, aliases=markers)
         if target is None:
             self._post_issue_comment(issue_number, body)
             comments = self._repo_issue_comments(issue_number)
+            _validate_recovery_provenance_comments(
+                marker, comments, owned_of=self._comment_owned_by_viewer
+            )
             _validate_shared_planning_identities(
                 comments,
                 planning_marker=planning_marker,
                 owned_of=self._comment_owned_by_viewer,
             )
             owned = owned_matching(comments)
-            target = select_unambiguous_comment(
-                owned,
-                marker=marker,
-                aliases=markers,
-                body_of=lambda comment: str(comment.get("body", "")),
-            )
+            target = _select_owned_comment(owned, marker=marker, aliases=markers)
             if target is None:
                 raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
 
@@ -146,18 +208,16 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         if str(target.get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
             comments = self._repo_issue_comments(issue_number)
+            _validate_recovery_provenance_comments(
+                marker, comments, owned_of=self._comment_owned_by_viewer
+            )
             _validate_shared_planning_identities(
                 comments,
                 planning_marker=planning_marker,
                 owned_of=self._comment_owned_by_viewer,
             )
             owned = owned_matching(comments)
-            target = select_unambiguous_comment(
-                owned,
-                marker=marker,
-                aliases=markers,
-                body_of=lambda comment: str(comment.get("body", "")),
-            )
+            target = _select_owned_comment(owned, marker=marker, aliases=markers)
         if (
             target is None
             or target.get("databaseId") != target_id

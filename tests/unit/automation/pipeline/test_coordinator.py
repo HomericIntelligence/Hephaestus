@@ -1607,7 +1607,7 @@ class TestImplementationAdmission:
             stage=StageName.IMPLEMENTATION,
             state="WORKTREE_WAIT",
             branch=shared_branch,
-            payload={"existing_pr": True},
+            payload={"existing_pr": True, "_implementation_file_claims": set()},
         )
         sibling = WorkItem(
             repo="repo-a",
@@ -1617,7 +1617,7 @@ class TestImplementationAdmission:
             stage=StageName.IMPLEMENTATION,
             state="WORKTREE_WAIT",
             branch=shared_branch,
-            payload={"existing_pr": True},
+            payload={"existing_pr": True, "_implementation_file_claims": set()},
         )
         coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
         coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
@@ -2610,14 +2610,14 @@ class TestImplementationAdmission:
         ("max_workers", "serialize_file_overlap"),
         [(1, True), (2, False)],
     )
-    def test_overlap_claim_capture_is_off_without_parallel_serialization(
+    def test_plan_claim_capture_stays_on_without_parallel_serialization(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         max_workers: int,
         serialize_file_overlap: bool,
     ) -> None:
-        """Disabled overlap serialization makes no per-subjob plan lookup."""
+        """Overlap opt-out still captures the immutable plan manifest once."""
         coordinator, pool, _ = make_coordinator(
             tmp_path,
             monkeypatch,
@@ -2627,16 +2627,15 @@ class TestImplementationAdmission:
         item = _issue_item(21, StageName.IMPLEMENTATION)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("disabled overlap serialization must not fetch plan claims")
-            ),
+            lambda *_args, **_kwargs: {"README.md"},
         )
 
         coordinator._submit(item, JobRequest(_agent_job(item.repo, item.issue or 0), item.stage))
 
         assert len(pool.submitted) == 1
-        assert coordinator._implementation_file_claims == {}
-        assert coordinator._inflight_implementation_claims == {}
+        claim = (("org", "repo-a"), "README.md")
+        assert coordinator._implementation_file_claims[id(item)] == {claim}
+        assert coordinator._inflight_implementation_claims
 
     def test_overlap_gate_checks_ambiguous_numbers_against_active_claims(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3037,9 +3036,7 @@ class TestImplementationAdmission:
         coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: (_ for _ in ()).throw(
-                AssertionError("overlap lookup must be disabled")
-            ),
+            lambda _issue, repo=None: {"README.md"},
         )
 
         coordinator._drain_implementation()

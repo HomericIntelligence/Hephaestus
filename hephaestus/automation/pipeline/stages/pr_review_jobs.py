@@ -30,7 +30,10 @@ from .pr_review_recovery import (
     empty_diff_outcome,
     restart_direct_pr_review,
 )
-from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
+from .pr_review_scope_expansion import (
+    PrReviewScopeExpansionMixin,
+    store_remediation_thread_context,
+)
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -81,14 +84,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
     def _route_existing_threads_before_audit(
         item: WorkItem, ctx: StageContext
     ) -> StageOutcome | None:
-        """Route inherited threads to their responsible role before a new audit.
-
-        An unresolved thread lacking a current-head implementation response is
-        writer work, not input for another broad review.  Conversely, a
-        complete current-head response set enters the detached checkout only
-        for reviewer comment validation, where the reviewer may resolve the
-        threads or explain why they remain open.
-        """
+        """Route inherited threads to their responsible role before a new audit."""
         if item.pr is None:  # guarded by on_enter; keeps type narrowing local
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         entry = PrReviewStage._read_existing_thread_entry(item, ctx)
@@ -121,10 +117,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             return None
 
         item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
-        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        item.payload["remediation_threads"] = remediation_threads
-        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
-        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        store_remediation_thread_context(item, live_threads, remediation_threads)
         no_go_outcome = PrReviewStage._write_no_go(item, ctx)
         if no_go_outcome is not None:
             if isinstance(no_go_outcome, StageOutcome):
@@ -465,10 +458,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.payload[_COMMENT_VALIDATION_ONLY] = True
             return Continue(next_state=VALIDATE_WAIT)
         item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
-        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        item.payload["remediation_threads"] = remediation_threads
-        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
-        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        store_remediation_thread_context(item, live_threads, remediation_threads)
         return Continue(next_state=ADDRESS_WAIT)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -1195,6 +1185,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload["posted_thread_ids"] = [
             str(value["id"]) for value in posted if isinstance(value, dict) and "id" in value
         ]
+        item.payload["trusted_remediation_thread_ids"] = list(item.payload["posted_thread_ids"])
         item.payload["unresolved_threads"] = [dict(value) for value in unresolved]
         item.payload["remediation_threads"] = [dict(value) for value in remediation]
         item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]

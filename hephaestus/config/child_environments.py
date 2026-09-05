@@ -75,6 +75,44 @@ def build_codex_child_env(*, codex_home: Path | None = None) -> dict[str, str]:
     return env
 
 
+def build_isolated_codex_child_env(*, profile: Path) -> dict[str, str]:
+    """Build a finite Codex environment rooted entirely in one job profile.
+
+    This is the automation-only variant.  It intentionally does not inherit
+    the parent's home, temporary, XDG, or platform-specific state roots.
+    """
+    root = profile.expanduser().absolute()
+    temporary = root / "tmp"
+    xdg = root / "xdg"
+    environment = build_codex_child_env(codex_home=root)
+    for name in (
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+    ):
+        environment.pop(name, None)
+    environment.update(
+        {
+            "HOME": _absolute_path(root),
+            "CODEX_HOME": _absolute_path(root),
+            "TMPDIR": _absolute_path(temporary),
+            "TMP": _absolute_path(temporary),
+            "TEMP": _absolute_path(temporary),
+            "XDG_CONFIG_HOME": _absolute_path(xdg / "config"),
+            "XDG_CACHE_HOME": _absolute_path(xdg / "cache"),
+            "XDG_DATA_HOME": _absolute_path(xdg / "data"),
+        }
+    )
+    return environment
+
+
 def build_pi_child_env(
     *, temp_dir: Path | None = None, pi_dir: Path | None = None
 ) -> dict[str, str]:
@@ -202,6 +240,7 @@ __all__ = [
     "build_git_child_env",
     "build_git_signing_env",
     "build_host_verification_env",
+    "build_isolated_codex_child_env",
     "build_pi_child_env",
     "build_python_phase_env",
     "build_sbatch_submission_env",

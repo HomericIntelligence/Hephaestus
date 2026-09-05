@@ -291,17 +291,12 @@ class ImplementationDispatcher(_CoordinatorHost):
     ) -> set[_admission.PlanFileClaim]:
         """Return the immutable claims reserved for an implementation sub-job.
 
-        The parallel admission gate places its exact selection snapshot in the
+        The admission gate places its exact selection snapshot in the
         host-owned payload. It stays with the ct.WorkItem for every sub-job in
-        the implementation stage. Serial and overlap-opt-out modes do not
-        fetch or reserve claims because admission intentionally skips overlap
-        serialization in those configurations.
+        the implementation stage, including serial and overlap-opt-out modes.
+        Those modes skip overlap arbitration, not immutable plan admission.
         """
-        if (
-            item.stage is not ct.StageName.IMPLEMENTATION
-            or item.issue is None
-            or not self._overlap_serialization_enabled()
-        ):
+        if item.stage is not ct.StageName.IMPLEMENTATION or item.issue is None:
             return set()
         item_id = id(item)
         selected = self._implementation_file_claims.get(item_id)

@@ -70,15 +70,55 @@ class TestParsePlannedFiles:
         )
         assert _parse_planned_files(body) == {"hephaestus/automation/ci_driver.py"}
 
-    def test_parse_planned_files_bare_filenames_not_captured(self) -> None:
-        """Bare filenames without directory (e.g., `pyproject.toml`) are NOT captured."""
+    def test_parse_planned_files_captures_top_level_filenames(self) -> None:
+        """A canonical plan may authorize a top-level repository file."""
         body = "# Implementation Plan\n\n## Files to Modify\n\n- `pyproject.toml`\n"
-        assert _parse_planned_files(body) == set()
+        assert _parse_planned_files(body) == {"pyproject.toml"}
+
+    def test_parse_planned_files_accepts_valid_non_extension_paths(self) -> None:
+        """Dotfiles, extensionless paths, and spaces remain valid plan claims."""
+        body = (
+            "# Implementation Plan\n\n## Files to Modify\n\n"
+            "- `.github/workflows/ci.yml`\n"
+            "- `.pre-commit-config.yaml`\n"
+            "- `Dockerfile`\n"
+            "- `Makefile`\n"
+            "- `docs/file with spaces.md`\n"
+            "- `../outside.py`\n"
+        )
+        assert _parse_planned_files(body) == {
+            ".github/workflows/ci.yml",
+            ".pre-commit-config.yaml",
+            "Dockerfile",
+            "Makefile",
+            "docs/file with spaces.md",
+        }
 
     def test_parse_planned_files_case_insensitive_heading(self) -> None:
         """## Files to Modify/Create headings are case-insensitive."""
         body = "# Implementation Plan\n\n## FILES TO MODIFY\n\n- `hephaestus/automation/test.py`\n"
         assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
+
+    def test_parse_planned_files_rejects_paths_mentioned_only_in_prose(self) -> None:
+        """Explanatory backticks must not expand the implementation manifest."""
+        body = (
+            "# Implementation Plan\n\n## Files to Modify\n\n"
+            "- `hephaestus/automation/test.py` — update the parser.\n"
+            "Explain why `hephaestus/automation/private.py` is out of scope.\n"
+        )
+        assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
+
+    def test_parse_planned_files_rejects_globs_and_pathspec_magic(self) -> None:
+        """A plan file claim must name one literal repository path."""
+        body = (
+            "# Implementation Plan\n\n## Files to Modify\n\n"
+            "- `hephaestus/**/*.py`\n"
+            "- `tests/unit/test_?.py`\n"
+            "- `:(glob)hephaestus/*.py`\n"
+            "- `hephaestus/[ab].py`\n"
+            "- `hephaestus/allowed.py`\n"
+        )
+        assert _parse_planned_files(body) == {"hephaestus/allowed.py"}
 
 
 class TestCoordinatorCapOwnership:

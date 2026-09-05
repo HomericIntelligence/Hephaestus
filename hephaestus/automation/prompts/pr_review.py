@@ -507,7 +507,9 @@ def _render_review_validation_prompt(
         pr_title_block=fenced.fence("PR_TITLE", pr_title),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
-        terse_output_directive=get_terse_output_directive(),
+        terse_output_directive=get_terse_output_directive(
+            terminal_output_contract="End with exactly one fenced validation JSON object."
+        ),
     )
 
 
