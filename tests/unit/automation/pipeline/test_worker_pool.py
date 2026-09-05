@@ -38,6 +38,7 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.coordinator import PipelineConfig
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -54,6 +55,18 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageContext
+from hephaestus.automation.pipeline.stages.implementation import (
+    ADVISE_WAIT,
+    IMPLEMENT_WAIT,
+    WORKTREE_WAIT,
+    ImplementationStage,
+)
+from hephaestus.automation.pipeline.stages.repo import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+)
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _confirmed_pytest_failure,
@@ -3945,21 +3958,63 @@ class TestGitOps:
         assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
         assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == branch
 
-        binding = source_manager._binding(promoted)
-        agent = _agent_job(
-            model="worker-transition-agent",
+        stage = ImplementationStage()
+        item = WorkItem(
             repo="Hephaestus",
+            kind=ItemKind.ISSUE,
             issue=7,
-            cwd=predecessor.cwd,
-            workspace=binding,
-            allowed_tools="Read",
+            stage=StageName.IMPLEMENTATION,
+            state=WORKTREE_WAIT,
         )
+        item.branch = branch
+        item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = base_revision
+        ctx = StageContext(
+            config=PipelineConfig(
+                org="HomericIntelligence",
+                repos=["Hephaestus"],
+                no_advise=True,
+            ),
+            org="HomericIntelligence",
+            dry_run=False,
+            github=MagicMock(),
+            paths=MagicMock(
+                repo_root=repo,
+                worktree=predecessor.cwd,
+                source_workspaces=source_manager,
+            ),
+        )
+        stage.on_job_done(item, result, ctx)
+
+        assert item.worktree == str(predecessor.cwd)
+        assert item.payload["_impl_source_revision"] == base_revision
+        assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == {
+            "branch": branch,
+            "base_sha": base_revision,
+        }
+
+        item.state = "DIRTY_DECISION_WAIT"
+        dirty_transition = stage.step(item, ctx)
+        assert dirty_transition == Continue(next_state=ADVISE_WAIT)
+        item.state = dirty_transition.next_state
+        advise_transition = stage.step(item, ctx)
+        assert advise_transition == Continue(next_state=IMPLEMENT_WAIT)
+        item.state = advise_transition.next_state
+        assert item.state == IMPLEMENT_WAIT
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.cwd == predecessor.cwd
+        assert request.job.workspace is not None
+        assert request.job.workspace.cwd == predecessor.cwd
+        assert request.job.workspace.revision == base_revision
+
         with patch.object(pool, "_run_agent", return_value=JobResult(ok=True)) as run_agent:
-            pool.submit(agent, StageName.IMPLEMENTATION)
+            pool.submit(request.job, request.on_done_state)
             _, agent_result = completion_q.get(timeout=10)
 
         assert agent_result.ok is True
-        run_agent.assert_called_once_with(agent)
+        run_agent.assert_called_once_with(request.job)
 
     @pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift"])
     def test_direct_impl_writer_worker_preserves_invalid_predecessor(
@@ -3973,12 +4028,22 @@ class TestGitOps:
         repo, predecessor_revision, base_revision = _worker_repository(tmp_path)
         source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
         predecessor = source_manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor_revision)
+        dirty_path: Path | None = None
+        expected_dirty_content: str | None = None
+        expected_dirty_status: str | None = None
+        expected_branch: str | None = None
+        expected_head: str | None = None
         if mutation == "dirty":
-            (predecessor.cwd / "pending-change").write_text("preserve\n", encoding="utf-8")
+            dirty_path = predecessor.cwd / "pending-change"
+            dirty_path.write_text("preserve\n", encoding="utf-8")
+            expected_dirty_content = dirty_path.read_text(encoding="utf-8")
+            expected_dirty_status = _git(predecessor.cwd, "status", "--porcelain")
         elif mutation == "attached":
             _git(predecessor.cwd, "switch", "-c", "unexpected-branch")
+            expected_branch = _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD")
         else:
             _git(predecessor.cwd, "reset", "--hard", base_revision)
+            expected_head = _git(predecessor.cwd, "rev-parse", "HEAD")
 
         nonce = "b" * 32
         branch = f"7-auto-impl-direct-{nonce}"
@@ -4021,12 +4086,20 @@ class TestGitOps:
         assert preserved.detached is True
         assert predecessor.cwd.exists()
         if mutation == "dirty":
-            assert (predecessor.cwd / "pending-change").read_text(encoding="utf-8") == "preserve\n"
-            assert "?? pending-change" in _git(predecessor.cwd, "status", "--porcelain")
+            assert dirty_path is not None
+            assert expected_dirty_content is not None
+            assert expected_dirty_status is not None
+            assert dirty_path.read_text(encoding="utf-8") == expected_dirty_content
+            assert _git(predecessor.cwd, "status", "--porcelain") == expected_dirty_status
+            assert "?? pending-change" in expected_dirty_status
         elif mutation == "attached":
-            assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == "unexpected-branch"
+            assert expected_branch is not None
+            assert expected_branch == "unexpected-branch"
+            assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == expected_branch
         else:
-            assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
+            assert expected_head is not None
+            assert expected_head == base_revision
+            assert _git(predecessor.cwd, "rev-parse", "HEAD") == expected_head
 
     def test_implementation_source_lane_rejects_unmaterialized_writer(
         self,
