@@ -22,7 +22,7 @@ operator authorization or independently produces the native review artifact.
 ## Queue pre-PR source checks
 
 Before publishing a Hephaestus implementation, the queue runs the fixed command
-`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all`. Rebuilding the
+`bash scripts/run_ci_local.sh all --rebuild`. Rebuilding the
 CI image prevents a prior checkout's dependency environment from weakening the
 gate. Each invocation builds from an explicit allowlisted context, captures its
 own immutable image ID, and runs every container step against that ID; parallel
@@ -45,10 +45,12 @@ security scans, schema and version checks, license policy, shell checks, and
 repository structure checks. A failure returns to the bounded implementation
 test-fix loop instead of publishing a knowingly red branch.
 
-On macOS, an unavailable optional container runner emits a warning and the
-queue runs the native pre-PR verification command. The output names the runner
-that ran and the reason for the fallback. A failure in native verification
-still returns the item to the bounded test-fix loop.
+On macOS, the shell can request native verification only when the engine is
+absent, the engine is unavailable, or the no-op container-start probe fails.
+It exits with code 75 and writes one exact terminal protocol record. The queue
+validates the record and then runs `uv run pytest tests -q --tb=short`. A
+failure in native verification still returns the item to the bounded test-fix
+loop.
 
 This local pass cannot run checks whose inputs do not exist until GitHub creates
 the PR. `pr-policy` still validates the live PR body, title, commit subjects,

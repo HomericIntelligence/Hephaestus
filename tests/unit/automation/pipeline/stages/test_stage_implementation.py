@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -53,6 +55,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
@@ -71,6 +74,7 @@ _DIRTY_CONTENT_SNAPSHOT = {
     "worktree_sha256": "2" * 64,
     "untracked_sha256": "3" * 64,
 }
+_IMPLEMENTATION_PLATFORM = "hephaestus.automation.pipeline.stages.implementation.sys.platform"
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
@@ -2907,71 +2911,263 @@ class TestTestsAndFix:
         assert isinstance(result, Continue)
         assert result.next_state == "TESTFIX_WAIT"
 
-    def test_runner_failure_falls_back_to_native_tests(
-        self, make_ctx: Any, make_work_item: Any
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "container-engine-absent",
+            "container-engine-unavailable",
+            "container-start-failed",
+        ],
+    )
+    def test_exact_container_handoff_uses_fixed_native_command(
+        self, make_ctx: Any, make_work_item: Any, reason: str
     ) -> None:
-        """An optional runner failure starts the configured native test path."""
+        """The exact container protocol selects the fixed native command."""
         stage = ImplementationStage()
         ctx = make_ctx(
-            config_overrides={
-                "run_pre_pr_tests": True,
-                "pre_pr_test_argv": ("pytest", "tests/native", "-q"),
-            }
+            org="HomericIntelligence",
+            config_overrides={"pre_pr_test_argv": ("pytest", "tests/custom", "-q")},
         )
-        item = make_work_item(issue=1, state="TEST_WAIT")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
 
         initial = stage.step(item, ctx)
         assert isinstance(initial, JobRequest)
-        assert isinstance(initial.job, BuildTestJob)
-        assert initial.job.argv == ("pytest", "tests/native", "-q")
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=(
+                        "[CI] Container engine is unavailable.\n"
+                        f"HEPHAESTUS_CI_RUNNER_FAILURE: {reason}\n"
+                    ),
+                    error="rc=75",
+                ),
+                ctx,
+            )
 
+        item.state = "COMMIT_PUSH_WAIT"
+        transition = stage.step(item, ctx)
+        assert transition == Continue(next_state="TEST_WAIT")
+        item.state = transition.next_state
+        native = stage.step(item, ctx)
+
+        assert isinstance(native, JobRequest)
+        assert isinstance(native.job, BuildTestJob)
+        assert native.job.argv == PRE_PR_TEST_ARGV
+        assert native.job.descr == "pre_pr_tests_native_fallback"
+        assert item.payload["pre_pr_runner_mode"] == "native"
+        assert item.payload["pre_pr_fallback_reason"] == reason
+
+    def test_native_mode_remains_transition_authority_after_restart(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Durable native mode requests its test after a process restart."""
+        item = make_work_item(issue=1, repo="Hephaestus", state="COMMIT_PUSH_WAIT")
+        item.payload["pre_pr_runner_mode"] = "native"
+        item.payload["pre_pr_fallback_reason"] = "container-start-failed"
+
+        result = ImplementationStage().step(item, make_ctx(org="HomericIntelligence"))
+
+        assert result == Continue(next_state="TEST_WAIT")
+
+    @pytest.mark.parametrize(
+        ("stderr_tail", "error", "value"),
+        [
+            ("", "rc=75", None),
+            ("HEPHAESTUS_CI_RUNNER_FAILURE: unknown\n", "rc=75", None),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n"
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n",
+                "rc=75",
+                None,
+            ),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent",
+                "rc=75",
+                None,
+            ),
+            ("HEPHAESTUS_CI_RUNNER_FAIL", "rc=75", None),
+            (
+                "embedded HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n",
+                "rc=75",
+                None,
+            ),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\nlater diagnostic\n",
+                "rc=75",
+                None,
+            ),
+            (
+                "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n",
+                "rc=1",
+                None,
+            ),
+            ("", "timeout", None),
+            ("", "FileNotFoundError: runner executable is absent", None),
+            ("", "host_verification_failed", {"failure_kind": "runner"}),
+        ],
+    )
+    def test_malformed_and_worker_failures_cannot_authorize_native_mode(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        stderr_tail: str,
+        error: str,
+        value: object,
+    ) -> None:
+        """Malformed output, timeouts, and worker errors stay blocking."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(ok=False, value=value, stderr_tail=stderr_tail, error=error),
+                ctx,
+            )
+        item.state = "COMMIT_PUSH_WAIT"
+
+        assert stage.step(item, ctx) == Continue(next_state="TESTFIX_WAIT")
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
+
+    def test_stdout_marker_cannot_authorize_or_forge_a_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Process output cannot create a transition or receipt."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        marker = "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent"
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stdout_tail=marker,
+                    stderr_tail=f"{marker}\n",
+                    error="rc=75",
+                ),
+                ctx,
+            )
+
+        assert item.payload["tests_failed"] is True
+
+        item = make_work_item(issue=2, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        item.payload["test_command"] = "attacker-controlled command"
         stage.on_job_done(
             item,
-            JobResult(
-                ok=False,
-                value=1,
-                stderr_tail="HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable",
-                error="rc=1",
-            ),
+            JobResult(ok=True, stdout_tail=f"HEPHAESTUS_CI_RUNNER_FALLBACK: {marker}"),
             ctx,
         )
-        item.state = "COMMIT_PUSH_WAIT"
-        result = stage.step(item, ctx)
+        assert item.payload["test_receipt"] == (
+            "`bash scripts/run_ci_local.sh all --rebuild` — passed"
+        )
 
-        assert isinstance(result, JobRequest)
-        assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == ("pytest", "tests/native", "-q")
-        assert result.on_done_state == "COMMIT_PUSH_WAIT"
-        assert "tests_failed" not in item.payload
-        assert "container-engine-unavailable" in item.payload["pre_pr_fallback_reason"]
+    @pytest.mark.parametrize("platform", ["linux", "win32"])
+    def test_non_darwin_cannot_authorize_native_mode(
+        self, make_ctx: Any, make_work_item: Any, platform: str
+    ) -> None:
+        """The handoff protocol is macOS-only."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        with patch(_IMPLEMENTATION_PLATFORM, platform):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n"),
+                    error="rc=75",
+                ),
+                ctx,
+            )
 
-        item.state = "TEST_WAIT"
-        stage.on_job_done(item, JobResult(ok=True, value=0), ctx)
-        assert "pre_pr_runner_error" not in item.payload
-        assert "native fallback" in item.payload["test_receipt"]
-        assert "container-engine-unavailable" in item.payload["test_receipt"]
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
+
+    def test_configured_non_container_command_cannot_authorize_native_mode(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only the canonical container command can request native mode."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
+        item = make_work_item(issue=1, state="TEST_WAIT")
+        stage.step(item, ctx)
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent\n"),
+                    error="rc=75",
+                ),
+                ctx,
+            )
+
+        assert item.payload["tests_failed"] is True
+
+    def test_worker_subprocess_start_failure_is_blocking(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """The production worker start-error result cannot authorize native mode."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path,
+        )
+        try:
+            with patch(
+                "hephaestus.automation.pipeline.worker_pool.subprocess.run",
+                side_effect=FileNotFoundError("runner executable is absent"),
+            ):
+                result = pool._run(request.job)
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+        assert result.error == "FileNotFoundError: runner executable is absent"
+        stage.on_job_done(item, result, ctx)
+        assert item.payload["tests_failed"] is True
+        assert item.payload["pre_pr_runner_mode"] == "container"
 
     def test_native_fallback_failure_blocks_commit_and_pr(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A native fallback failure still routes to test repair."""
         stage = ImplementationStage()
-        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
-        item = make_work_item(issue=1, state="TEST_WAIT")
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
 
         initial = stage.step(item, ctx)
         assert isinstance(initial, JobRequest)
 
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value=1,
-                stderr_tail="HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable",
-            ),
-            ctx,
-        )
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable\n"),
+                    error="rc=75",
+                ),
+                ctx,
+            )
         item.state = "COMMIT_PUSH_WAIT"
+        transition = stage.step(item, ctx)
+        assert transition == Continue(next_state="TEST_WAIT")
+        item.state = "TEST_WAIT"
         fallback = stage.step(item, ctx)
         assert isinstance(fallback, JobRequest)
 
@@ -2988,58 +3184,46 @@ class TestTestsAndFix:
         assert result.next_state == "TESTFIX_WAIT"
         assert item.payload["tests_failed"] is True
 
-    def test_script_native_fallback_failure_routes_to_testfix(
+    def test_native_mode_persists_through_test_fix_rerun(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A failed script fallback is a test failure, not a runner failure."""
+        """A test fix reruns the fixed native command, not the container command."""
         stage = ImplementationStage()
-        item = make_work_item(issue=1, state="TEST_WAIT")
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value=1,
-                stderr_tail=(
-                    "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable\n"
-                    "Native pre-PR verification FAILED."
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        stage.step(item, ctx)
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-start-failed\n"),
+                    error="rc=75",
                 ),
-                stdout_tail="HEPHAESTUS_CI_RUNNER_FALLBACK: container-engine-unavailable",
-            ),
-            make_ctx(),
-        )
+                ctx,
+            )
         item.state = "COMMIT_PUSH_WAIT"
-        result = stage.step(item, make_ctx())
-
-        assert isinstance(result, Continue)
-        assert result.next_state == "TESTFIX_WAIT"
-
-    def test_optional_runner_start_failure_falls_back_to_native_tests(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A subprocess runner start failure does not block a green native gate."""
-        stage = ImplementationStage()
-        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
-        item = make_work_item(issue=1, state="TEST_WAIT")
-
-        initial = stage.step(item, ctx)
-        assert isinstance(initial, JobRequest)
+        assert stage.step(item, ctx) == Continue(next_state="TEST_WAIT")
+        item.state = "TEST_WAIT"
+        first_native = stage.step(item, ctx)
+        assert isinstance(first_native, JobRequest)
         stage.on_job_done(
             item,
-            JobResult(
-                ok=False,
-                value={"failure_kind": "runner"},
-                error="host_verification_failed: executable unavailable",
-            ),
+            JobResult(ok=False, stdout_tail="FAILED native verification", error="rc=23"),
             ctx,
         )
         item.state = "COMMIT_PUSH_WAIT"
+        assert stage.step(item, ctx) == Continue(next_state="TESTFIX_WAIT")
+        item.state = "TESTFIX_WAIT"
+        fix = stage.step(item, ctx)
+        assert isinstance(fix, JobRequest)
+        stage.on_job_done(item, JobResult(ok=True, value="fixed"), ctx)
+        item.state = "TEST_WAIT"
 
-        fallback = stage.step(item, ctx)
-
-        assert isinstance(fallback, JobRequest)
-        assert isinstance(fallback.job, BuildTestJob)
-        assert fallback.job.descr == "pre_pr_tests_native_fallback"
-        assert "optional pre-PR runner failed to start" in item.payload["pre_pr_fallback_reason"]
+        second_native = stage.step(item, ctx)
+        assert isinstance(second_native, JobRequest)
+        assert second_native.job.argv == PRE_PR_TEST_ARGV
+        assert second_native.job.descr == "pre_pr_tests_native_fallback"
 
     def test_green_tests_clear_failure_state(self, make_ctx: Any, make_work_item: Any) -> None:
         """A green run clears any prior failure payload."""
@@ -4276,6 +4460,62 @@ class TestFullWalks:
             "commit_push",
         ]
         assert item.attempts["test_fix"] == 1
+
+    def test_macos_handoff_walk_publishes_host_owned_native_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A complete handoff uses native checks before commit and PR creation."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=["state:plan-go"])
+        ctx = make_ctx(
+            org="HomericIntelligence",
+            github=github,
+            config_overrides={
+                "no_advise": True,
+                "pre_pr_test_argv": ("pytest", "tests/unsafe-override", "-q"),
+            },
+        )
+        item = make_work_item(issue=7, repo="Hephaestus", state="ENTER")
+        pool = FakeWorkerPool()
+        pool.script(
+            JobResult(ok=True, value={"path": "/tmp/wt7", "dirty": False}),
+            JobResult(ok=True, value="implemented"),
+            JobResult(
+                ok=False,
+                stderr_tail=("HEPHAESTUS_CI_RUNNER_FAILURE: container-start-failed\n"),
+                error="rc=75",
+            ),
+            JobResult(
+                ok=True,
+                stdout_tail=("HEPHAESTUS_CI_RUNNER_FALLBACK: attacker-controlled-reason"),
+            ),
+            JobResult(ok=True, value=True),
+        )
+
+        with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
+            outcome = _drive(stage, item, ctx, pool)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+        assert [handle.job.descr for handle in pool.submitted] == [
+            "create_worktree",
+            "implement",
+            "pre_pr_tests",
+            "pre_pr_tests_native_fallback",
+            "commit_push",
+        ]
+        assert pool.submitted[2].job.argv == (
+            "bash",
+            "scripts/run_ci_local.sh",
+            "all",
+            "--rebuild",
+        )
+        assert pool.submitted[3].job.argv == PRE_PR_TEST_ARGV
+        assert item.pr == 1001
+        assert (
+            "`uv run pytest tests -q --tb=short` — passed "
+            "(native fallback after container-start-failed)" in github.prs[1001]["body"]
+        )
 
     def test_walk_agent_error_retry_then_exhaustion(
         self, make_ctx: Any, make_work_item: Any

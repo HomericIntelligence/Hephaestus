@@ -1675,7 +1675,7 @@ out-of-band.
 | `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](../hephaestus/automation/agent_stage.py) |
 
 Hephaestus implementation work always runs
-`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all` through the
+`bash scripts/run_ci_local.sh all --rebuild` through the
 [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py)
 test-fix gate before commit, push, and PR creation. The fixed command executes
 the repository's locally executable required source checks and cannot be
@@ -1691,9 +1691,12 @@ granting container write access to repository metadata.
 automatic profile. Its vetted default is
 `uv run pytest tests -q --tb=short`; programmatic callers can supply
 `PipelineConfig.pre_pr_test_argv` for a different vetted fallback command.
-If the optional runner reports an availability or startup failure, the stage
-logs the reason and runs this native command. A native failure still blocks
-publication. The test receipt records the runner and the fallback reason.
+For the Hephaestus profile on macOS, the shell can request a native run only
+for an absent engine, an unavailable engine, or a failed container-start
+probe. The shell exits with code 75 and writes one exact terminal protocol
+record. The stage validates the complete protocol, changes the runner mode,
+and runs the fixed native command. A native failure still blocks publication.
+The test receipt uses the stage-owned runner mode and fallback reason.
 GitHub-only checks that need a created PR, especially `pr-policy`, still run
 after publication and remain part of the merge contract.
 

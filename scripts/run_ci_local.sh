@@ -2,8 +2,8 @@
 # Run the locally executable Hephaestus CI checks.
 #
 # Project toolchain commands use the same CI container image as GitHub Actions
-# when a usable container engine is available. On macOS, the pre-PR check uses
-# the native toolchain when the optional container runner is unavailable.
+# when a usable container engine is available. On macOS, the complete pre-PR
+# check can request a queue-owned native run for approved runner failures.
 # Supports both Podman (rootless, no SU — preferred) and Docker.
 #
 # Usage:
@@ -67,7 +67,7 @@ CANDIDATE_OBJECTS_CONTAINER=""
 REPOSITORY_OBJECTS_CONTAINER=""
 CI_BUILD_ROOT=""
 CI_RUN_IMAGE=""
-CONTAINER_RUNNER_FAILURE_REASON=""
+CONTAINER_RUNNER_FAILURE_CODE=""
 
 cleanup_candidate_snapshot() {
     if [ -z "${CANDIDATE_ROOT}" ]; then
@@ -224,21 +224,23 @@ trap cleanup EXIT
 # Container engine detection
 # ============================================================================
 
-report_engine_unavailable() {
-    CONTAINER_RUNNER_FAILURE_REASON="$1"
-    log_error "${CONTAINER_RUNNER_FAILURE_REASON}"
-    log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
+report_engine_failure() {
+    CONTAINER_RUNNER_FAILURE_CODE="$1"
+    log_error "$2"
     return 1
 }
 
 detect_engine() {
     if [ -n "${CONTAINER_ENGINE:-}" ]; then
         if ! command -v "${CONTAINER_ENGINE}" &> /dev/null; then
-            report_engine_unavailable "CONTAINER_ENGINE=${CONTAINER_ENGINE} not found in PATH"
+            report_engine_failure \
+                "container-engine-absent" \
+                "CONTAINER_ENGINE=${CONTAINER_ENGINE} not found in PATH"
             return 1
         fi
         if ! "${CONTAINER_ENGINE}" info >/dev/null 2>&1; then
-            report_engine_unavailable \
+            report_engine_failure \
+                "container-engine-unavailable" \
                 "CONTAINER_ENGINE=${CONTAINER_ENGINE} is unavailable. Start its service."
             return 1
         fi
@@ -253,11 +255,13 @@ detect_engine() {
         CONTAINER_ENGINE="docker"
         log_info "Container engine: docker"
     elif command -v podman &> /dev/null || command -v docker &> /dev/null; then
-        report_engine_unavailable \
+        report_engine_failure \
+            "container-engine-unavailable" \
             "A container engine is installed but unavailable. Start its service."
         return 1
     else
-        report_engine_unavailable \
+        report_engine_failure \
+            "container-engine-absent" \
             "No container engine found. Install podman (recommended) or docker."
         log_error "  Podman: https://podman.io/getting-started/installation"
         return 1
@@ -267,17 +271,6 @@ detect_engine() {
 
 is_macos() {
     [ "$(uname -s)" = "Darwin" ]
-}
-
-run_native_pre_pr_checks() {
-    log_warn "Container runner unavailable: ${CONTAINER_RUNNER_FAILURE_REASON}; "\
-        "falling back to native pre-PR verification."
-    log_info "HEPHAESTUS_CI_RUNNER_FALLBACK: ${CONTAINER_RUNNER_FAILURE_REASON}"
-    log_info "Runner: native (uv run pytest tests -q --tb=short)"
-    if ! (cd "${PROJECT_ROOT}" && uv run pytest tests -q --tb=short); then
-        log_error "Native pre-PR verification FAILED."
-        return 1
-    fi
 }
 
 # ============================================================================
@@ -628,25 +621,30 @@ prepare_container_runner() {
         return 1
     fi
     if ! resolve_image; then
-        CONTAINER_RUNNER_FAILURE_REASON="Container runner failed to initialize: image resolution failed."
-        log_error "${CONTAINER_RUNNER_FAILURE_REASON}"
-        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-runner-initialization-failed"
         return 1
     fi
     if ! resolve_git_metadata_mount; then
-        CONTAINER_RUNNER_FAILURE_REASON="Container runner failed to initialize: Git metadata preparation failed."
-        log_error "${CONTAINER_RUNNER_FAILURE_REASON}"
-        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-runner-initialization-failed"
+        return 1
+    fi
+    if ! run_in_container true >/dev/null 2>&1; then
+        report_engine_failure \
+            "container-start-failed" \
+            "The container engine could not start the local CI image."
         return 1
     fi
 }
 
 if ! prepare_container_runner; then
     if is_macos && [ "${SUBSET}" = "all" ]; then
-        if ! run_native_pre_pr_checks; then
-            exit 1
-        fi
-        exit 0
+        case "${CONTAINER_RUNNER_FAILURE_CODE}" in
+            container-engine-absent|container-engine-unavailable|container-start-failed)
+                cleanup
+                trap - EXIT
+                printf '%s\n' \
+                    "HEPHAESTUS_CI_RUNNER_FAILURE: ${CONTAINER_RUNNER_FAILURE_CODE}" >&2
+                exit 75
+                ;;
+        esac
     fi
     exit 1
 fi
