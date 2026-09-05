@@ -2871,6 +2871,55 @@ class TestGitOps:
         assert result.value["failure_kind"] == "unsafe_git_configuration"
         assert marker.exists() is False
 
+    @pytest.mark.parametrize("oversize_kind", ["config", "worktree-list"])
+    def test_inspection_fails_closed_when_git_metadata_exceeds_the_byte_limit(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        oversize_kind: str,
+    ) -> None:
+        """Inspection rejects Git metadata before it can retain unbounded output."""
+        branch = "2973-auto-impl"
+        repo, writer, head = self._inspection_writer(tmp_path, branch)
+        oversized_payload = "x" * (80 * 1024)
+        if oversize_kind == "config":
+            config_path = repo / ".git" / "config"
+            config_path.write_text(
+                f"{config_path.read_text(encoding='utf-8')}\n"
+                f"[inspection]\n\tpayload = {oversized_payload}\n",
+                encoding="utf-8",
+            )
+        else:
+            metadata = repo / ".git" / "worktrees" / "oversized-metadata"
+            metadata.mkdir()
+            (metadata / "HEAD").write_text(f"{head}\n", encoding="ascii")
+            (metadata / "commondir").write_text("../..\n", encoding="ascii")
+            (metadata / "gitdir").write_text(
+                f"/{oversized_payload}/.git\n",
+                encoding="ascii",
+            )
+
+        result = pool._git_inspect_implementation_worktree(
+            GitJob(
+                repo="test/repo",
+                op="inspect_implementation_worktree",
+                timeout_s=60,
+                kwargs={
+                    "repo_root": str(repo),
+                    "worktree_path": str(writer),
+                    "branch": branch,
+                    "expected_head": head,
+                },
+            )
+        )
+
+        assert result.ok is False
+        assert result.value == {
+            "outcome": "failed",
+            "failure_kind": "resource_limit_exceeded",
+            "cause": "Git output limit exceeded",
+        }
+
     @pytest.mark.parametrize("oversize_kind", ["diff", "changed-files", "snapshot-content"])
     def test_inspection_fails_closed_when_untrusted_writer_data_exceeds_a_bound(
         self,

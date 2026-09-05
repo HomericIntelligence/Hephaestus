@@ -59,6 +59,7 @@ from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
     DIRTY_SNAPSHOT_GIT_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+    IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
 )
 from hephaestus.automation.pipeline.github_jobs import (
@@ -1738,18 +1739,31 @@ def _unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
     return None
 
 
-def _checkout_preflight_error(checkout: Path, timeout_s: int) -> str | None:
+def _checkout_preflight_error(
+    checkout: Path,
+    timeout_s: int,
+    *,
+    max_config_bytes: int | None = None,
+) -> str | None:
     """Return a reusable-checkout metadata safety failure before synchronization."""
     if not (checkout / ".git").exists():
         return None
-    unsafe_config = _unsafe_local_git_config_key(
-        git_utils.run(
+    if max_config_bytes is None:
+        config = git_utils.run(
             ["git", "config", "--null", "--list"],
             cwd=checkout,
             timeout=timeout_s,
             env=_controlled_git_env(),
         ).stdout
-    )
+    else:
+        config = _run_bounded_git_output(
+            ("git", "config", "--null", "--list"),
+            cwd=checkout,
+            timeout=timeout_s,
+            max_bytes=max_config_bytes,
+            retain_text=True,
+        ).text
+    unsafe_config = _unsafe_local_git_config_key(config)
     if unsafe_config is not None:
         return "checkout has unsafe local Git configuration"
     graft_value = git_utils.run(
@@ -4726,7 +4740,11 @@ class WorkerPool:
         try:
             env = _controlled_git_env()
             for checkout in (confined_root, confined_worktree):
-                if preflight_error := _checkout_preflight_error(checkout, job.timeout_s):
+                if preflight_error := _checkout_preflight_error(
+                    checkout,
+                    job.timeout_s,
+                    max_config_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
+                ):
                     return fail("unsafe_git_configuration", preflight_error)
             canonical_root = git_utils.run(
                 ["git", "rev-parse", "--show-toplevel"],
@@ -4736,12 +4754,13 @@ class WorkerPool:
             ).stdout.strip()
             if not canonical_root or Path(canonical_root).resolve(strict=True) != confined_root:
                 return fail("worktree_unconfined", "repository root identity changed")
-            listing = git_utils.run(
-                ["git", "-c", "core.fsmonitor=false", "worktree", "list", "--porcelain"],
+            listing = _run_bounded_git_output(
+                ("git", "-c", "core.fsmonitor=false", "worktree", "list", "--porcelain"),
                 cwd=confined_root,
                 timeout=job.timeout_s,
-                env=env,
-            ).stdout
+                max_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
+                retain_text=True,
+            ).text
             expected_block = (
                 f"worktree {confined_worktree}\nHEAD {expected_head}\nbranch refs/heads/{branch}\n"
             )
