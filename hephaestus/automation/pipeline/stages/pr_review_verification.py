@@ -1,37 +1,34 @@
-"""Host-owned verification plans and receipt checks for PR review."""
+"""Compatibility exports for the closed PR-review verification catalog."""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+
+from hephaestus.automation.host_verification_catalog import (
+    _NONHERMETIC_HOST_UNIT_TEST_PATHS,
+    _PYTHON_VALIDATION_CONFIG_PATHS,
+    _host_verification_specs as _catalog_host_verification_specs,
+    _HostPlan,
+    _HostVerificationSpec,
+)
+
+HOST_VERIFICATION_TIMEOUT_S = 300
+HOST_VERIFICATION_DIAGNOSTIC_MAX = 4_000
 
 
-@dataclass(frozen=True)
-class _HostVerificationSpec:
-    """One repository-owned verification command eligible for PR review."""
-
-    changed_path: str | None
-    argv: tuple[str, ...]
-    descr: str
-
-
-_HostPlan = tuple[_HostVerificationSpec, ...]
-
-
-# Run static validation on immutable snapshots before read-only Python reviews.
+# A later integration wave changes callers to provide checkout-derived paths.
+# Preserve the old diff-text input until that atomic consumer migration lands.
 _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
-        changed_path=None,
-        argv=("uv", "run", "ruff", "check", "hephaestus/", "tests/"),
         descr="review_python_ruff_check",
+        argv=("uv", "run", "ruff", "check", "hephaestus/", "tests/"),
     ),
     _HostVerificationSpec(
-        changed_path=None,
-        argv=("uv", "run", "ruff", "format", "--check", "hephaestus/", "tests/"),
         descr="review_python_ruff_format",
+        argv=("uv", "run", "ruff", "format", "--check", "hephaestus/", "tests/"),
     ),
     _HostVerificationSpec(
-        changed_path=None,
+        descr="review_python_mypy",
         argv=(
             "uv",
             "run",
@@ -41,20 +38,7 @@ _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "scripts/",
             "tests/",
         ),
-        descr="review_python_mypy",
     ),
-)
-_PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
-    {
-        "pyproject.toml",
-        "uv.lock",
-        "coverage.toml",
-        "mypy.ini",
-        "pytest.ini",
-        "ruff.toml",
-        "setup.cfg",
-        "tox.ini",
-    }
 )
 _FULL_UNIT_COVERAGE_SPEC = _HostVerificationSpec(
     changed_path="coverage.toml",
@@ -67,14 +51,6 @@ _FULL_UNIT_COVERAGE_SPEC = _HostVerificationSpec(
     ),
     descr="review_full_unit_coverage",
 )
-# This suite exercises the host verifier's own disk-image and sandbox
-# primitives. Running it inside that verifier would require nested mounts and
-# produces runner failures rather than meaningful code evidence.
-_NONHERMETIC_HOST_UNIT_TEST_PATHS = frozenset(
-    {"tests/unit/automation/pipeline/test_worker_pool.py"}
-)
-# Additional bounded execution is derived only from a real Git diff header,
-# never from reviewer or GitHub prose.
 _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
         changed_path="docs/MIGRATION.md",
@@ -98,7 +74,8 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "pytest",
             "-o",
             "addopts=",
-            "tests/unit/automation/pipeline/test_worker_pool.py::TestAgentErrorHandling::test_codex_event_failure_is_explicit_agent_error",
+            "tests/unit/automation/pipeline/test_worker_pool.py::"
+            "TestAgentErrorHandling::test_codex_event_failure_is_explicit_agent_error",
             "-q",
             "--tb=short",
         ),
@@ -119,8 +96,6 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
         descr="review_stalled_consumer_verification",
     ),
 )
-HOST_VERIFICATION_TIMEOUT_S = 300
-HOST_VERIFICATION_DIAGNOSTIC_MAX = 4_000
 
 _DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", flags=re.MULTILINE)
 
@@ -142,20 +117,17 @@ def _changed_new_side_paths(pr_diff: str) -> frozenset[str]:
             flush_pending_header_path()
             pending_header_path = header.group(2)
             continue
-
         if raw_line.startswith("+++ ") and pending_header_path is not None:
             target = raw_line[4:].strip()
             pending_header_path = None
-            if target == "/dev/null":
-                continue
-            paths.add(target[2:] if target.startswith("b/") else target)
-
+            if target != "/dev/null":
+                paths.add(target[2:] if target.startswith("b/") else target)
     flush_pending_header_path()
     return frozenset(paths)
 
 
 def _changed_unit_pytest_argv(target: str) -> tuple[str, ...]:
-    """Return the changed-unit pytest command while preserving host exclusions."""
+    """Return the old changed-unit command while preserving its exclusions."""
     ignore_args = tuple(
         f"--ignore={path}"
         for path in sorted(_NONHERMETIC_HOST_UNIT_TEST_PATHS)
@@ -174,9 +146,9 @@ def _changed_unit_pytest_argv(target: str) -> tuple[str, ...]:
     )
 
 
-def _host_verification_specs(pr_diff: object, *, profile: str | None = "hephaestus") -> _HostPlan:
-    """Return the complete fixed host plan activated by the verified diff."""
-    if profile != "hephaestus" or not isinstance(pr_diff, str):
+def _legacy_host_verification_specs(pr_diff: str, *, profile: str | None) -> _HostPlan:
+    """Return the prior diff-text plan until all callers use changed paths."""
+    if profile != "hephaestus":
         return ()
     changed_paths = {match.group(2) for match in _DIFF_GIT_HEADER_RE.finditer(pr_diff)}
     path_triggered_specs = tuple(
@@ -189,11 +161,10 @@ def _host_verification_specs(pr_diff: object, *, profile: str | None = "hephaest
         path.endswith(".py") or path in _PYTHON_VALIDATION_CONFIG_PATHS for path in changed_paths
     ):
         return path_triggered_specs
-    changed_new_side_paths = _changed_new_side_paths(pr_diff)
     changed_unit_paths = tuple(
         sorted(
             path
-            for path in changed_new_side_paths
+            for path in _changed_new_side_paths(pr_diff)
             if path.startswith("tests/unit/")
             and path.endswith(".py")
             and path not in _NONHERMETIC_HOST_UNIT_TEST_PATHS
@@ -239,12 +210,25 @@ def _host_verification_specs(pr_diff: object, *, profile: str | None = "hephaest
     )
 
 
-# fmt: off
+def _host_verification_specs(selector: object, *, profile: str | None = "hephaestus") -> _HostPlan:
+    """Delegate checkout paths to the catalog and support old diff callers."""
+    if isinstance(selector, str):
+        return _legacy_host_verification_specs(selector, profile=profile)
+    return _catalog_host_verification_specs(selector, profile=profile)
+
+
 __all__ = [
-    'HOST_VERIFICATION_DIAGNOSTIC_MAX', 'HOST_VERIFICATION_TIMEOUT_S', '_DIFF_GIT_HEADER_RE',
-    '_NONHERMETIC_HOST_UNIT_TEST_PATHS', '_PATH_HOST_VERIFICATION_SPECS',
-    '_PYTHON_HOST_VERIFICATION_SPECS', '_PYTHON_VALIDATION_CONFIG_PATHS', '_HostPlan',
-    '_HostVerificationSpec',
-    '_changed_new_side_paths', '_changed_unit_pytest_argv', '_host_verification_specs',
-    'annotations', 'dataclass', 're']
-# fmt: on
+    "HOST_VERIFICATION_DIAGNOSTIC_MAX",
+    "HOST_VERIFICATION_TIMEOUT_S",
+    "_DIFF_GIT_HEADER_RE",
+    "_FULL_UNIT_COVERAGE_SPEC",
+    "_NONHERMETIC_HOST_UNIT_TEST_PATHS",
+    "_PATH_HOST_VERIFICATION_SPECS",
+    "_PYTHON_HOST_VERIFICATION_SPECS",
+    "_PYTHON_VALIDATION_CONFIG_PATHS",
+    "_HostPlan",
+    "_HostVerificationSpec",
+    "_changed_new_side_paths",
+    "_changed_unit_pytest_argv",
+    "_host_verification_specs",
+]
