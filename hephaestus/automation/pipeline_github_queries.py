@@ -668,7 +668,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         )
         check_runs: list[object] = []
         expected_count: int | None = None
-        check_run_ids: set[int] | None = None
+        check_run_ids: set[int] = set()
         page = 1
         while expected_count is None or len(check_runs) < expected_count:
             page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
@@ -689,24 +689,21 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                         head_sha,
                     )
                     return None
-                if expected_count > len(page_runs):
-                    check_run_ids = set()
             elif total_count != expected_count:
                 logger.warning("Check Runs count changed for %s", head_sha)
                 return None
 
-            if check_run_ids is not None:
-                for check_run in page_runs:
-                    check_run_id = check_run.get("id") if isinstance(check_run, dict) else None
-                    if (
-                        not isinstance(check_run_id, int)
-                        or isinstance(check_run_id, bool)
-                        or check_run_id <= 0
-                        or check_run_id in check_run_ids
-                    ):
-                        logger.warning("Check Runs page has invalid identity for %s", head_sha)
-                        return None
-                    check_run_ids.add(check_run_id)
+            for check_run in page_runs:
+                check_run_id = check_run.get("id") if isinstance(check_run, dict) else None
+                if (
+                    not isinstance(check_run_id, int)
+                    or isinstance(check_run_id, bool)
+                    or check_run_id <= 0
+                    or check_run_id in check_run_ids
+                ):
+                    logger.warning("Check Runs page has invalid identity for %s", head_sha)
+                    return None
+                check_run_ids.add(check_run_id)
 
             check_runs.extend(page_runs)
             if len(check_runs) > expected_count or (

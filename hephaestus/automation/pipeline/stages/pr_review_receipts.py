@@ -42,21 +42,7 @@ def _host_verification_failure_kind(result_value: dict[object, object]) -> str:
 def _host_verification_receipt_matches(
     receipt: object, spec: _HostVerificationSpec, reviewed_head: str
 ) -> bool:
-    """Return whether *receipt* proves a pass or an authentic platform skip."""
-    if isinstance(receipt, dict) and receipt.get("status") == "skipped":
-        platform = receipt.get("platform")
-        return bool(
-            receipt.get("head_sha") == reviewed_head
-            and receipt.get("argv") == list(spec.argv)
-            and receipt.get("immutable_source") is False
-            and receipt.get("ok") is False
-            and receipt.get("error") == UNSUPPORTED_HOST_VERIFICATION_ERROR
-            and isinstance(platform, str)
-            and bool(platform)
-            and platform != "darwin"
-            and isinstance(receipt.get("stdout_tail"), str)
-            and isinstance(receipt.get("stderr_tail"), str)
-        )
+    """Return whether *receipt* proves that a required host check passed."""
     return bool(
         isinstance(receipt, dict)
         and receipt.get("head_sha") == reviewed_head

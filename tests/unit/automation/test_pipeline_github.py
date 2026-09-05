@@ -2679,6 +2679,38 @@ class TestExactHeadChecks:
 
         assert adapter.required_checks_pass_for_head("a" * 40) is False
 
+    @pytest.mark.parametrize(
+        ("first_id", "second_id"),
+        [(1, 1), (1, 0)],
+        ids=("duplicate", "invalid"),
+    )
+    def test_one_page_check_run_response_rejects_invalid_identity(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        first_id: int,
+        second_id: int,
+    ) -> None:
+        """A one-page response with invalid identities cannot permit a merge."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        check_runs = [
+            self._check_run(head, check_run_id=first_id),
+            self._check_run(head, check_run_id=second_id),
+        ]
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"total_count": 2, "check_runs": check_runs}),
+                )
+            ),
+        )
+
+        assert adapter.required_checks_pass_for_head(head) is False
+
     def test_paginates_and_rechecks_large_check_run_snapshots(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
