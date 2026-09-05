@@ -28,6 +28,7 @@ _RULESET_PAGE_SIZE = 100
 _RULESET_MAX_TOTAL = 1_000
 _BYPASS_STATES = frozenset({"never", "always", "pull_requests_only"})
 _BYPASS_MODES = frozenset({"always", "pull_request", "exempt"})
+_IGNORED_BYPASS_ACTOR_ID_TYPES = frozenset({"EnterpriseOwner", "OrganizationAdmin"})
 _BYPASS_ACTOR_TYPES = frozenset(
     {
         "DeployKey",
@@ -187,7 +188,7 @@ def _validate_bypass(ruleset: dict[str, object]) -> bool:
     """Validate bypass actors and return whether the live actor can bypass."""
     bypass = ruleset.get("current_user_can_bypass")
     actors = ruleset.get("bypass_actors")
-    if bypass not in _BYPASS_STATES or not isinstance(actors, list):
+    if not isinstance(bypass, str) or bypass not in _BYPASS_STATES or not isinstance(actors, list):
         raise ValueError("ruleset bypass policy is malformed")
     for actor in actors:
         if not isinstance(actor, dict) or set(actor) != {
@@ -196,13 +197,23 @@ def _validate_bypass(ruleset: dict[str, object]) -> bool:
             "bypass_mode",
         }:
             raise ValueError("ruleset bypass actor is malformed")
-        actor_id = actor["actor_id"]
-        if not isinstance(actor_id, int) or isinstance(actor_id, bool) or actor_id <= 0:
-            raise ValueError("ruleset bypass actor ID is malformed")
-        if actor["actor_type"] not in _BYPASS_ACTOR_TYPES:
+        actor_type = actor["actor_type"]
+        bypass_mode = actor["bypass_mode"]
+        if not isinstance(actor_type, str) or actor_type not in _BYPASS_ACTOR_TYPES:
             raise ValueError("ruleset bypass actor type is unsupported")
-        if actor["bypass_mode"] not in _BYPASS_MODES:
+        if not isinstance(bypass_mode, str) or bypass_mode not in _BYPASS_MODES:
             raise ValueError("ruleset bypass mode is malformed")
+        actor_id = actor["actor_id"]
+        if actor_type == "DeployKey":
+            if actor_id is not None or bypass_mode == "pull_request":
+                raise ValueError("ruleset bypass actor is malformed")
+        elif actor_type in _IGNORED_BYPASS_ACTOR_ID_TYPES:
+            if actor_id is not None and (
+                not isinstance(actor_id, int) or isinstance(actor_id, bool)
+            ):
+                raise ValueError("ruleset bypass actor ID is malformed")
+        elif not isinstance(actor_id, int) or isinstance(actor_id, bool) or actor_id <= 0:
+            raise ValueError("ruleset bypass actor ID is malformed")
     return bypass != "never"
 
 

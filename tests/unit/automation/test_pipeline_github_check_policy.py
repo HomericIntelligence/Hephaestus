@@ -183,6 +183,125 @@ def test_effective_policy_combines_classic_and_applicable_ruleset_checks(
 
 
 @pytest.mark.parametrize(
+    ("actor_type", "actor_id"),
+    [
+        ("DeployKey", None),
+        ("OrganizationAdmin", None),
+        ("OrganizationAdmin", 0),
+        ("EnterpriseOwner", None),
+        ("EnterpriseOwner", -1),
+    ],
+    ids=(
+        "deploy-key-null",
+        "organization-admin-null",
+        "organization-admin-ignored-integer",
+        "enterprise-owner-null",
+        "enterprise-owner-ignored-integer",
+    ),
+)
+def test_documented_bypass_actor_ids_produce_an_effective_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    actor_type: str,
+    actor_id: object,
+) -> None:
+    """Documented null and ignored actor IDs are valid policy input."""
+    ruleset = _ruleset(can_bypass="always")
+    ruleset["bypass_actors"] = [
+        {
+            "actor_id": actor_id,
+            "actor_type": actor_type,
+            "bypass_mode": "always",
+        }
+    ]
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        _policy_transport(_classic_policy(), [ruleset]),
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo")
+
+    policy = adapter.effective_merge_policy(
+        7,
+        "main",
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    assert policy is not None
+    assert policy.bypassable_ruleset_ids == (155,)
+
+
+@pytest.mark.parametrize(
+    ("actor_type", "actor_id", "bypass_mode"),
+    [
+        ("Integration", None, "always"),
+        ("RepositoryRole", None, "always"),
+        ("Team", None, "always"),
+        ("User", None, "always"),
+        ("EnterpriseRole", None, "always"),
+        ("Integration", 0, "always"),
+        ("RepositoryRole", -1, "always"),
+        ("Team", True, "always"),
+        ("User", "5", "always"),
+        ("DeployKey", 5, "always"),
+        ("DeployKey", None, "pull_request"),
+        ("OrganizationAdmin", True, "always"),
+        ("EnterpriseOwner", "ignored", "always"),
+        ([], 5, "always"),
+        ("RepositoryRole", 5, []),
+    ],
+    ids=(
+        "integration-null",
+        "repository-role-null",
+        "team-null",
+        "user-null",
+        "enterprise-role-null",
+        "integration-zero",
+        "repository-role-negative",
+        "team-boolean",
+        "user-string",
+        "deploy-key-non-null",
+        "deploy-key-pull-request-mode",
+        "organization-admin-boolean",
+        "enterprise-owner-string",
+        "unhashable-actor-type",
+        "unhashable-bypass-mode",
+    ),
+)
+def test_malformed_bypass_actor_ids_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    actor_type: object,
+    actor_id: object,
+    bypass_mode: object,
+) -> None:
+    """Invalid actor-specific ID and mode combinations produce no policy."""
+    ruleset = _ruleset()
+    ruleset["bypass_actors"] = [
+        {
+            "actor_id": actor_id,
+            "actor_type": actor_type,
+            "bypass_mode": bypass_mode,
+        }
+    ]
+    monkeypatch.setattr(
+        github_api_mod,
+        "gh_call",
+        _policy_transport(_classic_policy(), [ruleset]),
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo")
+
+    assert (
+        adapter.effective_merge_policy(
+            7,
+            "main",
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=threading.Event(),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
     ("classic_strict", "ruleset_strict", "expected"),
     [(False, False, False), (True, False, True), (False, True, True)],
 )
@@ -753,6 +872,7 @@ def test_policy_snapshot_change_fails_closed(monkeypatch: pytest.MonkeyPatch) ->
         {"conditions": {"ref_name": {"include": "main", "exclude": []}}},
         {"rules": [{"type": "required_status_checks", "parameters": {}}]},
         {"bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole"}]},
+        {"current_user_can_bypass": []},
     ],
 )
 def test_malformed_active_ruleset_fails_closed(
