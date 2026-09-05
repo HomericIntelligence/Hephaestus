@@ -22,7 +22,6 @@ from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, Ath
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stage_results import Continue, JobRequest
-from hephaestus.automation.pipeline.stages import planning as planning_mod
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     _mark_published_plan_pending_review,
@@ -1260,7 +1259,10 @@ class TestPlanningSourceWorkspacePreparation:
                 SourceWorkspacePreparationCause.GIT_METADATA_LOCK_UNAVAILABLE
             )
 
-        monkeypatch.setattr(planning_mod, "source_workspace_binding", unavailable)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.stages.planning.source_workspace_binding",
+            unavailable,
+        )
         payload: dict[str, Any] = {}
         if state == "REQUIREMENTS_RECOVERY_REVIEW_WAIT":
             payload["recovered_requirements"] = RecoveredRequirements(
@@ -1300,7 +1302,10 @@ class TestPlanningSourceWorkspacePreparation:
                 SourceWorkspacePreparationCause.LANE_LOCK_UNAVAILABLE
             )
 
-        monkeypatch.setattr(planning_mod, "source_workspace_binding", unavailable)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.stages.planning.source_workspace_binding",
+            unavailable,
+        )
         item = make_work_item(issue=2983, state="ADVISE_WAIT")
         result = PlanningStage().step(
             item,
