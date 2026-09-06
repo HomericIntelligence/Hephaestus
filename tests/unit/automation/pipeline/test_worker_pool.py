@@ -4471,15 +4471,30 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == (
-            "source_workspace_ownership_unavailable: "
-            "detached implementation writer predecessor is invalid"
-        )
-        assert result.value == {
-            "path": str(predecessor.cwd),
-            WORKTREE_MATERIALIZED_KEY: True,
-            "direct_scope_reservation": {"branch": branch, "base_sha": base_revision},
+        assert result.error is not None
+        assert result.error.startswith("source_workspace_ownership_unavailable: ")
+        assert isinstance(result.value, dict)
+        assert result.value["path"] == str(predecessor.cwd)
+        assert result.value[WORKTREE_MATERIALIZED_KEY] is True
+        assert result.value["failure_kind"] == "source_workspace_ownership"
+        assert result.value["direct_scope_reservation"] == {
+            "branch": branch,
+            "base_sha": base_revision,
         }
+        recovery = result.value["source_workspace_recovery"]
+        assert isinstance(recovery, dict)
+        assert (
+            recovery["kind"]
+            == {
+                "dirty": "dirty_worktree",
+                "attached": "branch_mismatch",
+                "revision-drift": "revision_drift",
+            }[mutation]
+        )
+        assert recovery["item_number"] == 7
+        assert recovery["path"] == str(predecessor.cwd)
+        assert recovery["receipt_path"].endswith("7-impl.json")
+        assert recovery["manual_action"]
         preserved = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
         assert preserved is not None
         assert preserved.revision == predecessor_revision

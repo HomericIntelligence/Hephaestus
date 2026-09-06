@@ -1519,14 +1519,14 @@ class TestWorktreeManager:
         manager = WorktreeManager()
 
         mock_result = Mock()
-        mock_result.stdout = """worktree /repo
-HEAD abc123
-branch refs/heads/main
-
-worktree /repo/build/.worktrees/issue-123
-HEAD def456
-branch refs/heads/123-feature
-"""
+        mock_result.stdout = (
+            "worktree /repo\0"
+            "HEAD abc123\0"
+            "branch refs/heads/main\0\0"
+            "worktree /repo/build/.worktrees/issue\n123\0"
+            "HEAD def456\0"
+            "branch refs/heads/123-feature\0\0"
+        )
         worktree_mocks.run.return_value = mock_result
 
         worktrees = manager.list_worktrees()
@@ -1534,8 +1534,15 @@ branch refs/heads/123-feature
         assert len(worktrees) == 2
         assert worktrees[0]["path"] == "/repo"
         assert worktrees[0]["branch"] == "refs/heads/main"
-        assert worktrees[1]["path"] == "/repo/build/.worktrees/issue-123"
+        assert worktrees[1]["path"] == "/repo/build/.worktrees/issue\n123"
         assert worktrees[1]["branch"] == "refs/heads/123-feature"
+        assert worktree_mocks.run.call_args.args[0] == [
+            "git",
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ]
 
     def test_ensure_branch_deleted(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test deleting branch from local and remote."""

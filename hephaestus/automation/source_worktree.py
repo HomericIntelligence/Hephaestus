@@ -597,7 +597,18 @@ class SourceWorkspaceManager:
         if target != base_sha:
             raise SourceWorkspaceError("direct implementation writer base is invalid")
         if old is None:
-            if expected_path.exists():
+            try:
+                predecessor_is_registered = self._has_worktree_registration(expected_path)
+            except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+                raise SourceWorkspaceError(
+                    "implementation writer predecessor is unproven",
+                    recovery=self._unproven_recovery(
+                        item_number=item_number,
+                        path=expected_path,
+                        receipt_path=receipt_path,
+                    ),
+                ) from exc
+            if expected_path.exists() or predecessor_is_registered:
                 raise SourceWorkspaceError(
                     "implementation writer predecessor is unproven",
                     recovery=self._recovery(
@@ -751,6 +762,16 @@ class SourceWorkspaceManager:
             )
         except RuntimeError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
+
+    def _has_worktree_registration(self, path: Path) -> bool:
+        """Return whether Git still registers the exact source path."""
+        expected_path = path.resolve()
+        result = _git(self.repo_root, "worktree", "list", "--porcelain", "-z")
+        return any(
+            Path(field.removeprefix("worktree ")).resolve() == expected_path
+            for field in result.stdout.split("\0")
+            if field.startswith("worktree ")
+        )
 
     def _recovery(
         self,

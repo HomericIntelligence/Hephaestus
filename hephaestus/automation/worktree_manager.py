@@ -642,7 +642,19 @@ class WorktreeManager:
                     ):
                         return existing
                     if source_lane == "impl" and base_sha is not None and worktree_path.exists():
-                        if not is_clean_working_tree(worktree_path, timeout=timeout):
+                        try:
+                            predecessor_is_clean = is_clean_working_tree(
+                                worktree_path, timeout=timeout
+                            )
+                        except Exception as exc:
+                            raise WorktreeCreationReceiptError(
+                                "implementation writer predecessor cannot be inspected",
+                                recovery=self._implementation_writer_recovery(
+                                    issue_number=issue_number,
+                                    worktree_path=worktree_path,
+                                ),
+                            ) from exc
+                        if not predecessor_is_clean:
                             raise WorktreeCreationReceiptError(
                                 "implementation writer predecessor changed after authorization",
                                 recovery=self._implementation_writer_recovery(
@@ -709,7 +721,16 @@ class WorktreeManager:
                                         worktree_path=worktree_path,
                                     ),
                                 )
-                        self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+                        if direct_predecessor:
+                            self._remove_direct_writer_conservatively(
+                                issue_number=issue_number,
+                                worktree_path=worktree_path,
+                                expected_revision=predecessor_revision,
+                                expected_branch=predecessor_branch,
+                                timeout=timeout,
+                            )
+                        else:
+                            self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
                     else:
                         predecessor_evidence = None
                     self._validate_direct_scope_worktree_request(
@@ -967,17 +988,29 @@ class WorktreeManager:
             if reserved_remote_branch_sha is not None and isinstance(
                 implementation_writer_handoff, ImplementationWriterHandoff
             ):
-                predecessor_revision = run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    **_timeout_kw(timeout),
-                ).stdout.strip()
                 try:
+                    predecessor_revision = run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=worktree_path,
+                        capture_output=True,
+                        **_timeout_kw(timeout),
+                    ).stdout.strip()
                     predecessor_branch = self._implementation_writer_branch(
                         worktree_path, timeout=timeout
                     )
-                except WorktreeCreationReceiptError as exc:
+                    predecessor_is_clean = is_clean_working_tree(worktree_path, timeout=timeout)
+                    if not predecessor_is_clean:
+                        raise WorktreeCreationReceiptError(
+                            "implementation writer predecessor is not clean"
+                        )
+                    implementation_writer_handoff._validate_direct_transition(
+                        path=worktree_path,
+                        predecessor_revision=predecessor_revision,
+                        predecessor_branch=predecessor_branch,
+                        branch=branch_name,
+                        base_sha=reserved_remote_branch_sha,
+                    )
+                except Exception as exc:
                     raise WorktreeCreationReceiptError(
                         "implementation writer predecessor changed after authorization",
                         recovery=self._implementation_writer_recovery(
@@ -985,32 +1018,7 @@ class WorktreeManager:
                             worktree_path=worktree_path,
                         ),
                     ) from exc
-                if is_clean_working_tree(worktree_path, timeout=timeout):
-                    try:
-                        implementation_writer_handoff._validate_direct_transition(
-                            path=worktree_path,
-                            predecessor_revision=predecessor_revision,
-                            predecessor_branch=predecessor_branch,
-                            branch=branch_name,
-                            base_sha=reserved_remote_branch_sha,
-                        )
-                    except RuntimeError as exc:
-                        raise WorktreeCreationReceiptError(
-                            "implementation writer predecessor changed after authorization",
-                            recovery=self._implementation_writer_recovery(
-                                issue_number=issue_number,
-                                worktree_path=worktree_path,
-                            ),
-                        ) from exc
-                    else:
-                        return True
-                raise WorktreeCreationReceiptError(
-                    "implementation writer predecessor changed after authorization",
-                    recovery=self._implementation_writer_recovery(
-                        issue_number=issue_number,
-                        worktree_path=worktree_path,
-                    ),
-                )
+                return True
             raise WorktreeCreationReceiptError(
                 "deterministic implementation writer is already registered and preserved"
             )
@@ -1052,6 +1060,71 @@ class WorktreeManager:
                 f"issue #{issue_number}."
             ),
         }
+
+    def _remove_direct_writer_conservatively(
+        self,
+        *,
+        issue_number: int,
+        worktree_path: Path,
+        expected_revision: str,
+        expected_branch: str | None,
+        timeout: int | None,
+    ) -> None:
+        """Remove an exact direct predecessor without force or path deletion."""
+        try:
+            current_is_clean = is_clean_working_tree(worktree_path, timeout=timeout)
+            current_revision = run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree_path,
+                capture_output=True,
+                **_timeout_kw(timeout),
+            ).stdout.strip()
+            current_branch = self._implementation_writer_branch(worktree_path, timeout=timeout)
+        except Exception as exc:
+            raise WorktreeCreationReceiptError(
+                "implementation writer predecessor cannot be removed safely",
+                recovery=self._implementation_writer_recovery(
+                    issue_number=issue_number,
+                    worktree_path=worktree_path,
+                ),
+            ) from exc
+        if (
+            not current_is_clean
+            or current_revision != expected_revision
+            or current_branch != expected_branch
+        ):
+            raise WorktreeCreationReceiptError(
+                "implementation writer predecessor changed before removal",
+                recovery=self._implementation_writer_recovery(
+                    issue_number=issue_number,
+                    worktree_path=worktree_path,
+                ),
+            )
+        try:
+            result = run(
+                ["git", "worktree", "remove", str(worktree_path)],
+                cwd=self.repo_root,
+                check=False,
+                capture_output=True,
+                **_timeout_kw(timeout),
+            )
+            registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
+        except Exception as exc:
+            raise WorktreeCreationReceiptError(
+                "implementation writer predecessor removal is unproven",
+                recovery=self._implementation_writer_recovery(
+                    issue_number=issue_number,
+                    worktree_path=worktree_path,
+                ),
+            ) from exc
+        if result.returncode or worktree_path.exists() or registered is not None:
+            raise WorktreeCreationReceiptError(
+                "implementation writer predecessor removal did not complete",
+                recovery=self._implementation_writer_recovery(
+                    issue_number=issue_number,
+                    worktree_path=worktree_path,
+                ),
+            )
 
     @staticmethod
     def _implementation_writer_branch(path: Path, *, timeout: int | None) -> str | None:
@@ -2066,7 +2139,7 @@ class WorktreeManager:
         """
         try:
             result = run(
-                ["git", "worktree", "list", "--porcelain"],
+                ["git", "worktree", "list", "--porcelain", "-z"],
                 cwd=self.repo_root,
                 capture_output=True,
                 **_timeout_kw(timeout),
@@ -2075,20 +2148,19 @@ class WorktreeManager:
             worktrees = []
             current: dict[str, str] = {}
 
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if not line:
+            for field in result.stdout.split("\0"):
+                if not field:
                     if current:
                         worktrees.append(current)
                         current = {}
                     continue
 
-                if line.startswith("worktree "):
-                    current["path"] = line.split(" ", 1)[1]
-                elif line.startswith("branch "):
-                    current["branch"] = line.split(" ", 1)[1]
-                elif line.startswith("HEAD "):
-                    current["commit"] = line.split(" ", 1)[1]
+                if field.startswith("worktree "):
+                    current["path"] = field.split(" ", 1)[1]
+                elif field.startswith("branch "):
+                    current["branch"] = field.split(" ", 1)[1]
+                elif field.startswith("HEAD "):
+                    current["commit"] = field.split(" ", 1)[1]
 
             if current:
                 worktrees.append(current)
