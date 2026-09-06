@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import shutil
@@ -2400,3 +2401,120 @@ def test_repository_identity_prevents_equal_number_collision(tmp_path: Path) -> 
         second_manager.prepare(6, SourceLane.REVIEW, second)
 
     assert first.cwd.name == "auto-6-review"
+
+
+def test_direct_writer_transition_revalidates_predecessor_branch_before_removal(
+    tmp_path: Path,
+) -> None:
+    """A predecessor branch change after authorization preserves the checkout."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    _git(repo, "push", "origin", f"{second}:refs/heads/writer-branch")
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+
+    with pytest.raises(WorktreeCreationReceiptError, match="already registered"):
+        with source_manager.implementation_writer_handoff(9) as handoff:
+            source_manager.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+            _git(predecessor.cwd, "switch", "-c", "foreign-predecessor")
+
+            worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                base_sha=second,
+                remote_branch_reserved=True,
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+
+    assert predecessor.cwd.exists()
+    assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == "foreign-predecessor"
+    assert _git(predecessor.cwd, "rev-parse", "HEAD") == first
+
+
+def test_direct_writer_transition_journal_reconciles_after_restart(tmp_path: Path) -> None:
+    """A pending handoff journal restores a removed predecessor after restart."""
+    repo, first, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    journal_path = source_manager.state_dir / "9-impl-transition.json"
+
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        source_manager.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+
+        assert journal_path.is_file()
+        assert journal_path.stat().st_mode & 0o777 == 0o600
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        assert journal["schema_version"] == 1
+        assert journal["repository"] == "example/project"
+        assert journal["item_number"] == 9
+        assert journal["lane"] == "impl"
+        assert journal["predecessor"]["revision"] == first
+        assert journal["successor"]["branch"] == "writer-branch"
+
+        worktree_manager = WorktreeManager(repo_root=repo, base_dir=source_manager.base_dir)
+        worktree_manager._remove_worktree_path_forcefully(predecessor.cwd)
+
+    restarted = SourceWorkspaceManager(repo, repository="example/project")
+    with restarted.implementation_writer_handoff(9):
+        pass
+
+    assert predecessor.cwd.exists()
+    assert _git(predecessor.cwd, "rev-parse", "HEAD") == first
+    assert _git(predecessor.cwd, "branch", "--show-current") == ""
+    assert not journal_path.exists()
+
+
+def test_adopted_writer_cannot_bypass_the_common_handoff_lifecycle(tmp_path: Path) -> None:
+    """An adopted writer replacement requires consumed source transition evidence."""
+    repo, _, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = source_manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="adopted-branch",
+    )
+    _git(repo, "push", "origin", "HEAD:refs/heads/adopted-branch")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source_manager.base_dir,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(WorktreeCreationReceiptError, match="transition"):
+            worktree_manager.create_worktree(
+                9,
+                "adopted-branch",
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_adoption_head=second,
+                implementation_writer_handoff=handoff,
+            )
+
+    assert writer.cwd.exists()
+    assert _git(writer.cwd, "symbolic-ref", "--short", "HEAD") == "adopted-branch"

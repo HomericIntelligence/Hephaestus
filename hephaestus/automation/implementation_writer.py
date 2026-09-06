@@ -29,6 +29,23 @@ if TYPE_CHECKING:
         ) -> None:
             raise NotImplementedError
 
+        def _arm_writer_transition(
+            self,
+            *,
+            path: Path,
+            predecessor_generation: int,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
+            journal_digest: str,
+            phase_writer: Callable[[str], None],
+            commit_writer: Callable[[], None],
+        ) -> None:
+            raise NotImplementedError
+
         def _validate_direct_transition(
             self,
             *,
@@ -37,6 +54,19 @@ if TYPE_CHECKING:
             predecessor_branch: str | None,
             branch: str,
             base_sha: str,
+        ) -> None:
+            raise NotImplementedError
+
+        def _validate_writer_transition(
+            self,
+            *,
+            path: Path,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
         ) -> None:
             raise NotImplementedError
 
@@ -51,6 +81,25 @@ if TYPE_CHECKING:
         ) -> object:
             raise NotImplementedError
 
+        def _consume_writer_transition(
+            self,
+            *,
+            path: Path,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
+        ) -> object:
+            raise NotImplementedError
+
+        def _mark_transition_phase(self, phase: str) -> None:
+            raise NotImplementedError
+
+        def _complete_writer_transition(self) -> None:
+            raise NotImplementedError
+
         def _validate_consumed_direct_transition(
             self,
             evidence: object,
@@ -63,6 +112,21 @@ if TYPE_CHECKING:
         ) -> None:
             raise NotImplementedError
 
+        def _validate_consumed_writer_transition(
+            self,
+            evidence: object,
+            *,
+            path: Path,
+            predecessor_generation: int,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            branch: str,
+            successor_revision: str | None,
+            transition: str,
+        ) -> None:
+            raise NotImplementedError
+
 
 def _build_implementation_writer_api() -> tuple[  # noqa: C901
     type[ImplementationWriterHandoff],
@@ -71,16 +135,20 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
     """Build the handoff API around a sentinel inaccessible to callers."""
     sentinel = object()
 
-    class _DirectTransitionEvidence:
-        """Private immutable facts for one direct writer transition."""
+    class _WriterTransitionEvidence:
+        """Private immutable facts for one writer checkout transition."""
 
         __slots__ = (
             "base_sha",
             "branch",
+            "journal_digest",
             "path",
             "predecessor_branch",
+            "predecessor_detached",
             "predecessor_generation",
             "predecessor_revision",
+            "successor_revision",
+            "transition",
         )
 
         def __init__(
@@ -89,16 +157,23 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             path: Path,
             predecessor_generation: int,
             predecessor_revision: str,
+            predecessor_detached: bool,
             predecessor_branch: str | None,
             branch: str,
             base_sha: str,
+            transition: str = "direct",
+            journal_digest: str = "",
         ) -> None:
             self.path = path.resolve()
             self.predecessor_generation = predecessor_generation
             self.predecessor_revision = predecessor_revision
+            self.predecessor_detached = predecessor_detached
             self.predecessor_branch = predecessor_branch
             self.branch = branch
             self.base_sha = base_sha
+            self.successor_revision = base_sha
+            self.transition = transition
+            self.journal_digest = journal_digest
 
     class _ImplementationWriterHandoff:
         """Opaque capability issued only by the handoff context manager."""
@@ -108,16 +183,20 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
         _item_number: int
         _lock_path: Path
         _repo_root: Path
-        _direct_transition: _DirectTransitionEvidence | None
-        _consumed_direct_transition: _DirectTransitionEvidence | None
+        _direct_transition: _WriterTransitionEvidence | None
+        _consumed_direct_transition: _WriterTransitionEvidence | None
+        _phase_writer: Callable[[str], None] | None
+        _commit_writer: Callable[[], None] | None
 
         __slots__ = (
             "_active",
+            "_commit_writer",
             "_construction_token",
             "_consumed_direct_transition",
             "_direct_transition",
             "_item_number",
             "_lock_path",
+            "_phase_writer",
             "_repo_root",
         )
 
@@ -145,20 +224,54 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             branch: str,
             base_sha: str,
         ) -> None:
+            self._arm_writer_transition(
+                path=path,
+                predecessor_generation=predecessor_generation,
+                predecessor_revision=predecessor_revision,
+                predecessor_detached=predecessor_branch is None,
+                predecessor_branch=predecessor_branch,
+                successor_branch=branch,
+                successor_revision=base_sha,
+                transition="direct",
+                journal_digest="",
+                phase_writer=lambda _phase: None,
+                commit_writer=lambda: None,
+            )
+
+        def _arm_writer_transition(
+            self,
+            *,
+            path: Path,
+            predecessor_generation: int,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
+            journal_digest: str,
+            phase_writer: Callable[[str], None],
+            commit_writer: Callable[[], None],
+        ) -> None:
             if not self._active or self._direct_transition is not None:
                 raise RuntimeError("implementation writer direct transition is unavailable")
             object.__setattr__(
                 self,
                 "_direct_transition",
-                _DirectTransitionEvidence(
+                _WriterTransitionEvidence(
                     path=path,
                     predecessor_generation=predecessor_generation,
                     predecessor_revision=predecessor_revision,
+                    predecessor_detached=predecessor_detached,
                     predecessor_branch=predecessor_branch,
-                    branch=branch,
-                    base_sha=base_sha,
+                    branch=successor_branch,
+                    base_sha=successor_revision,
+                    transition=transition,
+                    journal_digest=journal_digest,
                 ),
             )
+            object.__setattr__(self, "_phase_writer", phase_writer)
+            object.__setattr__(self, "_commit_writer", commit_writer)
 
         def _validate_direct_transition(
             self,
@@ -169,17 +282,45 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             branch: str,
             base_sha: str,
         ) -> None:
+            self._validate_writer_transition(
+                path=path,
+                predecessor_revision=predecessor_revision,
+                predecessor_detached=predecessor_branch is None,
+                predecessor_branch=predecessor_branch,
+                successor_branch=branch,
+                successor_revision=base_sha,
+                transition="direct",
+            )
+
+        def _validate_writer_transition(
+            self,
+            *,
+            path: Path,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
+        ) -> None:
             evidence = self._direct_transition
             if (
                 not self._active
                 or evidence is None
                 or evidence.path != path.resolve()
                 or evidence.predecessor_revision != predecessor_revision
+                or evidence.predecessor_detached != predecessor_detached
                 or evidence.predecessor_branch != predecessor_branch
-                or evidence.branch != branch
-                or evidence.base_sha != base_sha
+                or evidence.branch != successor_branch
+                or evidence.successor_revision != successor_revision
+                or evidence.transition != transition
             ):
-                raise RuntimeError("implementation writer direct transition is invalid")
+                message = (
+                    "implementation writer direct transition is invalid"
+                    if transition == "direct"
+                    else "implementation writer transition is invalid"
+                )
+                raise RuntimeError(message)
 
         def _consume_direct_transition(
             self,
@@ -190,19 +331,68 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             branch: str,
             base_sha: str,
         ) -> object:
-            self._validate_direct_transition(
+            return self._consume_writer_transition(
                 path=path,
                 predecessor_revision=predecessor_revision,
+                predecessor_detached=predecessor_branch is None,
                 predecessor_branch=predecessor_branch,
-                branch=branch,
-                base_sha=base_sha,
+                successor_branch=branch,
+                successor_revision=base_sha,
+                transition="direct",
             )
+
+        def _consume_writer_transition(
+            self,
+            *,
+            path: Path,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
+        ) -> object:
+            self._validate_writer_transition(
+                path=path,
+                predecessor_revision=predecessor_revision,
+                predecessor_detached=predecessor_detached,
+                predecessor_branch=predecessor_branch,
+                successor_branch=successor_branch,
+                successor_revision=successor_revision,
+                transition=transition,
+            )
+            phase_writer = self._phase_writer
+            if phase_writer is None:
+                raise RuntimeError("implementation writer transition journal is unavailable")
+            phase_writer("predecessor_removing")
             evidence = self._direct_transition
             if evidence is None:  # pragma: no cover - guarded above
-                raise RuntimeError("implementation writer direct transition is invalid")
+                raise RuntimeError("implementation writer transition is invalid")
             object.__setattr__(self, "_direct_transition", None)
             object.__setattr__(self, "_consumed_direct_transition", evidence)
             return evidence
+
+        def _mark_transition_phase(self, phase: str) -> None:
+            if not self._active or (
+                self._direct_transition is None and self._consumed_direct_transition is None
+            ):
+                raise RuntimeError("implementation writer transition is unavailable")
+            phase_writer = self._phase_writer
+            if phase_writer is None:
+                raise RuntimeError("implementation writer transition journal is unavailable")
+            phase_writer(phase)
+
+        def _complete_writer_transition(self) -> None:
+            if not self._active:
+                raise RuntimeError("implementation writer transition is unavailable")
+            commit_writer = self._commit_writer
+            if commit_writer is None:
+                raise RuntimeError("implementation writer transition journal is unavailable")
+            commit_writer()
+            object.__setattr__(self, "_direct_transition", None)
+            object.__setattr__(self, "_consumed_direct_transition", None)
+            object.__setattr__(self, "_phase_writer", None)
+            object.__setattr__(self, "_commit_writer", None)
 
         def _validate_consumed_direct_transition(
             self,
@@ -214,6 +404,31 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             predecessor_branch: str | None,
             branch: str,
         ) -> None:
+            self._validate_consumed_writer_transition(
+                evidence,
+                path=path,
+                predecessor_generation=predecessor_generation,
+                predecessor_revision=predecessor_revision,
+                predecessor_detached=predecessor_branch is None,
+                predecessor_branch=predecessor_branch,
+                branch=branch,
+                successor_revision=None,
+                transition="direct",
+            )
+
+        def _validate_consumed_writer_transition(
+            self,
+            evidence: object,
+            *,
+            path: Path,
+            predecessor_generation: int,
+            predecessor_revision: str,
+            predecessor_detached: bool,
+            predecessor_branch: str | None,
+            branch: str,
+            successor_revision: str | None,
+            transition: str,
+        ) -> None:
             expected = self._consumed_direct_transition
             if (
                 not self._active
@@ -222,10 +437,21 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 or expected.path != path.resolve()
                 or expected.predecessor_generation != predecessor_generation
                 or expected.predecessor_revision != predecessor_revision
+                or expected.predecessor_detached != predecessor_detached
                 or expected.predecessor_branch != predecessor_branch
                 or expected.branch != branch
+                or expected.transition != transition
+                or (
+                    successor_revision is not None
+                    and expected.successor_revision != successor_revision
+                )
             ):
-                raise RuntimeError("implementation writer direct transition evidence is invalid")
+                message = (
+                    "implementation writer direct transition evidence is invalid"
+                    if transition == "direct"
+                    else "implementation writer transition evidence is invalid"
+                )
+                raise RuntimeError(message)
 
     @contextmanager
     def implementation_writer_handoff(
@@ -242,6 +468,8 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
         object.__setattr__(handoff, "_repo_root", normalized_root)
         object.__setattr__(handoff, "_direct_transition", None)
         object.__setattr__(handoff, "_consumed_direct_transition", None)
+        object.__setattr__(handoff, "_phase_writer", None)
+        object.__setattr__(handoff, "_commit_writer", None)
         with file_lock(normalized_lock_path, require_exclusive=True):
             object.__setattr__(handoff, "_active", True)
             try:
@@ -249,6 +477,8 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             finally:
                 object.__setattr__(handoff, "_direct_transition", None)
                 object.__setattr__(handoff, "_consumed_direct_transition", None)
+                object.__setattr__(handoff, "_phase_writer", None)
+                object.__setattr__(handoff, "_commit_writer", None)
                 object.__setattr__(handoff, "_active", False)
 
     return (

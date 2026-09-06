@@ -348,17 +348,17 @@ class WorktreeManager:
         worktree_path: Path,
         expected_head: str,
         timeout: int | None,
+        implementation_writer_handoff: ImplementationWriterHandoff | None = None,
     ) -> ImplementationWriterAuthority:
         """Mint authority after a pending authenticated PR adoption stays exact."""
         path = worktree_path.resolve()
         pending = self._pending_implementation_adoptions.get(path)
-        expected = _ImplementationWriterAuthorityRecord(
-            issue_number=issue_number,
-            branch=branch_name,
-            path=path,
-            revision=expected_head,
-        )
-        if pending != expected:
+        if pending is None or (
+            pending.issue_number != issue_number
+            or pending.branch != branch_name
+            or pending.path != path
+            or pending.revision != expected_head
+        ):
             raise WorktreeCreationReceiptError(
                 "implementation writer adoption is not authenticated"
             )
@@ -367,15 +367,29 @@ class WorktreeManager:
             branch_name=branch_name,
             worktree_path=path,
             timeout=timeout,
+            predecessor_evidence=pending.predecessor_evidence if pending is not None else None,
         )
         with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
             record = _IMPLEMENTATION_WRITER_AUTHORITIES.get(authority.token)
-        if record != expected:
+        if record is None or (
+            record.issue_number != issue_number
+            or record.branch != branch_name
+            or record.path != path
+            or record.revision != expected_head
+            or record.predecessor_evidence is not pending.predecessor_evidence
+        ):
             with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
                 _IMPLEMENTATION_WRITER_AUTHORITIES.pop(authority.token, None)
             self._implementation_writer_authorities.pop(path, None)
             self._pending_implementation_adoptions.pop(path, None)
             raise WorktreeCreationReceiptError("implementation writer adoption head changed")
+        if pending.predecessor_evidence is not None:
+            if not isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
+                raise WorktreeCreationReceiptError("implementation writer handoff is missing")
+            try:
+                implementation_writer_handoff._mark_transition_phase("authority_minted")
+            except RuntimeError as exc:
+                raise WorktreeCreationReceiptError(str(exc)) from exc
         del self._pending_implementation_adoptions[path]
         return authority
 
@@ -681,12 +695,18 @@ class WorktreeManager:
                                     worktree_path, timeout=timeout
                                 )
                                 predecessor_evidence = (
-                                    implementation_writer_handoff._consume_direct_transition(
+                                    implementation_writer_handoff._consume_writer_transition(
                                         path=worktree_path,
                                         predecessor_revision=predecessor_revision,
-                                        predecessor_branch=predecessor_branch,
-                                        branch=branch_name,
-                                        base_sha=base_sha,
+                                        predecessor_detached=predecessor_branch is None,
+                                        predecessor_branch=(
+                                            predecessor_branch.removeprefix("refs/heads/")
+                                            if predecessor_branch is not None
+                                            else None
+                                        ),
+                                        successor_branch=branch_name,
+                                        successor_revision=base_sha,
+                                        transition="direct",
                                     )
                                 )
                                 predecessor_is_clean = is_clean_working_tree(
@@ -731,6 +751,16 @@ class WorktreeManager:
                             )
                         else:
                             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+                        if direct_predecessor:
+                            if not isinstance(
+                                implementation_writer_handoff, ImplementationWriterHandoff
+                            ):
+                                raise WorktreeCreationReceiptError(
+                                    "implementation writer handoff is missing"
+                                )
+                            implementation_writer_handoff._mark_transition_phase(
+                                "successor_creating"
+                            )
                     else:
                         predecessor_evidence = None
                     self._validate_direct_scope_worktree_request(
@@ -751,6 +781,7 @@ class WorktreeManager:
                                 worktree_path=worktree_path,
                                 expected_head=implementation_adoption_head or "",
                                 timeout=timeout,
+                                implementation_writer_handoff=implementation_writer_handoff,
                             )
                         else:
                             self._add_worktree_for_branch(
@@ -761,6 +792,17 @@ class WorktreeManager:
                                 timeout=timeout,
                             )
                             if source_lane == "impl":
+                                if direct_predecessor:
+                                    if not isinstance(
+                                        implementation_writer_handoff,
+                                        ImplementationWriterHandoff,
+                                    ):
+                                        raise WorktreeCreationReceiptError(
+                                            "implementation writer handoff is missing"
+                                        )
+                                    implementation_writer_handoff._mark_transition_phase(
+                                        "successor_created"
+                                    )
                                 self._mint_writer_authority(
                                     issue_number=issue_number,
                                     branch_name=branch_name,
@@ -768,6 +810,17 @@ class WorktreeManager:
                                     timeout=timeout,
                                     predecessor_evidence=predecessor_evidence,
                                 )
+                                if direct_predecessor:
+                                    if not isinstance(
+                                        implementation_writer_handoff,
+                                        ImplementationWriterHandoff,
+                                    ):
+                                        raise WorktreeCreationReceiptError(
+                                            "implementation writer handoff is missing"
+                                        )
+                                    implementation_writer_handoff._mark_transition_phase(
+                                        "authority_minted"
+                                    )
                     except Exception:
                         self.worktrees.pop(worktree_key, None)
                         if base_sha is None and source_lane != "impl":
@@ -1003,12 +1056,18 @@ class WorktreeManager:
                         raise WorktreeCreationReceiptError(
                             "implementation writer predecessor is not clean"
                         )
-                    implementation_writer_handoff._validate_direct_transition(
+                    implementation_writer_handoff._validate_writer_transition(
                         path=worktree_path,
                         predecessor_revision=predecessor_revision,
-                        predecessor_branch=predecessor_branch,
-                        branch=branch_name,
-                        base_sha=reserved_remote_branch_sha,
+                        predecessor_detached=predecessor_branch is None,
+                        predecessor_branch=(
+                            predecessor_branch.removeprefix("refs/heads/")
+                            if predecessor_branch is not None
+                            else None
+                        ),
+                        successor_branch=branch_name,
+                        successor_revision=reserved_remote_branch_sha,
+                        transition="direct",
                     )
                 except Exception as exc:
                     raise WorktreeCreationReceiptError(
@@ -1379,7 +1438,7 @@ class WorktreeManager:
             except Exception as e:
                 logger.debug("git worktree prune failed: %s", e)
 
-    def _add_authenticated_adopted_implementation_writer(
+    def _add_authenticated_adopted_implementation_writer(  # noqa: C901
         self,
         *,
         issue_number: int,
@@ -1387,6 +1446,7 @@ class WorktreeManager:
         worktree_path: Path,
         expected_head: str,
         timeout: int | None,
+        implementation_writer_handoff: ImplementationWriterHandoff | None = None,
     ) -> None:
         """Create one writer from the authenticated, exact adopted PR head.
 
@@ -1430,12 +1490,49 @@ class WorktreeManager:
         registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
         if registered is not None and registered.get("branch") != f"refs/heads/{branch_name}":
             raise BranchWorktreeOwnedError(branch_name, worktree_path)
+        predecessor_evidence = None
         if worktree_path.exists():
             if not is_clean_working_tree(worktree_path, timeout=timeout):
                 raise WorktreeCreationReceiptError(
                     f"authenticated implementation writer is dirty and preserved: {worktree_path}"
                 )
+            predecessor_evidence = None
+            if isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
+                predecessor_revision = run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    **_timeout_kw(timeout),
+                ).stdout.strip()
+                predecessor_symbolic_ref = run(
+                    ["git", "symbolic-ref", "--quiet", "HEAD"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    check=False,
+                    **_timeout_kw(timeout),
+                )
+                predecessor_branch = predecessor_symbolic_ref.stdout.strip() or None
+                try:
+                    predecessor_evidence = implementation_writer_handoff._consume_writer_transition(
+                        path=worktree_path,
+                        predecessor_revision=predecessor_revision,
+                        predecessor_detached=predecessor_branch is None,
+                        predecessor_branch=(
+                            predecessor_branch.removeprefix("refs/heads/")
+                            if predecessor_branch is not None
+                            else None
+                        ),
+                        successor_branch=branch_name,
+                        successor_revision=expected_head,
+                        transition="adopted",
+                    )
+                except RuntimeError as exc:
+                    raise WorktreeCreationReceiptError(str(exc)) from exc
             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+            if predecessor_evidence is not None:
+                if not isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
+                    raise WorktreeCreationReceiptError("implementation writer handoff is missing")
+                implementation_writer_handoff._mark_transition_phase("successor_creating")
         run(
             ["git", "worktree", "add", "-B", branch_name, str(worktree_path), expected_head],
             cwd=self.repo_root,
@@ -1455,12 +1552,17 @@ class WorktreeManager:
         ).stdout.strip()
         if verified_branch != branch_name or verified_head != expected_head:
             raise WorktreeCreationReceiptError("implementation writer adoption identity is invalid")
+        if predecessor_evidence is not None:
+            if not isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
+                raise WorktreeCreationReceiptError("implementation writer handoff is missing")
+            implementation_writer_handoff._mark_transition_phase("successor_created")
         self._pending_implementation_adoptions[worktree_path.resolve()] = (
             _ImplementationWriterAuthorityRecord(
                 issue_number=issue_number,
                 branch=branch_name,
                 path=worktree_path.resolve(),
                 revision=expected_head,
+                predecessor_evidence=predecessor_evidence,
             )
         )
 
