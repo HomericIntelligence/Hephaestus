@@ -66,7 +66,6 @@ from hephaestus.agents.model_selection import AgentModelSelection, parse_model_s
 from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.runtime import agent_uses_configured_model_default
 from hephaestus.agents.session_errors import AgentSessionLostError
-from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import (
     plan_reviewer_claude_timeout,
     planner_claude_timeout,
@@ -122,7 +121,7 @@ from .base import (
     WorkItem,
     _require_issue_labels,
     agent_provider,
-    source_workspace_binding,
+    planning_source_workspace_binding,
     stage_model,
     stage_timeout,
 )
@@ -764,7 +763,7 @@ class PlanReviewStage(Stage):
                 round_index,
                 item.payload.get("plan_revision", 1),
             )
-            workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
+            workspace = planning_source_workspace_binding(item, ctx)
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
@@ -843,7 +842,7 @@ class PlanReviewStage(Stage):
 
         if item.state == "AMEND_WAIT":
             logger.info("plan_review:%d: requesting amend job", item.issue)
-            workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
+            workspace = planning_source_workspace_binding(item, ctx)
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,

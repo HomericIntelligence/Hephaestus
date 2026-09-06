@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     WAVE_NON_CODE_INTENT_PAYLOAD,
@@ -55,6 +57,8 @@ from hephaestus.automation.review_journal import (
     render_current_review,
 )
 from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,
 )
@@ -70,8 +74,20 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.prompts import PromptCatalog
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+from tests.unit.automation.test_source_worktree import _repository
 
 _RECOVERY_REVISION = "d" * 40
+
+
+def _git_output(path: Path, *args: str) -> str:
+    """Run one Git query for a temporary repository test."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _recovery_binding(
@@ -1234,6 +1250,79 @@ class TestPlanningStageEnter:
 class TestPlanningSourceWorkspacePreparation:
     """Bound source preparation before planning jobs."""
 
+    @pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
+    def test_forced_replan_uses_detached_source_through_plan_review(
+        self,
+        dirty: bool,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A legacy writer lane cannot block a captured planning source."""
+        repo, first_revision, default_revision = _repository(tmp_path)
+        manager = SourceWorkspaceManager(
+            repo,
+            repository="test-repo",
+            base_dir=tmp_path / "worktrees",
+        )
+        writer = manager.prepare(
+            2998,
+            SourceLane.IMPLEMENTATION,
+            first_revision,
+            branch="legacy-writer",
+        )
+        if dirty:
+            (writer.cwd / "legacy-uncommitted.txt").write_text(
+                "keep this file\n",
+                encoding="utf-8",
+            )
+        writer_before = {
+            "revision": _git_output(writer.cwd, "rev-parse", "HEAD"),
+            "branch": _git_output(writer.cwd, "symbolic-ref", "HEAD"),
+            "status": _git_output(writer.cwd, "status", "--porcelain"),
+            "tracked": (writer.cwd / "tracked.txt").read_bytes(),
+            "legacy": (writer.cwd / "legacy-uncommitted.txt").read_bytes() if dirty else None,
+        }
+        paths = SimpleNamespace(
+            repo_root=repo,
+            worktree=repo,
+            source_workspaces=manager,
+        )
+        payload = {
+            "_worktree_cleanup_head_sha": first_revision,
+            "_impl_source_revision": first_revision,
+            "reviewed_pr_head_sha": "e" * 40,
+            "pr_head_sha": "f" * 40,
+            "_synced_default_branch_sha": default_revision,
+            "_direct_scope_base_sha": first_revision,
+        }
+        item = make_work_item(issue=2998, state="ADVISE_WAIT", payload=payload)
+        ctx = make_ctx(paths=paths)
+
+        try:
+            result = PlanningStage().step(item, ctx)
+        except SourceWorkspaceError:
+            result = None
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AthenaSkillJob)
+        planning_workspace = result.job.request.workspace
+        assert planning_workspace is not None
+        assert planning_workspace.cwd.name == "auto-2998-review"
+        assert planning_workspace.revision == default_revision
+        assert planning_workspace.detached is True
+        assert _git_output(planning_workspace.cwd, "status", "--porcelain") == ""
+        assert _git_output(planning_workspace.cwd, "rev-parse", "HEAD") == default_revision
+
+        writer_after = {
+            "revision": _git_output(writer.cwd, "rev-parse", "HEAD"),
+            "branch": _git_output(writer.cwd, "symbolic-ref", "HEAD"),
+            "status": _git_output(writer.cwd, "status", "--porcelain"),
+            "tracked": (writer.cwd / "tracked.txt").read_bytes(),
+            "legacy": (writer.cwd / "legacy-uncommitted.txt").read_bytes() if dirty else None,
+        }
+        assert writer_after == writer_before
+
     @pytest.mark.parametrize(
         "state",
         [
@@ -1260,7 +1349,7 @@ class TestPlanningSourceWorkspacePreparation:
             )
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.stages.planning.source_workspace_binding",
+            "hephaestus.automation.pipeline.stages.planning.planning_source_workspace_binding",
             unavailable,
         )
         payload: dict[str, Any] = {}
@@ -1303,7 +1392,7 @@ class TestPlanningSourceWorkspacePreparation:
             )
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.stages.planning.source_workspace_binding",
+            "hephaestus.automation.pipeline.stages.planning.planning_source_workspace_binding",
             unavailable,
         )
         item = make_work_item(issue=2983, state="ADVISE_WAIT")

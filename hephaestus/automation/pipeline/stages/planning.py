@@ -38,7 +38,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
-from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
@@ -139,7 +139,7 @@ from .base import (
     _require_issue_labels,
     agent_provider,
     athena_advise_failure_reason,
-    source_workspace_binding,
+    planning_source_workspace_binding,
     stage_model,
     stage_timeout,
 )
@@ -1124,14 +1124,12 @@ def _source_workspace_preparation_failure(
 def _prepare_planning_workspace(
     item: WorkItem,
     ctx: StageContext,
-    lane: SourceLane,
 ) -> tuple[WorkspaceBinding | None, StageOutcome | None]:
     """Prepare a planning source lane and classify bounded preparation failures."""
     try:
-        workspace = source_workspace_binding(
+        workspace = planning_source_workspace_binding(
             item,
             ctx,
-            lane,
             preparation_timeout_s=SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S,
         )
     except SourceWorkspacePreparationError as exc:
@@ -1146,7 +1144,6 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         workspace, preparation_outcome = _prepare_planning_workspace(
             item,
             ctx,
-            SourceLane.IMPLEMENTATION,
         )
         if preparation_outcome is not None:
             return preparation_outcome
@@ -1202,7 +1199,6 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         workspace, preparation_outcome = _prepare_planning_workspace(
             item,
             ctx,
-            SourceLane.REVIEW,
         )
         if preparation_outcome is not None:
             return preparation_outcome
@@ -2123,7 +2119,6 @@ class PlanningStage(Stage):
             workspace, preparation_outcome = _prepare_planning_workspace(
                 item,
                 ctx,
-                SourceLane.IMPLEMENTATION,
             )
             if preparation_outcome is not None:
                 return preparation_outcome
@@ -2157,7 +2152,6 @@ class PlanningStage(Stage):
             workspace, preparation_outcome = _prepare_planning_workspace(
                 item,
                 ctx,
-                SourceLane.IMPLEMENTATION,
             )
             if preparation_outcome is not None:
                 return preparation_outcome
