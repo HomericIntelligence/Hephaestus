@@ -215,3 +215,80 @@ def test_load_config_rejects_malformed_or_writable_file(
 
     with pytest.raises(ValueError):
         load_linux_host_verification_config(config_path)
+
+
+def test_prepare_run_creates_private_shared_lease_layout(tmp_path: Path) -> None:
+    """A run receives one private shared-root layout with no ambient paths."""
+    from hephaestus.automation.linux_host_verification import (
+        LinuxHostVerificationConfig,
+        prepare_linux_host_verification_run,
+    )
+
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir(mode=0o700)
+    config = LinuxHostVerificationConfig.from_mapping(
+        {
+            "shared_root": str(shared_root),
+            "image_path": "/srv/hephaestus-images/verify.sqsh",
+            "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+            "trusted_slurm_bin_dir": "/usr/bin",
+            "timeout_seconds": 900,
+        }
+    )
+
+    run = prepare_linux_host_verification_run(config, "run-20260906-01234567")
+
+    assert run.root == shared_root / "run-20260906-01234567"
+    assert run.request_path.parent == run.root
+    assert run.receipt_path.parent == run.root
+    assert run.source_archive_path.parent == run.root
+    assert run.git_metadata_archive_path.parent == run.root
+    assert run.source_extract_path.parent == run.root
+    assert run.git_metadata_extract_path.parent == run.root
+    assert run.scratch_path.parent == run.root
+    for directory in (
+        run.root,
+        run.source_extract_path,
+        run.git_metadata_extract_path,
+        run.scratch_path,
+    ):
+        assert directory.is_dir()
+        assert directory.stat().st_mode & 0o077 == 0
+
+
+def test_prepare_run_rejects_existing_or_unsafe_shared_root(tmp_path: Path) -> None:
+    """Run staging fails closed instead of reusing or widening a shared path."""
+    from hephaestus.automation.linux_host_verification import (
+        LinuxHostVerificationConfig,
+        prepare_linux_host_verification_run,
+    )
+
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir(mode=0o700)
+    config = LinuxHostVerificationConfig.from_mapping(
+        {
+            "shared_root": str(shared_root),
+            "image_path": "/srv/hephaestus-images/verify.sqsh",
+            "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+            "trusted_slurm_bin_dir": "/usr/bin",
+            "timeout_seconds": 900,
+        }
+    )
+
+    prepare_linux_host_verification_run(config, "run-20260906-01234567")
+    with pytest.raises(ValueError):
+        prepare_linux_host_verification_run(config, "run-20260906-01234567")
+
+    unsafe_root = tmp_path / "unsafe"
+    unsafe_root.mkdir(mode=0o755)
+    unsafe_config = LinuxHostVerificationConfig.from_mapping(
+        {
+            "shared_root": str(unsafe_root),
+            "image_path": "/srv/hephaestus-images/verify.sqsh",
+            "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+            "trusted_slurm_bin_dir": "/usr/bin",
+            "timeout_seconds": 900,
+        }
+    )
+    with pytest.raises(ValueError):
+        prepare_linux_host_verification_run(unsafe_config, "run-20260906-76543210")

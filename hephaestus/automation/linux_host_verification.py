@@ -9,6 +9,7 @@ unreviewed setting cannot widen the host execution boundary.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tomllib
 from collections.abc import Mapping
@@ -32,6 +33,7 @@ _CONFIG_FIELDS = frozenset(
     }
 )
 _CONFIG_TABLE = "linux_host_verification"
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def _absolute_path(value: object, field_name: str) -> str:
@@ -205,3 +207,66 @@ class LinuxHostVerificationConfig:
             elif not stat.S_ISDIR(file_status.st_mode):
                 raise ValueError("trusted Slurm executable ancestor is not a directory")
         return executable_path
+
+
+@dataclass(frozen=True)
+class LinuxHostVerificationRun:
+    """Private shared-filesystem paths for one Linux verification lease."""
+
+    run_id: str
+    root: Path
+    source_archive_path: Path
+    source_extract_path: Path
+    git_metadata_archive_path: Path
+    git_metadata_extract_path: Path
+    scratch_path: Path
+    stdout_path: Path
+    stderr_path: Path
+    request_path: Path
+    receipt_path: Path
+
+
+def prepare_linux_host_verification_run(
+    config: LinuxHostVerificationConfig, run_id: str
+) -> LinuxHostVerificationRun:
+    """Create one private, non-reusable shared-filesystem lease layout."""
+    if not isinstance(run_id, str) or _RUN_ID_RE.fullmatch(run_id) is None:
+        raise ValueError("Linux host-verification run ID is invalid")
+    shared_root = Path(config.shared_root)
+    try:
+        root_status = os.lstat(shared_root)
+    except OSError as error:
+        raise ValueError("Linux host-verification shared root is unavailable") from error
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or stat.S_ISLNK(root_status.st_mode)
+        or root_status.st_mode & 0o077
+    ):
+        raise ValueError("Linux host-verification shared root is unsafe")
+    root = shared_root / run_id
+    try:
+        root.mkdir(mode=0o700)
+        os.chmod(root, 0o700)
+        source_extract_path = root / "source"
+        git_metadata_extract_path = root / "git-metadata"
+        scratch_path = root / "scratch"
+        for directory in (source_extract_path, git_metadata_extract_path, scratch_path):
+            directory.mkdir(mode=0o700)
+            os.chmod(directory, 0o700)
+    except FileExistsError as error:
+        raise ValueError("Linux host-verification run already exists") from error
+    except OSError as error:
+        raise ValueError("Linux host-verification run staging failed") from error
+    return LinuxHostVerificationRun(
+        run_id=run_id,
+        root=root,
+        source_archive_path=root / "source.tar",
+        source_extract_path=source_extract_path,
+        git_metadata_archive_path=root / "git-metadata.tar",
+        git_metadata_extract_path=git_metadata_extract_path,
+        scratch_path=scratch_path,
+        stdout_path=root / "stdout.log",
+        stderr_path=root / "stderr.log",
+        request_path=root / "request.json",
+        receipt_path=root / "receipt.json",
+    )
