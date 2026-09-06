@@ -2505,9 +2505,9 @@ class TestWorkerPoolSubmitComplete:
             patch(f"{_WP}.sys.platform", "linux"),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
-            patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata),
+            patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata) as stage_image,
             patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
-            patch(f"{_WP}._extract_immutable_archive"),
+            patch(f"{_WP}._extract_immutable_archive") as extract_archive,
             patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata"),
             patch(f"{_WP}._prepare_host_output_aliases"),
             patch(f"{_WP}._build_pyxis_environment", return_value={"UV_OFFLINE": "1"}),
@@ -2533,6 +2533,10 @@ class TestWorkerPoolSubmitComplete:
         }
         (pi_smoke_logs,) = run_command.call_args.kwargs["additional_writable_paths"]
         assert pi_smoke_logs.name == "pi-smoke-logs"
+        staging_root = stage_image.call_args.args[1]
+        immutable_source = extract_archive.call_args.args[1]
+        assert immutable_source.parent == staging_root
+        assert staging_root.parent == image.parent
 
     def test_linux_resource_wrapper_sets_all_inherited_limits(self) -> None:
         """The Linux Slurm launcher inherits fixed OS limits before dispatch."""

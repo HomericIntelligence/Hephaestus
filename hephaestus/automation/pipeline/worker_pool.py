@@ -4523,17 +4523,14 @@ class WorkerPool:
         if git_executable is None:
             return JobResult(ok=False, error="host_verification_git_unavailable")
         try:
-            with (
-                tempfile.TemporaryDirectory(prefix="hephaestus-host-verification-") as temp_dir,
-                tempfile.TemporaryDirectory(
-                    prefix=".hephaestus-pyxis-exec-", dir=image.path.parent
-                ) as image_temp_dir,
-            ):
-                root = Path(temp_dir)
-                # Pyxis resolves the image on the execution host. Stage it on
-                # the same shared filesystem as the authorized source image.
-                staging = Path(image_temp_dir)
-                staged_image = _stage_verified_pyxis_image(image, staging)
+            with tempfile.TemporaryDirectory(
+                prefix=".hephaestus-pyxis-exec-", dir=image.path.parent
+            ) as staging_dir:
+                # Pyxis resolves every mount on the execution node. Keep the
+                # image, source, and Git metadata in one private directory on
+                # the shared filesystem that contains the authorized image.
+                root = Path(staging_dir)
+                staged_image = _stage_verified_pyxis_image(image, root)
                 source = root / "source"
                 source.mkdir()
                 archive, _archive_stderr = _bounded_git_archive(
