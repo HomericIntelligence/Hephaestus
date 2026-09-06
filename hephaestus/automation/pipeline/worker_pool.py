@@ -1575,6 +1575,89 @@ def _bounded_git_archive(
     return bytes(archive), stderr_tail
 
 
+def _bounded_git_metadata_archive(
+    checkout: Path, expected_head_sha: str, timeout_s: int, git_executable: str
+) -> bytes:
+    """Return a bounded tar archive of one bare Git snapshot at the bound head.
+
+    Linux allocation nodes cannot read the submit checkout.  This distinct
+    archive gives the allocation driver the minimal Git database that a
+    repository-aware catalog command needs, without widening the source
+    archive into a writable checkout.  The clone is local and transient; only
+    regular files and directories can enter the staged payload.
+    """
+    with tempfile.TemporaryDirectory(prefix="hephaestus-git-metadata-") as temporary:
+        metadata = Path(temporary) / "metadata.git"
+        deadline = time.monotonic() + timeout_s
+
+        def remaining_timeout() -> float:
+            return max(deadline - time.monotonic(), 0.01)
+
+        clone = subprocess.run(
+            (git_executable, "clone", "--bare", "--no-local", str(checkout), str(metadata)),
+            env=_controlled_git_env(),
+            capture_output=True,
+            text=True,
+            timeout=remaining_timeout(),
+            check=False,
+        )
+        if clone.returncode != 0:
+            raise _HostVerificationBoundaryError("immutable_git_metadata_snapshot_failed")
+        head = subprocess.run(
+            (git_executable, f"--git-dir={metadata}", "rev-parse", "HEAD"),
+            env=_controlled_git_env(),
+            capture_output=True,
+            text=True,
+            timeout=remaining_timeout(),
+            check=False,
+        )
+        if head.returncode != 0 or head.stdout.strip() != expected_head_sha:
+            raise _HostVerificationBoundaryError("immutable_git_metadata_head_changed")
+
+        entries: list[tuple[str, Path, os.stat_result]] = []
+        payload_size = 0
+        for directory, directory_names, file_names in os.walk(metadata, followlinks=False):
+            directory_path = Path(directory)
+            directory_names.sort()
+            file_names.sort()
+            for name in (*directory_names, *file_names):
+                path = directory_path / name
+                relative = path.relative_to(metadata).as_posix()
+                status = os.lstat(path)
+                if stat.S_ISLNK(status.st_mode) or not (
+                    stat.S_ISDIR(status.st_mode) or stat.S_ISREG(status.st_mode)
+                ):
+                    raise _HostVerificationBoundaryError("unsafe_git_metadata_member")
+                if stat.S_ISREG(status.st_mode):
+                    payload_size += status.st_size
+                entries.append((relative, path, status))
+        # Each member needs a tar header and the stream has end blocks.  Keep
+        # the preflight intentionally conservative so a crafted Git object
+        # cannot allocate an unbounded in-memory staging buffer.
+        if (
+            len(entries) > _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS
+            or payload_size + (len(entries) + 2) * 1024 > _HOST_VERIFICATION_ARCHIVE_MAX_BYTES
+        ):
+            raise _HostVerificationBoundaryError("git_metadata_archive_size_limit_exceeded")
+
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:") as output:
+            for relative, path, status in entries:
+                info = tarfile.TarInfo(relative)
+                info.mode = stat.S_IMODE(status.st_mode)
+                info.mtime = 0
+                if stat.S_ISDIR(status.st_mode):
+                    info.type = tarfile.DIRTYPE
+                    output.addfile(info)
+                    continue
+                info.size = status.st_size
+                with path.open("rb") as member:
+                    output.addfile(info, member)
+                if archive.tell() > _HOST_VERIFICATION_ARCHIVE_MAX_BYTES:
+                    raise _HostVerificationBoundaryError("git_metadata_archive_size_limit_exceeded")
+    return archive.getvalue()
+
+
 def _prepare_immutable_git_metadata(
     checkout: Path, expected_head_sha: str, source: Path, root: Path, git_executable: str
 ) -> Path:
