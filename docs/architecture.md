@@ -1099,12 +1099,16 @@ findings are recorded on the GitHub pull request so their history survives
 local process or agent-session loss. The implementation stage owns each PR
 branch writer, including rebase and lease-publish. At entry, and again
 immediately before submitting a broad audit, PR review reads the complete
-open-thread set. Threads without a current-head implementation response go
-directly to writer remediation and do not create another broad review batch. A
-complete set of current-head responses creates a detached,
+open-thread set. In the automatic queue path, threads without a current-head
+implementation response go directly to writer remediation and do not create
+another broad review batch. A complete set of current-head responses creates a detached,
 disposable checkout for comment validation only; the reviewer resolves the
-validated threads or leaves corrective feedback. A thread-free entry creates a
-detached checkout of head `H`, verifies that checkout once, submits one batched
+validated threads or leaves corrective feedback. An explicit operator broad
+review is the only exception. It reconciles dependencies, verifies a detached
+checkout of head `H`, and submits a fresh source-anchored review before it
+routes all inherited and new open threads through validation, publication,
+and implementation remediation. A thread-free entry also creates a detached
+checkout of head `H`, verifies that checkout once, submits one batched
 source-anchored review for `H`, and removes the checkout before handoff. A
 later branch push does not invalidate that posted review; only the final
 `state:implementation-go` transition requires the reviewed head to still be
@@ -1130,6 +1134,7 @@ implementation authorization.
 ```mermaid
 flowchart LR
     PR["PR diff and requirements"] --> ThreadGate{"Open thread state"}
+    PR --> Explicit["Explicit operator broad review"] --> Snapshot
     ThreadGate -->|"no thread"| Snapshot["Immutable host verification"] --> Review
     ThreadGate -->|"unreplied thread"| Address["Implementation fixes and replies"]
     ThreadGate -->|"all threads replied"| Validate["Reviewer validates reply + diff"]
@@ -1153,6 +1158,7 @@ stateDiagram-v2
     ThreadGate --> Implementation: thread lacks current-head response; durable no-go
     ThreadGate --> Checkout: no open threads; broad audit
     ThreadGate --> Checkout: all threads have current-head responses; comment validation
+    ThreadGate --> Checkout: explicit operator broad review; preserve inherited threads
     Checkout --> Review: broad audit entry and clean snapshot matches H
     Checkout --> Validate: comment-validation entry and clean snapshot matches H
     Checkout --> HostVerification: clean checkout matches snapshot head and fixed check is required
@@ -1185,7 +1191,11 @@ Architectural contract:
 - Prior rounds remain visible in the PR timeline.
 - Any open review thread without a current-head implementation response
   produces `state:implementation-no-go` and is handed to implementation
-  before another broad review. A fresh broad audit of a thread-free PR, or a
+  before another broad review in the automatic queue path. An explicit operator
+  broad review first uses the dependency, exact-head checkout, and complete
+  thread-read gates. It then preserves all inherited and new open threads for
+  the validation, publication, and implementation-remediation lifecycle. A
+  fresh broad audit of a thread-free PR, or a
   fresh comment-validation pass that resolves every current thread, may produce
   `state:implementation-go` only when its typed reviewer verdict is `GO`. The
   parser treats a missing, malformed, `NOGO`, or `BLOCKED` verdict as a failed

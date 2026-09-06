@@ -9,6 +9,7 @@ end with ``run_pipeline`` mocked so no live agent or GitHub call is made.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -17,6 +18,7 @@ import pytest
 
 from hephaestus.automation import pr_reviewer as pr_reviewer_mod
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.cli.utils import emit_json_status
 
 
 @pytest.fixture(autouse=True)
@@ -120,6 +122,40 @@ def test_main_returns_run_pipeline_exit_code() -> None:
     captured = _run_main_capturing_config(["--issues", "5", "--dry-run"], rc=1)
 
     assert captured["rc"] == 1
+
+
+def test_main_json_preserves_the_coordinator_terminal_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """JSON mode emits one terminal record with the review-run reason."""
+
+    def _fake_run_pipeline(config: Any) -> int:
+        assert config.json_out is True
+        emit_json_status(
+            0,
+            review_run_reasons={"explicit-review": 1},
+        )
+        return 0
+
+    with (
+        patch("sys.argv", ["hephaestus-review-prs", "--issues", "5", "--json"]),
+        patch.object(pr_reviewer_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch.object(pr_reviewer_mod, "resolve_agent", return_value="claude"),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            side_effect=_fake_run_pipeline,
+        ),
+    ):
+        assert pr_reviewer_mod.main() == 0
+
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert records == [
+        {
+            "status": "ok",
+            "exit_code": 0,
+            "review_run_reasons": {"explicit-review": 1},
+        }
+    ]
 
 
 def test_main_returns_130_on_keyboard_interrupt() -> None:

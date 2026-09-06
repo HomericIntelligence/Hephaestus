@@ -202,8 +202,6 @@ def main() -> int:
 
         rc = run_pipeline(config)
         log.info("PR review complete (rc=%d)", rc)
-        if args.json:
-            emit_json_status(rc, issues=issues)
         return rc
 
     except KeyboardInterrupt:

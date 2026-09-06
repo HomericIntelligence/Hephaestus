@@ -404,12 +404,60 @@ class TestExplicitPrReviewRetry:
     def test_updated_no_go_pr_runs_fresh_review_before_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Dispatch review despite an old implementation no-go label."""
+        """A fresh explicit review preserves all inherited threads for remediation."""
+
+        class PreservingThreadGitHub(FakeStageGitHub):
+            """Keep inherited threads stable when the review adds a new finding."""
+
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.live_threads = [
+                    {
+                        "id": f"inherited-{index}",
+                        "path": f"inherited-{index}.py",
+                        "line": index,
+                        "side": "RIGHT",
+                        "severity": "major",
+                        "body": f"inherited finding {index}",
+                        "author": "reviewer",
+                        "authors": ["reviewer"],
+                        "review_id": f"inherited-review-{index}",
+                        "comments": [
+                            {
+                                "id": f"inherited-comment-{index}",
+                                "author": "reviewer",
+                                "body": f"inherited finding {index}",
+                            }
+                        ],
+                    }
+                    for index in (1, 2)
+                ]
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live_threads]
+
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                *,
+                expected_head_sha: str,
+                review_diff: str | None = None,
+            ) -> list[dict[str, Any]]:
+                receipts = super().post_review_threads(
+                    pr_number,
+                    threads,
+                    expected_head_sha=expected_head_sha,
+                    review_diff=review_diff,
+                )
+                self.live_threads.extend(dict(receipt) for receipt in receipts)
+                return receipts
+
         current_head = "b" * 40
-        github = FakeStageGitHub(
+        github = PreservingThreadGitHub(
             labels=[STATE_IMPLEMENTATION_NO_GO],
             open_pr=1001,
-            unresolved=[(1, 0)],
             pr_head_branch="feature-1",
             pr_state={
                 "state": "OPEN",
@@ -456,7 +504,7 @@ class TestExplicitPrReviewRetry:
         adopted = stage.step(item, ctx)
         assert adopted == Continue(next_state="REVIEW_WAIT")
         item.state = adopted.next_state
-        _dispatch_review(stage, item, ctx)
+        review = _dispatch_review(stage, item, ctx)
 
         assert item.payload["reviewed_pr_head_sha"] == current_head
         assert github.mutation_log == []
@@ -467,11 +515,60 @@ class TestExplicitPrReviewRetry:
             "reason": "explicit-review",
             "head_sha": current_head,
         }
-        item.state = "EVAL"
+        item.state = review.on_done_state
+
+        validation = stage.step(item, ctx)
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, AgentJob)
+        assert validation.job.descr == "validate"
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"resolved": [], "unaddressed": []}),
+            ctx,
+        )
+        item.state = validation.on_done_state
+
+        assert item.state == "POST"
+        reconciliation = stage.step(item, ctx)
+        assert isinstance(reconciliation, JobRequest)
+        assert isinstance(reconciliation.job, GitHubJob)
+        assert isinstance(reconciliation.job.request, ReconcilePrReviewRequest)
+        receipt = PipelineGitHubJobRunner._reconcile_pr_review(
+            reconciliation.job.request,
+            github,
+        )
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        item.state = reconciliation.on_done_state
+        assert item.state == "POST_APPLY"
+        posted = stage.step(item, ctx)
+        assert posted == Continue(next_state="ADDRESS_WAIT")
+        assert {thread["thread_id"] for thread in item.payload["remediation_threads"]} == {
+            "inherited-1",
+            "inherited-2",
+            "thread-1001-0",
+        }
+        assert {thread["id"] for thread in item.payload["unresolved_threads"]} == {
+            "inherited-1",
+            "inherited-2",
+            "thread-1001-0",
+        }
+
+        item.state = posted.next_state
+        cleanup = stage.step(item, ctx)
+        assert cleanup == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        item.state = cleanup.next_state
+        removal = stage.step(item, ctx)
+        assert isinstance(removal, JobRequest)
+        assert isinstance(removal.job, GitJob)
+        assert removal.job.op == "remove_worktree"
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+        item.state = removal.on_done_state
         result = stage.step(item, ctx)
 
-        assert isinstance(result, Continue)
-        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert item.payload["implementation_remediation"] is True
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert ("gh_pr_review_post", (1001, "COMMENT")) in github.mutation_log
         assert not any(entry[0] == "mark_pr_implementation_go" for entry in github.mutation_log)
 
     def test_failed_explicit_review_does_not_record_completion_reason(
@@ -491,6 +588,36 @@ class TestExplicitPrReviewRetry:
         )
 
         PrReviewStage().on_job_done(item, JobResult(ok=False, error="review failed"), make_ctx())
+
+        assert "_pr_review_run" not in item.payload
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(object(), id="wrong-result-type"),
+            pytest.param(_invalid_audit(), id="invalid-audit"),
+        ],
+    )
+    def test_malformed_explicit_review_does_not_record_completion_reason(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        value: object,
+    ) -> None:
+        """A successful process needs a valid audit before completion is recorded."""
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            stage=StageName.PR_REVIEW,
+            state="REVIEW_WAIT",
+            payload={
+                "explicit_pr_review": True,
+                "review_job_pending": True,
+                "reviewed_pr_head_sha": "a" * 40,
+            },
+        )
+
+        PrReviewStage().on_job_done(item, JobResult(ok=True, value=value), make_ctx())
 
         assert "_pr_review_run" not in item.payload
 
