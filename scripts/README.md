@@ -66,6 +66,12 @@ through installed `hephaestus-*` console scripts.
   starts the network-free test container.
 - **`provision_codex_sigstore_fixture.py`** — Provision and validate the fixed
   offline Codex release evidence for the required artifact test lane.
+- **`prepare_host_verification_pyxis_image.py`** — Build `ci/Containerfile`
+  with local Podman or Docker and export a local Enroot squashfs image for
+  Linux PR-review host verification. The command writes a SHA-256 sidecar and
+  a JSON provenance record with the immutable OCI image ID. It never imports a
+  registry image; use `just host-verification-pyxis-image` to rebuild the
+  default image.
 
 ### Disaster recovery
 

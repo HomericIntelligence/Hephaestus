@@ -55,6 +55,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     ReplyJournalAppended,
 )
+from hephaestus.automation.pipeline.host_verification_pyxis import PyxisImageMetadata
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -2431,10 +2432,10 @@ class TestWorkerPoolSubmitComplete:
         }
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
-    def test_immutable_build_test_skips_unsupported_platform_before_execution(
+    def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """An unsupported host records a bound skip without executing PR code."""
+        """Linux fails closed when its verified Pyxis image is unavailable."""
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -2465,15 +2466,81 @@ class TestWorkerPoolSubmitComplete:
             result = pool._run_build_test(job)
 
         assert result.ok is False
-        assert result.error == "unsupported_host_verification_boundary"
-        assert result.value == {
-            "failure_kind": "runner",
-            "head_sha": "a" * 40,
-            "immutable_source": False,
-            "platform": "linux",
-            "status": "skipped",
-        }
+        assert result.error == "host_verification_pyxis_image_unavailable"
+        assert result.value["failure_kind"] == "runner"
+        assert result.value["head_sha"] == "a" * 40
+        assert result.value["platform"] == "linux"
+        assert result.value["status"] != "skipped"
         archive.assert_not_called()
+
+    def test_immutable_build_test_runs_linux_pyxis_and_records_image_digest(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Linux host verification records the exact local Pyxis image proof."""
+        image = tmp_path / "host-verification.sqsh"
+        metadata = PyxisImageMetadata(path=image.resolve(), sha256="b" * 64)
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+        command_result = JobResult(ok=True, value={"failure_kind": "none"})
+
+        with (
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
+            patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
+            patch(f"{_WP}._extract_immutable_archive"),
+            patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata"),
+            patch(f"{_WP}._prepare_host_output_aliases"),
+            patch(f"{_WP}._build_pyxis_environment", return_value={"UV_OFFLINE": "1"}),
+            patch(f"{_WP}._build_pyxis_srun_command", return_value=("srun", "true")),
+            patch(f"{_WP}._run_bounded_host_command", return_value=command_result) as run_command,
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is True
+        assert result.value == {
+            "container_image": str(image.resolve()),
+            "container_image_sha256": "b" * 64,
+            "container_runtime": "pyxis",
+            "failure_kind": "none",
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "platform": "linux",
+            "status": "passed",
+        }
+        (pi_smoke_logs,) = run_command.call_args.kwargs["additional_writable_paths"]
+        assert pi_smoke_logs.name == "pi-smoke-logs"
+
+    def test_bounded_host_command_enforces_each_writable_tree(self, tmp_path: Path) -> None:
+        """An additional writable output tree has the same fixed quota."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        logs = tmp_path / "logs"
+        for path in (source, scratch, logs):
+            path.mkdir()
+
+        with patch(
+            f"{_WP}._scratch_usage_exceeds_limit", side_effect=(False, True)
+        ) as exceeds_limit:
+            result = _run_bounded_host_command(
+                (sys.executable, "-c", "import time; time.sleep(30)"),
+                validation_argv=("uv", "run", "pytest", "tests/unit"),
+                source=source,
+                scratch=scratch,
+                additional_writable_paths=(logs,),
+                environment={},
+                timeout_s=10,
+                shutdown=threading.Event(),
+            )
+
+        assert result.error == "host_verification_resource_limit_exceeded"
+        assert [call.args[0] for call in exceeds_limit.call_args_list] == [scratch, logs]
 
     def test_host_verification_profile_keeps_source_outside_writable_root(
         self, tmp_path: Path

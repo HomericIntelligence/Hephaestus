@@ -617,6 +617,7 @@ def main() -> int:
             frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT})
         ),
         gh_extra_path_root=args.gh_extra_path_root,
+        host_verification_pyxis_image=args.host_verification_pyxis_image,
     )
 
     rc = run_pipeline(config)

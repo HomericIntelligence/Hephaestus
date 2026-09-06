@@ -335,6 +335,7 @@ def main() -> int:
             poll_max_wait=args.poll_max_wait,
             json_out=args.json,
             scope=PipelineScope(_CI_DRIVER_SCOPE_STAGES),
+            host_verification_pyxis_image=args.host_verification_pyxis_image,
         )
 
         rc = run_pipeline(config)

@@ -128,6 +128,18 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     )
 
 
+def test_build_pipeline_config_maps_pyxis_image_path(
+    dispatch: dict[str, MagicMock], tmp_path: Path
+) -> None:
+    """The loop exposes the local Pyxis image override to the pipeline."""
+    image = tmp_path / "hephaestus-ci.sqsh"
+
+    loop_runner.main(["--host-verification-pyxis-image", str(image)])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.host_verification_pyxis_image == image
+
+
 def test_event_log_retention_flags_reach_lifecycle(
     dispatch: dict[str, MagicMock],
 ) -> None:

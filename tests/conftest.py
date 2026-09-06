@@ -52,6 +52,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         help="require live package evidence in the nightly Pi smoke tests",
     )
+    group.addoption(
+        "--require-pyxis-host-verification",
+        action="store_true",
+        help="fail instead of skip when live Linux Pyxis host verification is unavailable",
+    )
 
 
 def _git_supports_path_format() -> bool:
@@ -149,6 +154,12 @@ def require_cli(pytestconfig: pytest.Config) -> bool:
 def require_pi_package_smoke(pytestconfig: pytest.Config) -> bool:
     """Return whether nightly Pi package smoke evidence is required."""
     return bool(pytestconfig.getoption("require_pi_package_smoke"))
+
+
+@pytest.fixture(scope="session")
+def require_pyxis_host_verification(pytestconfig: pytest.Config) -> bool:
+    """Return whether the live Linux Pyxis verification lane is required."""
+    return bool(pytestconfig.getoption("require_pyxis_host_verification"))
 
 
 @pytest.fixture(autouse=True)

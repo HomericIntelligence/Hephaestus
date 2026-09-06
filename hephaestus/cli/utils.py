@@ -37,6 +37,7 @@ __all__ = [
     "add_follow_up_timeout_arg",
     "add_git_message_timeout_arg",
     "add_github_throttle_args",
+    "add_host_verification_pyxis_image_arg",
     "add_json_arg",
     "add_learn_timeout_arg",
     "add_logging_args",
@@ -728,6 +729,7 @@ def add_pipeline_runtime_args(
             parser.add_argument(
                 flag, default="", metavar="MODEL[:EFFORT]", help=MODEL_REFERENCE_HELP
             )
+    add_host_verification_pyxis_image_arg(parser)
     parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
     parser.add_argument(
         "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True
@@ -756,3 +758,17 @@ def add_pipeline_runtime_args(
             default=default,
             metavar="SECONDS",
         )
+
+
+def add_host_verification_pyxis_image_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the local Enroot squashfs image override for Linux host checks."""
+    parser.add_argument(
+        "--host-verification-pyxis-image",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Local Enroot squashfs path for Linux host verification. The path "
+            "must have a matching .sha256 sidecar."
+        ),
+    )

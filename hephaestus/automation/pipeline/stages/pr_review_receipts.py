@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
+
 from .pr_review_verification import _HostVerificationSpec
 
 UNSUPPORTED_HOST_VERIFICATION_ERROR = "unsupported_host_verification_boundary"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _host_verification_result_status(
@@ -43,9 +46,28 @@ def _host_verification_receipt_matches(
     receipt: object, spec: _HostVerificationSpec, reviewed_head: str
 ) -> bool:
     """Return whether *receipt* proves an exact-head host-verification pass."""
+    if not isinstance(receipt, dict):
+        return False
+    platform = receipt.get("platform")
+    if platform == "linux":
+        image = receipt.get("container_image")
+        image_digest = receipt.get("container_image_sha256")
+        return bool(
+            receipt.get("head_sha") == reviewed_head
+            and receipt.get("argv") == list(spec.argv)
+            and receipt.get("immutable_source") is True
+            and receipt.get("ok") is True
+            and receipt.get("status") == "passed"
+            and receipt.get("container_runtime") == "pyxis"
+            and isinstance(image, str)
+            and image.startswith("/")
+            and "://" not in image
+            and _SHA256_RE.fullmatch(str(image_digest or "")) is not None
+            and isinstance(receipt.get("stdout_tail"), str)
+            and isinstance(receipt.get("stderr_tail"), str)
+        )
     return bool(
-        isinstance(receipt, dict)
-        and receipt.get("head_sha") == reviewed_head
+        receipt.get("head_sha") == reviewed_head
         and receipt.get("argv") == list(spec.argv)
         and receipt.get("immutable_source") is True
         and receipt.get("ok") is True
