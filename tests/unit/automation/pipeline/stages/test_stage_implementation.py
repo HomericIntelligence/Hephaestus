@@ -96,7 +96,13 @@ def _committed_runner_fixture(tmp_path: Path, source: str) -> tuple[Path, str]:
     install_helpers.write_text("#!/bin/bash\n", encoding="utf-8")
     install_helpers.chmod(0o644)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "core.filemode", "false"], cwd=repo, check=True)
     subprocess.run(["git", "add", "scripts"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "update-index", "--chmod=+x", "scripts/run_ci_local.sh"],
+        cwd=repo,
+        check=True,
+    )
     subprocess.run(
         [
             "git",
