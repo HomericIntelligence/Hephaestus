@@ -556,11 +556,14 @@ def _require_trusted_ancestry(path: Path) -> None:
         raise PyxisArtifactIOError("cross-node path ancestry contains a symlink")
     for component in reversed((resolved, *resolved.parents)):
         metadata = component.lstat()
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid not in {0, os.geteuid()}
-            or stat.S_IMODE(metadata.st_mode) & 0o022
-        ):
+        mode = stat.S_IMODE(metadata.st_mode)
+        root_owned_sticky = metadata.st_uid == 0 and bool(mode & stat.S_ISVTX)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid not in {
+            0,
+            os.geteuid(),
+        }:
+            raise PyxisArtifactIOError("cross-node path ancestry is not trusted")
+        if mode & 0o022 and not root_owned_sticky:
             raise PyxisArtifactIOError("cross-node path ancestry is not trusted")
 
 

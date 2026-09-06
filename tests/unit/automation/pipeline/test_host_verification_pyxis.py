@@ -22,7 +22,10 @@ from hephaestus.automation.pipeline.stages.pr_review_receipts import (
     _host_verification_receipt_matches,
 )
 from hephaestus.automation.pipeline.stages.pr_review_verification import _HostVerificationSpec
-from hephaestus.automation.pyxis_artifact_io import CrossNodePathBinding
+from hephaestus.automation.pyxis_artifact_io import (
+    CrossNodePathBinding,
+    bind_cross_node_root,
+)
 
 
 def _image(tmp_path: Path, *, sidecar: bool = True) -> tuple[Path, str]:
@@ -504,6 +507,42 @@ def test_validate_pyxis_quota_root_rejects_untrusted_ancestry(tmp_path: Path) ->
 
     with pytest.raises(PyxisImageValidationError, match="quota root"):
         validate_pyxis_quota_root(quota)
+
+
+def test_cross_node_root_accepts_root_owned_sticky_temporary_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root-owned sticky temporary directory safely separates user entries."""
+    original_lstat = Path.lstat
+    sticky_ancestor = tmp_path.parent
+
+    def linux_temporary_lstat(path: Path) -> os.stat_result | SimpleNamespace:
+        if path == sticky_ancestor:
+            return SimpleNamespace(st_mode=0o41777, st_uid=0)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", linux_temporary_lstat)
+
+    with bind_cross_node_root(tmp_path) as binding:
+        binding.revalidate()
+
+
+def test_cross_node_root_rejects_root_owned_writable_nonsticky_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root-owned writable directory needs sticky entry protection."""
+    original_lstat = Path.lstat
+    writable_ancestor = tmp_path.parent
+
+    def writable_lstat(path: Path) -> os.stat_result | SimpleNamespace:
+        if path == writable_ancestor:
+            return SimpleNamespace(st_mode=0o40777, st_uid=0)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", writable_lstat)
+
+    with pytest.raises(OSError, match="ancestry is not trusted"):
+        bind_cross_node_root(tmp_path)
 
 
 def test_retained_quota_binding_revalidates_the_filesystem(
