@@ -20,12 +20,8 @@ from hephaestus.automation.issue_waves import (
 )
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
-from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import (
-    Continue,
-    JobRequest,
-    StageOutcome,
-)
+from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
+from hephaestus.automation.pipeline.stage_results import Continue, JobRequest
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     _mark_published_plan_pending_review,
@@ -57,6 +53,10 @@ from hephaestus.automation.review_journal import (
     plan_fingerprint,
     render_current_plan,
     render_current_review,
+)
+from hephaestus.automation.source_worktree import (
+    SourceWorkspacePreparationCause,
+    SourceWorkspacePreparationError,
 )
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
@@ -1229,6 +1229,140 @@ class TestPlanningStageEnter:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.BLOCKED
         assert github.mutation_log == []
+
+
+class TestPlanningSourceWorkspacePreparation:
+    """Bound source preparation before planning jobs."""
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            "REQUIREMENTS_RECOVERY_WAIT",
+            "REQUIREMENTS_RECOVERY_REVIEW_WAIT",
+            "ADVISE_WAIT",
+            "PLAN_WAIT",
+        ],
+    )
+    def test_unavailable_workspace_returns_retry_without_agent_job(
+        self,
+        state: str,
+        make_ctx: Any,
+        make_work_item: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: Any,
+    ) -> None:
+        """Source contention returns a timer outcome before job construction."""
+
+        def unavailable(*args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise SourceWorkspacePreparationError(
+                SourceWorkspacePreparationCause.GIT_METADATA_LOCK_UNAVAILABLE
+            )
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.stages.planning.source_workspace_binding",
+            unavailable,
+        )
+        payload: dict[str, Any] = {}
+        if state == "REQUIREMENTS_RECOVERY_REVIEW_WAIT":
+            payload["recovered_requirements"] = RecoveredRequirements(
+                RecoveryDisposition.REQUIREMENTS,
+                "Keep retries bounded.",
+                "Repository evidence.",
+                "evidence",
+            )
+        item = make_work_item(issue=2983, state=state, payload=payload)
+        ctx = make_ctx(budget_fn=lambda _name: 2)
+
+        with caplog.at_level("WARNING"):
+            result = PlanningStage().step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.RETRY
+        assert item.state == state
+        assert item.attempts["source_workspace"] == 1
+        assert item.payload["retry_delay_s"] == 1.0
+        assert item.attempts["plan"] == 0
+        assert any(
+            "git_metadata_lock_unavailable" in record.message and "attempt 1/2" in record.message
+            for record in caplog.records
+        )
+
+    def test_workspace_retry_budget_exhausts_without_agent_job(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Preparation exhaustion fails the item without submitting a job."""
+
+        def unavailable(*args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise SourceWorkspacePreparationError(
+                SourceWorkspacePreparationCause.LANE_LOCK_UNAVAILABLE
+            )
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.stages.planning.source_workspace_binding",
+            unavailable,
+        )
+        item = make_work_item(issue=2983, state="ADVISE_WAIT")
+        result = PlanningStage().step(
+            item,
+            make_ctx(budget_fn=lambda name: 1 if name == "source_workspace" else 2),
+        )
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["source_workspace"] == 1
+        assert "retry_delay_s" not in item.payload
+        assert item.attempts["plan"] == 0
+
+    def test_bounded_preparation_keeps_job_and_revision_binding(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Successful bounded preparation passes its exact binding to advise."""
+        calls: list[dict[str, Any]] = []
+
+        def clock() -> float:
+            return 100.0
+
+        binding = SimpleNamespace(
+            cwd=tmp_path / "source",
+            revision="b" * 40,
+        )
+
+        class Manager:
+            def prepare(self, *args: Any, **kwargs: Any) -> None:
+                raise AssertionError("blocking preparation was used")
+
+            def prepare_bounded(self, *args: Any, **kwargs: Any) -> Any:
+                del args
+                calls.append(kwargs)
+                return binding
+
+        item = make_work_item(
+            issue=2983,
+            state="ADVISE_WAIT",
+            payload={"_synced_default_branch_sha": "b" * 40},
+        )
+        paths = SimpleNamespace(
+            repo_root=tmp_path,
+            worktree=tmp_path,
+            source_workspaces=Manager(),
+        )
+
+        result = PlanningStage().step(item, make_ctx(paths=paths, now_fn=clock))
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AthenaSkillJob)
+        assert result.job.request.workspace is binding
+        assert result.job.request.cwd == binding.cwd
+        assert calls[0]["deadline"].expires_at == 145.0
+        assert calls[0]["deadline"].monotonic() == 100.0
 
 
 class TestPlanningStageStep:

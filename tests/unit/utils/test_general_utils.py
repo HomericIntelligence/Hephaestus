@@ -2,9 +2,11 @@
 """Tests for general utilities."""
 
 import os
+import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -582,3 +584,41 @@ class TestRunSubprocessTimeoutLogging:
             )
 
         assert time.monotonic() - started < 2
+
+    @pytest.mark.skipif(
+        not hasattr(os, "killpg"),
+        reason="requires POSIX process groups",
+    )
+    def test_tracked_timeout_does_not_wait_for_escaped_pipe_holder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A timed-out command returns after a pipe-holding child escapes."""
+        child_pid_path = tmp_path / "escaped-child.pid"
+        child_code = (
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(4)"
+        )
+        parent_code = (
+            "import pathlib,subprocess,sys,time; "
+            f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}],"
+            "start_new_session=True); "
+            f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); "
+            "time.sleep(4)"
+        )
+        started = time.monotonic()
+
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                run_subprocess(
+                    [sys.executable, "-c", parent_code],
+                    env={"PATH": os.defpath},
+                    timeout=0.1,
+                    track_process_group=True,
+                )
+
+            assert time.monotonic() - started < 2
+        finally:
+            if child_pid_path.exists():
+                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+                with suppress(ProcessLookupError):
+                    os.kill(child_pid, signal.SIGKILL)

@@ -49,11 +49,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     StageName.PLAN_REVIEW: {"nogo", "plan_missing", "plan_cycles_exhausted"},
     StageName.IMPLEMENTATION: {"plan_not_go", "already_implementation_go_pr"},
     StageName.PR_REVIEW: {"agent_error", "implementation_remediation"},
-    StageName.MERGE_WAIT: {
-        "not_implementation_go",
-        "reviewed_head_drift",
-        "reviewed_head_missing",
-    },
+    StageName.MERGE_WAIT: {"reviewed_head_missing"},
 }
 
 
@@ -118,7 +114,7 @@ def test_scan_is_not_vacuous() -> None:
     """The AST scan finds real emissions (guards against a silent no-op scan)."""
     assert "agent_error" in _fail_back_reason_literals(pr_review)
     assert "plan_not_go" in _fail_back_reason_literals(implementation)
-    assert "not_implementation_go" in _fail_back_reason_literals(merge_wait)
+    assert "reviewed_head_missing" in _fail_back_reason_literals(merge_wait)
 
 
 def test_named_reasons_route_where_the_doc_says() -> None:

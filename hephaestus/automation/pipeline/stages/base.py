@@ -50,11 +50,12 @@ Coordinator convention (binding for #1817, the coordinator slice):
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from hephaestus.agents.model_selection import normalize_model_reference
 from hephaestus.agents.runtime import (
@@ -62,8 +63,8 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
+from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "GIT_JOB_TIMEOUT_S",
+    "SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S",
     "AgentJob",
     "AthenaSkillJob",
     "AthenaSkillRequest",
@@ -140,6 +142,9 @@ def athena_advise_failure_reason(item: WorkItem) -> str:
 #: not import it from each other).
 GIT_JOB_TIMEOUT_S = 600
 
+# Keep source preparation below the coordinator's 60-second stage watchdog.
+SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S = 45.0
+
 #: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
 #: every stage that uses the legacy exponential poll delay.
 
@@ -159,6 +164,7 @@ class ConditionalMergeResult:
     transport_error: bool = False
     malformed: bool = False
     dry_run: bool = False
+    queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -557,35 +563,39 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness without granting authorization."""
         pass
 
-    def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
-        """Return one stable native-review authorization snapshot."""
+    def effective_merge_policy(
+        self,
+        pr_number: int,
+        base_branch: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> Any:
+        """Return one stable classic-and-ruleset merge-policy snapshot."""
         pass
 
-    def repository_permission_for_actor(self, login: str) -> str:
-        """Return the actor's current repository permission."""
-        pass
-
-    def base_branch_requires_conversation_resolution(
-        self, pr_number: int, base_branch: str
+    def required_checks_pass_for_head(
+        self,
+        head_sha: str,
+        policy: Any,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
     ) -> bool:
-        """Return whether this PR base branch has server-enforced conversation resolution.
-
-        The read is scoped to the accessor's explicit repository and the exact
-        base branch admitted for ``pr_number``. Admission requires enforced
-        conversation resolution and administrator enforcement, with no
-        explicit PR-bypass allowances. ``False`` includes an absent,
-        unreadable, or malformed branch-protection response and must prevent a
-        normal merge request.
-        """
-        ...
+        """Return whether required status evidence passes for ``head_sha``."""
+        pass
 
     def merge_pr_if_head(
         self,
         pr_number: int,
         reviewed_sha: str,
-        authorization: MergeAuthorization,
+        *,
+        policy: Any,
+        pull_request_id: str | None = None,
+        deadline_s: float | None = None,
+        cancellation: threading.Event | None = None,
     ) -> ConditionalMergeResult:
-        """Perform one authorized normal merge conditional on ``reviewed_sha``."""
+        """Request one server-enforced merge route for the reviewed head."""
         pass
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
@@ -673,6 +683,7 @@ class StageContext:
     event_fn: Callable[[StageEvent], None] | None = None
     learning_journal: Any = None
     plan_review_sessions: Any = None
+    cancellation: threading.Event = field(default_factory=threading.Event)
     # Per-Coordinator one-shot consumption state for plan-review session
     # resets. The coordinator copies this from the immutable
     # ``PipelineConfig.reset_plan_review_sessions`` frozenset so stages can
@@ -754,6 +765,7 @@ def source_workspace_binding(
     *,
     revision: str | None = None,
     branch: str | None = None,
+    preparation_timeout_s: float | None = None,
 ) -> WorkspaceBinding | None:
     """Prepare a typed source lane when production workspace ownership is wired.
 
@@ -784,10 +796,26 @@ def source_workspace_binding(
     )
     if len(target) != 40:
         raise RuntimeError("source workspace requires a captured full revision")
-    binding: WorkspaceBinding = manager.prepare(item_number, lane, target, branch=branch)
+    if preparation_timeout_s is None:
+        binding = manager.prepare(item_number, lane, target, branch=branch)
+    else:
+        if preparation_timeout_s <= 0:
+            raise ValueError("preparation_timeout_s must be positive")
+        clock = ctx.now_fn or time.monotonic
+        deadline = _PreparationDeadline(
+            expires_at=clock() + preparation_timeout_s,
+            monotonic=clock,
+        )
+        binding = manager.prepare_bounded(
+            item_number,
+            lane,
+            target,
+            branch=branch,
+            deadline=deadline,
+        )
     if lane is SourceLane.IMPLEMENTATION:
         item.payload["_impl_source_revision"] = binding.revision
-    return binding
+    return cast(WorkspaceBinding, binding)
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

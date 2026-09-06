@@ -14,15 +14,31 @@ or `pull_request_target` events. `pr_review` applies
 `state:implementation-go` only after a structural audit and fresh live GitHub
 facts confirm the exact open, unarmed reviewed head, complete thread state, and
 exclusive label transition by readback. `merge_wait` consumes that loop-owned
-label with its process-local reviewed-head proof and one trusted, unedited
-marked `APPROVED` GitHub review for that exact SHA; restarted labels re-enter
-review because the process-local proof is not durable. CI/CD never creates
-operator authorization or independently produces the native review artifact.
+label with its process-local reviewed-head proof and complete passing required
+status evidence for that exact SHA. Restarted labels re-enter review because
+the process-local proof is not durable. A required Check Run must have the
+`completed` status and a `success`, `neutral`, or `skipped` conclusion. A
+required commit status must have the `success` state. An unbound required
+context can use either source. A positive GitHub App binding requires a Check
+Run from that exact application; a commit status cannot satisfy it. The gate
+selects required Check Runs by name before it validates the application and
+result fields. Thus, an optional Check Run with a schema-valid null application
+does not revoke merge eligibility. The gate still validates all page and run
+identities. If both
+sources use the same required context, both sources must pass. Each required
+Check Run uses its completion time. Each required commit status uses its update
+time. The time must be in the inclusive seven-day period before the controlled
+UTC read time. A missing, malformed, future, or expired time fails closed.
+Required status evidence does not create review authorization or replace the
+structural review. The merge gate does not require a second GitHub user or a
+marked `APPROVED` review. The effective policy selects exact-head merge-queue
+admission when a ruleset requires it. A direct merge requires strict-update
+protection from a source that the current actor cannot bypass.
 
 ## Queue pre-PR source checks
 
 Before publishing a Hephaestus implementation, the queue runs the fixed command
-`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all`. Rebuilding the
+`bash scripts/run_ci_local.sh all --rebuild`. Rebuilding the
 CI image prevents a prior checkout's dependency environment from weakening the
 gate. Each invocation builds from an explicit allowlisted context, captures its
 own immutable image ID, and runs every container step against that ID; parallel
@@ -44,6 +60,21 @@ integration tests, installed-CLI tests, artifact lifecycle validation,
 security scans, schema and version checks, license policy, shell checks, and
 repository structure checks. A failure returns to the bounded implementation
 test-fix loop instead of publishing a knowingly red branch.
+
+For each platform, the shell reports an approved runner-initialization failure.
+Approved failures are an absent engine, an unavailable engine, and a failed
+no-op container-start probe. The shell exits with code 75 and writes one exact
+terminal protocol record. The queue validates the record. On macOS, the queue
+runs `uv run pytest tests -q --tb=short`. On other platforms, the queue stops
+with `pre_pr_runner_unavailable`. A failure in native verification still
+returns the item to the bounded test-fix loop.
+
+The stage puts only the fixed command and source revision in the build job.
+The closed worker resolves the system executables. Its launcher reads the
+runner and its sourced helper through no-follow directory descriptors. It
+compares both files with the immutable implementation-source tree. It executes
+anonymous snapshots of the verified bytes. A path rename, symlink change, or
+candidate marker cannot grant native-fallback authority.
 
 This local pass cannot run checks whose inputs do not exist until GitHub creates
 the PR. `pr-policy` still validates the live PR body, title, commit subjects,

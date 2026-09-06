@@ -35,7 +35,9 @@ def _binding() -> MnemosyneBindingReceipt:
         root="/tmp/knowledge",
         repository="HomericIntelligence/Mnemosyne",
         default_branch="main",
+        version="3.0.0",
         commit_sha=SHA,
+        sync_status="updated",
         trust_basis="canonical upstream",
         athena_contract=_contract().to_dict(),
     )

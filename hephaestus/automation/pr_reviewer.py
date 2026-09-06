@@ -197,12 +197,11 @@ def main() -> int:
             json_out=args.json,
             scope=PipelineScope(_PR_REVIEWER_SCOPE_STAGES),
             gh_extra_path_root=args.gh_extra_path_root,
+            explicit_pr_review=True,
         )
 
         rc = run_pipeline(config)
         log.info("PR review complete (rc=%d)", rc)
-        if args.json:
-            emit_json_status(rc, issues=issues)
         return rc
 
     except KeyboardInterrupt:

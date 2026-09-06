@@ -13,6 +13,7 @@ envelope extension when ``--json`` is active.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from collections import Counter
 from collections.abc import Sequence
@@ -24,6 +25,44 @@ from hephaestus.cli.utils import emit_json_status
 logger = logging.getLogger(__name__)
 
 _SUMMARY_ACTIONS_KEY = "_planning_summary_actions"
+_REVIEW_RUN_KEY = "_pr_review_run"
+_EXPLICIT_REVIEW_RUN_REASON = "explicit-review"
+_FULL_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+
+def record_review_run(item: WorkItem, *, reason: str, head_sha: str) -> None:
+    """Record one bounded explicit-review completion reason on an item."""
+    if reason != _EXPLICIT_REVIEW_RUN_REASON:
+        raise ValueError("unsupported review run reason")
+    if not isinstance(head_sha, str) or _FULL_SHA_PATTERN.fullmatch(head_sha) is None:
+        raise ValueError("review run head must be a lowercase full commit SHA")
+    item.payload[_REVIEW_RUN_KEY] = {"reason": reason, "head_sha": head_sha}
+
+
+def _review_run(item: WorkItem) -> tuple[str, str] | None:
+    """Return a valid bounded review-run record, if one exists."""
+    raw = item.payload.get(_REVIEW_RUN_KEY)
+    if not isinstance(raw, dict):
+        return None
+    reason = raw.get("reason")
+    head_sha = raw.get("head_sha")
+    if (
+        reason != _EXPLICIT_REVIEW_RUN_REASON
+        or not isinstance(head_sha, str)
+        or _FULL_SHA_PATTERN.fullmatch(head_sha) is None
+    ):
+        return None
+    return reason, head_sha
+
+
+def _review_run_reasons(items: Sequence[WorkItem]) -> dict[str, int]:
+    """Count valid review-run records in the retained item window."""
+    reasons: Counter[str] = Counter()
+    for item in items:
+        review_run = _review_run(item)
+        if review_run is not None:
+            reasons[review_run[0]] += 1
+    return dict(sorted(reasons.items()))
 
 
 def record_summary_action(item: WorkItem, action: str) -> None:
@@ -175,6 +214,7 @@ class TerminalSummary:
     _dispositions: Counter[str] = field(default_factory=Counter)
     _per_stage: Counter[str] = field(default_factory=Counter)
     _planning_actions: Counter[str] = field(default_factory=Counter)
+    _review_run_reasons: Counter[str] = field(default_factory=Counter)
 
     def record(self, item: WorkItem) -> None:
         """Add one terminal or resumable item outcome to the aggregate."""
@@ -182,6 +222,9 @@ class TerminalSummary:
         self._dispositions[_disposition_bucket(item)] += 1
         self._per_stage[item.stage.value] += 1
         self._planning_actions.update(_summary_actions(item))
+        review_run = _review_run(item)
+        if review_run is not None:
+            self._review_run_reasons[review_run[0]] += 1
 
     def reset(self) -> None:
         """Start a fresh reseed-pass aggregate without retaining item identities."""
@@ -189,6 +232,7 @@ class TerminalSummary:
         self._dispositions.clear()
         self._per_stage.clear()
         self._planning_actions.clear()
+        self._review_run_reasons.clear()
 
     @property
     def dispositions(self) -> dict[str, int]:
@@ -204,6 +248,11 @@ class TerminalSummary:
     def planning_actions(self) -> dict[str, int]:
         """Return counts of autonomous planning actions taken by the run."""
         return dict(sorted(self._planning_actions.items()))
+
+    @property
+    def review_run_reasons(self) -> dict[str, int]:
+        """Return counts of bounded review-run completion reasons."""
+        return dict(sorted(self._review_run_reasons.items()))
 
 
 def _json_message(exit_code: int) -> str:
@@ -264,6 +313,13 @@ def print_summary(
     logger.info("  %s", "-" * (len(header) - 2))
     for item in items:
         logger.info("%s", _item_row(item))
+        review_run = _review_run(item)
+        if review_run is not None:
+            logger.info(
+                "    review-run reason=%s head=%s",
+                review_run[0],
+                review_run[1],
+            )
         cycle_id = item.payload.get("plan_review_cycle_id")
         if cycle_id:
             logger.info(
@@ -286,11 +342,13 @@ def print_summary(
             planning_action_counter.update(_summary_actions(item))
         total_items = len(items)
         planning_actions = dict(sorted(planning_action_counter.items()))
+        review_run_reasons = _review_run_reasons(items)
     else:
         dispositions = terminal_summary.dispositions
         per_stage = terminal_summary.per_stage
         total_items = terminal_summary.total
         planning_actions = terminal_summary.planning_actions
+        review_run_reasons = terminal_summary.review_run_reasons
 
     logger.info("")
     logger.info("=== Aggregates ===")
@@ -298,6 +356,8 @@ def print_summary(
     logger.info("  per-stage: %s", dict(sorted(per_stage.items())))
     if planning_actions:
         logger.info("  planning-actions: %s", planning_actions)
+    if review_run_reasons:
+        logger.info("  review-run reasons: %s", review_run_reasons)
     if terminal_summary is not None and total_items > len(items):
         logger.info("  detailed terminal rows retained: %d of %d", len(items), total_items)
     logger.info(
@@ -343,6 +403,7 @@ def print_summary(
             message=_json_message(stats.exit_code),
             dispositions=dict(sorted(dispositions.items())),
             planning_actions=planning_actions,
+            review_run_reasons=review_run_reasons,
             loops_run=stats.loops_run,
             agent_jobs=stats.agent_job_count,
             agent_job_time_s=round(stats.agent_job_time_s, 1),

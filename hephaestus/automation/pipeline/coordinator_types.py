@@ -304,6 +304,9 @@ class PipelineConfig:
     issue_limit: int | None = None
     enable_learn: bool = True
     reset_plan_review_sessions: frozenset[int] = frozenset()
+    # Set only by the standalone PR-review wrapper. Marks direct requests so
+    # stale implementation labels do not route a retry into remediation first.
+    explicit_pr_review: bool = False
 
     @property
     def enable_advise(self) -> bool:

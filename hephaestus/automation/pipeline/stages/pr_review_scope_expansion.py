@@ -153,9 +153,15 @@ class PrReviewScopeExpansionMixin:
             item.payload["writer_worktree"] = item.worktree
             item.payload["reviewer_checkout_needed"] = True
             item.worktree = ""
-        thread_outcome = self._route_existing_threads_before_audit(item, ctx)
-        if thread_outcome is not None:
-            return cast(StepResult, thread_outcome)
+        if item.payload.get("explicit_pr_review"):
+            # An explicit operator request starts a fresh audit. Keep the
+            # current-head checks in the checkout path, but do not send old
+            # unresolved threads to implementation before that audit runs.
+            item.payload["existing_pr"] = True
+        else:
+            thread_outcome = self._route_existing_threads_before_audit(item, ctx)
+            if thread_outcome is not None:
+                return cast(StepResult, thread_outcome)
         if not item.worktree and (
             item.kind is ItemKind.PR
             or item.payload.get("existing_pr")

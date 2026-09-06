@@ -997,7 +997,9 @@ class TestPlanReviewStageStep:
             root=str(tmp_path / "mnemosyne"),
             repository="HomericIntelligence/Mnemosyne",
             default_branch="main",
+            version="3.0.0",
             commit_sha="b" * 40,
+            sync_status="updated",
             trust_basis="test",
             athena_contract={},
         )

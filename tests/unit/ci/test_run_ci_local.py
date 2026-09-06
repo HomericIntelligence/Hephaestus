@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -15,6 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNNER = REPO_ROOT / "scripts" / "run_ci_local.sh"
 FAKE_IMAGE_ID = f"sha256:{'a' * 64}"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+RUNNER_FAILURE_MARKER = "HEPHAESTUS_CI_RUNNER_FAILURE:"
+SYSTEM_PATH = os.defpath
 
 
 def _fake_engine(
@@ -25,6 +28,11 @@ def _fake_engine(
     license_violation: bool = False,
     image_exists: bool = True,
     image_id: str = FAKE_IMAGE_ID,
+    build_fails: bool = False,
+    inspect_fails: bool = False,
+    start_probe_fails: bool = False,
+    validator_marker_command: str = "",
+    git_failing_command: str = "",
     external_git_common_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     """Create a controlled container-engine boundary that records invocations."""
@@ -34,6 +42,20 @@ def _fake_engine(
         f'  [[ "$*" == *{failing_command!r}* ]] && exit 37\n' if failing_command else ""
     )
     info_failure_clause = 'if [[ "$1" == "info" ]]; then exit 1; fi\n' if info_fails else ""
+    build_failure_clause = "  exit 29\n" if build_fails else ""
+    inspect_failure_clause = "exit 31; " if inspect_fails else ""
+    start_probe_failure_clause = (
+        '  [[ "${!#}" == "true" ]] && exit 33\n' if start_probe_fails else ""
+    )
+    validator_marker_clause = (
+        f'  if [[ "$*" == *{validator_marker_command!r}* ]]; then\n'
+        '    printf "validator: HEPHAESTUS_CI_RUNNER_FAILURE: '
+        'container-engine-unavailable\\n" >&2\n'
+        "    exit 75\n"
+        "  fi\n"
+        if validator_marker_command
+        else ""
+    )
     license_violation_clause = (
         '  [[ "$FAKE_LICENSE_VIOLATION" == "1" && "$*" == *'
         '"env GITHUB_EVENT_NAME=pull_request uv run python '
@@ -49,11 +71,13 @@ def _fake_engine(
             + 'if [[ "$1" == "image" && "$2" == "exists" ]]; then '
             f"exit {0 if image_exists else 1}; fi\n"
             'if [[ "$1" == "image" && "$2" == "inspect" ]]; then '
-            f'printf "%s\\n" "{image_id}"; exit 0; fi\n'
+            + inspect_failure_clause
+            + f'printf "%s\\n" "{image_id}"; exit 0; fi\n'
             'if [[ "$1" == "image" && "$2" == "rm" ]]; then exit 0; fi\n'
             'if [[ "$1" == "images" ]]; then exit 0; fi\n'
             'if [[ "$1" == "build" ]]; then\n'
-            '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
+            + build_failure_clause
+            + '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
             '  previous=""\n'
             '  for arg in "$@"; do\n'
@@ -110,7 +134,13 @@ def _fake_engine(
             '    cat "$candidate_root/new_secret_source.txt" >> "$FAKE_ENGINE_LOG"\n'
             '    if grep -q "fixture-secret-value" '
             '"$candidate_root/new_secret_source.txt"; then exit 42; fi\n'
-            "  fi\n" + failure_clause + license_violation_clause + "fi\n" + "exit 0\n"
+            "  fi\n"
+            + start_probe_failure_clause
+            + validator_marker_clause
+            + failure_clause
+            + license_violation_clause
+            + "fi\n"
+            + "exit 0\n"
         ),
         encoding="utf-8",
     )
@@ -125,13 +155,22 @@ def _fake_engine(
             encoding="utf-8",
         )
         executable.chmod(0o755)
-    if external_git_common_dir is not None:
+    if external_git_common_dir is not None or git_failing_command:
         git = tmp_path / "git"
         git.write_text(
             (
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
-                f'printf "%s\\n" "{external_git_common_dir}"\n'
+                + (
+                    f'[[ "$*" == *{git_failing_command!r}* ]] && exit 41\n'
+                    if git_failing_command
+                    else ""
+                )
+                + (
+                    f'printf "%s\\n" "{external_git_common_dir}"\n'
+                    if external_git_common_dir is not None
+                    else 'exec /usr/bin/git "$@"\n'
+                )
             ),
             encoding="utf-8",
         )
@@ -143,7 +182,7 @@ def _run_runner(
     tmp_path: Path,
     subset: str,
     *,
-    engine_name: str = "podman",
+    engine_name: str | None = "podman",
     failing_command: str = "",
     info_fails: bool = False,
     license_violation: bool = False,
@@ -151,11 +190,18 @@ def _run_runner(
     host_gid: int | None = None,
     image_exists: bool = True,
     image_id: str = FAKE_IMAGE_ID,
+    build_fails: bool = False,
+    inspect_fails: bool = False,
+    start_probe_fails: bool = False,
+    validator_marker_command: str = "",
+    git_failing_command: str = "",
     rebuild_image: bool = False,
     external_git_common_dir: Path | None = None,
     repo_root: Path = REPO_ROOT,
     color_environment: dict[str, str] | None = None,
     machine_architecture: str | None = None,
+    machine_system: str | None = None,
+    execution_path: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -165,9 +211,19 @@ def _run_runner(
         license_violation=license_violation,
         image_exists=image_exists,
         image_id=image_id,
+        build_fails=build_fails,
+        inspect_fails=inspect_fails,
+        start_probe_fails=start_probe_fails,
+        validator_marker_command=validator_marker_command,
+        git_failing_command=git_failing_command,
         external_git_common_dir=external_git_common_dir,
     )
-    if engine_name != "podman":
+    bash = shutil.which("bash")
+    assert bash is not None
+    (tmp_path / "bash").symlink_to(bash)
+    if engine_name is None:
+        engine_path.unlink()
+    elif engine_name != "podman":
         docker = engine_path.with_name(engine_name)
         engine_path.rename(docker)
     if host_uid is not None and host_gid is not None:
@@ -191,18 +247,37 @@ def _run_runner(
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
                 f'[[ "$1" == "-m" ]] && printf "%s\\n" "{machine_architecture}" && exit 0\n'
-                'printf "unsupported uname argument: %s\\n" "$1" >&2\n'
-                "exit 2\n"
+                + (
+                    f'[[ "$1" == "-s" ]] && printf "%s\\n" "{machine_system}" && exit 0\n'
+                    if machine_system is not None
+                    else ""
+                )
+                + 'exec /usr/bin/uname "$@"\n'
+            ),
+            encoding="utf-8",
+        )
+        uname.chmod(0o755)
+    elif machine_system is not None:
+        uname = tmp_path / "uname"
+        uname.write_text(
+            (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f'[[ "$1" == "-s" ]] && printf "%s\\n" "{machine_system}" && exit 0\n'
+                'exec /usr/bin/uname "$@"\n'
             ),
             encoding="utf-8",
         )
         uname.chmod(0o755)
     environment = os.environ | {
-        "CONTAINER_ENGINE": engine_name,
         "FAKE_ENGINE_LOG": str(log),
         "FAKE_LICENSE_VIOLATION": "1" if license_violation else "0",
-        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "PATH": execution_path or f"{tmp_path}{os.pathsep}{SYSTEM_PATH}",
     }
+    if engine_name is None:
+        environment.pop("CONTAINER_ENGINE", None)
+    else:
+        environment["CONTAINER_ENGINE"] = engine_name
     for name in ("NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
         environment.pop(name, None)
     if color_environment:
@@ -218,15 +293,74 @@ def _run_runner(
         capture_output=True,
         check=False,
     )
-    return result, log.read_text(encoding="utf-8") if log.exists() else ""
+    log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+    return result, log_text
 
 
-def test_unavailable_selected_engine_emits_runner_failure_marker(tmp_path: Path) -> None:
-    """The wrapper makes a selected-but-unavailable engine distinguishable from checks."""
-    result, _ = _run_runner(tmp_path, "lint", info_fails=True)
+def _assert_runner_handoff(result: subprocess.CompletedProcess[str], reason: str) -> None:
+    """Assert that the shell wrote one terminal runner handoff record."""
+    assert result.returncode == 75
+    assert result.stderr.count(RUNNER_FAILURE_MARKER) == 1
+    assert result.stderr.endswith(f"{RUNNER_FAILURE_MARKER} {reason}\n")
 
-    assert result.returncode != 0
-    assert "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable" in result.stderr
+
+def test_unavailable_selected_engine_is_not_a_subset_handoff(tmp_path: Path) -> None:
+    """A runner failure cannot hand off a non-``all`` subset."""
+    result, _ = _run_runner(tmp_path, "lint", info_fails=True, machine_system="Darwin")
+
+    assert result.returncode == 1
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+
+
+def test_unavailable_engine_on_macos_emits_terminal_handoff(tmp_path: Path) -> None:
+    """A macOS ``all`` run can report an unavailable container engine."""
+    result, _ = _run_runner(tmp_path, "all", info_fails=True, machine_system="Darwin")
+
+    _assert_runner_handoff(result, "container-engine-unavailable")
+
+
+def test_unavailable_engine_on_macos_does_not_replace_lint(tmp_path: Path) -> None:
+    """A non-pre-PR subset keeps its ordinary container-runner failure."""
+    result, _ = _run_runner(tmp_path, "lint", info_fails=True, machine_system="Darwin")
+
+    assert result.returncode == 1
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+
+
+def test_absent_engine_on_macos_emits_hermetic_handoff(tmp_path: Path) -> None:
+    """Engine discovery cannot use an engine from the ambient host path."""
+    closed_tools = tmp_path / "closed-tools"
+    closed_tools.mkdir()
+    for command in ("bash", "dirname"):
+        executable = shutil.which(command)
+        assert executable is not None
+        (closed_tools / command).symlink_to(executable)
+    closed_path = str(closed_tools)
+    assert shutil.which("podman", path=closed_path) is None
+    assert shutil.which("docker", path=closed_path) is None
+
+    result, _ = _run_runner(
+        tmp_path,
+        "all",
+        engine_name=None,
+        execution_path=closed_path,
+    )
+
+    _assert_runner_handoff(result, "container-engine-absent")
+
+
+def test_container_start_probe_failure_emits_terminal_handoff(tmp_path: Path) -> None:
+    """A failed no-op container start has its own handoff reason."""
+    result, _ = _run_runner(tmp_path, "all", start_probe_fails=True, machine_system="Darwin")
+
+    _assert_runner_handoff(result, "container-start-failed")
+
+
+def test_runner_failure_on_non_macos_emits_terminal_protocol(tmp_path: Path) -> None:
+    """Each platform reports the same runner-initialization protocol."""
+    result, _ = _run_runner(tmp_path, "all", info_fails=True, machine_system="Linux")
+
+    _assert_runner_handoff(result, "container-engine-unavailable")
 
 
 def _candidate_repo(tmp_path: Path) -> Path:
@@ -470,6 +604,96 @@ def test_queue_mode_rebuilds_an_existing_ci_image(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("require_git_path_format")
 @pytest.mark.parametrize(
+    ("runner_kwargs", "expected_error"),
+    [
+        ({"git_failing_command": "read-tree HEAD"}, "candidate index"),
+        ({"git_failing_command": "--git-path objects"}, "Git objects"),
+        ({"machine_architecture": "sparc64"}, "Unsupported local CI build architecture"),
+        ({"build_fails": True}, "Failed to build local CI image"),
+    ],
+)
+def test_source_and_image_build_failures_never_request_native_handoff(
+    tmp_path: Path,
+    runner_kwargs: dict[str, Any],
+    expected_error: str,
+) -> None:
+    """Source, architecture, and image-build failures stay blocking."""
+    result, _ = _run_runner(
+        tmp_path,
+        "all",
+        rebuild_image=True,
+        machine_system="Darwin",
+        **runner_kwargs,
+    )
+
+    assert result.returncode == 1
+    assert expected_error in result.stderr
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+
+
+def test_image_inspection_failure_never_requests_native_handoff(tmp_path: Path) -> None:
+    """An image-inspection failure stays blocking on macOS."""
+    result, _ = _run_runner(
+        tmp_path,
+        "all",
+        inspect_fails=True,
+        machine_system="Darwin",
+    )
+
+    assert result.returncode == 1
+    assert "Unable to resolve immutable ID" in result.stderr
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+
+
+def test_invalid_image_id_never_requests_native_handoff(tmp_path: Path) -> None:
+    """An invalid engine-owned image identity stays blocking on macOS."""
+    result, _ = _run_runner(
+        tmp_path,
+        "all",
+        image_id="mutable-tag",
+        machine_system="Darwin",
+    )
+
+    assert result.returncode == 1
+    assert "invalid image ID" in result.stderr
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+
+
+@pytest.mark.usefixtures("require_git_path_format")
+def test_missing_build_input_never_requests_native_handoff(tmp_path: Path) -> None:
+    """A missing allowlisted build input stays blocking on macOS."""
+    repo = _buildable_candidate_repo(tmp_path)
+    (repo / "README.md").unlink()
+
+    result, _ = _run_runner(
+        tmp_path,
+        "all",
+        image_exists=False,
+        machine_system="Darwin",
+        repo_root=repo,
+    )
+
+    assert result.returncode == 1
+    assert "Unable to prepare the local CI build context" in result.stderr
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+
+
+def test_validator_marker_like_output_is_not_runner_protocol(tmp_path: Path) -> None:
+    """A validator cannot create a terminal runner handoff record."""
+    result, _ = _run_runner(
+        tmp_path,
+        "all",
+        validator_marker_command="pytest tests/unit",
+        machine_system="Darwin",
+    )
+
+    assert result.returncode == 1
+    assert f"validator: {RUNNER_FAILURE_MARKER}" in result.stderr
+    assert not result.stderr.endswith(f"{RUNNER_FAILURE_MARKER} container-engine-unavailable\n")
+
+
+@pytest.mark.usefixtures("require_git_path_format")
+@pytest.mark.parametrize(
     ("machine_architecture", "target_arch"),
     [("x86_64", "amd64"), ("aarch64", "arm64")],
 )
@@ -519,10 +743,17 @@ def test_image_build_rejects_allowlisted_symlink_sources(tmp_path: Path) -> None
     pyproject.unlink()
     pyproject.symlink_to((repo / "ignored.env").resolve())
 
-    result, log = _run_runner(tmp_path, "unit", image_exists=False, repo_root=repo)
+    result, log = _run_runner(
+        tmp_path,
+        "all",
+        image_exists=False,
+        machine_system="Darwin",
+        repo_root=repo,
+    )
 
     assert result.returncode != 0
     assert "Candidate build source must be a regular file" in result.stderr
+    assert RUNNER_FAILURE_MARKER not in result.stderr
     assert "build --iidfile" not in log
 
 
@@ -536,10 +767,17 @@ def test_image_build_rejects_allowlisted_symlink_ancestors(tmp_path: Path) -> No
     (external_ci / "Containerfile").write_text("FROM scratch\n", encoding="utf-8")
     (repo / "ci").symlink_to(external_ci.resolve(), target_is_directory=True)
 
-    result, log = _run_runner(tmp_path, "unit", image_exists=False, repo_root=repo)
+    result, log = _run_runner(
+        tmp_path,
+        "all",
+        image_exists=False,
+        machine_system="Darwin",
+        repo_root=repo,
+    )
 
     assert result.returncode != 0
     assert "Candidate build source must be a regular file" in result.stderr
+    assert RUNNER_FAILURE_MARKER not in result.stderr
     assert "build --iidfile" not in log
 
 

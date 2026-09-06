@@ -23,6 +23,7 @@ from ..github_jobs import (
     ReconcilePrReviewRequest,
     ReplyHandoffAttempted,
 )
+from ..summary import record_review_run
 from .base import source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_recovery import (
@@ -54,16 +55,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         return StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Hydrate review inputs, require an unarmed PR, and reset the round counter.
+        """Hydrate review inputs, require an unarmed PR, and reset the review round.
 
-        The per-cycle review budget lives in ``payload["pr_review_round"]``.
-        Its reset keys on ``attempts["implement"]``
-        so it fires exactly once per implementation pass: a same-cycle
-        re-entry (e.g. the ERROR-path RETRY) keeps its round count and its
-        Args:
-            item: The work item being processed.
-            ctx: The stage context.
-
+        The counter resets once per implementation pass.
         """
         if item.pr is not None:
             item.payload.pop("reviewed_pr_head_sha", None)
@@ -403,7 +397,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload["review_job_pending"] = True
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
 
-    def _route_threads_before_broad_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _route_threads_before_broad_review(  # noqa: C901
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
         """Route threads appearing during checkout before broad review."""
         if item.pr is None:
             return self._cleanup_review_worktree_then(
@@ -461,6 +457,12 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_invalid"),
             )
+        if item.payload.get("explicit_pr_review"):
+            empty_diff = empty_diff_outcome(item)
+            if empty_diff:
+                return self._cleanup_review_worktree_then(item, empty_diff)
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            return self._submit_review_job(item, ctx)
         if all(bool(snapshot.get("implementation_reply_submitted")) for snapshot in snapshots):
             item.payload[_COMMENT_VALIDATION_ONLY] = True
             return Continue(next_state=VALIDATE_WAIT)
@@ -591,14 +593,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                     verification,
                     str(receipt.get("error") or "host_verification_receipt_invalid"),
                 )
-            if receipt["ok"] or receipt.get("status") == "skipped":
-                continue
-            return self._handle_host_verification_failure(
-                item,
-                ctx,
-                verification,
-                str(receipt.get("error") or "host_verification_failed"),
-            )
         if len(matched_receipts) < len(verifications):
             return self._submit_host_verification(item, ctx, verifications[len(matched_receipts)])
         if not _host_verification_receipts_match(receipts, verifications, reviewed_head):
@@ -866,7 +860,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         is_review_result = review_job_pending or item.state == REVIEW_WAIT
         if self._consume_failed_job(item, result, is_review_result):
             return
-
         if item.state == PUSH_WAIT:
             # Real-commit gate (#1575): commit_push reports whether a commit
             # was actually produced (value/changed True). A no-commit push
@@ -928,9 +921,16 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item.payload.pop("reviewed_pr_head_sha", None)
             item.payload["push_no_commit"] = not produced_commit
             return
-
         if is_review_result and result.value is not None:
-            self._store_review_result(item, result.value)
+            valid_review_result = self._store_review_result(item, result.value)
+            if (
+                valid_review_result
+                and review_job_pending
+                and item.payload.get("explicit_pr_review")
+            ):
+                reviewed_head = item.payload.get("reviewed_pr_head_sha")
+                if isinstance(reviewed_head, str) and is_full_commit_sha(reviewed_head):
+                    record_review_run(item, reason="explicit-review", head_sha=reviewed_head)
         elif item.state == VALIDATE_WAIT and result.value is not None:
             item.payload["validation_result"] = result.value
         elif item.state == ADDRESS_WAIT and result.value is not None:
@@ -1039,19 +1039,20 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         return True
 
     @staticmethod
-    def _store_review_result(item: WorkItem, value: object) -> None:
-        """Persist one structural reviewer result."""
+    def _store_review_result(item: WorkItem, value: object) -> bool:
+        """Persist one structural reviewer result and report if it is valid."""
         if isinstance(value, _ParsedReviewResponse):
             item.payload["review_audit"] = value.audit
             item.payload["review_feedback"] = value.audit.raw_feedback
             item.payload["review_threads"] = [dict(comment) for comment in value.audit.findings]
-            return
+            return value.audit.valid
         if isinstance(value, ReviewAudit):
             item.payload["review_audit"] = value
             item.payload["review_feedback"] = value.raw_feedback
             item.payload["review_threads"] = [dict(comment) for comment in value.findings]
-            return
+            return value.valid
         item.payload["review_audit_failure"] = True
+        return False
 
     @staticmethod
     def _on_direct_pr_worktree_done(item: WorkItem, result: JobResult) -> None:
