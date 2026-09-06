@@ -146,6 +146,10 @@ from hephaestus.automation.pipeline.tool_scopes import (
     tool_scope_for,
 )
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
+from hephaestus.automation.pyxis_artifact_io import (
+    CrossNodePathBinding,
+    bind_cross_node_root,
+)
 from hephaestus.automation.remediation_prepublication import (
     RemediationPretestCandidate,
     canonical_source_receipt_json,
@@ -1772,6 +1776,7 @@ def _run_bounded_host_command(
     timeout_s: int,
     shutdown: threading.Event,
     additional_writable_paths: tuple[Path, ...] = (),
+    pre_launch: Callable[[], None] | None = None,
 ) -> JobResult:
     """Run the sandboxed child with bounded files, time, and scratch usage."""
     output = scratch / "outputs"
@@ -1780,6 +1785,8 @@ def _run_bounded_host_command(
     stderr_path = output / "stderr.log"
     try:
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            if pre_launch is not None:
+                pre_launch()
             process = subprocess.Popen(
                 command,
                 cwd=str(source),
@@ -4965,7 +4972,10 @@ class WorkerPool:
             )
             if self._host_verification_pyxis_quota_root is None:
                 raise ValueError("Pyxis writable quota root is missing")
-            quota_root = _validate_pyxis_quota_root(self._host_verification_pyxis_quota_root)
+            quota_value = _validate_pyxis_quota_root(
+                self._host_verification_pyxis_quota_root,
+                retain_binding=True,
+            )
         except (OSError, ValueError):
             return JobResult(
                 ok=False,
@@ -4981,57 +4991,102 @@ class WorkerPool:
 
         git_executable = _trusted_git_executable()
         if git_executable is None:
+            if isinstance(quota_value, CrossNodePathBinding):
+                quota_value.close()
             return JobResult(ok=False, error="host_verification_git_unavailable")
         try:
-            with tempfile.TemporaryDirectory(
-                prefix=".hephaestus-pyxis-exec-", dir=image.path.parent
-            ) as staging_dir:
-                # Pyxis resolves every mount on the execution node. Keep the
-                # image, source, and Git metadata in one private directory on
-                # the shared filesystem that contains the authorized image.
-                root = Path(staging_dir)
-                staged_image = _stage_verified_pyxis_image(image, root)
-                source = root / "source"
-                source.mkdir()
-                archive, _archive_stderr = _bounded_git_archive(
-                    job.cwd, job.expected_head_sha, job.timeout_s
+            with ExitStack() as bindings:
+                quota_binding = (
+                    quota_value
+                    if isinstance(quota_value, CrossNodePathBinding)
+                    else bind_cross_node_root(Path(quota_value))
                 )
-                _extract_immutable_archive(archive, source)
-                git_metadata = _prepare_immutable_git_metadata(
-                    job.cwd, job.expected_head_sha, source, root, git_executable
-                )
+                bindings.callback(quota_binding.close)
+                quota_root = quota_binding.path
                 with tempfile.TemporaryDirectory(
-                    prefix="hephaestus-host-verification-run-", dir=quota_root
-                ) as quota_temp_dir:
-                    quota_run = Path(quota_temp_dir)
-                    scratch = quota_run / "scratch"
-                    scratch.mkdir(mode=0o700)
-                    pi_smoke_logs = quota_run / "pi-smoke-logs"
-                    pi_smoke_logs.mkdir(mode=0o700)
-                    (source / "pi-smoke-logs").mkdir()
-                    _prepare_host_output_aliases(source, scratch)
-                    _seal_host_runtime(source)
-                    environment = _build_pyxis_environment(source=source, scratch=scratch)
-                    command = _build_pyxis_srun_command(
-                        image=staged_image,
-                        source=source,
-                        git_metadata=git_metadata,
-                        scratch=scratch,
-                        pi_smoke_logs=pi_smoke_logs,
-                        argv=job.argv,
-                        environment=environment,
-                        timeout_s=job.timeout_s,
-                    )
-                    result = _run_bounded_host_command(
-                        _linux_resource_limited_command(command, timeout_s=job.timeout_s),
-                        validation_argv=job.argv,
-                        source=source,
-                        scratch=scratch,
-                        additional_writable_paths=(pi_smoke_logs,),
-                        environment=environment,
-                        timeout_s=job.timeout_s,
-                        shutdown=self._shutdown,
-                    )
+                    prefix=".hephaestus-pyxis-exec-", dir=image.path.parent
+                ) as staging_dir:
+                    # Pyxis resolves every mount on the execution node. Keep the
+                    # image, source, and Git metadata in one private directory on
+                    # the shared filesystem that contains the authorized image.
+                    root = Path(staging_dir)
+                    staged_image = _stage_verified_pyxis_image(image, root)
+                    shared_binding = staged_image.launch_binding or bind_cross_node_root(root)
+                    with shared_binding:
+                        if staged_image.launch_binding is None:
+                            shared_binding.bind_path(
+                                staged_image.path,
+                                kind="regular",
+                                expected_sha256=staged_image.sha256,
+                                require_read_only=True,
+                            )
+                        source = root / "source"
+                        source.mkdir()
+                        archive, _archive_stderr = _bounded_git_archive(
+                            job.cwd, job.expected_head_sha, job.timeout_s
+                        )
+                        _extract_immutable_archive(archive, source)
+                        git_metadata = _prepare_immutable_git_metadata(
+                            job.cwd, job.expected_head_sha, source, root, git_executable
+                        )
+                        with tempfile.TemporaryDirectory(
+                            prefix="hephaestus-host-verification-run-", dir=quota_root
+                        ) as quota_temp_dir:
+                            quota_binding.revalidate()
+                            quota_run = Path(quota_temp_dir)
+                            with bind_cross_node_root(quota_run) as run_binding:
+                                scratch = quota_run / "scratch"
+                                scratch.mkdir(mode=0o700)
+                                pi_smoke_logs = quota_run / "pi-smoke-logs"
+                                pi_smoke_logs.mkdir(mode=0o700)
+                                (source / "pi-smoke-logs").mkdir()
+                                _prepare_host_output_aliases(source, scratch)
+                                _seal_host_runtime(source)
+                                shared_binding.bind_path(
+                                    source,
+                                    kind="directory",
+                                    require_read_only=True,
+                                )
+                                shared_binding.bind_path(
+                                    git_metadata,
+                                    kind="directory",
+                                    require_read_only=True,
+                                )
+                                shared_binding.seal_root()
+                                run_binding.bind_path(scratch, kind="directory")
+                                run_binding.bind_path(pi_smoke_logs, kind="directory")
+                                environment = _build_pyxis_environment(
+                                    source=source, scratch=scratch
+                                )
+                                command = _build_pyxis_srun_command(
+                                    image=staged_image,
+                                    source=source,
+                                    git_metadata=git_metadata,
+                                    scratch=scratch,
+                                    pi_smoke_logs=pi_smoke_logs,
+                                    argv=job.argv,
+                                    environment=environment,
+                                    timeout_s=job.timeout_s,
+                                )
+
+                                def revalidate_launch_paths() -> None:
+                                    quota_binding.revalidate()
+                                    run_binding.revalidate()
+                                    shared_binding.revalidate()
+
+                                result = _run_bounded_host_command(
+                                    _linux_resource_limited_command(
+                                        command, timeout_s=job.timeout_s
+                                    ),
+                                    validation_argv=job.argv,
+                                    source=source,
+                                    scratch=scratch,
+                                    additional_writable_paths=(pi_smoke_logs,),
+                                    environment=environment,
+                                    timeout_s=job.timeout_s,
+                                    shutdown=self._shutdown,
+                                    pre_launch=revalidate_launch_paths,
+                                )
                 checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
                 if checkout_error is not None:
                     return JobResult(
