@@ -29,7 +29,7 @@ import hephaestus.automation.pipeline.stages.base as stage_base_mod
 import hephaestus.automation.pipeline.stages.pr_review as pr_review_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
 import hephaestus.prompts.catalog as prompt_catalog_mod
-from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_NO_GO, STATE_PLAN_GO
 from hephaestus.prompts import PromptCatalog
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -763,6 +763,39 @@ class TestSeedingEdges:
         assert item.kind is ItemKind.ISSUE
         assert item.issue == 1818
         assert item.pr == 1854
+
+    def test_explicit_review_intent_reaches_open_pr_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit review request reaches the direct open-PR item."""
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO, STATE_IMPLEMENTATION_NO_GO],
+            open_pr=1854,
+            pr_impl_state=(False, True),
+        )
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                issues=[1818],
+                projects_dir=tmp_path,
+                explicit_pr_review=True,
+            ),
+            github=github,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+
+        _complete_direct_scope_bootstrap(coordinator)
+
+        item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
+        assert item.payload["explicit_pr_review"] is True
+        assert item.payload["existing_pr"] is True
 
     def test_direct_issue_scope_uses_repo_scoped_github_accessor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
