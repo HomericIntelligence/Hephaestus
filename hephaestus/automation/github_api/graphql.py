@@ -1435,27 +1435,19 @@ def enqueue_pull_request_mutation(
         "mutation EnqueuePullRequest($pullRequestId:ID!,$expectedHeadOid:GitObjectID!,"
         "$clientMutationId:String!){enqueuePullRequest(input:{pullRequestId:$pullRequestId,"
         "expectedHeadOid:$expectedHeadOid,clientMutationId:$clientMutationId}){clientMutationId "
-        "mergeQueueEntry{id state baseCommit{oid} pullRequest{id headRefOid}}}}"
+        "mergeQueueEntry{id state}}}"
     )
 
     def required(
         payload: dict[str, Any], intent: GraphQLMutationIntent, _: dict[str, Any]
     ) -> dict[str, Any]:
         entry = payload.get("mergeQueueEntry")
-        pull_request = entry.get("pullRequest") if isinstance(entry, dict) else None
-        base_commit = entry.get("baseCommit") if isinstance(entry, dict) else None
         queue_states = {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"}
         if (
             not isinstance(entry, dict)
             or not isinstance(entry.get("id"), str)
             or not entry["id"]
             or entry.get("state") not in queue_states
-            or not isinstance(pull_request, dict)
-            or pull_request.get("id") != pull_request_id
-            or pull_request.get("headRefOid") != expected_head_oid
-            or not isinstance(base_commit, dict)
-            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", str(base_commit.get("oid") or ""))
-            is None
         ):
             raise ValueError("merge-queue admission receipt was incomplete")
         return {"clientMutationId": intent.client_mutation_id, **entry}

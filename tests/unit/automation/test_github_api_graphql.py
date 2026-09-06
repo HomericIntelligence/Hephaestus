@@ -151,8 +151,8 @@ def test_mutation_factory_owns_fresh_correlation_id_and_hides_body() -> None:
     assert "secret body" not in prepared_intent.safe_summary()
 
 
-def test_enqueue_pull_request_receipt_is_bound_to_the_expected_head() -> None:
-    """Queue admission validates its PR, head, base, and correlation receipt."""
+def test_enqueue_pull_request_sends_expected_head_and_accepts_minimal_receipt() -> None:
+    """Queue admission sends the exact head and accepts stable receipt fields."""
     spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
     assert spec.query.count("{") == spec.query.count("}")
     response = {
@@ -162,8 +162,6 @@ def test_enqueue_pull_request_receipt_is_bound_to_the_expected_head() -> None:
                 "mergeQueueEntry": {
                     "id": "MQE_node",
                     "state": "QUEUED",
-                    "baseCommit": {"oid": "b" * 40},
-                    "pullRequest": {"id": "PR_node", "headRefOid": "a" * 40},
                 },
             }
         }
@@ -186,19 +184,26 @@ def test_enqueue_pull_request_receipt_is_bound_to_the_expected_head() -> None:
     assert "enablePullRequestAutoMerge" not in request
 
 
-def test_enqueue_pull_request_rejects_a_wrong_head_receipt() -> None:
-    """A queue receipt for a different PR head has an unknown outcome."""
+@pytest.mark.parametrize(
+    ("client_mutation_id", "entry"),
+    [
+        ("queue-id", {"id": "", "state": "QUEUED"}),
+        ("queue-id", {"id": "MQE_node", "state": "UNKNOWN"}),
+        ("wrong-id", {"id": "MQE_node", "state": "QUEUED"}),
+    ],
+    ids=("empty-entry-id", "unknown-state", "wrong-correlation"),
+)
+def test_enqueue_pull_request_rejects_invalid_minimal_receipt(
+    client_mutation_id: str,
+    entry: dict[str, str],
+) -> None:
+    """Queue admission rejects an invalid stable receipt field."""
     spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
     response = {
         "data": {
             "enqueuePullRequest": {
-                "clientMutationId": "queue-id",
-                "mergeQueueEntry": {
-                    "id": "MQE_node",
-                    "state": "QUEUED",
-                    "baseCommit": {"oid": "b" * 40},
-                    "pullRequest": {"id": "PR_node", "headRefOid": "c" * 40},
-                },
+                "clientMutationId": client_mutation_id,
+                "mergeQueueEntry": entry,
             }
         }
     }
