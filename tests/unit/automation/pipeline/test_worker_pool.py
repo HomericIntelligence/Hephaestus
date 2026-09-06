@@ -2647,13 +2647,64 @@ class TestWorkerPoolSubmitComplete:
         """The Linux Slurm launcher inherits fixed OS limits before dispatch."""
         command = _linux_resource_limited_command(("srun", "--flag"), timeout_s=300)
 
-        assert command[:2] == ("/bin/sh", "-c")
-        script = command[2]
-        assert "ulimit -S -t 240" in script
-        assert "ulimit -S -f 131072" in script
-        assert "ulimit -S -u 64" in script
-        assert "ulimit -S -n 1024" in script
+        assert command[:4] == (sys.executable, "-I", "-S", "-c")
+        script = command[4]
+        assert "RLIMIT_CPU" in script
+        assert "RLIMIT_FSIZE" in script
+        assert "RLIMIT_NPROC" in script
+        assert "RLIMIT_NOFILE" in script
         assert command[-2:] == ("srun", "--flag")
+
+    def test_linux_resource_wrapper_executes_dash_with_exact_limits(self, tmp_path: Path) -> None:
+        """Dash can run after the Python boundary applies every inherited limit."""
+        dash = shutil.which("dash")
+        if dash is None:
+            pytest.skip("dash is unavailable")
+        probe = tmp_path / "limits.py"
+        probe.write_text(
+            "import resource\n"
+            "assert resource.getrlimit(resource.RLIMIT_CPU)[0] == 7\n"
+            "assert resource.getrlimit(resource.RLIMIT_FSIZE)[0] == 67108864\n"
+            "assert resource.getrlimit(resource.RLIMIT_NPROC)[0] == 64\n"
+            "assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == 1024\n",
+            encoding="utf-8",
+        )
+        command = _linux_resource_limited_command(
+            (
+                dash,
+                "-c",
+                'exec "$1" -I -S "$2"',
+                "dash",
+                sys.executable,
+                str(probe),
+            ),
+            timeout_s=7,
+        )
+
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+        assert result.returncode == 0, result.stderr
+
+    def test_linux_resource_wrapper_rejects_a_lower_hard_limit(self, tmp_path: Path) -> None:
+        """The boundary stops when the host cannot supply a required limit."""
+        limiter = tmp_path / "lower-hard-limit.py"
+        limiter.write_text(
+            "import os, resource, sys\n"
+            "resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))\n"
+            "os.execv(sys.argv[1], sys.argv[1:])\n",
+            encoding="utf-8",
+        )
+        command = _linux_resource_limited_command(("/bin/true",), timeout_s=7)
+
+        result = subprocess.run(
+            (sys.executable, "-I", "-S", str(limiter), *command),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "required resource limit exceeds hard limit" in result.stderr
 
     def test_bounded_host_command_enforces_each_writable_tree(self, tmp_path: Path) -> None:
         """An additional writable output tree has the same fixed quota."""

@@ -878,6 +878,19 @@ _HOST_VERIFICATION_PROCESS_HEADROOM = 64
 _HOST_VERIFICATION_POLL_S = 0.05
 _HOST_VERIFICATION_SETUP_TIMEOUT_S = 30
 _HOST_VERIFICATION_OPEN_FILES_MAX = 1024
+_LINUX_RESOURCE_LIMIT_BOOTSTRAP = (
+    "import os, resource, sys\n"
+    "limits = ((resource.RLIMIT_CPU, int(sys.argv[1])), "
+    "(resource.RLIMIT_FSIZE, int(sys.argv[2])), "
+    "(resource.RLIMIT_NPROC, int(sys.argv[3])), "
+    "(resource.RLIMIT_NOFILE, int(sys.argv[4])))\n"
+    "for resource_id, required in limits:\n"
+    "    _soft, hard = resource.getrlimit(resource_id)\n"
+    "    if hard != resource.RLIM_INFINITY and hard < required:\n"
+    "        raise SystemExit('required resource limit exceeds hard limit')\n"
+    "    resource.setrlimit(resource_id, (required, hard))\n"
+    "os.execvp(sys.argv[5], sys.argv[5:])\n"
+)
 
 
 def _agent_exception_result(exc: Exception) -> JobResult:
@@ -1339,15 +1352,18 @@ def _linux_resource_limited_command(command: tuple[str, ...], *, timeout_s: int)
     if timeout_s < 1:
         raise _HostVerificationBoundaryError("host_verification_timeout_invalid")
     cpu_limit = min(timeout_s, _HOST_VERIFICATION_CPU_MAX_S)
-    limits = (
-        "set -e; "
-        f"ulimit -S -t {cpu_limit}; "
-        f"ulimit -S -f {_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS}; "
-        f"ulimit -S -u {_HOST_VERIFICATION_PROCESS_HEADROOM}; "
-        f"ulimit -S -n {_HOST_VERIFICATION_OPEN_FILES_MAX}; "
-        'exec "$@"'
+    return (
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        _LINUX_RESOURCE_LIMIT_BOOTSTRAP,
+        str(cpu_limit),
+        str(_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS * 512),
+        str(_HOST_VERIFICATION_PROCESS_HEADROOM),
+        str(_HOST_VERIFICATION_OPEN_FILES_MAX),
+        *command,
     )
-    return ("/bin/sh", "-c", limits, "host-verification-linux-limits", *command)
 
 
 def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
