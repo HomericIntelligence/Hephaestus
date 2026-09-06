@@ -416,6 +416,7 @@ class TestExplicitPrReviewRetry:
                 self.live_threads = [
                     {
                         "id": f"inherited-{index}",
+                        "isResolved": False,
                         "path": f"inherited-{index}.py",
                         "line": index,
                         "side": "RIGHT",
@@ -428,9 +429,15 @@ class TestExplicitPrReviewRetry:
                             {
                                 "id": f"inherited-comment-{index}",
                                 "author": "reviewer",
+                                "author_type": "User",
+                                "author_association": "MEMBER",
                                 "body": f"inherited finding {index}",
+                                "review_id": f"inherited-review-{index}",
+                                "review_state": "COMMENTED",
+                                "review_commit_sha": "b" * 40,
                             }
                         ],
+                        "pr_state": {"state": "OPEN", "headRefOid": "b" * 40},
                     }
                     for index in (1, 2)
                 ]
@@ -453,6 +460,19 @@ class TestExplicitPrReviewRetry:
                     expected_head_sha=expected_head_sha,
                     review_diff=review_diff,
                 )
+                for receipt in receipts:
+                    receipt["isResolved"] = False
+                    receipt["pr_state"] = {
+                        "state": "OPEN",
+                        "headRefOid": expected_head_sha,
+                    }
+                    receipt["comments"][0].update(
+                        {
+                            "viewer_did_author": True,
+                            "review_state": "COMMENTED",
+                            "review_commit_sha": expected_head_sha,
+                        }
+                    )
                 self.live_threads.extend(dict(receipt) for receipt in receipts)
                 return receipts
 
