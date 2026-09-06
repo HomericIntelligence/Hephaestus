@@ -258,6 +258,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `CommandRegistry` | 0.1.0 | Registry type for CLI subcommands |
 | `COMMAND_REGISTRY` | 0.1.0 | Default shared `CommandRegistry` instance |
 | `DRY_RUN_HELP_CAVEAT` | 0.9.0 | Standard help text appended for dry-run flags |
+| `MODEL_REFERENCE_HELP` | 0.9.8 | Standard help text for model-reference options |
 | `add_advise_timeout_arg` | 0.9.8 | Add an `--advise-timeout` flag to a parser |
 | `add_agent_timeout_arg` | 0.9.8 | Add an `--agent-timeout` flag to a parser |
 | `add_dry_run_arg` | 0.9.0 | Add a `--dry-run` flag to a parser |

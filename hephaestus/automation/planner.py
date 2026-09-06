@@ -24,8 +24,10 @@ from __future__ import annotations
 import argparse
 import logging
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.cli.utils import (
+    MODEL_REFERENCE_HELP,
     add_agent_timeout_arg,
     add_pipeline_runtime_args,
     configure_cli_logging,
@@ -152,7 +154,12 @@ Examples:
         help="Write private typed queue-job receipts beneath PATH (disabled by default).",
     )
     add_agent_timeout_arg(parser, default=1200)
-    parser.add_argument("--reviewer-model", default="", metavar="MODEL[:EFFORT]")
+    parser.add_argument(
+        "--reviewer-model",
+        default="",
+        metavar="MODEL[:EFFORT]",
+        help=MODEL_REFERENCE_HELP,
+    )
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
     add_pipeline_runtime_args(parser, role="planner", timeouts=("gh", "metadata"))
     return parser
@@ -207,17 +214,21 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
     log.info("Starting issue planner (pipeline, planning scope)")
-    agent = resolve_agent(
-        args.agent,
-        disable_pi_automation=args.disable_pi_automation,
-        auth_status_timeout=args.auth_status_timeout,
-        pi_isolation_adapter=args.pi_isolation_adapter,
-        pi_dir=args.pi_dir,
-        model_references=(
-            args.planner_model or args.model,
-            args.reviewer_model or args.model,
-        ),
-    )
+    try:
+        agent = resolve_agent(
+            args.agent,
+            disable_pi_automation=args.disable_pi_automation,
+            auth_status_timeout=args.auth_status_timeout,
+            pi_isolation_adapter=args.pi_isolation_adapter,
+            pi_dir=args.pi_dir,
+            model_references=(
+                args.planner_model or args.model,
+                args.reviewer_model or args.model,
+                args.fallback_model or args.model,
+            ),
+        )
+    except UnknownModelAliasError as exc:
+        _build_parser().error(str(exc))
 
     org, repo = _resolve_repo()
 

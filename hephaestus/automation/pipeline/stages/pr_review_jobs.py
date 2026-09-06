@@ -13,6 +13,7 @@ from hephaestus.automation.prompts.pr_review import (
     build_bounded_pr_review_analysis_prompt,
     build_bounded_review_validation_prompt,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceError
 
 from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
@@ -97,7 +98,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
         item.branch = branch
         item.payload["existing_pr"] = True
-
         if all(bool(snapshot.get("implementation_reply_submitted")) for snapshot in snapshots):
             item.payload[_COMMENT_VALIDATION_ONLY] = True
             return None
@@ -242,9 +242,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
 
     def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Refresh review inputs, then bind the checkout before dispatch."""
-        # Clear ALL round-scoped payload at submission (stale-result
-        # guard, M3 pattern): a failed later round must never replay an
-        # earlier round's verdict, threads, or address output.
+        # Clear round-scoped state. A later failed round must not replay
+        # an earlier verdict, thread set, or address output.
         _clear_round_review_state(item)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
@@ -288,9 +287,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 StageOutcome(Disposition.FINISH_FAIL, "review_checkout_unavailable"),
             )
         if not ready:
-            # A review is a one-shot immutable snapshot.  Do not retry by
-            # mutating the PR branch (or repeatedly re-fetching it) here: the
-            # next loop item will take a fresh detached snapshot if needed.
+            # A review is one immutable snapshot. Do not mutate the PR branch
+            # or re-fetch it; the next item takes a fresh detached snapshot.
             return self._cleanup_review_worktree_then(
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift"),
@@ -300,6 +298,10 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
             prior_generation = 0
         item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
+        try:
+            source_workspace_binding(item, ctx, SourceLane.REVIEW, revision=expected_head)
+        except (RuntimeError, SourceWorkspaceError):
+            return StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
         verifications = _prepare_host_checks(item.payload, _worktree_path(item, ctx), expected_head)
         if verifications:
             logger.info(
@@ -316,9 +318,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
     ) -> JobRequest:
         """Submit one fixed host command from the immutable review plan."""
-        # Callbacks run before the coordinator installs ``on_done_state``.
-        # Keep an ownership marker because the current mini-state can also
-        # submit the primary review job.
+        # Callbacks run before ``on_done_state``; keep an ownership marker.
         item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
         return JobRequest(
             BuildTestJob(

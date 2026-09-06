@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
+
 K2_HORIZON_09B = "IFM/K2-Horizon-0.9B"
 K2_HORIZON_37B = "IFM/K2-Horizon-3.7B"
 K2_HORIZON_7B = "IFM/K2-Horizon-7B"
@@ -9,6 +13,9 @@ K2_HORIZON_32B = "IFM/K2-Horizon-32B"
 K2_HORIZON_MOVA_36B_A4B = "IFM/K2-Horizon-MoVA-36B-A4B"
 K2_HORIZON_375B_A23B = "IFM/K2-Horizon-375B-A23B"
 GPT_6_ASTRA = "gpt-6-astra"
+GPT_56_SOL = "gpt-5.6-sol"
+GPT_56_TERRA = "gpt-5.6-terra"
+GPT_56_LUNA = "gpt-5.6-luna"
 PI_THINKING_LEVELS: frozenset[str] = frozenset({"off", "minimal", "low", "medium", "high", "xhigh"})
 
 IFM_MODELS: frozenset[str] = frozenset(
@@ -61,21 +68,44 @@ _IFM_ALIASES: dict[str, str] = {
 class AgentModelSelection(str):
     """A canonical model identifier and its optional reasoning effort."""
 
-    model: str
-    reasoning_effort: str
+    __slots__ = ()
 
     def __new__(cls, model: str, reasoning_effort: str = "") -> AgentModelSelection:
         """Create a string-compatible selection with separate model metadata."""
         reference = f"{model}:{reasoning_effort}" if reasoning_effort else model
-        selection = super().__new__(cls, reference)
-        selection.model = model
-        selection.reasoning_effort = reasoning_effort
-        return selection
+        return super().__new__(cls, reference)
+
+    @property
+    def model(self) -> str:
+        """Return the model part of the selection."""
+        model, separator, effort = self.rpartition(":")
+        return model if separator and effort else str(self)
+
+    @property
+    def reasoning_effort(self) -> str:
+        """Return the optional reasoning-effort part of the selection."""
+        _model, separator, effort = self.rpartition(":")
+        return effort if separator and effort else ""
 
     @property
     def reference(self) -> str:
         """Return the compact model reference used between agent layers."""
         return str(self)
+
+
+CODEX_ROLE_MODEL_ALIASES: Mapping[str, AgentModelSelection] = MappingProxyType(
+    {
+        "sol": AgentModelSelection(GPT_56_SOL, "xhigh"),
+        "terra": AgentModelSelection(GPT_56_TERRA, "xhigh"),
+        "luna": AgentModelSelection(GPT_56_LUNA, "medium"),
+    }
+)
+
+_CODEX_ROLE_MODEL_IDS = frozenset(
+    selection.model for selection in CODEX_ROLE_MODEL_ALIASES.values()
+)
+_SHORT_MODEL_ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_CODEX_LEGACY_ALIASES = frozenset({"fable", "opus", "sonnet", "haiku"})
 
 
 def _normalize_model_id(model: str) -> str:
@@ -101,8 +131,62 @@ def normalize_model_reference(reference: str) -> str:
     return parse_model_selection(reference).reference
 
 
+class UnknownModelAliasError(ValueError):
+    """Raised when a Codex reference uses an unknown short alias."""
+
+
+def resolve_codex_model_selection(reference: str) -> AgentModelSelection:
+    """Resolve a Codex role alias and preserve its selected effort."""
+    selection = parse_model_selection(reference)
+    if not selection.model:
+        return selection
+
+    model_key = selection.model.casefold()
+    for alias_selection in CODEX_ROLE_MODEL_ALIASES.values():
+        if model_key == alias_selection.model.casefold():
+            default_effort = alias_selection.reasoning_effort
+            return AgentModelSelection(
+                alias_selection.model,
+                selection.reasoning_effort or default_effort,
+            )
+
+    role_selection = CODEX_ROLE_MODEL_ALIASES.get(model_key)
+    if role_selection is None:
+        return selection
+    return AgentModelSelection(
+        role_selection.model,
+        selection.reasoning_effort or role_selection.reasoning_effort,
+    )
+
+
+def validate_codex_role_model_reference(reference: str) -> None:
+    """Reject an unknown short alias in a Codex model reference."""
+    selection = parse_model_selection(reference)
+    model = selection.model
+    if not model:
+        return
+
+    model_key = model.casefold()
+    if (
+        model_key in CODEX_ROLE_MODEL_ALIASES
+        or model_key in _CODEX_ROLE_MODEL_IDS
+        or model_key in _CODEX_LEGACY_ALIASES
+        or model_key == "astra"
+        or not _SHORT_MODEL_ALIAS_RE.fullmatch(model)
+    ):
+        return
+
+    raise UnknownModelAliasError(
+        f"Unknown Codex model alias {model!r}; use sol, terra, luna, or a full model ID"
+    )
+
+
 __all__ = [
+    "CODEX_ROLE_MODEL_ALIASES",
     "GPT_6_ASTRA",
+    "GPT_56_LUNA",
+    "GPT_56_SOL",
+    "GPT_56_TERRA",
     "IFM_MODELS",
     "K2_HORIZON_09B",
     "K2_HORIZON_7B",
@@ -112,6 +196,9 @@ __all__ = [
     "K2_HORIZON_MOVA_36B_A4B",
     "PI_THINKING_LEVELS",
     "AgentModelSelection",
+    "UnknownModelAliasError",
     "normalize_model_reference",
     "parse_model_selection",
+    "resolve_codex_model_selection",
+    "validate_codex_role_model_reference",
 ]
