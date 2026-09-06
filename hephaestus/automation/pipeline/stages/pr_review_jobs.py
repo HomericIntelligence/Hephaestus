@@ -1007,24 +1007,27 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         status, platform = _host_verification_result_status(
             result.value, result.ok, result.error, reviewed_head
         )
-        receipts.append(
-            {
-                "argv": list(spec.argv),
-                "head_sha": reviewed_head,
-                "immutable_source": bool(
-                    isinstance(result.value, dict)
-                    and result.value.get("head_sha") == reviewed_head
-                    and result.value.get("immutable_source") is True
-                ),
-                "failure_kind": _host_verification_failure_kind(result_value),
-                "ok": result.ok,
-                "error": redact_diagnostic_text(result.error or "")[:500],
-                "platform": platform,
-                "status": status,
-                "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
-                "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
-            }
-        )
+        receipt = {
+            "argv": list(spec.argv),
+            "head_sha": reviewed_head,
+            "immutable_source": bool(
+                isinstance(result.value, dict)
+                and result.value.get("head_sha") == reviewed_head
+                and result.value.get("immutable_source") is True
+            ),
+            "failure_kind": _host_verification_failure_kind(result_value),
+            "ok": result.ok,
+            "error": redact_diagnostic_text(result.error or "")[:500],
+            "platform": platform,
+            "status": status,
+            "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+            "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
+        }
+        for key in ("container_runtime", "container_image", "container_image_sha256"):
+            value = result_value.get(key)
+            if isinstance(value, str):
+                receipt[key] = value
+        receipts.append(receipt)
 
     def _consume_failed_job(
         self, item: WorkItem, result: JobResult, is_review_result: bool

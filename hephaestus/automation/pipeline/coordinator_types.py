@@ -84,6 +84,9 @@ from jinja2 import TemplateNotFound as TemplateNotFound
 
 import hephaestus.automation.pipeline.admission as _admission
 from hephaestus.automation.issue_waves import WaveLease as WaveLease
+from hephaestus.automation.pipeline.host_verification_pyxis import (
+    DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE as DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+)
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER as PIPELINE_ORDER,
     ROUTES as ROUTES,
@@ -307,6 +310,9 @@ class PipelineConfig:
     # Set only by the standalone PR-review wrapper. Marks direct requests so
     # stale implementation labels do not route a retry into remediation first.
     explicit_pr_review: bool = False
+    host_verification_pyxis_image: Path = field(
+        default_factory=lambda: DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
+    )
 
     @property
     def enable_advise(self) -> bool:

@@ -116,6 +116,10 @@ clean-all: clean
 ci-build:
     podman build -f ci/Containerfile -t hephaestus-ci:local . || docker build -f ci/Containerfile -t hephaestus-ci:local .
 
+# Prepare the local Enroot image used by Linux PR-review host verification.
+host-verification-pyxis-image:
+    uv run python scripts/prepare_host_verification_pyxis_image.py --rebuild
+
 # Run CI lint (pre-commit + doc links) in container
 ci-lint:
     ./scripts/run_ci_local.sh lint

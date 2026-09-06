@@ -61,6 +61,12 @@ through installed `hephaestus-*` console scripts.
   autonomous queue always passes it. Linked-worktree Git metadata
   is mounted read-only so versioning and Git-aware scans inspect the candidate
   commit. `just`, ShellCheck, and Bats all run in the pinned CI image.
+- **`prepare_host_verification_pyxis_image.py`** — Build `ci/Containerfile`
+  with local Podman or Docker and export a local Enroot squashfs image for
+  Linux PR-review host verification. The command writes a SHA-256 sidecar and
+  a JSON provenance record with the immutable OCI image ID. It never imports a
+  registry image; use `just host-verification-pyxis-image` to rebuild the
+  default image.
 
 ### Disaster recovery
 

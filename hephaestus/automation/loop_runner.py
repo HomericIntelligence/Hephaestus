@@ -70,8 +70,12 @@ from hephaestus.automation.loop_repo_manager import (
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.host_verification_pyxis import (
+    DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+)
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
+    add_host_verification_pyxis_image_arg,
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
@@ -305,6 +309,7 @@ class LoopConfig:
     issue_limit: int | None = None
     event_log_retention_days: int = DEFAULT_EVENT_LOG_RETENTION_DAYS
     event_log_retention_count: int = DEFAULT_EVENT_LOG_RETENTION_COUNT
+    host_verification_pyxis_image: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +333,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         verbose_help="Enable DEBUG logging",
     )
+    add_host_verification_pyxis_image_arg(p)
     p.add_argument(
         "--loops",
         type=_parse_positive_int,
@@ -952,6 +958,9 @@ def _build_pipeline_config(
             cfg.projects_dir, repos, has_repo_source=repo_source_factory is not None
         ),
         evidence_receipt_dir=cfg.evidence_receipt_dir,
+        host_verification_pyxis_image=(
+            cfg.host_verification_pyxis_image or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
+        ),
         projects_dir=cfg.projects_dir,
         repo_roots=cfg.repo_roots,
         json_out=args.json,
@@ -1179,6 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics_port=args.metrics_port,
         event_log_retention_days=args.event_log_retention_days,
         event_log_retention_count=args.event_log_retention_count,
+        host_verification_pyxis_image=args.host_verification_pyxis_image,
         evidence_receipt_dir=args.evidence_receipt_dir,
     )
 
