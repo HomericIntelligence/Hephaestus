@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import loop_runner
 from hephaestus.automation.loop_runner import (
     ALL_PHASES,
@@ -1006,6 +1007,28 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
         model_references=("", "", ""),
     )
     assert config.agent == "codex"  # type: ignore[attr-defined]
+
+
+def test_main_rejects_unknown_codex_alias_before_scope_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop rejects an unknown alias before repository discovery or dispatch."""
+    monkeypatch.setattr(
+        loop_runner,
+        "resolve_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+        ),
+    )
+    resolve_scope = patch.object(loop_runner, "_resolve_org_and_repos")
+    run_pipeline = patch("hephaestus.automation.pipeline.coordinator.run_pipeline")
+    with resolve_scope as mock_resolve_scope, run_pipeline as mock_run_pipeline:
+        with pytest.raises(SystemExit) as error:
+            main(["--agent", "codex", "--model", "unknown:high"])
+
+    assert error.value.code == 2
+    mock_resolve_scope.assert_not_called()
+    mock_run_pipeline.assert_not_called()
 
 
 def test_main_passes_inline_role_effort_before_pi_admission(

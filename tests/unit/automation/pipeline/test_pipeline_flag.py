@@ -295,19 +295,21 @@ def test_build_pipeline_config_keeps_per_role_inline_reasoning_effort(
         [
             "--agent",
             "codex",
+            "--model",
+            "gpt-5.6",
             "--planner-model",
-            "sol:xhigh",
+            "sol:high",
             "--reviewer-model",
             "terra:default",
             "--implementer-model",
-            "gpt-6-astra:future-effort",
+            "luna:xhigh",
         ]
     )
 
     (config,) = dispatch["run_pipeline"].call_args.args
-    assert config.planner_model == "sol:xhigh"
+    assert config.planner_model == "sol:high"
     assert config.reviewer_model == "terra:default"
-    assert config.implementer_model == "gpt-6-astra:future-effort"
+    assert config.implementer_model == "luna:xhigh"
     assert not hasattr(config, "planner_reasoning_effort")
 
 

@@ -166,6 +166,26 @@ def test_registered_astra_model_does_not_warn(
     assert "Unknown model" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [
+        ("sol", "gpt-5.6-sol:xhigh"),
+        ("terra:high", "gpt-5.6-terra:high"),
+        ("luna", "gpt-5.6-luna:medium"),
+    ],
+)
+def test_codex_role_aliases_resolve_to_canonical_references(
+    reference: str,
+    expected: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Codex role aliases resolve to their approved model and effort."""
+    with caplog.at_level(logging.WARNING, logger=agent_config.__name__):
+        assert agent_config.reviewer_model(reference, agent="codex") == expected
+
+    assert "Unknown model" not in caplog.text
+
+
 @pytest.mark.parametrize("agent", ["opencode", "pi"])
 @pytest.mark.parametrize(
     "resolver",

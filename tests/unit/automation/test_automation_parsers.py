@@ -20,7 +20,7 @@ from hephaestus.automation import (
     pr_reviewer,
 )
 from hephaestus.automation._review_utils import build_automation_parser
-from hephaestus.cli.utils import DRY_RUN_HELP_CAVEAT
+from hephaestus.cli.utils import DRY_RUN_HELP_CAVEAT, MODEL_REFERENCE_HELP
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR
 
 AGENT_CHOICES = ("claude", "codex", "pi", "opencode")
@@ -1046,6 +1046,31 @@ def test_build_automation_parser_does_not_add_throttle_by_default() -> None:
 
     assert "--gh-global-rate" not in flags
     assert "--gh-global-burst" not in flags
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        planner._build_parser,
+        implementer._build_parser,
+        pr_reviewer._build_parser,
+        loop_runner._build_parser,
+    ],
+)
+def test_model_help_documents_codex_role_alias_contract(
+    factory: Callable[[], argparse.ArgumentParser],
+) -> None:
+    """Each model option describes the shared Codex reference contract."""
+    parser = factory()
+    help_text = " ".join(
+        str(action.help) for action in parser._actions if "MODEL[:EFFORT]" in str(action.help)
+    )
+
+    assert MODEL_REFERENCE_HELP in help_text
+    assert all(alias in help_text for alias in ("sol", "terra", "luna"))
+    assert "full model IDs" in help_text
+    assert "free-form effort" in help_text
+    assert "default" in help_text
 
 
 def test_plan_reviewer_still_has_no_throttle_or_version_flags() -> None:

@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import implementer as implementer_mod
 from hephaestus.automation.pipeline.routing import StageName
 
@@ -102,6 +103,51 @@ def test_timeout_flags_thread_into_pipeline_config(tmp_path: Path) -> None:
     assert (config.git_message_timeout, config.poll_max_wait) == (13, 14)
     assert (config.pre_pr_test_timeout, config.run_pre_pr_tests) == (15, True)
     assert config.reviewer_model == "review-model"
+
+
+def test_codex_role_aliases_reach_implementer_config(tmp_path: Path) -> None:
+    """Implementer role aliases resolve before pipeline configuration is built."""
+    captured = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--agent",
+            "codex",
+            "--implementer-model",
+            "luna:xhigh",
+            "--reviewer-model",
+            "terra",
+        ],
+        tmp_path,
+        resolved_agent="codex",
+    )
+
+    assert captured["config"].implementer_model == "gpt-5.6-luna:xhigh"
+    assert captured["config"].reviewer_model == "gpt-5.6-terra:xhigh"
+
+
+def test_main_rejects_unknown_codex_alias_before_state_or_pipeline_work(
+    tmp_path: Path,
+) -> None:
+    """Implementer rejects an unknown alias before state or pipeline work."""
+    with (
+        patch.object(sys, "argv", ["hephaestus-implement-issues", "--issues", "123"]),
+        patch.object(
+            implementer_mod,
+            "resolve_agent",
+            side_effect=UnknownModelAliasError("Unknown Codex model alias 'unknown'"),
+        ),
+        patch.object(implementer_mod, "get_repo_root", return_value=tmp_path) as get_repo_root,
+        patch.object(implementer_mod, "_resolve_repo") as resolve_repo,
+        patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,
+        pytest.raises(SystemExit) as error,
+    ):
+        implementer_mod.main()
+
+    assert error.value.code == 2
+    get_repo_root.assert_not_called()
+    resolve_repo.assert_not_called()
+    run_pipeline.assert_not_called()
 
 
 def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:

@@ -936,6 +936,13 @@ def test_codex_base_cmd_allows_terra_default_reasoning(model: str, tmp_path: Pat
     assert "model_reasoning_effort" not in cmd
 
 
+def test_codex_base_cmd_rejects_unknown_short_alias(tmp_path: Path) -> None:
+    """The Codex command builder does not pass an unknown alias to the provider."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        with pytest.raises(ValueError, match="Unknown Codex model alias"):
+            agent_runtime._codex_base_cmd(cwd=tmp_path, model="unknown:high")
+
+
 @pytest.mark.parametrize(
     ("model", "expected_model", "reasoning_effort", "expected_reasoning"),
     [
@@ -4041,6 +4048,15 @@ def test_resolve_agent_explicit_codex_overrides_claude() -> None:
             ),
         ):
             assert agent_runtime.resolve_agent("codex") == "codex"
+
+
+def test_resolve_agent_rejects_unknown_codex_alias_before_authentication() -> None:
+    """Codex alias validation runs before the provider authentication probe."""
+    with patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated:
+        with pytest.raises(ValueError, match="Unknown Codex model alias"):
+            agent_runtime.resolve_agent("codex", model_references=("unknown:high",))
+
+    authenticated.assert_not_called()
 
 
 def test_resolve_agent_explicit_rejects_uninstalled_agent() -> None:

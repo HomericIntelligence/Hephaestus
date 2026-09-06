@@ -34,11 +34,14 @@ from hephaestus.agents.execution_policy import (
     resolve_policy,
 )
 from hephaestus.agents.model_selection import (
+    CODEX_ROLE_MODEL_ALIASES,
     GPT_6_ASTRA,
     IFM_MODELS,
     PI_THINKING_LEVELS,
     AgentModelSelection,
     parse_model_selection,
+    resolve_codex_model_selection,
+    validate_codex_role_model_reference,
 )
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
@@ -78,9 +81,6 @@ CODEX_TERMINATION_GRACE_SECONDS = 5
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
 CODEX_GPT_56_MODEL = "gpt-5.6"
 CODEX_GPT_55_MODEL = "gpt-5.5"
-CODEX_GPT_56_SOL_MODEL = "gpt-5.6-sol"
-CODEX_GPT_56_TERRA_MODEL = "gpt-5.6-terra"
-CODEX_GPT_56_LUNA_MODEL = "gpt-5.6-luna"
 CODEX_GPT_6_ASTRA_MODEL = GPT_6_ASTRA
 # Preserve the established Claude-tier translation while exposing the GPT-5.6
 # Sol/Terra/Luna family as explicit capability-tier aliases below.
@@ -784,6 +784,14 @@ def _validate_pi_model_references_before_admission(
         _resolve_pi_model_selection(reference, pi_dir=pi_dir)
 
 
+def _validate_codex_model_references(model_references: Sequence[str] | None) -> None:
+    """Validate Codex role references before provider authentication."""
+    if model_references is None:
+        return
+    for reference in model_references:
+        validate_codex_role_model_reference(reference)
+
+
 def validate_durable_model_selection(
     provider: str,
     model: str,
@@ -820,6 +828,8 @@ def resolve_agent(
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
+        if agent == "codex":
+            _validate_codex_model_references(model_references)
         if agent == "pi":
             _validate_pi_model_references_before_admission(
                 model_references,
@@ -875,6 +885,8 @@ def resolve_agent(
 
     for agent_name in installed_agents:
         if is_agent_authenticated(agent_name, auth_status_timeout=auth_status_timeout):
+            if agent_name == "codex":
+                _validate_codex_model_references(model_references)
             return agent_name
 
     raise RuntimeError(
@@ -1495,18 +1507,22 @@ def codex_approval_args(approval: str) -> list[str]:
 
 def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelConfig:
     """Translate legacy tier IDs and split a free-form Codex effort."""
-    selection = parse_model_selection(model)
+    validate_codex_role_model_reference(model)
+    selection = resolve_codex_model_selection(model)
     lower_model = selection.model.lower()
     explicit_effort = selection.reasoning_effort
     alias_model = lower_model
     if not selection.model and use_default:
         config = CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
-    elif alias_model in {"sol", CODEX_GPT_56_SOL_MODEL}:
-        config = CodexModelConfig(CODEX_GPT_56_SOL_MODEL, CODEX_FABLE_REASONING_EFFORT)
-    elif alias_model in {"terra", CODEX_GPT_56_TERRA_MODEL}:
-        config = CodexModelConfig(CODEX_GPT_56_TERRA_MODEL, CODEX_OPUS_REASONING_EFFORT)
-    elif alias_model in {"luna", CODEX_GPT_56_LUNA_MODEL}:
-        config = CodexModelConfig(CODEX_GPT_56_LUNA_MODEL, CODEX_SONNET_REASONING_EFFORT)
+    elif alias_model in {
+        role_selection.model.casefold() for role_selection in CODEX_ROLE_MODEL_ALIASES.values()
+    }:
+        role_selection = next(
+            role_selection
+            for role_selection in CODEX_ROLE_MODEL_ALIASES.values()
+            if role_selection.model.casefold() == alias_model
+        )
+        config = CodexModelConfig(role_selection.model, role_selection.reasoning_effort)
     elif alias_model in {"astra", CODEX_GPT_6_ASTRA_MODEL}:
         config = CodexModelConfig(CODEX_GPT_6_ASTRA_MODEL, CODEX_FABLE_REASONING_EFFORT)
     elif lower_model == "fable" or lower_model.startswith("claude-fable-"):

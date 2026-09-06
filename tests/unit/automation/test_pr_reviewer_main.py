@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import pr_reviewer as pr_reviewer_mod
 from hephaestus.automation.pipeline.routing import StageName
 
@@ -71,6 +72,36 @@ def test_agent_timeout_threads_into_pipeline_config() -> None:
     """Standalone reviewer timeout configures the review agent operation."""
     captured = _run_main_capturing_config(["--issues", "123", "--agent-timeout", "11"])
     assert captured["config"].reviewer_timeout == 11
+
+
+def test_codex_role_alias_reaches_reviewer_config() -> None:
+    """Reviewer role aliases resolve before pipeline configuration is built."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", "codex", "--reviewer-model", "luna"],
+        resolved_agent="codex",
+    )
+
+    assert captured["config"].reviewer_model == "gpt-5.6-luna:medium"
+
+
+def test_main_rejects_unknown_codex_alias_before_repo_or_pipeline_work() -> None:
+    """Reviewer rejects an unknown alias before repository or pipeline work."""
+    with (
+        patch("sys.argv", ["hephaestus-review-prs", "--issues", "123"]),
+        patch.object(
+            pr_reviewer_mod,
+            "resolve_agent",
+            side_effect=UnknownModelAliasError("Unknown Codex model alias 'unknown'"),
+        ),
+        patch.object(pr_reviewer_mod, "_resolve_repo") as resolve_repo,
+        patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,
+        pytest.raises(SystemExit) as error,
+    ):
+        pr_reviewer_mod.main()
+
+    assert error.value.code == 2
+    resolve_repo.assert_not_called()
+    run_pipeline.assert_not_called()
 
 
 def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:

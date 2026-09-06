@@ -38,12 +38,14 @@ import sys
 import threading
 from pathlib import Path
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     agent_cli_name,
     agent_display_name,
     resolve_agent,
 )
 from hephaestus.cli.utils import (
+    MODEL_REFERENCE_HELP,
     add_agent_timeout_arg,
     add_git_message_timeout_arg,
     add_pipeline_runtime_args,
@@ -237,7 +239,12 @@ Examples:
         help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
     )
     add_agent_timeout_arg(parser, default=1800)
-    parser.add_argument("--reviewer-model", default="", metavar="MODEL[:EFFORT]")
+    parser.add_argument(
+        "--reviewer-model",
+        default="",
+        metavar="MODEL[:EFFORT]",
+        help=MODEL_REFERENCE_HELP,
+    )
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
     parser.add_argument(
         "--address-review-timeout", type=positive_int, default=7200, metavar="SECONDS"
@@ -498,17 +505,20 @@ def main() -> int:
     install_sigtstp_only()
     args = _parse_args()
     configure_github_throttle_from_args(args)
-    agent = resolve_agent(
-        args.agent,
-        disable_pi_automation=args.disable_pi_automation,
-        auth_status_timeout=args.auth_status_timeout,
-        pi_isolation_adapter=args.pi_isolation_adapter,
-        pi_dir=args.pi_dir,
-        model_references=(
-            args.implementer_model or args.model,
-            args.reviewer_model or args.model,
-        ),
-    )
+    try:
+        agent = resolve_agent(
+            args.agent,
+            disable_pi_automation=args.disable_pi_automation,
+            auth_status_timeout=args.auth_status_timeout,
+            pi_isolation_adapter=args.pi_isolation_adapter,
+            pi_dir=args.pi_dir,
+            model_references=(
+                args.implementer_model or args.model,
+                args.reviewer_model or args.model,
+            ),
+        )
+    except UnknownModelAliasError as exc:
+        _build_parser().error(str(exc))
 
     state_dir = ensure_state_dir(get_repo_root())
     _setup_logging(args.verbose, log_dir=state_dir, log_format=args.log_format)
