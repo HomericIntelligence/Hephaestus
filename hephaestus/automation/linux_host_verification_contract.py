@@ -8,10 +8,15 @@ must perform those separate trust-boundary checks before they use a request.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import stat
+import tempfile
 from collections.abc import Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 
 SCHEMA_VERSION = 1
@@ -22,6 +27,9 @@ MAX_TIMEOUT_SECONDS = 86_400
 
 MAX_DIAGNOSTIC_CHARS = 16_384
 """The largest bounded stdout or stderr tail in a receipt."""
+
+MAX_LEASE_FILE_BYTES = 1 << 20
+"""The largest serialized request or receipt accepted from shared storage."""
 
 _CANONICAL_DIGEST_PREFIX = b"hephaestus/linux-host-verification/canonical-digest/v1\x00"
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
@@ -496,11 +504,116 @@ class LinuxHostVerificationReceipt:
         }
 
 
+def _lease_path(path: Path) -> Path:
+    """Return one absolute lease path with a safe parent directory."""
+    if not isinstance(path, Path) or not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise ValueError("lease path is invalid")
+    try:
+        parent_status = os.lstat(path.parent)
+    except OSError as error:
+        raise ValueError("lease parent is unavailable") from error
+    if (
+        not stat.S_ISDIR(parent_status.st_mode)
+        or stat.S_ISLNK(parent_status.st_mode)
+        or parent_status.st_mode & 0o022
+    ):
+        raise ValueError("lease parent is unsafe")
+    return path
+
+
+def _atomic_write_lease(path: Path, payload: Mapping[str, object]) -> None:
+    """Atomically write a closed lease payload with private permissions."""
+    destination = _lease_path(path)
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_LEASE_FILE_BYTES:
+        raise ValueError("lease payload is too large")
+    descriptor = -1
+    temporary_path = ""
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            dir=destination.parent,
+            text=False,
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=False) as temporary_file:
+            temporary_file.write(encoded)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, destination)
+        temporary_path = ""
+    except (OSError, TypeError, ValueError) as error:
+        raise ValueError("lease write failed") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path:
+            with suppress(OSError):
+                os.unlink(temporary_path)
+
+
+def _read_lease(path: Path) -> dict[str, object]:
+    """Read one bounded private JSON object without following a symlink."""
+    source = _lease_path(path)
+    try:
+        descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        raise ValueError("lease file cannot be opened") from error
+    try:
+        file_status = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_status.st_mode)
+            or file_status.st_mode & 0o077
+            or file_status.st_size > MAX_LEASE_FILE_BYTES
+        ):
+            raise ValueError("lease file is unsafe")
+        with os.fdopen(descriptor, "rb", closefd=False) as lease_file:
+            parsed = json.load(lease_file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("lease file is invalid") from error
+    finally:
+        os.close(descriptor)
+    if not isinstance(parsed, dict) or not all(isinstance(key, str) for key in parsed):
+        raise ValueError("lease file must contain one JSON object")
+    return parsed
+
+
+def write_linux_host_verification_request(
+    path: Path, request: LinuxHostVerificationRequest
+) -> None:
+    """Atomically write a validated allocation request lease."""
+    _atomic_write_lease(path, request.to_mapping())
+
+
+def read_linux_host_verification_request(path: Path) -> LinuxHostVerificationRequest:
+    """Read and validate one allocation request lease."""
+    return LinuxHostVerificationRequest.from_mapping(_read_lease(path))
+
+
+def write_linux_host_verification_receipt(
+    path: Path, receipt: LinuxHostVerificationReceipt
+) -> None:
+    """Atomically write a validated allocation receipt lease."""
+    _atomic_write_lease(path, receipt.to_mapping())
+
+
+def read_linux_host_verification_receipt(path: Path) -> LinuxHostVerificationReceipt:
+    """Read and validate one allocation receipt lease."""
+    return LinuxHostVerificationReceipt.from_mapping(_read_lease(path))
+
+
 __all__ = [
     "MAX_DIAGNOSTIC_CHARS",
+    "MAX_LEASE_FILE_BYTES",
     "MAX_TIMEOUT_SECONDS",
     "SCHEMA_VERSION",
     "LinuxHostVerificationReceipt",
     "LinuxHostVerificationRequest",
     "canonical_digest",
+    "read_linux_host_verification_receipt",
+    "read_linux_host_verification_request",
+    "write_linux_host_verification_receipt",
+    "write_linux_host_verification_request",
 ]

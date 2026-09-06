@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from copy import deepcopy
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -11,6 +14,10 @@ from hephaestus.automation.linux_host_verification_contract import (
     LinuxHostVerificationReceipt,
     LinuxHostVerificationRequest,
     canonical_digest,
+    read_linux_host_verification_receipt,
+    read_linux_host_verification_request,
+    write_linux_host_verification_receipt,
+    write_linux_host_verification_request,
 )
 
 
@@ -195,3 +202,36 @@ def test_success_receipt_rejects_failed_boundary_or_failure_state() -> None:
     failed_state["failure_classification"] = "execution"
     with pytest.raises(ValueError, match="passed receipt"):
         LinuxHostVerificationReceipt.from_mapping(failed_state)
+
+
+def test_request_and_receipt_files_round_trip_atomically(tmp_path: Path) -> None:
+    """Lease files use private, atomic JSON serialization and closed readers."""
+    request = LinuxHostVerificationRequest.from_mapping(_request_payload())
+    receipt = LinuxHostVerificationReceipt.from_mapping(_receipt_payload())
+    request_path = tmp_path / "request.json"
+    receipt_path = tmp_path / "receipt.json"
+
+    write_linux_host_verification_request(request_path, request)
+    write_linux_host_verification_receipt(receipt_path, receipt)
+
+    assert request_path.stat().st_mode & 0o077 == 0
+    assert receipt_path.stat().st_mode & 0o077 == 0
+    assert read_linux_host_verification_request(request_path) == request
+    assert read_linux_host_verification_receipt(receipt_path) == receipt
+
+
+@pytest.mark.parametrize(
+    "reader", [read_linux_host_verification_request, read_linux_host_verification_receipt]
+)
+def test_lease_file_reader_rejects_symlink(
+    tmp_path: Path, reader: Callable[[Path], object]
+) -> None:
+    """A lease reader never follows a symbolic link at the trusted path."""
+    target = tmp_path / "target.json"
+    target.write_text("{}", encoding="utf-8")
+    target.chmod(0o600)
+    linked = tmp_path / "linked.json"
+    os.symlink(target, linked)
+
+    with pytest.raises(ValueError):
+        reader(linked)
