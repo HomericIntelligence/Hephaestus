@@ -402,6 +402,31 @@ def test_main_health_check_short_circuits(tmp_path: Path) -> None:
     mock_run.assert_not_called()
 
 
+def test_health_check_does_not_load_linux_host_verification_config(tmp_path: Path) -> None:
+    """The standalone health check does not initialize the optional backend."""
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "hephaestus-implement-issues",
+                "--health-check",
+                "--linux-host-verification-config",
+                str(tmp_path / "not-read.toml"),
+            ],
+        ),
+        patch.object(implementer_mod, "get_repo_root", return_value=tmp_path),
+        patch.object(implementer_mod, "resolve_agent", return_value="claude"),
+        patch.object(
+            implementer_mod,
+            "load_linux_host_verification_config",
+            side_effect=AssertionError("health check must not load Linux configuration"),
+        ),
+        patch("hephaestus.github.client.gh_call", side_effect=OSError("missing gh")),
+    ):
+        assert implementer_mod.main() == 0
+
+
 def test_main_configures_logging_under_default_state_dir(tmp_path: Path) -> None:
     """main() passes the canonical state directory to logging setup."""
     from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
