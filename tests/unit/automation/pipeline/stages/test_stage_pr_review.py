@@ -19,8 +19,10 @@ from unittest.mock import patch
 import pytest
 
 import hephaestus.automation.github_api as github_api
+import hephaestus.automation.pipeline.stages.pr_review_jobs as pr_review_jobs
 from hephaestus.agents.execution_policy import AgentRole
 from hephaestus.agents.pi_session import create_pi_binding
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.github_jobs import (
     DeliverReplyHandoffRequest,
     EnsureScopeExpansionChildrenRequest,
@@ -2678,6 +2680,76 @@ class TestPrReviewStageStep:
         assert result.job.argv == ("uv", "run", "ruff", "check", "hephaestus/", "tests/")
         assert result.job.descr == "review_python_ruff_check"
         assert result.on_done_state == "HOST_VERIFICATION_WAIT"
+
+    def test_checkout_rebinds_review_source_before_host_verification(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Host verification must have a receipt for its exact review head."""
+
+        class SourceWorkspaces:
+            """Record the review-source preparation boundary."""
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, object, str, str | None]] = []
+
+            def prepare(
+                self, item_number: int, lane: object, revision: str, *, branch: str | None = None
+            ) -> SimpleNamespace:
+                self.calls.append((item_number, lane, revision, branch))
+                return SimpleNamespace(cwd=tmp_path, revision=revision)
+
+        source_workspaces = SourceWorkspaces()
+        paths = SimpleNamespace(
+            repo_root=tmp_path,
+            worktree=tmp_path,
+            source_workspaces=source_workspaces,
+        )
+        head = "a" * 40
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": head,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/hephaestus/automation/pipeline/worker_pool.py "
+                    "b/hephaestus/automation/pipeline/worker_pool.py\n"
+                ),
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(paths=paths))
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert source_workspaces.calls == [(1, SourceLane.REVIEW, head, None)]
+
+    def test_checkout_fails_closed_when_review_source_binding_fails(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A binding error must not start host verification or review work."""
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": "diff --git a/hephaestus/a.py b/hephaestus/a.py\n",
+            }
+        )
+        stage = PrReviewStage()
+        uncaught = StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_uncaught")
+        with patch.object(
+            pr_review_jobs,
+            "source_workspace_binding",
+            side_effect=RuntimeError("review source unavailable"),
+        ):
+            try:
+                result = stage.step(item, make_ctx())
+            except RuntimeError:
+                result = uncaught
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
 
     def test_non_hephaestus_repository_has_no_hephaestus_host_plan(self) -> None:
         specs = stage_module._host_verification_specs(
