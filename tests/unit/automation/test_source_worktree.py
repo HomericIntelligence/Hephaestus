@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import queue
+import shutil
+import signal
 import subprocess
+import sys
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -13,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import implementation_writer
+from hephaestus.automation import implementation_writer, source_worktree
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -22,6 +27,10 @@ from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
+    SourceWorkspacePreparationCause,
+    SourceWorkspacePreparationError,
+    _git as _source_worktree_git,
+    _PreparationDeadline,
 )
 from hephaestus.automation.worktree_manager import (
     ImplementationWriterAuthority,
@@ -74,6 +83,447 @@ def test_many_preparations_reuse_exactly_two_named_worktrees(tmp_path: Path) -> 
     }
     assert paths == {"repository", "auto-42-impl", "auto-42-review"}
     assert _git(repo, "branch", "--format=%(refname:short)").splitlines() == ["main"]
+
+
+def test_bounded_prepare_rejects_held_lane_lock_without_receipt_mutation(
+    tmp_path: Path,
+) -> None:
+    """Bounded preparation reports lane contention before it can mutate state."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    lane = SourceLane.IMPLEMENTATION
+    receipt_path = manager._receipt_path(42, lane)
+    path = manager.path_for(42, lane)
+
+    with file_lock(manager._lane_lock_path(42, lane), require_exclusive=True):
+        bounded_prepare = getattr(manager, "prepare_bounded", None)
+        assert callable(bounded_prepare)
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            bounded_prepare(42, lane, second)
+
+    assert raised.value.cause is SourceWorkspacePreparationCause.LANE_LOCK_UNAVAILABLE
+    assert not receipt_path.exists()
+    assert not path.exists()
+
+
+def test_bounded_prepare_rejects_held_git_metadata_lock_without_receipt_mutation(
+    tmp_path: Path,
+) -> None:
+    """Metadata contention releases the lane and preserves durable state."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    lane = SourceLane.REVIEW
+    receipt_path = manager._receipt_path(42, lane)
+    metadata_lock = WorktreeManager.git_metadata_lock_path(repo)
+
+    with file_lock(metadata_lock, require_exclusive=True):
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            manager.prepare_bounded(42, lane, second)
+
+        assert raised.value.cause is SourceWorkspacePreparationCause.GIT_METADATA_LOCK_UNAVAILABLE
+        with file_lock(
+            manager._lane_lock_path(42, lane),
+            blocking=False,
+            require_exclusive=True,
+        ):
+            pass
+
+    assert not receipt_path.exists()
+    assert not manager.path_for(42, lane).exists()
+
+
+def test_bounded_prepare_times_out_stalled_git_without_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled Git command uses the remaining deadline and writes no receipt."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    calls: list[float] = []
+    ticks = iter((0.0, 2.0))
+    deadline = _PreparationDeadline(10.0, lambda: next(ticks))
+    real_run = subprocess.run
+
+    def delayed_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        timeout: float,
+        env: dict[str, str],
+        log_on_error: bool,
+        track_process_group: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert not log_on_error
+        assert track_process_group
+        calls.append(timeout)
+        if command[1:3] == ["worktree", "add"]:
+            raise subprocess.TimeoutExpired(command, timeout)
+        return real_run(
+            command,
+            cwd=cwd,
+            check=check,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    monkeypatch.setattr(source_worktree, "run_subprocess", delayed_run)
+
+    with pytest.raises(SourceWorkspacePreparationError) as raised:
+        manager.prepare_bounded(
+            42,
+            SourceLane.REVIEW,
+            second,
+            deadline=deadline,
+        )
+
+    assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+    assert calls == [10.0, 8.0]
+    assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
+    assert not manager.path_for(42, SourceLane.REVIEW).exists()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc").is_dir(),
+    reason="requires POSIX process groups and process state",
+)
+def test_bounded_git_timeout_stops_child_and_reaps_group_leader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded Git timeout stops a child before it reports the timeout."""
+    child_pid_path = tmp_path / "child.pid"
+    child_ready_path = tmp_path / "child.ready"
+    real_popen = subprocess.Popen
+    processes: list[subprocess.Popen[str]] = []
+    parent_script = '''
+import pathlib
+import subprocess
+import sys
+import time
+
+child_script = """
+import pathlib
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text("ready", encoding="utf-8")
+time.sleep(30)
+"""
+child = subprocess.Popen(
+    [sys.executable, "-c", child_script, sys.argv[2]],
+)
+ready = pathlib.Path(sys.argv[2])
+while not ready.exists():
+    time.sleep(0.01)
+pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+time.sleep(30)
+'''
+
+    def spawn_process(**kwargs: Any) -> subprocess.Popen[str]:
+        process = real_popen(
+            [
+                sys.executable,
+                "-c",
+                parent_script,
+                str(child_pid_path),
+                str(child_ready_path),
+            ],
+            cwd=kwargs.get("cwd"),
+            env=kwargs.get("env"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        processes.append(process)
+        limit = time.monotonic() + 2.0
+        while not child_pid_path.exists() and time.monotonic() < limit:
+            time.sleep(0.01)
+        assert child_pid_path.exists(), "test child did not start"
+        return process
+
+    def substitute_popen(*_args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        assert kwargs.get("start_new_session") is True
+        return spawn_process(**kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", substitute_popen)
+    try:
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            _source_worktree_git(
+                tmp_path,
+                "worktree",
+                "add",
+                deadline=_PreparationDeadline(time.monotonic() + 0.1, time.monotonic),
+            )
+
+        assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+        assert processes[0].returncode is not None
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        limit = time.monotonic() + 1.0
+        while time.monotonic() < limit:
+            status_path = Path("/proc") / str(child_pid) / "stat"
+            try:
+                state = status_path.read_text().split()[2]
+            except FileNotFoundError:
+                break
+            if state in {"X", "Z"}:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("timed-out Git child process is still running")
+    finally:
+        for process in processes:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            if process.returncode is None:
+                process.wait(timeout=1.0)
+
+
+def test_bounded_prepare_stops_git_process_group_before_unlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Git timeout stops resistant children before preparation unlocks."""
+    if not hasattr(os, "killpg") or not hasattr(os, "getpgid"):
+        pytest.skip("process-group signals are not available")
+
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    child_pid = tmp_path / "git-child.pid"
+    heartbeat = tmp_path / "git-child.heartbeat"
+    fake_git = fake_bin / "git"
+    child_code = (
+        "import os, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(child_pid)!r}, 'w').write(str(os.getpid()) + ' ' + str(os.getpgrp())); "
+        f"stream = open({str(heartbeat)!r}, 'ab', buffering=0); "
+        "[(stream.write(b'x'), time.sleep(0.02)) for _ in iter(int, 1)]"
+    )
+    fake_git.write_text(
+        f"""#!{sys.executable}
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+if sys.argv[1:3] == ["worktree", "add"]:
+    child = subprocess.Popen(
+        [sys.executable, "-c", {child_code!r}],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    while not Path({str(child_pid)!r}).exists() or not Path({str(heartbeat)!r}).exists():
+        time.sleep(0.01)
+    time.sleep(30)
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    parent_path = os.environ.get("PATH", os.defpath)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{parent_path}")
+    monotonic = time.monotonic
+    deadline = _PreparationDeadline(monotonic() + 0.5, monotonic)
+
+    try:
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            manager.prepare_bounded(
+                42,
+                SourceLane.REVIEW,
+                second,
+                deadline=deadline,
+            )
+
+        assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+        with file_lock(
+            manager._lane_lock_path(42, SourceLane.REVIEW),
+            blocking=False,
+            require_exclusive=True,
+        ):
+            pass
+        assert child_pid.exists()
+        assert heartbeat.exists()
+        pid, _pgid = (int(value) for value in child_pid.read_text(encoding="utf-8").split())
+        heartbeat_size = heartbeat.stat().st_size
+        time.sleep(0.15)
+        assert heartbeat.stat().st_size == heartbeat_size
+        child_deadline = monotonic() + 1.0
+        while monotonic() < child_deadline:
+            status_path = Path("/proc") / str(pid) / "stat"
+            if status_path.exists():
+                try:
+                    if status_path.read_text().split()[2] in {"X", "Z"}:
+                        break
+                except FileNotFoundError:
+                    break
+            else:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            time.sleep(0.01)
+        else:
+            pytest.fail("the timed-out Git child process is still running")
+    finally:
+        if child_pid.exists():
+            pid = int(child_pid.read_text(encoding="utf-8").split()[0])
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_bounded_prepare_releases_locks_when_a_pipe_holding_child_escapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Git timeout stays bounded when a child escapes its process group."""
+    if not hasattr(os, "killpg"):
+        pytest.skip("process-group signals are not available")
+
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    child_pid = tmp_path / "escaped-child.pid"
+    heartbeat = tmp_path / "escaped-child.heartbeat"
+    fake_git = fake_bin / "git"
+    child_code = (
+        "import os, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(child_pid)!r}, 'w').write(str(os.getpid())); "
+        f"stream = open({str(heartbeat)!r}, 'ab', buffering=0); "
+        "[(stream.write(b'x'), os.write(1, b'x'), time.sleep(0.02)) "
+        "for _ in iter(int, 1)]"
+    )
+    fake_git.write_text(
+        f"""#!{sys.executable}
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+if sys.argv[1:3] == ["worktree", "add"]:
+    subprocess.Popen(
+        [sys.executable, "-c", {child_code!r}],
+        start_new_session=True,
+    )
+    while not Path({str(child_pid)!r}).exists() or not Path({str(heartbeat)!r}).exists():
+        time.sleep(0.01)
+    time.sleep(4)
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    parent_path = os.environ.get("PATH", os.defpath)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{parent_path}")
+    monotonic = time.monotonic
+    started = monotonic()
+
+    try:
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            manager.prepare_bounded(
+                42,
+                SourceLane.REVIEW,
+                second,
+                deadline=_PreparationDeadline(started + 0.5, monotonic),
+            )
+
+        assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+        assert monotonic() - started < 2.5
+        with file_lock(
+            manager._lane_lock_path(42, SourceLane.REVIEW),
+            blocking=False,
+            require_exclusive=True,
+        ):
+            pass
+        assert child_pid.exists()
+        assert heartbeat.exists()
+        pid = int(child_pid.read_text(encoding="utf-8"))
+        child_deadline = monotonic() + 1.0
+        while monotonic() < child_deadline:
+            status_path = Path("/proc") / str(pid) / "stat"
+            if status_path.exists():
+                try:
+                    if status_path.read_text().split()[2] in {"X", "Z"}:
+                        break
+                except FileNotFoundError:
+                    break
+            else:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            time.sleep(0.01)
+        else:
+            pytest.fail("the escaped Git child process is still running")
+        heartbeat_size = heartbeat.stat().st_size
+        time.sleep(0.15)
+        assert heartbeat.stat().st_size == heartbeat_size
+    finally:
+        if child_pid.exists():
+            pid = int(child_pid.read_text(encoding="utf-8"))
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_bounded_prepare_restarts_after_replacement_timeout(
+    tmp_path: Path,
+) -> None:
+    """A retry reconciles a clean partial replacement before writing its receipt."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    real_replace = manager._replace_worktree
+
+    def replace_then_timeout(*args: Any, **kwargs: Any) -> None:
+        real_replace(*args, **kwargs)
+        raise SourceWorkspacePreparationError(SourceWorkspacePreparationCause.GIT_TIMEOUT)
+
+    with patch.object(manager, "_replace_worktree", side_effect=replace_then_timeout):
+        with pytest.raises(SourceWorkspacePreparationError) as raised:
+            manager.prepare_bounded(42, SourceLane.REVIEW, second)
+
+    assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+    assert manager.path_for(42, SourceLane.REVIEW).exists()
+    assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
+
+    binding = manager.prepare_bounded(42, SourceLane.REVIEW, second)
+
+    assert binding.revision == second
+    assert manager._read_receipt(42, SourceLane.REVIEW) is not None
+
+
+def test_source_manager_uses_shared_git_common_dir_from_linked_checkout(
+    tmp_path: Path,
+) -> None:
+    """A linked checkout shares identity, locks, and receipt storage with its base."""
+    repo, _, second = _repository(tmp_path)
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-b", "linked", str(linked), second)
+    base_manager = SourceWorkspaceManager(repo, repository="example/project")
+    linked_manager = SourceWorkspaceManager(linked, repository="example/project")
+
+    assert linked_manager.common_dir == base_manager.common_dir
+    assert linked_manager.repository_identity == base_manager.repository_identity
+    assert linked_manager._lane_lock_path(42, SourceLane.REVIEW) == (
+        base_manager._lane_lock_path(42, SourceLane.REVIEW)
+    )
+    assert linked_manager._receipt_path(42, SourceLane.REVIEW) == (
+        base_manager._receipt_path(42, SourceLane.REVIEW)
+    )
 
 
 def test_review_rebinds_same_path_to_exact_revision(tmp_path: Path) -> None:

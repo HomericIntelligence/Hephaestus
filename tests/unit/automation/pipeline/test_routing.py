@@ -239,6 +239,12 @@ class TestROUTES:
         assert ROUTES[StageName.REPO].fail_routes["*"] == StageName.FINISHED
         assert ROUTES[StageName.REPO].budgets == {"clone": 2}
 
+    def test_planning_has_a_separate_source_workspace_budget(self) -> None:
+        """Source preparation has its own retry budget before agent work."""
+        budgets = ROUTES[StageName.PLANNING].budgets
+        assert budgets["plan"] == 2
+        assert budgets["source_workspace"] == 2
+
     def test_plan_review_stage_loops_back(self) -> None:
         """PLAN_REVIEW default fail target is PLANNING (loop back)."""
         route = ROUTES[StageName.PLAN_REVIEW]
