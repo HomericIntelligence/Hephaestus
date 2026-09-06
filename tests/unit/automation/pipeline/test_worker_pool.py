@@ -65,6 +65,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
+    _linux_resource_limited_command,
     _prepare_host_output_aliases,
     _quota_backed_volume,
     _repo_lock_path,
@@ -1598,7 +1599,17 @@ class TestWorkerPoolSubmitComplete:
     ) -> None:
         """Linux host verification records the exact local Pyxis image proof."""
         image = tmp_path / "host-verification.sqsh"
-        metadata = PyxisImageMetadata(path=image.resolve(), sha256="b" * 64)
+        metadata = PyxisImageMetadata(
+            path=image.resolve(),
+            sha256="b" * 64,
+            container_image_id="sha256:" + ("c" * 64),
+            container_image_reference="podman://sha256:" + ("c" * 64),
+            containerfile_sha256="d" * 64,
+            source_revision="a" * 40,
+        )
+        pool._host_verification_pyxis_sha256 = "b" * 64
+        pool._host_verification_pyxis_authority = tmp_path / "authority.json"
+        pool._host_verification_pyxis_quota_root = tmp_path
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -1613,6 +1624,8 @@ class TestWorkerPoolSubmitComplete:
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}.sys.platform", "linux"),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
+            patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
+            patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata),
             patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
             patch(f"{_WP}._extract_immutable_archive"),
             patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata"),
@@ -1627,6 +1640,10 @@ class TestWorkerPoolSubmitComplete:
         assert result.value == {
             "container_image": str(image.resolve()),
             "container_image_sha256": "b" * 64,
+            "container_image_id": "sha256:" + ("c" * 64),
+            "container_image_reference": "podman://sha256:" + ("c" * 64),
+            "containerfile_sha256": "d" * 64,
+            "container_source_revision": "a" * 40,
             "container_runtime": "pyxis",
             "failure_kind": "none",
             "head_sha": "a" * 40,
@@ -1636,6 +1653,18 @@ class TestWorkerPoolSubmitComplete:
         }
         (pi_smoke_logs,) = run_command.call_args.kwargs["additional_writable_paths"]
         assert pi_smoke_logs.name == "pi-smoke-logs"
+
+    def test_linux_resource_wrapper_sets_all_inherited_limits(self) -> None:
+        """The Linux Slurm launcher inherits fixed OS limits before dispatch."""
+        command = _linux_resource_limited_command(("srun", "--flag"), timeout_s=300)
+
+        assert command[:2] == ("/bin/sh", "-c")
+        script = command[2]
+        assert "ulimit -S -t 240" in script
+        assert "ulimit -S -f 131072" in script
+        assert "ulimit -S -u 64" in script
+        assert "ulimit -S -n 1024" in script
+        assert command[-2:] == ("srun", "--flag")
 
     def test_bounded_host_command_enforces_each_writable_tree(self, tmp_path: Path) -> None:
         """An additional writable output tree has the same fixed quota."""

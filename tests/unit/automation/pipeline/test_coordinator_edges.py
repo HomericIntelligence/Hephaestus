@@ -150,6 +150,9 @@ class TestWiring:
                 rebase_policy_selector: Any = None,
                 evidence_receipt_dir: Path | None = None,
                 host_verification_pyxis_image: Path | None = None,
+                host_verification_pyxis_sha256: str | None = None,
+                host_verification_pyxis_authority: Path | None = None,
+                host_verification_pyxis_quota_root: Path | None = None,
             ) -> None:
                 created["size"] = size
                 created["shutdown"] = shutdown
@@ -160,6 +163,9 @@ class TestWiring:
                 created["rebase_policy_selector"] = rebase_policy_selector
                 created["evidence_receipt_dir"] = evidence_receipt_dir
                 created["host_verification_pyxis_image"] = host_verification_pyxis_image
+                created["host_verification_pyxis_sha256"] = host_verification_pyxis_sha256
+                created["host_verification_pyxis_authority"] = host_verification_pyxis_authority
+                created["host_verification_pyxis_quota_root"] = host_verification_pyxis_quota_root
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
         monkeypatch.setattr(
@@ -189,6 +195,9 @@ class TestWiring:
         assert created["rebase_policy_selector"]("Comet") is None
         assert created["evidence_receipt_dir"] is None
         assert created["host_verification_pyxis_image"] == config.host_verification_pyxis_image
+        assert created["host_verification_pyxis_sha256"] is None
+        assert created["host_verification_pyxis_authority"] is None
+        assert created["host_verification_pyxis_quota_root"] is None
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

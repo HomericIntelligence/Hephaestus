@@ -41,10 +41,15 @@ def test_linux_pyxis_host_verification_boundary(
         if image_text
         else Path.cwd() / "build/host-verification/hephaestus-ci.sqsh"
     )
+    expected_sha256 = os.environ.get("HEPHAESTUS_HOST_VERIFICATION_PYXIS_SHA256", "")
+    authority_text = os.environ.get("HEPHAESTUS_HOST_VERIFICATION_PYXIS_AUTHORITY", "")
+    quota_root_text = os.environ.get("HEPHAESTUS_HOST_VERIFICATION_PYXIS_QUOTA_ROOT", "")
     if missing:
         pytest.fail("live Pyxis prerequisites unavailable: " + ", ".join(missing))
     if not image.is_file() or image.is_symlink():
         pytest.fail(f"prepared Pyxis squashfs image is unavailable: {image}")
+    if not expected_sha256 or not authority_text or not quota_root_text:
+        pytest.fail("live Pyxis authority digest, provenance, and quota root are required")
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -80,6 +85,9 @@ def test_linux_pyxis_host_verification_boundary(
         completion_q=queue.Queue(),
         lock_dir=tmp_path / "locks",
         host_verification_pyxis_image=image,
+        host_verification_pyxis_sha256=expected_sha256,
+        host_verification_pyxis_authority=Path(authority_text),
+        host_verification_pyxis_quota_root=Path(quota_root_text),
     )
     try:
         result = pool._run_build_test(
@@ -100,8 +108,12 @@ def test_linux_pyxis_host_verification_boundary(
         f"Pyxis host verification failed: {result.error}\n{result.stderr_tail}"
     )
     assert result.value == {
-        "container_image": str(image.resolve()),
+        "container_image": result.value["container_image"],
         "container_image_sha256": result.value["container_image_sha256"],
+        "container_image_id": result.value["container_image_id"],
+        "container_image_reference": result.value["container_image_reference"],
+        "containerfile_sha256": result.value["containerfile_sha256"],
+        "container_source_revision": result.value["container_source_revision"],
         "container_runtime": "pyxis",
         "failure_kind": "none",
         "head_sha": head,

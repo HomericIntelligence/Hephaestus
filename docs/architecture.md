@@ -1137,14 +1137,21 @@ later branch push does not invalidate that posted review; only the final
 the current open, unarmed PR head.
 
 For the registered host-verification plan, macOS uses `sandbox-exec` plus
-disposable, quota-backed disk images. Linux uses a local, attested Pyxis/Enroot
-squashfs image. The image is read-only, source and Git metadata are mounted
-read-only, and scratch and Pi logs use separate writable paths. The preparation
-script records the image digest and immutable OCI image ID in a local
-provenance record. A missing image, digest proof, Pyxis allocation, or Enroot
-runtime produces a failed receipt; it cannot become a passing skip. Other
-platforms remain fail-closed until a separately reviewed isolation backend
-exists. There is no unsandboxed fallback.
+disposable, quota-backed disk images. Linux uses a local Pyxis/Enroot squashfs
+image. A separate host-owned authority binds the expected digest, committed
+source revision, Containerfile digest, immutable OCI image ID, and local
+content-addressed reference. The worker verifies the authority and copies the
+exact bytes to a private digest-named path before dispatch. Source and Git
+metadata are read-only. The host virtual environment is not mounted.
+
+Scratch and Pi logs are on an owner-private filesystem with a maximum 1 GiB
+capacity. Slurm and inherited OS limits bound CPU, memory, process count,
+file size, and wall-clock time. The authoritative Linux lane runs the real
+integration test with `--require-pyxis-host-verification`. A missing image,
+authority, bounded filesystem, Pyxis allocation, or Enroot runtime produces a
+failed receipt. It cannot become a passing skip. Other platforms remain
+fail-closed until a separately reviewed isolation backend exists. There is no
+unsandboxed fallback.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is
