@@ -359,6 +359,11 @@ and the operator must select it with `--pi-isolation-adapter ENTRY_POINT`. That 
 enforces the resolved filesystem and network policy; the local setup otherwise
 supports only the explicit adapter-smoke seam.
 
+Use `--disable-pi-automation` when a run must omit Pi. That flag leaves
+host-owned Athena `advise` and `learn` unchanged. See
+[`docs/runbooks/pi-rollout.md`](docs/runbooks/pi-rollout.md) for enable, omit,
+and recovery steps.
+
 For GPT-6 Astra, IFM and K2-Horizon model IDs and aliases,
 `MODEL[:EFFORT]` controls, and external server requirements, see
 [`docs/ifm-models.md`](docs/ifm-models.md).

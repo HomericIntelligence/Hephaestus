@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import planner as planner_mod
 from hephaestus.automation.models import DEFAULT_WORKER_COUNT
 from hephaestus.automation.pipeline.routing import StageName
@@ -82,6 +83,63 @@ def test_timeout_flags_thread_into_pipeline_config() -> None:
     config = captured["config"]
     assert (config.planner_timeout, config.reviewer_timeout) == (11, 12)
     assert config.reviewer_model == "review-model"
+
+
+def test_codex_role_aliases_reach_planner_config() -> None:
+    """Planner role aliases resolve before pipeline configuration is built."""
+    captured = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--agent",
+            "codex",
+            "--planner-model",
+            "sol",
+            "--reviewer-model",
+            "terra:high",
+        ],
+        resolved_agent="codex",
+    )
+
+    assert captured["config"].planner_model == "gpt-5.6-sol:xhigh"
+    assert captured["config"].reviewer_model == "gpt-5.6-terra:high"
+
+
+def test_main_rejects_unknown_codex_alias_before_repo_resolution() -> None:
+    """Planner rejects an unknown alias before repository or pipeline work."""
+
+    def reject_unknown_fallback(agent: str | None, **kwargs: Any) -> str:
+        assert agent == "codex"
+        assert kwargs["model_references"] == ("", "", "unknown")
+        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+
+    with (
+        patch(
+            "sys.argv",
+            [
+                "hephaestus-plan-issues",
+                "--issues",
+                "123",
+                "--agent",
+                "codex",
+                "--fallback-model",
+                "unknown",
+            ],
+        ),
+        patch.object(
+            planner_mod,
+            "resolve_agent",
+            side_effect=reject_unknown_fallback,
+        ),
+        patch.object(planner_mod, "_resolve_repo") as resolve_repo,
+        patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,
+        pytest.raises(SystemExit) as error,
+    ):
+        planner_mod.main()
+
+    assert error.value.code == 2
+    resolve_repo.assert_not_called()
+    run_pipeline.assert_not_called()
 
 
 def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:

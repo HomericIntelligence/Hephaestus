@@ -1059,21 +1059,19 @@ def review_receipts_page_query(
     return _query("reviewReceipts", document, validate)
 
 
-def merge_authorization_reviews_page_query(
+def pull_request_reviews_page_query(
     owner: str, name: str, pr_number: int
 ) -> GraphQLQuerySpec[dict[str, Any]]:
-    """Build one validated merge-authorization native-review page query."""
+    """Build one validated pull-request review page query."""
     document = (
         "query($owner:String!,$name:String!,$number:Int!,$after:String){"
         " repository(owner:$owner,name:$name){"
         "  id name owner{login}"
         "  pullRequest(number:$number){"
-        "   id number headRefOid"
+        "   id number"
         "   reviews(first:100,after:$after){"
         "    totalCount pageInfo{hasNextPage endCursor}"
-        "    nodes{id fullDatabaseId body state submittedAt updatedAt "
-        "includesCreatedEdit lastEditedAt viewerDidAuthor "
-        "author{login __typename} commit{oid}}"
+        "    nodes{id body state viewerDidAuthor}"
         "   }"
         "  }"
         " }"
@@ -1089,21 +1087,25 @@ def merge_authorization_reviews_page_query(
             not isinstance(pull_request, dict)
             or not isinstance(pull_request.get("id"), str)
             or pull_request.get("number") != pr_number
-            or not isinstance(pull_request.get("headRefOid"), str)
-            or not pull_request["headRefOid"]
         ):
-            raise ValueError("merge authorization pull request identity was malformed")
+            raise ValueError("pull request review identity was malformed")
         connection = _page_info(pull_request.get("reviews"))
         total_count = connection.get("totalCount")
         if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count < 0:
-            raise ValueError("merge authorization review count was malformed")
+            raise ValueError("pull request review count was malformed")
         for node in connection["nodes"]:
             review_id = node.get("id")
-            if not isinstance(review_id, str) or not review_id:
-                raise ValueError("merge authorization review identity was malformed")
+            if (
+                not isinstance(review_id, str)
+                or not review_id
+                or not isinstance(node.get("body"), str)
+                or not isinstance(node.get("state"), str)
+                or not isinstance(node.get("viewerDidAuthor"), bool)
+            ):
+                raise ValueError("pull request review node was malformed")
         return pull_request
 
-    return _query("MergeAuthorizationReviews", document, validate)
+    return _query("PullRequestReviews", document, validate)
 
 
 def _receipt_mutation[T](
@@ -1425,6 +1427,50 @@ def resolve_thread_mutation(thread_id: str) -> GraphQLMutationSpec[dict[str, Any
     )
 
 
+def enqueue_pull_request_mutation(
+    pull_request_id: str, expected_head_oid: str
+) -> GraphQLMutationSpec[dict[str, Any]]:
+    """Build an exact-head merge-queue admission mutation."""
+    document = (
+        "mutation EnqueuePullRequest($pullRequestId:ID!,$expectedHeadOid:GitObjectID!,"
+        "$clientMutationId:String!){enqueuePullRequest(input:{pullRequestId:$pullRequestId,"
+        "expectedHeadOid:$expectedHeadOid,clientMutationId:$clientMutationId}){clientMutationId "
+        "mergeQueueEntry{id state baseCommit{oid} pullRequest{id headRefOid}}}}"
+    )
+
+    def required(
+        payload: dict[str, Any], intent: GraphQLMutationIntent, _: dict[str, Any]
+    ) -> dict[str, Any]:
+        entry = payload.get("mergeQueueEntry")
+        pull_request = entry.get("pullRequest") if isinstance(entry, dict) else None
+        base_commit = entry.get("baseCommit") if isinstance(entry, dict) else None
+        queue_states = {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"}
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"]
+            or entry.get("state") not in queue_states
+            or not isinstance(pull_request, dict)
+            or pull_request.get("id") != pull_request_id
+            or pull_request.get("headRefOid") != expected_head_oid
+            or not isinstance(base_commit, dict)
+            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", str(base_commit.get("oid") or ""))
+            is None
+        ):
+            raise ValueError("merge-queue admission receipt was incomplete")
+        return {"clientMutationId": intent.client_mutation_id, **entry}
+
+    return _receipt_mutation(
+        "enqueuePullRequest",
+        document,
+        {"pullRequestId": pull_request_id, "expectedHeadOid": expected_head_oid},
+        ("pullRequestId", "expectedHeadOid"),
+        (),
+        "enqueuePullRequest",
+        required,
+    )
+
+
 def github_schema_contract_query() -> GraphQLQuerySpec[dict[str, Any]]:
     """Build a read-only introspection query for the live schema contract lane."""
     document = (
@@ -1454,6 +1500,7 @@ __all__ = [
     "batch_issue_states_query",
     "batch_issue_titles_query",
     "create_pending_review_mutation",
+    "enqueue_pull_request_mutation",
     "gh_call",
     "gh_cli_timeout",
     "github_schema_contract_query",

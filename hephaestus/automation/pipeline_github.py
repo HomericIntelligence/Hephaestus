@@ -61,7 +61,6 @@ if _typing.TYPE_CHECKING:
         logger,
         logging,
         normalize_scope_retraction_paths,
-        quote,
         re,
         scope_retraction_marker,
         subprocess,
@@ -81,9 +80,11 @@ from ._review_utils import (
 )
 from .git_utils import issue_auto_impl_branch_name
 from .pipeline_github_audit import PipelineGitHubAuditReceipts
-from .pipeline_github_authorization import PipelineGitHubAuthorization
+from .pipeline_github_check_policy import PipelineGitHubCheckPolicy
 from .pipeline_github_mutations import PipelineGitHubMutations
 from .pipeline_github_queries import PipelineGitHubQueries
+from .pipeline_github_required_checks import PipelineGitHubRequiredChecks
+from .pipeline_github_review_queries import PipelineGitHubReviewQueries
 from .pipeline_github_reviews import PipelineGitHubReviews
 from .pipeline_github_scope_expansion import PipelineGitHubScopeExpansion
 
@@ -205,38 +206,12 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
     return "\n".join([f"[Review] {body}", *markers])
 
 
-def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
-    """Return whether the classic protection response grants no PR bypasses.
-
-    Classic branch protection exposes actor allowances that may bypass pull
-    request requirements under ``required_pull_request_reviews``. A missing
-    review-requirement object means this response exposes no such allowance.
-    GitHub also omits the allowance field itself when no PR bypass is
-    configured. Once the field is present, every allowance collection must be
-    present, list-typed, and empty. This is deliberately fail-closed because a
-    merge actor must not infer that a malformed allowance is safe.
-    """
-    reviews = protection.get("required_pull_request_reviews")
-    if reviews is None:
-        return True
-    if not isinstance(reviews, dict):
-        return False
-    if "bypass_pull_request_allowances" not in reviews:
-        return True
-    allowances = reviews["bypass_pull_request_allowances"]
-    if not isinstance(allowances, dict):
-        return False
-    for actor_type in ("users", "teams", "apps"):
-        actors = allowances.get(actor_type)
-        if not isinstance(actors, list) or actors:
-            return False
-    return True
-
-
 class PipelineGitHub(
     PipelineGitHubTransport,
     PipelineGitHubQueries,
-    PipelineGitHubAuthorization,
+    PipelineGitHubCheckPolicy,
+    PipelineGitHubRequiredChecks,
+    PipelineGitHubReviewQueries,
     PipelineGitHubReviews,
     PipelineGitHubAuditReceipts,
     PipelineGitHubMutations,

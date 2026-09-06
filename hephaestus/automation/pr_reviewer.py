@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import logging
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
@@ -147,14 +148,20 @@ def main() -> int:
     args = _parse_args()
     configure_github_throttle_from_args(args)
     configure_cli_logging(verbose=args.verbose, log_format=args.log_format)
-    agent = resolve_agent(
-        args.agent,
-        disable_pi_automation=args.disable_pi_automation,
-        auth_status_timeout=args.auth_status_timeout,
-        pi_isolation_adapter=args.pi_isolation_adapter,
-        pi_dir=args.pi_dir,
-        model_references=(args.reviewer_model or args.model,),
-    )
+    try:
+        agent = resolve_agent(
+            args.agent,
+            disable_pi_automation=args.disable_pi_automation,
+            auth_status_timeout=args.auth_status_timeout,
+            pi_isolation_adapter=args.pi_isolation_adapter,
+            pi_dir=args.pi_dir,
+            model_references=(
+                args.reviewer_model or args.model,
+                args.fallback_model or args.model,
+            ),
+        )
+    except UnknownModelAliasError as exc:
+        _build_parser().error(str(exc))
 
     log = logging.getLogger(__name__)
     log.info("Starting PR review (pipeline, pr_review scope) for issues: %s", args.issues)
@@ -197,12 +204,11 @@ def main() -> int:
             json_out=args.json,
             scope=PipelineScope(_PR_REVIEWER_SCOPE_STAGES),
             gh_extra_path_root=args.gh_extra_path_root,
+            explicit_pr_review=True,
         )
 
         rc = run_pipeline(config)
         log.info("PR review complete (rc=%d)", rc)
-        if args.json:
-            emit_json_status(rc, issues=issues)
         return rc
 
     except KeyboardInterrupt:

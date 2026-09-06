@@ -9,7 +9,7 @@ runs:
       with:
         node-version: 22.19.0
 
-    - name: Install Pi CLI
+    - name: Install Pi CLI and managed package set
       shell: bash
       run: |
         set -euo pipefail
@@ -17,3 +17,4 @@ runs:
         expected="${pi_spec##*@}"
         npm install -g --ignore-scripts "$pi_spec"
         test "$(pi --version)" = "$expected"
+        uv run --locked hephaestus-install-pi-plugins --global --yes --no-approve >/dev/null

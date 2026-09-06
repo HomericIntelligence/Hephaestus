@@ -20,10 +20,12 @@ def test_pi_default_binding_is_validated_against_the_resolved_selection(tmp_path
     """The coordinator persists a binding for the trusted Pi default."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
+    settings_path = pi_dir / "settings.json"
+    settings_path.write_text(
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B","defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    settings_path.chmod(0o600)
     job = AgentJob(
         repo="repo",
         issue=1,

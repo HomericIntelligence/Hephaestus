@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
     from hephaestus.automation.pipeline.routing import PipelineScope
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
     resolve_agent,
@@ -70,6 +71,7 @@ from hephaestus.automation.loop_repo_manager import (
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.cli.utils import (
+    MODEL_REFERENCE_HELP,
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
@@ -462,7 +464,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="MODEL[:EFFORT]",
         help=(
             "MODEL[:EFFORT] applied to every phase (planner, reviewer, implementer, advise) "
-            "for child processes. The /learn "
+            f"for child processes. {MODEL_REFERENCE_HELP} The /learn "
             "step inherits its parent phase's model automatically. A per-phase flag below "
             "overrides this for that phase."
         ),
@@ -471,25 +473,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--planner-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help="MODEL[:EFFORT] for planner child processes",
+        help=MODEL_REFERENCE_HELP,
     )
     p.add_argument(
         "--reviewer-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=(
-            "MODEL[:EFFORT] for reviewer child processes (plan-review + PR-review); "
-            "use terra:default to select GPT-5.6 Terra with its provider default"
-        ),
+        help=MODEL_REFERENCE_HELP,
     )
     p.add_argument(
         "--implementer-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=(
-            "MODEL[:EFFORT] for implementer child processes "
-            "(implement, address-review, drive-green)"
-        ),
+        help=MODEL_REFERENCE_HELP,
     )
     p.add_argument(
         "--fallback-model",
@@ -670,8 +666,8 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
     merge_wait, drive-green = pr_review+merge_wait. The overlap
     lets either operational entry point resume an already-eligible PR through
     merge-wait, where the loop re-reads its eligibility label, live PR head,
-    and separate operator authorization before conditional merge; it still
-    requires the ephemeral current-process review proof.
+    and passing exact-head required status evidence before conditional merge;
+    it still requires the ephemeral current-process review proof.
     """
     selected = set(phases)
     if selected == set(ALL_SELECTABLE):
@@ -1072,18 +1068,22 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     configure_github_throttle_from_args(args)
     _setup_logging(args.verbose, args.log_format)
-    agent = resolve_agent(
-        args.agent,
-        disable_pi_automation=args.disable_pi_automation,
-        auth_status_timeout=args.auth_status_timeout,
-        pi_isolation_adapter=args.pi_isolation_adapter,
-        pi_dir=args.pi_dir,
-        model_references=(
-            args.planner_model or args.model,
-            args.reviewer_model or args.model,
-            args.implementer_model or args.model,
-        ),
-    )
+    try:
+        agent = resolve_agent(
+            args.agent,
+            disable_pi_automation=args.disable_pi_automation,
+            auth_status_timeout=args.auth_status_timeout,
+            pi_isolation_adapter=args.pi_isolation_adapter,
+            pi_dir=args.pi_dir,
+            model_references=(
+                args.planner_model or args.model,
+                args.reviewer_model or args.model,
+                args.implementer_model or args.model,
+                args.fallback_model or args.model,
+            ),
+        )
+    except UnknownModelAliasError as exc:
+        _build_parser().error(str(exc))
 
     phases = _validate_phases(args.phases)
 

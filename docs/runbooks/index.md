@@ -14,6 +14,7 @@ needs hands-on recovery.
 | [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage reports a 429 quota/session-limit infrastructure failure and the issue remains unlabeled. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [Pi issue #2519 evidence run](pi-e2e-2519.md) | You need to reproduce the live Pi/Codex conformance evidence run, regenerate the report, or re-attest the publication artifacts. |
+| [Pi rollout and recovery](pi-rollout.md) | You need to enable, verify, omit, or recover the managed Pi provider. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
 | [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0013). |
 | [Compacting issue timelines](compact-issue-timelines.md) | An upgraded release appended plan/review history to linked issues and you want to migrate that history off the issue timeline. |
@@ -38,6 +39,6 @@ copy — the module is the source of truth.
 | `state:plan-go` | Plan reviewed and approved; ready for implementation. |
 | `state:plan-no-go` | Plan reviewed and rejected; needs re-planning. |
 | `state:plan-blocked` | Automation is stopped pending a stated decision or dependency. Comments do not resume it. After resolving the block, an external actor must replace this label with exactly one next plan-state label. |
-| `state:implementation-go` | Automated implementation eligibility after structural audit and fresh exact-head facts. Merge-wait separately requires its current-process reviewed-head proof and one trusted marked operator approval for the exact head. |
+| `state:implementation-go` | Automated implementation eligibility after structural audit and fresh exact-head facts. Merge wait separately requires its current-process reviewed-head proof and complete passing required status evidence for the exact head. |
 | `state:implementation-no-go` | Implementation reviewed and rejected; needs re-work. |
 | `state:skip` | Work item taken out of the loop entirely — operator-applied, auto-applied when the review loop exhausts its budget without a GO, or applied to epics before exclusion. Independent of all other state labels. See [Reviving a state:skip-labeled issue](state-skip-revival.md) to safely clear it. |

@@ -1,13 +1,18 @@
-"""Bind a local Mnemosyne checkout to a trusted repository revision."""
+"""Bind an available Mnemosyne version to a trusted repository."""
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
+import tomllib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.automation.remote_git import (
@@ -15,12 +20,21 @@ from hephaestus.automation.remote_git import (
     trusted_remote_git_config,
 )
 from hephaestus.config.child_environments import build_gh_child_env, build_git_child_env
-from hephaestus.github.mnemosyne_repo import MnemosyneTarget, resolve_mnemosyne_target
+from hephaestus.github.mnemosyne_repo import (
+    UPSTREAM_OWNER,
+    UPSTREAM_SLUG,
+    MnemosyneResolutionError,
+    MnemosyneTarget,
+    MnemosyneTrustBasis,
+    resolve_mnemosyne_target,
+)
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
+
+logger = logging.getLogger(__name__)
 
 
 class MnemosyneBindingError(RuntimeError):
-    """Raised when a checkout cannot be safely bound to a target revision."""
+    """Raised when an available checkout cannot be safely bound."""
 
     def __init__(self, message: str, *, failure_kind: str = "mnemosyne_binding") -> None:
         """Initialize a safe message and a stable failure class."""
@@ -34,12 +48,14 @@ Resolver = Callable[[], MnemosyneTarget]
 
 @dataclass(frozen=True)
 class MnemosyneBindingReceipt:
-    """Receipt proving a local checkout was bound before use."""
+    """Receipt that identifies the available Mnemosyne version."""
 
     root: str
     repository: str
     default_branch: str
+    version: str
     commit_sha: str
+    sync_status: str
     trust_basis: str
     athena_contract: dict[str, str]
 
@@ -138,7 +154,7 @@ def _gh_auth_status(command: str, timeout_s: int) -> bool:
 
 
 class MnemosyneBindingService:
-    """Validate, synchronize, and bind a Mnemosyne checkout before use."""
+    """Validate and bind an available Mnemosyne checkout before use."""
 
     def __init__(
         self,
@@ -161,26 +177,54 @@ class MnemosyneBindingService:
     def bind(
         self, *, contract: AthenaContractReceipt, sync: bool = True
     ) -> MnemosyneBindingReceipt:
-        """Return a binding receipt or fail closed before corpus read/write."""
-        target = self.resolver()
+        """Return a receipt for a safe available Mnemosyne version.
+
+        A remote synchronization attempt is best-effort. A usable local
+        version remains available when the remote update cannot complete.
+        """
         root = self.root
         if root.is_symlink():
             raise MnemosyneBindingError(f"Mnemosyne checkout must not be a symlink: {root}")
-        if not root.exists():
+        checkout_exists = root.exists()
+        if checkout_exists:
+            if not root.is_dir():
+                raise MnemosyneBindingError(f"Mnemosyne checkout must be a directory: {root}")
+            self._validate_git_checkout(root)
+            self._validate_safe_config(root)
+            self._validate_clean(root)
+            target = self._resolve_existing_target(root)
+        else:
+            target = self.resolver()
             self._clone_missing_checkout(root, target)
         if root.is_symlink() or not root.is_dir():
             raise MnemosyneBindingError(f"Mnemosyne checkout must be a directory: {root}")
-        self._validate_git_checkout(root)
+        if not checkout_exists:
+            self._validate_git_checkout(root)
+            self._validate_safe_config(root)
+            self._validate_clean(root)
         self._validate_origin(root, target)
-        self._validate_safe_config(root)
-        self._validate_clean(root)
+        sync_status = "not_requested"
         if sync:
-            self._fast_forward(root, target)
+            try:
+                self._fast_forward(root, target)
+            except (
+                MnemosyneBindingError,
+                OSError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ) as exc:
+                failure_kind = getattr(exc, "failure_kind", "mnemosyne_sync")
+                logger.warning(
+                    "Mnemosyne synchronization did not complete; "
+                    "the available local version will be used (failure_kind=%s)",
+                    failure_kind,
+                )
+                sync_status = "not_updated"
+            else:
+                sync_status = "updated"
+            self._validate_clean(root)
         commit = self._head(root)
-        if commit != target.head_sha:
-            raise MnemosyneBindingError(
-                f"revision drift: checkout {commit} does not match resolved {target.head_sha}"
-            )
+        version = self._version(root, commit)
         return MnemosyneBindingReceipt(
             root=str(root),
             repository=target.slug,
@@ -188,7 +232,32 @@ class MnemosyneBindingService:
             commit_sha=commit,
             trust_basis=target.trust_basis.value,
             athena_contract=contract.to_dict(),
+            version=version,
+            sync_status=sync_status,
         )
+
+    def _resolve_existing_target(self, root: Path) -> MnemosyneTarget:
+        """Resolve a target or use a verified canonical local checkout."""
+        try:
+            return self.resolver()
+        except MnemosyneResolutionError:
+            origin = _require_success(
+                self._git(root, "config", "--get", "remote.origin.url"),
+                "origin read",
+            )
+            if not _origin_matches(origin, UPSTREAM_SLUG):
+                raise
+            logger.warning(
+                "Mnemosyne repository resolution did not complete; "
+                "the canonical local checkout will be used"
+            )
+            return MnemosyneTarget(
+                owner=UPSTREAM_OWNER,
+                slug=UPSTREAM_SLUG,
+                is_fork_of_upstream=False,
+                default_branch="main",
+                trust_basis=MnemosyneTrustBasis.CANONICAL_UPSTREAM,
+            )
 
     def _git(self, root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
         return self.git(root, tuple(argv), self.timeout_s)
@@ -223,8 +292,8 @@ class MnemosyneBindingService:
     def _clone_missing_checkout(self, root: Path, target: MnemosyneTarget) -> None:
         """Create the canonical parent and clone the already-resolved target.
 
-        The clone remains untrusted until the normal origin, config, cleanliness,
-        fast-forward, and revision checks in :meth:`bind` complete.
+        The clone remains untrusted until the origin, configuration,
+        cleanliness, commit, and version checks in :meth:`bind` complete.
         """
         parent = root.parent
         try:
@@ -295,3 +364,27 @@ class MnemosyneBindingService:
         if re.fullmatch(r"[0-9a-f]{40}", head) is None:
             raise MnemosyneBindingError(f"invalid HEAD SHA: {head}")
         return head
+
+    def _version(self, root: Path, commit: str) -> str:
+        """Read and validate the release version from the available commit."""
+        result = self._git(root, "show", f"{commit}:pyproject.toml")
+        if result.returncode != 0:
+            raise MnemosyneBindingError("Mnemosyne version metadata is unavailable")
+        try:
+            metadata = tomllib.loads(result.stdout or "")
+        except tomllib.TOMLDecodeError as exc:
+            raise MnemosyneBindingError("Mnemosyne version metadata is invalid") from exc
+        project = metadata.get("project")
+        if not isinstance(project, dict):
+            raise MnemosyneBindingError("Mnemosyne project metadata is invalid")
+        name = project.get("name")
+        version = project.get("version")
+        if not isinstance(name, str) or canonicalize_name(name) != "project-mnemosyne":
+            raise MnemosyneBindingError("Mnemosyne project identity is invalid")
+        if not isinstance(version, str) or not version or version != version.strip():
+            raise MnemosyneBindingError("Mnemosyne version metadata is invalid")
+        try:
+            Version(version)
+        except InvalidVersion as exc:
+            raise MnemosyneBindingError("Mnemosyne version metadata is invalid") from exc
+        return version

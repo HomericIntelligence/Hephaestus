@@ -59,3 +59,19 @@ def test_remediation_defines_disclosure_window() -> None:
 def test_no_hardcoded_date_stamps() -> None:
     """New sections must not reintroduce 'As of YYYY-MM-DD' stamps (pre-commit hook)."""
     assert not re.search(r"As of \d{4}-\d{2}-\d{2}", _policy_text())
+
+
+def test_managed_pi_supply_chain_section_exists() -> None:
+    """The policy must name the managed Pi supply-chain boundary."""
+    assert re.search(r"^### Managed Pi supply chain\s*$", _policy_text(), re.MULTILINE)
+
+
+def test_managed_pi_supply_chain_covers_rollback_and_omit_paths() -> None:
+    """The Pi hardening section must keep host-owned Athena separate."""
+    text = _policy_text().lower()
+    assert "hephaestus-install-pi-plugins" in text
+    assert "--disable-pi-automation" in text
+    assert "host-owned athena" in text
+    assert "advise" in text
+    assert "learn" in text
+    assert "roll back" in text or "rerunning the managed installer" in text

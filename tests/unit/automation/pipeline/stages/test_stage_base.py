@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline import ROUTES
 from hephaestus.automation.pipeline.coordinator import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
@@ -129,3 +131,54 @@ class TestAgentProvider:
     def test_prefers_explicit_agent(self) -> None:
         """Configured agent values are returned unchanged."""
         assert agent_provider(self._ctx(agent="pi")) == "pi"
+
+
+class TestPlanningSourceWorkspaceBinding:
+    """Planning binds the detached captured source lane."""
+
+    @pytest.mark.parametrize(
+        ("synced_revision", "expected_revision"),
+        [
+            ("a" * 40, "a" * 40),
+            (None, "b" * 40),
+        ],
+    )
+    def test_uses_captured_revision_and_review_lane(
+        self,
+        synced_revision: str | None,
+        expected_revision: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Planning ignores stale implementation and PR revisions."""
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        binding = object()
+
+        class Manager:
+            def prepare_bounded(self, *args: Any, **kwargs: Any) -> object:
+                calls.append((args, kwargs))
+                return binding
+
+        payload: dict[str, Any] = {
+            "_worktree_cleanup_head_sha": "c" * 40,
+            "_impl_source_revision": "d" * 40,
+            "reviewed_pr_head_sha": "e" * 40,
+            "pr_head_sha": "f" * 40,
+            "_direct_scope_base_sha": "b" * 40,
+        }
+        if synced_revision is not None:
+            payload["_synced_default_branch_sha"] = synced_revision
+        item = make_work_item(issue=12, state="ADVISE_WAIT", payload=payload)
+        ctx = make_ctx(
+            paths=SimpleNamespace(source_workspaces=Manager()),
+            now_fn=lambda: 10.0,
+        )
+        helper = getattr(stage_base, "planning_source_workspace_binding", None)
+        assert callable(helper)
+
+        result = helper(item, ctx, preparation_timeout_s=5.0)
+
+        assert result is binding
+        assert calls[0][0] == (12, SourceLane.REVIEW, expected_revision)
+        assert calls[0][1]["branch"] is None
+        assert calls[0][1]["deadline"].expires_at == 15.0

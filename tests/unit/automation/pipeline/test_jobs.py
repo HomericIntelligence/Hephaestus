@@ -96,6 +96,21 @@ class TestJobDataclassesFrozen:
 class TestBuildTestJobArgv:
     """Tests that BuildTestJob.argv is always a tuple."""
 
+    def test_verified_runner_request_keeps_canonical_command_and_revision(self) -> None:
+        """A verified-runner job carries data only until a worker executes it."""
+        revision = "a" * 40
+
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=Path("/tmp"),
+            argv=("bash", "scripts/run_ci_local.sh", "all", "--rebuild"),
+            timeout_s=60,
+            verified_runner_source_revision=revision,
+        )
+
+        assert job.argv == ("bash", "scripts/run_ci_local.sh", "all", "--rebuild")
+        assert job.verified_runner_source_revision == revision
+
     def test_argv_tuple_preserved(self) -> None:
         job = BuildTestJob(repo="test/repo", cwd=Path("/tmp"), argv=("pytest", "-q"), timeout_s=60)
         assert job.argv == ("pytest", "-q")

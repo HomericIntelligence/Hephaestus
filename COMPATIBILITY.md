@@ -15,6 +15,14 @@ Hephaestus supports **Python 3.13** (`requires-python = ">=3.13,<3.14"` in
 support for a Python minor version is treated as a backwards-incompatible change and
 follows the deprecation policy below.
 
+## Agent Provider Compatibility
+
+| Provider | Selection | CI-covered platforms | Disablement |
+|---|---|---|---|
+| Claude | Default or explicit `--agent claude` | Linux amd64 | N/A |
+| Codex | Explicit `--agent codex` or fallback after Claude | Linux amd64 | N/A |
+| Pi | Explicit `--agent pi` after managed preflight | Linux amd64; Linux arm64 (`ubuntu-24.04-arm`) | `--disable-pi-automation` or omit `--agent pi` |
+
 ## Stability Tiers
 
 Hephaestus documents subpackages with different maturity levels. Only the
@@ -258,6 +266,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `CommandRegistry` | 0.1.0 | Registry type for CLI subcommands |
 | `COMMAND_REGISTRY` | 0.1.0 | Default shared `CommandRegistry` instance |
 | `DRY_RUN_HELP_CAVEAT` | 0.9.0 | Standard help text appended for dry-run flags |
+| `MODEL_REFERENCE_HELP` | 0.9.8 | Standard help text for model-reference options |
 | `add_advise_timeout_arg` | 0.9.8 | Add an `--advise-timeout` flag to a parser |
 | `add_agent_timeout_arg` | 0.9.8 | Add an `--agent-timeout` flag to a parser |
 | `add_dry_run_arg` | 0.9.0 | Add a `--dry-run` flag to a parser |

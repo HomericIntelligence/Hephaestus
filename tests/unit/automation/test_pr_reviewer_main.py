@@ -9,14 +9,17 @@ end with ``run_pipeline`` mocked so no live agent or GitHub call is made.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import pr_reviewer as pr_reviewer_mod
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.cli.utils import emit_json_status
 
 
 @pytest.fixture(autouse=True)
@@ -67,10 +70,64 @@ def test_main_builds_pr_review_scope_and_dispatches() -> None:
     assert config.scope.stages == frozenset({StageName.PR_REVIEW})
 
 
+def test_main_sets_explicit_pr_review_intent() -> None:
+    """The standalone reviewer marks its direct request for a fresh review."""
+    captured = _run_main_capturing_config(["--issues", "123", "--dry-run"])
+
+    assert captured["config"].explicit_pr_review is True
+
+
 def test_agent_timeout_threads_into_pipeline_config() -> None:
     """Standalone reviewer timeout configures the review agent operation."""
     captured = _run_main_capturing_config(["--issues", "123", "--agent-timeout", "11"])
     assert captured["config"].reviewer_timeout == 11
+
+
+def test_codex_role_alias_reaches_reviewer_config() -> None:
+    """Reviewer role aliases resolve before pipeline configuration is built."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", "codex", "--reviewer-model", "luna"],
+        resolved_agent="codex",
+    )
+
+    assert captured["config"].reviewer_model == "gpt-5.6-luna:medium"
+
+
+def test_main_rejects_unknown_codex_alias_before_repo_or_pipeline_work() -> None:
+    """Reviewer rejects an unknown alias before repository or pipeline work."""
+
+    def reject_unknown_fallback(agent: str | None, **kwargs: Any) -> str:
+        assert agent == "codex"
+        assert kwargs["model_references"] == ("", "unknown")
+        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+
+    with (
+        patch(
+            "sys.argv",
+            [
+                "hephaestus-review-prs",
+                "--issues",
+                "123",
+                "--agent",
+                "codex",
+                "--fallback-model",
+                "unknown",
+            ],
+        ),
+        patch.object(
+            pr_reviewer_mod,
+            "resolve_agent",
+            side_effect=reject_unknown_fallback,
+        ),
+        patch.object(pr_reviewer_mod, "_resolve_repo") as resolve_repo,
+        patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,
+        pytest.raises(SystemExit) as error,
+    ):
+        pr_reviewer_mod.main()
+
+    assert error.value.code == 2
+    resolve_repo.assert_not_called()
+    run_pipeline.assert_not_called()
 
 
 def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:
@@ -113,6 +170,40 @@ def test_main_returns_run_pipeline_exit_code() -> None:
     captured = _run_main_capturing_config(["--issues", "5", "--dry-run"], rc=1)
 
     assert captured["rc"] == 1
+
+
+def test_main_json_preserves_the_coordinator_terminal_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """JSON mode emits one terminal record with the review-run reason."""
+
+    def _fake_run_pipeline(config: Any) -> int:
+        assert config.json_out is True
+        emit_json_status(
+            0,
+            review_run_reasons={"explicit-review": 1},
+        )
+        return 0
+
+    with (
+        patch("sys.argv", ["hephaestus-review-prs", "--issues", "5", "--json"]),
+        patch.object(pr_reviewer_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch.object(pr_reviewer_mod, "resolve_agent", return_value="claude"),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            side_effect=_fake_run_pipeline,
+        ),
+    ):
+        assert pr_reviewer_mod.main() == 0
+
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert records == [
+        {
+            "status": "ok",
+            "exit_code": 0,
+            "review_run_reasons": {"explicit-review": 1},
+        }
+    ]
 
 
 def test_main_returns_130_on_keyboard_interrupt() -> None:

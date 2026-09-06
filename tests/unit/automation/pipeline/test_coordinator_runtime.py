@@ -1,5 +1,7 @@
 """Tests for durable coordinator runtime event classification."""
 
+import pytest
+
 from hephaestus.automation.pipeline.coordinator_runtime import CoordinatorRuntime
 from hephaestus.automation.pipeline.jobs import JobResult
 
@@ -41,6 +43,65 @@ def test_publish_lease_failure_has_specific_durable_error_class() -> None:
     fields = CoordinatorRuntime._job_result_event_fields(result)
 
     assert fields["error"] == "publish_remote_head_unchanged"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param("circuit_open", "circuit_open", id="open-circuit"),
+        pytest.param(
+            "agent_error: provider rejected the request",
+            "agent_error",
+            id="agent-execution",
+        ),
+        pytest.param("parse failed: ValueError", "parse_error", id="agent-output-parser"),
+        pytest.param("review-session-lost", "session_lost", id="lost-session"),
+        pytest.param(
+            "host_verification_failed: sandbox unavailable",
+            "host_verification",
+            id="host-verification",
+        ),
+        pytest.param("rc=75", "process_exit", id="subprocess-exit"),
+        pytest.param(
+            "mechanical rebase hit conflicts; resolution required",
+            "git_operation",
+            id="git-operation",
+        ),
+    ],
+)
+def test_safe_worker_error_class_remains_available(error: str, expected: str) -> None:
+    """A closed mapping keeps safe failure classes without raw details."""
+    fields = CoordinatorRuntime._job_result_event_fields(JobResult(ok=False, error=error))
+
+    assert fields["error"] == expected
+
+
+def test_specific_worker_error_class_precedes_generic_failure_kind() -> None:
+    """A specific safe error shape is more useful than a generic runner class."""
+    result = JobResult(
+        ok=False,
+        error="host_verification_failed: sandbox unavailable",
+        value={"failure_kind": "runner"},
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result)
+
+    assert fields["error"] == "host_verification"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "unexpected failure",
+        "provider returned secret-token-value",
+        "checkout /private/operator/path is dirty",
+    ],
+)
+def test_unknown_worker_error_remains_generic(error: str) -> None:
+    """Unknown or detail-bearing errors do not enter the durable event."""
+    fields = CoordinatorRuntime._job_result_event_fields(JobResult(ok=False, error=error))
+
+    assert fields["error"] == "error"
 
 
 def test_failed_validation_event_keeps_bounded_diagnostics() -> None:

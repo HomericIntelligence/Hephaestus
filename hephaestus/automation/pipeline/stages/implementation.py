@@ -68,6 +68,7 @@ import logging
 import re
 import secrets
 import shlex
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -92,7 +93,10 @@ from hephaestus.automation.agent_config import (
     implementer_model,
 )
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
-from hephaestus.automation.prompts.address_review import get_address_review_prompt
+from hephaestus.automation.prompts.address_review import (
+    get_address_review_prompt,
+    get_remediation_reply_recovery_prompt,
+)
 from hephaestus.automation.prompts.implementation import (
     get_dirty_reused_worktree_decision_prompt,
     get_impl_resume_feedback_prompt,
@@ -118,6 +122,11 @@ from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
 from ..diagnostics import redact_diagnostic_text
+from ..git_jobs import (
+    DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+    IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+    IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+)
 from ..github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -182,6 +191,13 @@ from .repo import (
 
 logger = logging.getLogger(__name__)
 RUNNER_FAILURE_MARKER = "_".join(("HEPHAESTUS", "CI", "RUNNER", "FAILURE")) + ":"
+RUNNER_FALLBACK_REASONS = frozenset(
+    {
+        "container-engine-absent",
+        "container-engine-unavailable",
+        "container-start-failed",
+    }
+)
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
@@ -189,6 +205,7 @@ GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
 DIRTY_RECOVERY_WAIT = "DIRTY_RECOVERY_WAIT"
+REMEDIATION_REPLY_RECOVERY_WAIT = "REMEDIATION_REPLY_RECOVERY_WAIT"
 REBASE_WAIT = "REBASE_WAIT"
 REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
@@ -209,6 +226,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
     DIRTY_RECOVERY_WAIT: "_dirty_recovery_wait",
+    REMEDIATION_REPLY_RECOVERY_WAIT: "_remediation_reply_recovery_wait",
     REBASE_WAIT: "_rebase_wait",
     REBASE_CONFLICT_WAIT: "_rebase_conflict_wait",
     REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
@@ -247,6 +265,37 @@ def _is_valid_dirty_content_snapshot(value: object) -> bool:
             isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
             for digest in value.values()
         )
+    )
+
+
+def _is_sha256(value: object) -> bool:
+    """Return whether a value is one lowercase SHA-256 digest."""
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _is_bounded_inspection_text(value: object, *, max_bytes: int) -> bool:
+    """Return whether inspection text fits its UTF-8 prompt limit."""
+    return isinstance(value, str) and len(value.encode("utf-8", "surrogateescape")) <= max_bytes
+
+
+def _is_valid_dirty_inspection(value: object) -> bool:
+    """Return whether a dirty writer receipt is complete and bounded."""
+    return (
+        isinstance(value, dict)
+        and value.get("outcome") == "dirty"
+        and _is_bounded_inspection_text(
+            value.get("status"),
+            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+        )
+        and _is_bounded_inspection_text(
+            value.get("diff"),
+            max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+        )
+        and isinstance(value.get("changed_file_count"), int)
+        and 0 < value["changed_file_count"] <= DIRTY_SNAPSHOT_CHANGED_FILE_MAX
+        and _is_valid_dirty_content_snapshot(value.get("content_snapshot"))
+        and _is_sha256(value.get("status_sha256"))
+        and _is_sha256(value.get("diff_sha256"))
     )
 
 
@@ -306,6 +355,10 @@ def _validated_source_workspace_recovery(
 #: remote must still terminate. Reset on any successful git job.
 GIT_ERROR_RETRY_CAP = 2
 
+#: A provider error can contain details from an untrusted tool event. Keep only
+#: a redacted bounded diagnostic for the read-only reply-recovery prompt.
+REMEDIATION_FAILURE_DIAGNOSTIC_MAX = 500
+
 #: A pending shared-branch holder waits for the in-flight creator's completion
 #: instead of re-entering the implementation drain in a tight loop.
 BRANCH_WORKTREE_OWNER_PENDING_DELAY_S = 0.1
@@ -329,6 +382,7 @@ HEPHAESTUS_REQUIRED_CHECK_ARGV: tuple[str, ...] = (
     "--rebuild",
 )
 
+
 #: The required suite runs CI's formerly parallel jobs serially on a local
 #: host, so it needs a wider bound than one generic pytest invocation.
 HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S = 7200
@@ -345,6 +399,57 @@ def _append_no_commit_reply_warning(reply: str) -> str:
     bounded_suffix = f"\n\n{_TRUNCATED_REPLY_WARNING}{suffix}"
     content_budget = MAX_ADDRESS_REPLY_CHARS - len(bounded_suffix)
     return f"{reply[:content_budget].rstrip()}{bounded_suffix}"
+
+
+def _pre_pr_runner_handoff_reason(result: JobResult) -> str | None:
+    """Return the reason from one exact terminal runner protocol record."""
+    if result.ok or result.error != "rc=75":
+        return None
+    if RUNNER_FAILURE_MARKER in result.stdout_tail:
+        return None
+    diagnostic = result.stderr_tail
+    if not diagnostic.endswith("\n") or diagnostic.count(RUNNER_FAILURE_MARKER) != 1:
+        return None
+    terminal_record = diagnostic.splitlines()[-1]
+    prefix = f"{RUNNER_FAILURE_MARKER} "
+    if not terminal_record.startswith(prefix):
+        return None
+    reason = terminal_record.removeprefix(prefix)
+    if reason not in RUNNER_FALLBACK_REASONS:
+        return None
+    if terminal_record != f"{prefix}{reason}":
+        return None
+    return reason
+
+
+def _native_pre_pr_fallback_is_authorized(item: WorkItem) -> bool:
+    """Return whether the current host can run the stored native fallback."""
+    return (
+        item.payload.get("pre_pr_runner_mode") == "native"
+        and item.payload.get("pre_pr_fallback_reason") in RUNNER_FALLBACK_REASONS
+        and sys.platform == "darwin"
+    )
+
+
+def _recovery_publish_kwargs(item: WorkItem) -> dict[str, object] | None:
+    """Return validated recovery pins, or ``None`` for an invalid inspection."""
+    inspection = item.payload.get("remediation_writer_inspection")
+    if inspection is None:
+        return {}
+    if not isinstance(inspection, dict):
+        return None
+    expected_head = inspection.get("head_sha")
+    expected_content = inspection.get("content_snapshot")
+    if (
+        not is_full_commit_sha(expected_head)
+        or expected_head != item.payload.get("_impl_source_revision")
+        or not _is_valid_dirty_content_snapshot(expected_content)
+    ):
+        return None
+    return {
+        "expected_recovery_head": expected_head,
+        "expected_recovery_content_snapshot": dict(cast(dict[str, str], expected_content)),
+    }
 
 
 def _remediation_reply_head(
@@ -512,22 +617,12 @@ class ImplementationStage(Stage):
     def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
-        if (
-            (
-                item.payload.get("implementation_remediation")
-                or item.payload.get("post_review_rebase_required")
-            )
-            and item.payload.pop("implementation_writer_restored", False)
-            and item.worktree
-        ):
-            # pr_review stowed this known branch writer while it created a
-            # detached, read-only snapshot.  Reuse it for remediation: trying
-            # to create a second worktree for the same PR branch would either
-            # fail because the branch is already checked out or tempt review to write there.
-            if item.payload.get("post_review_rebase_required"):
-                item.payload[_SYNC_RESTORED_WRITER_BEFORE_REBASE] = True
-            item.payload["worktree_dirty"] = False
-            return Continue(next_state=DIRTY_DECISION_WAIT)
+        inspection = self._restored_remediation_inspection_job(item, ctx)
+        if inspection is not None:
+            return inspection
+        restored_rebase = self._restored_post_review_rebase_outcome(item)
+        if restored_rebase is not None:
+            return restored_rebase
         logger.info("implementation:%d: requesting worktree job", issue)
         adopted = bool(item.payload.get("existing_pr"))
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
@@ -598,11 +693,97 @@ class ImplementationStage(Stage):
         )
         return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
 
+    @staticmethod
+    def _restored_remediation_inspection_job(
+        item: WorkItem, ctx: StageContext
+    ) -> JobRequest | StageOutcome | None:
+        """Return the inspection that one failed remediation event requires."""
+        if not item.payload.get("remediation_reply_inspection_required"):
+            return None
+        if not item.payload.get("implementation_remediation") or not item.worktree:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_reply_writer_identity_invalid",
+            )
+        expected_head = item.payload.get("_impl_source_revision")
+        if not is_full_commit_sha(expected_head):
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_reply_writer_identity_invalid",
+            )
+        item.payload["remediation_writer_inspection_inflight"] = True
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="inspect_implementation_worktree",
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "worktree_path": item.worktree,
+                    "branch": item.branch,
+                    "expected_head": expected_head,
+                },
+                descr="inspect_implementation_worktree",
+            ),
+            on_done_state=DIRTY_DECISION_WAIT,
+        )
+
+    @staticmethod
+    def _restored_post_review_rebase_outcome(item: WorkItem) -> Continue | None:
+        """Reuse a restored writer when merge wait requests a rebase."""
+        if not (
+            item.payload.get("post_review_rebase_required")
+            and item.payload.pop("implementation_writer_restored", False)
+            and item.worktree
+        ):
+            return None
+        item.payload[_SYNC_RESTORED_WRITER_BEFORE_REBASE] = True
+        item.payload["worktree_dirty"] = False
+        return Continue(next_state=DIRTY_DECISION_WAIT)
+
     def _dirty_decision_wait(  # noqa: C901
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult:
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
+        inspection = item.payload.pop("remediation_writer_inspection_receipt", None)
+        if inspection is not None:
+            if not isinstance(inspection, dict):
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            if inspection.get("outcome") == "failed":
+                failure_kind = inspection.get("failure_kind")
+                if failure_kind not in {"timeout", "git_error", "worker_error"}:
+                    note = (
+                        failure_kind
+                        if isinstance(failure_kind, str) and failure_kind
+                        else "result_invalid"
+                    )
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        f"implementation_reply_inspection_{note}",
+                    )
+                outcome = self._git_retry(item, "remediation writer inspection failed")
+                if outcome.disposition is Disposition.RETRY:
+                    item.state = WORKTREE_WAIT
+                return outcome
+            expected_identity = (
+                inspection.get("branch") == item.branch
+                and inspection.get("worktree_path") == item.worktree
+                and is_full_commit_sha(inspection.get("head_sha"))
+                and inspection.get("head_sha") == item.payload.get("_impl_source_revision")
+            )
+            if not expected_identity:
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            item.payload.pop("implementation_writer_restored", None)
+            item.payload.pop("remediation_writer_inspection_inflight", None)
+            if inspection.get("outcome") == "clean":
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            if not _is_valid_dirty_inspection(inspection):
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            item.payload.pop("git_error_retries", None)
+            item.payload["remediation_writer_inspection"] = dict(inspection)
+            return Continue(next_state=REMEDIATION_REPLY_RECOVERY_WAIT)
         if item.payload.pop("source_workspace_ownership_unavailable", None):
             recovery = _validated_source_workspace_recovery(
                 item.payload.pop("source_workspace_recovery", None),
@@ -766,6 +947,83 @@ class ImplementationStage(Stage):
             descr="dirty_decision",
         )
         return JobRequest(job, on_done_state=DIRTY_DECISION_WAIT)
+
+    def _remediation_reply_recovery_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit one read-only mapping recovery for an inspected dirty writer."""
+        issue = _issue_number(item)
+        if item.payload.pop("remediation_reply_recovery_invalid", False):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+        if "remediation_output" in item.payload:
+            snapshots = item.payload.get("remediation_thread_snapshots")
+            if (
+                not isinstance(snapshots, list)
+                or parse_addressed_replies(item.payload["remediation_output"], snapshots) is None
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            return Continue(next_state=TEST_WAIT)
+        if item.attempts.get("remediation_reply", 0) >= ctx.budget("remediation_reply"):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+        inspection = item.payload.get("remediation_writer_inspection")
+        snapshots = item.payload.get("remediation_thread_snapshots")
+        diagnostic = item.payload.get("remediation_failure_diagnostic")
+        if (
+            not _is_valid_dirty_inspection(inspection)
+            or not isinstance(snapshots, list)
+            or not snapshots
+            or not isinstance(diagnostic, str)
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+        inspection = cast(dict[str, object], inspection)
+        content_snapshot = inspection.get("content_snapshot")
+        if not _is_valid_dirty_content_snapshot(content_snapshot):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=get_remediation_reply_recovery_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT_INSPECT,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_IMPLEMENTER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            prompt_kwargs={
+                "issue_number": issue,
+                "worktree_path": item.worktree,
+                "thread_snapshots": snapshots,
+                "inspection_status": {
+                    key: inspection[key]
+                    for key in (
+                        "outcome",
+                        "branch",
+                        "head_sha",
+                        "status",
+                        "status_sha256",
+                        "diff_sha256",
+                        "content_snapshot",
+                        "worktree_path",
+                    )
+                    if key in inspection
+                },
+                "diff_text": inspection["diff"],
+                "diagnostic": diagnostic,
+            },
+            parse=_parse_addressed_block,
+            descr="recover_remediation_reply",
+        )
+        return JobRequest(job, on_done_state=REMEDIATION_REPLY_RECOVERY_WAIT)
 
     def _dirty_recovery_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Validate host recovery and route only its exact durable result."""
@@ -1256,10 +1514,19 @@ class ImplementationStage(Stage):
     def _test_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """TEST_WAIT either retries the implementer or runs the pre-PR tests."""
         issue = _issue_number(item)
+        if item.payload.get("implementation_remediation") and item.payload.get(
+            "remediation_reply_error"
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
         if item.payload.pop("implement_error", None):
+            if item.payload.get("implementation_remediation"):
+                if item.payload.get("remediation_reply_inspection_required"):
+                    return Continue(next_state=WORKTREE_WAIT)
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
             # The implement job hard-failed. The attempt was counted in
             # on_job_done (doc: agent_error consumes the implement
             # budget); RETRY re-enters the stage for the next attempt.
+            item.state = IMPLEMENT_WAIT
             return StageOutcome(Disposition.RETRY, "agent_error")
         is_hephaestus = (ctx.org.casefold(), item.repo.casefold()) == (
             "homericintelligence",
@@ -1276,14 +1543,34 @@ class ImplementationStage(Stage):
         item.payload.pop("tests_failed", None)
         item.payload.pop("test_output", None)
         item.payload.pop("test_receipt", None)
-        item.payload.pop("pre_pr_runner_error", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
-        test_argv = (
-            HEPHAESTUS_REQUIRED_CHECK_ARGV
-            if run_hephaestus_pre_pr_checks
-            else tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
-        )
-        item.payload["test_command"] = shlex.join(test_argv)
+        runner_mode = item.payload.get("pre_pr_runner_mode")
+        native_fallback_authorized = _native_pre_pr_fallback_is_authorized(item)
+        if runner_mode == "native" and not native_fallback_authorized:
+            return StageOutcome(Disposition.FINISH_FAIL, "pre_pr_runner_unavailable")
+        run_native_fallback = run_hephaestus_pre_pr_checks and native_fallback_authorized
+        verified_runner_source_revision: str | None = None
+        if run_native_fallback:
+            test_argv = PRE_PR_TEST_ARGV
+            receipt_argv = PRE_PR_TEST_ARGV
+            test_descr = "pre_pr_tests_native_fallback"
+        elif run_hephaestus_pre_pr_checks:
+            source_revision = item.payload.get("_impl_source_revision")
+            verified_runner_source_revision = (
+                source_revision if is_full_commit_sha(source_revision) else ""
+            )
+            test_argv = HEPHAESTUS_REQUIRED_CHECK_ARGV
+            receipt_argv = HEPHAESTUS_REQUIRED_CHECK_ARGV
+            test_descr = "pre_pr_tests"
+            item.payload["pre_pr_runner_mode"] = "container"
+            item.payload.pop("pre_pr_fallback_reason", None)
+        else:
+            test_argv = tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
+            receipt_argv = test_argv
+            test_descr = "pre_pr_tests"
+            item.payload["pre_pr_runner_mode"] = "configured"
+            item.payload.pop("pre_pr_fallback_reason", None)
+        item.payload["test_command"] = shlex.join(receipt_argv)
         test_job = BuildTestJob(
             repo=item.repo,
             cwd=_worktree_path(item, ctx),
@@ -1293,11 +1580,12 @@ class ImplementationStage(Stage):
                 "pre_pr_test",
                 (
                     HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S
-                    if run_hephaestus_pre_pr_checks
+                    if run_hephaestus_pre_pr_checks and not run_native_fallback
                     else PRE_PR_TEST_TIMEOUT_S
                 ),
             ),
-            descr="pre_pr_tests",
+            verified_runner_source_revision=verified_runner_source_revision,
+            descr=test_descr,
         )
         return JobRequest(test_job, on_done_state=COMMIT_PUSH_WAIT)
 
@@ -1342,10 +1630,27 @@ class ImplementationStage(Stage):
     def _commit_push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """COMMIT_PUSH_WAIT either re-enters test-fix or submits commit+push."""
         issue = _issue_number(item)
-        if item.payload.get("pre_pr_runner_error"):
+        if item.payload.get("pre_pr_runner_unavailable") is True or (
+            item.payload.get("pre_pr_runner_mode") == "native"
+            and not _native_pre_pr_fallback_is_authorized(item)
+        ):
             return StageOutcome(Disposition.FINISH_FAIL, "pre_pr_runner_unavailable")
         if item.payload.get("tests_failed"):
             return Continue(next_state=TESTFIX_WAIT)
+        if (
+            item.payload.get("pre_pr_runner_mode") == "native"
+            and item.payload.get("pre_pr_fallback_reason") in RUNNER_FALLBACK_REASONS
+            and not item.payload.get("test_receipt")
+        ):
+            logger.warning(
+                "implementation:%d: container runner failure=%s; platform=%s; "
+                "requesting fixed native verification: command=%s",
+                issue,
+                item.payload.get("pre_pr_fallback_reason"),
+                sys.platform,
+                shlex.join(PRE_PR_TEST_ARGV),
+            )
+            return Continue(next_state=TEST_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
         agent = agent_provider(ctx)
         kwargs: dict[str, object] = {
@@ -1356,6 +1661,13 @@ class ImplementationStage(Stage):
             "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
             "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
         }
+        recovery_kwargs = _recovery_publish_kwargs(item)
+        if recovery_kwargs is None:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_reply_writer_identity_invalid",
+            )
+        kwargs.update(recovery_kwargs)
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
         publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
@@ -1539,6 +1851,19 @@ class ImplementationStage(Stage):
             return
 
         if item.state == DIRTY_DECISION_WAIT:
+            if item.payload.pop("remediation_writer_inspection_inflight", False):
+                value = result.value if isinstance(result.value, dict) else {}
+                receipt = dict(value)
+                if not result.ok and receipt.get("outcome") != "failed":
+                    receipt = {
+                        "outcome": "failed",
+                        "failure_kind": "worker_error",
+                        "cause": redact_diagnostic_text(
+                            result.error or "remediation writer inspection failed"
+                        )[:REMEDIATION_FAILURE_DIAGNOSTIC_MAX],
+                    }
+                item.payload["remediation_writer_inspection_receipt"] = receipt
+                return
             if item.payload.pop("dirty_recovery_inflight", False):
                 value = result.value if isinstance(result.value, dict) else {}
                 item.payload["dirty_recovery_receipt"] = dict(value)
@@ -1630,6 +1955,22 @@ class ImplementationStage(Stage):
 
         if item.state == IMPLEMENT_WAIT:
             self._on_implement_done(item, result)
+            return
+
+        if item.state == REMEDIATION_REPLY_RECOVERY_WAIT:
+            item.attempts["remediation_reply"] = item.attempts.get("remediation_reply", 0) + 1
+            snapshots = item.payload.get("remediation_thread_snapshots")
+            replies = (
+                parse_addressed_replies(result.value, snapshots)
+                if result.ok and isinstance(snapshots, list)
+                else None
+            )
+            if replies is None:
+                item.payload["remediation_reply_recovery_invalid"] = True
+            else:
+                item.payload["remediation_output"] = result.value
+                item.payload.pop("implement_error", None)
+                item.payload.pop("remediation_reply_inspection_required", None)
             return
 
         if item.state == REBASE_CONFLICT_WAIT:
@@ -1841,9 +2182,8 @@ class ImplementationStage(Stage):
         without another implementation turn or commit. Before that retry can
         begin, this method records the exact batch in GitHub's immutable
         journal, allowing an interrupted loop to recover the original writer
-        response. A successful no-commit remediation is posted against the
-        unchanged reviewed head with an explicit warning so the reviewer—not
-        the implementation stage—decides whether the reply is sufficient.
+        response. A recovery-bound dirty writer must create and publish a new
+        commit before this method can prepare the handoff.
         """
         if not item.payload.get("implementation_remediation"):
             return
@@ -1862,17 +2202,6 @@ class ImplementationStage(Stage):
             snapshots,
         )
         if replies is None:
-            if pushed and item.pr is not None:
-                logger.warning(
-                    "implementation:%d: pushed remediation %s returned an invalid reply "
-                    "mapping; posting no replies and returning PR #%d for fresh review",
-                    item.issue,
-                    head_sha,
-                    item.pr,
-                )
-                item.payload.pop("implementation_remediation", None)
-                item.payload.pop("remediation_output", None)
-                return
             item.payload["remediation_reply_error"] = True
             return
         if item.pr is None:
@@ -1925,14 +2254,26 @@ class ImplementationStage(Stage):
         if not result.ok:
             logger.warning("implementation:%s: implement job failed: %s", item.issue, result.error)
             item.payload["implement_error"] = True
+            if item.payload.get("implementation_remediation"):
+                item.payload["remediation_reply_inspection_required"] = True
+                item.payload["remediation_failure_diagnostic"] = redact_diagnostic_text(
+                    result.error or "implementation remediation failed"
+                )[:REMEDIATION_FAILURE_DIAGNOSTIC_MAX]
             return
         item.payload.pop("post_review_rebase_required", None)
         item.payload.pop("rebase_conflict", None)
-        if result.value:
-            if item.payload.get("implementation_remediation"):
-                item.payload["remediation_output"] = result.value
+        if item.payload.get("implementation_remediation"):
+            snapshots = item.payload.get("remediation_thread_snapshots")
+            if (
+                not result.value
+                or not isinstance(snapshots, list)
+                or parse_addressed_replies(result.value, snapshots) is None
+            ):
+                item.payload["remediation_reply_error"] = True
             else:
-                item.payload["implement_summary"] = str(result.value)
+                item.payload["remediation_output"] = result.value
+        elif result.value:
+            item.payload["implement_summary"] = str(result.value)
 
     @staticmethod
     def _on_rebase_conflict_agent_done(item: WorkItem, result: JobResult) -> None:
@@ -2205,15 +2546,38 @@ class ImplementationStage(Stage):
         if result.ok and result.value in (0, None, True):
             item.payload.pop("tests_failed", None)
             item.payload.pop("test_output", None)
-            command = item.payload.pop("test_command", None)
+            runner_mode = item.payload.get("pre_pr_runner_mode")
+            submitted_command = item.payload.pop("test_command", None)
+            if runner_mode == "container":
+                command = shlex.join(HEPHAESTUS_REQUIRED_CHECK_ARGV)
+            elif runner_mode == "native":
+                command = shlex.join(PRE_PR_TEST_ARGV)
+            else:
+                command = submitted_command
             if isinstance(command, str) and command:
-                item.payload["test_receipt"] = f"`{command}` — passed"
+                fallback_reason = item.payload.get("pre_pr_fallback_reason")
+                if runner_mode == "native" and fallback_reason in RUNNER_FALLBACK_REASONS:
+                    item.payload["test_receipt"] = (
+                        f"`{command}` — passed (native fallback after {fallback_reason})"
+                    )
+                else:
+                    item.payload["test_receipt"] = f"`{command}` — passed"
             return
         output = "\n".join(
             part for part in (result.stdout_tail, result.stderr_tail, result.error) if part
         )
-        if RUNNER_FAILURE_MARKER in output:
-            item.payload["pre_pr_runner_error"] = output
+        handoff_reason = (
+            _pre_pr_runner_handoff_reason(result)
+            if item.payload.get("pre_pr_runner_mode") == "container"
+            else None
+        )
+        if handoff_reason is not None:
+            item.payload.pop("test_command", None)
+            if sys.platform == "darwin":
+                item.payload["pre_pr_runner_mode"] = "native"
+                item.payload["pre_pr_fallback_reason"] = handoff_reason
+            else:
+                item.payload["pre_pr_runner_unavailable"] = True
             return
         item.payload["tests_failed"] = True
         item.payload["test_output"] = output

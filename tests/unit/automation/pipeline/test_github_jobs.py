@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
@@ -1142,6 +1144,8 @@ def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
         reviewed_head_sha="a" * 40,
         proof_generation=2,
         declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
     )
 
     receipt = module.PipelineGitHubJobRunner("org", False).run(

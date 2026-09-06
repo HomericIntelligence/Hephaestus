@@ -44,7 +44,9 @@ def _binding() -> MnemosyneBindingReceipt:
         root="/tmp/knowledge",
         repository="HomericIntelligence/Mnemosyne",
         default_branch="main",
+        version="3.0.0",
         commit_sha="b" * 40,
+        sync_status="updated",
         trust_basis="canonical upstream",
         athena_contract=_contract().to_dict(),
     )
@@ -138,7 +140,9 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
         root=str(tmp_path / "knowledge"),
         repository="HomericIntelligence/Mnemosyne",
         default_branch="main",
+        version="3.0.0",
         commit_sha="b" * 40,
+        sync_status="updated",
         trust_basis="canonical upstream",
         athena_contract=_contract().to_dict(),
     )

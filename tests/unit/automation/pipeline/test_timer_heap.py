@@ -8,12 +8,13 @@ the coordinator consumes it into the heapq timer.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hephaestus.automation.merge_authorization import MergeAuthorization
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
@@ -28,6 +29,8 @@ from hephaestus.automation.pipeline.routing import Disposition, StageName, Stage
 from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -214,9 +217,8 @@ class TestRetryDelayConsumption:
                 self,
                 pr_number: int,
                 reviewed_sha: str,
-                authorization: MergeAuthorization,
+                **_kwargs: Any,
             ) -> ConditionalMergeResult:
-                assert authorization.head_sha == reviewed_sha
                 self.puts += 1
                 return ConditionalMergeResult(status=405, body={"message": "not ready"})
 
@@ -303,9 +305,8 @@ class TestRetryDelayConsumption:
                 self,
                 pr_number: int,
                 reviewed_sha: str,
-                authorization: MergeAuthorization,
+                **_kwargs: Any,
             ) -> ConditionalMergeResult:
-                assert authorization.head_sha == reviewed_sha
                 self.puts += 1
                 return ConditionalMergeResult(status=None, body=None, transport_error=True)
 
@@ -445,3 +446,61 @@ class TestStepWatchdog:
             coordinator._run_item(_item(13))
 
         assert not any("stalled" in record.message for record in caplog.records)
+
+    def test_bounded_source_preparation_retries_before_watchdog_and_submission(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A held source lane timer-parks planning without an agent job."""
+        repo = tmp_path / "repo-a"
+        repo.mkdir()
+
+        def run_git(*args: str) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        run_git("init", "-b", "main")
+        run_git("config", "user.email", "test@example.invalid")
+        run_git("config", "user.name", "Test User")
+        (repo / "tracked.txt").write_text("source\n", encoding="utf-8")
+        run_git("add", "tracked.txt")
+        run_git("commit", "-m", "initial")
+        revision = run_git("rev-parse", "HEAD")
+
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        pool = FakeWorkerPool()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            install_signals=False,
+        )
+        manager = SourceWorkspaceManager(repo, repository="org/repo-a")
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2983,
+            stage=StageName.PLANNING,
+            state="ADVISE_WAIT",
+            payload={"_synced_default_branch_sha": revision},
+        )
+
+        with file_lock(
+            manager._lane_lock_path(2983, SourceLane.REVIEW),
+            require_exclusive=True,
+        ):
+            with caplog.at_level("WARNING"):
+                coordinator._run_item(item)
+
+        assert pool.submitted == []
+        assert item.attempts["source_workspace"] == 1
+        assert len(coordinator.timers) == 1
+        assert any("lane_lock_unavailable" in record.message for record in caplog.records)
+        assert not any("stage.step stalled" in record.message for record in caplog.records)
+        assert any(event[0] == "timer_park" for event in coordinator.event_log)

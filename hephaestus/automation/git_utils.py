@@ -15,6 +15,7 @@ from typing import Any
 
 import hephaestus.automation.git_runtime as _git_runtime
 from hephaestus.constants import agent_git_timeout
+from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.retry import retry_with_backoff
 
 from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_impl_branch_name
@@ -181,6 +182,7 @@ def push_branch(
     branch_name: str,
     worktree_path: Path,
     *,
+    source_sha: str | None = None,
     timeout: int | None = None,
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
@@ -190,6 +192,7 @@ def push_branch(
     Args:
         branch_name: Branch name to push.
         worktree_path: Path to the git worktree.
+        source_sha: Optional immutable commit to publish to the branch.
         timeout: Optional timeout in seconds for the push.
         env: Optional controlled environment for remote authentication.
         remote_config: Trusted command-scope Git transport configuration.
@@ -198,12 +201,15 @@ def push_branch(
         RuntimeError: If the push fails.
 
     """
+    if source_sha is not None and not _is_full_commit_sha(source_sha):
+        raise RuntimeError("The Git push source commit is invalid")
+    source = f"{source_sha}:refs/heads/{branch_name}" if source_sha is not None else branch_name
     try:
         run_kwargs = _timeout_kw(timeout)
         if env is not None:
             run_kwargs["env"] = env
         run(
-            ["git", *remote_config, "push", "origin", branch_name],
+            ["git", *remote_config, "push", "origin", source],
             cwd=worktree_path,
             **run_kwargs,
         )
@@ -323,6 +329,7 @@ def push_branch_if_remote_matches(
     expected_remote_sha: str,
     worktree_path: Path,
     *,
+    source_sha: str | None = None,
     timeout: int | None = None,
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
@@ -337,13 +344,17 @@ def push_branch_if_remote_matches(
         branch_name: Branch name to publish.
         expected_remote_sha: Exact remote value required by the lease.
         worktree_path: Worktree that contains the new commit.
+        source_sha: Optional immutable commit to publish to the branch.
         timeout: Optional timeout in seconds for each command.
         env: Optional controlled environment for remote authentication.
         remote_config: Trusted command-scope Git transport configuration.
 
     """
+    if source_sha is not None and not _is_full_commit_sha(source_sha):
+        raise RuntimeError("The direct-scope Git push source commit is invalid")
+    source = source_sha if source_sha is not None else "HEAD"
     ancestry = run(
-        ["git", "merge-base", "--is-ancestor", expected_remote_sha, "HEAD"],
+        ["git", "merge-base", "--is-ancestor", expected_remote_sha, source],
         cwd=worktree_path,
         check=False,
         **_timeout_kw(timeout),
@@ -363,7 +374,7 @@ def push_branch_if_remote_matches(
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
-                f"HEAD:refs/heads/{branch_name}",
+                f"{source}:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
             **run_kwargs,

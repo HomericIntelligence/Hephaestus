@@ -27,7 +27,13 @@ prose or a stale PR snapshot.
    investigates each actionable thread, fixes it, and returns a concise reply
    describing the change. It never resolves a thread. A complete response set
    enters reviewer comment validation directly; it does not trigger another
-   broad review batch before that validation.
+   broad review batch before that validation. This rule applies to the
+   automatic queue path. An explicit operator broad review is the only
+   exception. It first reconciles scope-expansion dependencies and verifies a
+   detached checkout at the exact current head. It then reviews that head and
+   sends all inherited and new open threads through comment validation,
+   publication reconciliation, and implementation remediation. The exception
+   does not discard or resolve an inherited thread.
 2. The host posts an implementation reply after a real fix commit is pushed,
    or after a successful no-commit remediation response with the explicit
    suffix ``[auto-msg] reply has no corresponding commit, review thoroughly``.
