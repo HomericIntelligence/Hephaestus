@@ -424,6 +424,13 @@ class Coordinator(
     ) -> WorkItem:
         """Materialize a direct entry and apply its scope-specific metadata."""
         item = self._entry_to_item(entry, repo)
+        if (
+            self.config.explicit_pr_review
+            and item.stage is StageName.PR_REVIEW
+            and item.pr is not None
+        ):
+            item.payload["explicit_pr_review"] = True
+            item.payload["existing_pr"] = True
         if is_full_commit_sha(base_sha):
             item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = base_sha
             if (

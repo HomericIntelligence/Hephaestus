@@ -67,6 +67,13 @@ def test_main_builds_pr_review_scope_and_dispatches() -> None:
     assert config.scope.stages == frozenset({StageName.PR_REVIEW})
 
 
+def test_main_sets_explicit_pr_review_intent() -> None:
+    """The standalone reviewer marks its direct request for a fresh review."""
+    captured = _run_main_capturing_config(["--issues", "123", "--dry-run"])
+
+    assert captured["config"].explicit_pr_review is True
+
+
 def test_agent_timeout_threads_into_pipeline_config() -> None:
     """Standalone reviewer timeout configures the review agent operation."""
     captured = _run_main_capturing_config(["--issues", "123", "--agent-timeout", "11"])

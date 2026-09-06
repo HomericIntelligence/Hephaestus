@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.summary import (
     format_direct_review_recovery_worktrees,
     format_preserved_worktrees,
     print_summary,
+    record_review_run,
     record_summary_action,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
@@ -111,6 +112,57 @@ class TestFormatPreservedWorktrees:
 
 class TestPrintSummaryRows:
     """Per-item rows and aggregates."""
+
+    def test_review_run_record_overwrites_previous_head(self) -> None:
+        item = _item(7, StageName.PR_REVIEW, passed=False, reason="review failed")
+        record_review_run(item, reason="explicit-review", head_sha="a" * 40)
+        record_review_run(item, reason="explicit-review", head_sha="b" * 40)
+
+        assert item.payload["_pr_review_run"] == {
+            "reason": "explicit-review",
+            "head_sha": "b" * 40,
+        }
+
+    @pytest.mark.parametrize(
+        ("reason", "head_sha"),
+        [
+            ("other", "a" * 40),
+            ("explicit-review", "A" * 40),
+            ("explicit-review", "a" * 39),
+        ],
+    )
+    def test_review_run_record_rejects_unbounded_values(self, reason: str, head_sha: str) -> None:
+        """The summary accepts one reason and one strict head shape."""
+        with pytest.raises(ValueError):
+            record_review_run(
+                _item(7, StageName.PR_REVIEW, passed=False, reason="review failed"),
+                reason=reason,
+                head_sha=head_sha,
+            )
+
+    def test_explicit_review_completion_reason_is_bounded(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        item = _item(7, StageName.PR_REVIEW, passed=False, reason="review failed")
+        record_review_run(item, reason="explicit-review", head_sha="a" * 40)
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "review-run reason=explicit-review head=" + "a" * 40 in caplog.text
+        assert "review-run reasons: {'explicit-review': 1}" in caplog.text
+
+    def test_malformed_review_run_record_is_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
+        item = _item(7, StageName.PR_REVIEW, passed=False, reason="review failed")
+        item.payload["_pr_review_run"] = {
+            "reason": "untrusted",
+            "head_sha": "arbitrary diagnostic text",
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "review-run" not in caplog.text
 
     def test_all_disposition_rows(self, caplog: pytest.LogCaptureFixture) -> None:
         """PASS / FAIL:reason / SKIP / BLOCKED / RESUMABLE rows all render."""
@@ -261,6 +313,17 @@ class TestPrintSummaryRows:
 
 class TestJsonEnvelope:
     """emit_json_status extension fields."""
+
+    def test_json_envelope_includes_explicit_review_completion_reason(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        item = _item(8, StageName.PR_REVIEW, passed=False, reason="review failed")
+        record_review_run(item, reason="explicit-review", head_sha="b" * 40)
+
+        print_summary([item], _stats(), [], json_out=True)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["review_run_reasons"] == {"explicit-review": 1}
 
     def test_json_envelope_fields(self, capsys: pytest.CaptureFixture[str]) -> None:
         """The envelope carries dispositions, loops, resumable, preserved."""
