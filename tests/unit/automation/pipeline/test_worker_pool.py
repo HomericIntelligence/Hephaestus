@@ -4716,8 +4716,9 @@ class TestGitOps:
         assert preserved.detached is True
         assert preserved.branch is None
         assert predecessor.cwd.exists()
-        assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
-        assert _git(predecessor.cwd, "symbolic-ref", "--short", "HEAD") == branch
+        assert _git(predecessor.cwd, "rev-parse", "HEAD") == predecessor_revision
+        assert _git(predecessor.cwd, "branch", "--show-current") == ""
+        assert not (source_manager.state_dir / "7-impl-transition.json").exists()
 
     def test_implementation_source_lane_rejects_unmaterialized_writer(
         self,

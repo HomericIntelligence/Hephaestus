@@ -266,6 +266,7 @@ class _ImplementationWriterTransitionJournal:
     phase: str
     predecessor: SourceWorkspaceReceipt
     successor: SourceWorkspaceReceipt
+    target_ref_revision: str | None
     journal_digest: str
     schema_version: int = 1
 
@@ -281,6 +282,7 @@ class _ImplementationWriterTransitionJournal:
             "transition": self.transition,
             "predecessor": self.predecessor.to_dict(),
             "successor": self.successor.to_dict(),
+            "target_ref_revision": self.target_ref_revision,
         }
 
     def to_dict(self) -> dict[str, object]:
@@ -302,6 +304,7 @@ class _ImplementationWriterTransitionJournal:
         predecessor: SourceWorkspaceReceipt,
         successor: SourceWorkspaceReceipt,
         transition: str,
+        target_ref_revision: str | None,
     ) -> Self:
         """Create a prepared journal with a stable identity digest."""
         journal = cls(
@@ -314,6 +317,7 @@ class _ImplementationWriterTransitionJournal:
             phase="prepared",
             predecessor=predecessor,
             successor=successor,
+            target_ref_revision=target_ref_revision,
             journal_digest="",
         )
         digest = hashlib.sha256(
@@ -335,15 +339,71 @@ class _ImplementationWriterTransitionJournal:
             "phase",
             "predecessor",
             "successor",
+            "target_ref_revision",
             "journal_digest",
         }
         if set(payload) != fields:
             raise SourceWorkspaceError("source workspace transition schema mismatch")
+        receipt_fields = {
+            "schema_version",
+            "repository",
+            "repository_identity",
+            "ownership_key",
+            "item_number",
+            "lane",
+            "path",
+            "revision",
+            "generation",
+            "detached",
+            "branch",
+            "obligations",
+        }
+
+        def valid_receipt_payload(value: object) -> bool:
+            return (
+                isinstance(value, dict)
+                and set(value) == receipt_fields
+                and type(value["schema_version"]) is int
+                and type(value["item_number"]) is int
+                and type(value["generation"]) is int
+                and type(value["detached"]) is bool
+                and all(
+                    isinstance(value[name], str)
+                    for name in (
+                        "repository",
+                        "repository_identity",
+                        "ownership_key",
+                        "lane",
+                        "path",
+                        "revision",
+                    )
+                )
+                and (value["branch"] is None or isinstance(value["branch"], str))
+                and isinstance(value["obligations"], list)
+                and all(isinstance(item, str) for item in value["obligations"])
+            )
+
         if (
             type(payload["schema_version"]) is not int
             or type(payload["item_number"]) is not int
-            or not isinstance(payload["predecessor"], dict)
-            or not isinstance(payload["successor"], dict)
+            or not all(
+                isinstance(payload[name], str)
+                for name in (
+                    "repository",
+                    "repository_identity",
+                    "ownership_key",
+                    "lane",
+                    "transition",
+                    "phase",
+                    "journal_digest",
+                )
+            )
+            or (
+                payload["target_ref_revision"] is not None
+                and not isinstance(payload["target_ref_revision"], str)
+            )
+            or not valid_receipt_payload(payload["predecessor"])
+            or not valid_receipt_payload(payload["successor"])
         ):
             raise SourceWorkspaceError("invalid source workspace transition")
         try:
@@ -358,6 +418,7 @@ class _ImplementationWriterTransitionJournal:
                 phase=str(payload["phase"]),
                 predecessor=SourceWorkspaceReceipt.from_dict(payload["predecessor"]),
                 successor=SourceWorkspaceReceipt.from_dict(payload["successor"]),
+                target_ref_revision=payload["target_ref_revision"],
                 journal_digest=str(payload["journal_digest"]),
             )
         except (TypeError, ValueError) as exc:
@@ -368,6 +429,11 @@ class _ImplementationWriterTransitionJournal:
             or journal.transition not in {"direct", "adopted"}
             or journal.phase not in _TRANSITION_PHASES
             or not re.fullmatch(r"[0-9a-f]{64}", journal.journal_digest)
+            or (
+                journal.target_ref_revision is not None
+                and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", journal.target_ref_revision)
+                is None
+            )
         ):
             raise SourceWorkspaceError("unsupported source workspace transition")
         expected_digest = hashlib.sha256(
@@ -404,6 +470,17 @@ class SourceWorkspaceManager:
         """Return the deterministic physical path for a lane."""
         return self.base_dir / source_worktree_name(item_number, lane.value)
 
+    def _implementation_path(self, item_number: int) -> Path:
+        """Return the lexical implementation path, or reject a symlink."""
+        path = self.path_for(item_number, SourceLane.IMPLEMENTATION)
+        if (
+            self.base_dir.is_symlink()
+            or self.base_dir.resolve() != self.base_dir
+            or path.is_symlink()
+        ):
+            raise SourceWorkspaceError("implementation writer transition path is invalid")
+        return path
+
     def ownership_key(self, item_number: int, lane: SourceLane) -> str:
         """Return the repository-qualified internal ownership key."""
         return f"{self.repository_identity}:{item_number}:{lane.value}"
@@ -420,15 +497,15 @@ class SourceWorkspaceManager:
             item_number,
             self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
         ) as handoff:
-            self._reconcile_writer_transition(item_number)
+            self._reconcile_writer_transition(item_number, finalize_exact_successor=True)
             try:
                 yield handoff
             except BaseException:
                 with suppress(SourceWorkspaceError):
-                    self._reconcile_writer_transition(item_number)
+                    self._reconcile_writer_transition(item_number, finalize_exact_successor=False)
                 raise
             else:
-                self._reconcile_writer_transition(item_number)
+                self._reconcile_writer_transition(item_number, finalize_exact_successor=False)
 
     @staticmethod
     def guard_branch(item_number: int) -> str:
@@ -622,7 +699,7 @@ class SourceWorkspaceManager:
         unrecorded branch, so a caller cannot adopt an arbitrary branch.
         """
         lane = SourceLane.IMPLEMENTATION
-        expected_path = self.path_for(item_number, lane).resolve()
+        expected_path = self._implementation_path(item_number)
         if handoff is None:
             raise SourceWorkspaceError("implementation writer handoff is missing")
         try:
@@ -633,20 +710,14 @@ class SourceWorkspaceManager:
             )
         except RuntimeError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
-        if path.resolve() != expected_path:
+        if path != expected_path:
             raise SourceWorkspaceError(
                 "implementation writer path does not match the deterministic lane"
             )
         old = self._read_receipt(item_number, lane)
         self._reject_foreign_owner(old, item_number, lane)
-        if old is not None and old.path.resolve() != expected_path:
+        if old is not None and old.path != expected_path:
             raise SourceWorkspaceError("incompatible source workspace receipt")
-        replacing_direct_writer = (
-            old is not None
-            and not old.detached
-            and old.branch != branch
-            and _is_direct_implementation_branch(item_number, old.branch)
-        )
         transition = self._read_writer_transition(item_number)
         if (
             old is not None
@@ -738,19 +809,19 @@ class SourceWorkspaceManager:
                 raise SourceWorkspaceError(str(exc)) from exc
         return binding
 
-    def authorize_direct_implementation_writer_transition(  # noqa: C901
+    def authorize_direct_implementation_writer_transition(
         self,
         item_number: int,
         *,
         branch: str,
         base_sha: str,
         handoff: ImplementationWriterHandoff | None,
-    ) -> None:
+    ) -> bool:
         """Arm one exact controlled predecessor transition for a direct writer."""
         target = _git(self.repo_root, "rev-parse", f"{base_sha}^{{commit}}").stdout.strip()
         if target != base_sha:
             raise SourceWorkspaceError("direct implementation writer base is invalid")
-        self._authorize_writer_transition(
+        return self._authorize_writer_transition(
             item_number,
             branch=branch,
             target_revision=target,
@@ -765,12 +836,12 @@ class SourceWorkspaceManager:
         branch: str,
         expected_head: str,
         handoff: ImplementationWriterHandoff | None,
-    ) -> None:
+    ) -> bool:
         """Arm one exact controlled predecessor transition for an adopted writer."""
         target = _git(self.repo_root, "rev-parse", f"{expected_head}^{{commit}}").stdout.strip()
         if target != expected_head:
             raise SourceWorkspaceError("adopted implementation writer head is invalid")
-        self._authorize_writer_transition(
+        return self._authorize_writer_transition(
             item_number,
             branch=branch,
             target_revision=target,
@@ -778,7 +849,7 @@ class SourceWorkspaceManager:
             handoff=handoff,
         )
 
-    def _authorize_writer_transition(
+    def _authorize_writer_transition(  # noqa: C901
         self,
         item_number: int,
         *,
@@ -786,10 +857,10 @@ class SourceWorkspaceManager:
         target_revision: str,
         transition: str,
         handoff: ImplementationWriterHandoff | None,
-    ) -> None:
+    ) -> bool:
         """Validate and durably arm one direct or adopted writer transition."""
         lane = SourceLane.IMPLEMENTATION
-        expected_path = self.path_for(item_number, lane).resolve()
+        expected_path = self._implementation_path(item_number)
         if handoff is None:
             raise SourceWorkspaceError("implementation writer handoff is missing")
         try:
@@ -840,9 +911,7 @@ class SourceWorkspaceManager:
                         ),
                     ),
                 )
-            if transition == "direct":
-                return
-            raise SourceWorkspaceError("adopted implementation writer predecessor is invalid")
+            return False
         if old.path.resolve() != expected_path:
             raise SourceWorkspaceError(
                 "source workspace receipt path is not deterministic",
@@ -970,6 +1039,12 @@ class SourceWorkspaceManager:
                     receipt_path=receipt_path,
                 ),
             )
+        target_ref_revision = self._validate_transition_target_ref(
+            old,
+            branch=branch,
+            target_revision=target_revision,
+            transition=transition,
+        )
         successor = SourceWorkspaceReceipt(
             repository=self.repository,
             repository_identity=self.repository_identity,
@@ -991,8 +1066,11 @@ class SourceWorkspaceManager:
             predecessor=old,
             successor=successor,
             transition=transition,
+            target_ref_revision=target_ref_revision,
         )
         self._write_writer_transition(journal)
+        if not expected_path.exists():
+            self._restore_transition_predecessor(journal)
         try:
             handoff._arm_writer_transition(
                 path=expected_path,
@@ -1004,12 +1082,32 @@ class SourceWorkspaceManager:
                 successor_revision=target_revision,
                 transition=transition,
                 journal_digest=journal.journal_digest,
+                target_ref_revision=target_ref_revision,
                 phase_writer=lambda phase: self._update_writer_transition_phase(item_number, phase),
                 commit_writer=lambda: self._remove_writer_transition(item_number),
             )
         except RuntimeError as exc:
             self._remove_writer_transition(item_number)
             raise SourceWorkspaceError(str(exc)) from exc
+        return True
+
+    def _validate_transition_target_ref(
+        self,
+        predecessor: SourceWorkspaceReceipt,
+        *,
+        branch: str,
+        target_revision: str,
+        transition: str,
+    ) -> str | None:
+        """Return the exact permitted pre-transition local target revision."""
+        target_ref_revision = self._local_branch_revision(branch)
+        if transition == "direct":
+            allowed_target_revision = predecessor.revision if predecessor.branch == branch else None
+            if target_ref_revision != allowed_target_revision:
+                raise SourceWorkspaceError("direct implementation writer target branch is invalid")
+        elif target_ref_revision not in {None, predecessor.revision, target_revision}:
+            raise SourceWorkspaceError("adopted implementation writer target branch is invalid")
+        return target_ref_revision
 
     def _has_worktree_registration(self, path: Path) -> bool:
         """Return whether Git still registers the exact source path."""
@@ -1324,18 +1422,52 @@ class SourceWorkspaceManager:
         if not isinstance(payload, dict):
             raise SourceWorkspaceError("source workspace transition must be an object")
         journal = _ImplementationWriterTransitionJournal.from_dict(payload)
-        expected_path = self.path_for(item_number, SourceLane.IMPLEMENTATION).resolve()
+        expected_path = self._implementation_path(item_number)
         if (
             journal.repository != self.repository
             or journal.repository_identity != self.repository_identity
             or journal.ownership_key != self.ownership_key(item_number, SourceLane.IMPLEMENTATION)
             or journal.item_number != item_number
-            or journal.predecessor.path.resolve() != expected_path
-            or journal.successor.path.resolve() != expected_path
+            or journal.predecessor.path != expected_path
+            or journal.successor.path != expected_path
             or journal.predecessor.item_number != item_number
             or journal.successor.item_number != item_number
             or journal.predecessor.lane is not SourceLane.IMPLEMENTATION
             or journal.successor.lane is not SourceLane.IMPLEMENTATION
+            or journal.predecessor.repository != journal.repository
+            or journal.successor.repository != journal.repository
+            or journal.predecessor.repository_identity != journal.repository_identity
+            or journal.successor.repository_identity != journal.repository_identity
+            or journal.predecessor.ownership_key != journal.ownership_key
+            or journal.successor.ownership_key != journal.ownership_key
+            or journal.predecessor.generation < 1
+            or journal.successor.generation != journal.predecessor.generation + 1
+            or journal.predecessor.obligations != journal.successor.obligations
+            or journal.successor.detached
+            or journal.successor.branch is None
+            or (journal.predecessor.detached and journal.predecessor.branch is not None)
+            or (not journal.predecessor.detached and journal.predecessor.branch is None)
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", journal.predecessor.revision) is None
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", journal.successor.revision) is None
+            or (
+                journal.predecessor.branch == journal.successor.branch
+                and not journal.predecessor.detached
+                and journal.target_ref_revision != journal.predecessor.revision
+            )
+            or (
+                journal.transition == "direct"
+                and journal.predecessor.branch != journal.successor.branch
+                and journal.target_ref_revision is not None
+            )
+            or (
+                journal.transition == "adopted"
+                and journal.target_ref_revision
+                not in {
+                    None,
+                    journal.predecessor.revision,
+                    journal.successor.revision,
+                }
+            )
         ):
             raise SourceWorkspaceError("source workspace transition identity is invalid")
         return journal
@@ -1380,7 +1512,9 @@ class SourceWorkspaceManager:
         finally:
             os.close(descriptor)
 
-    def _reconcile_writer_transition(self, item_number: int) -> None:
+    def _reconcile_writer_transition(
+        self, item_number: int, *, finalize_exact_successor: bool
+    ) -> None:
         """Recover one pending transition before or after a writer handoff."""
         journal = self._read_writer_transition(item_number)
         if journal is None:
@@ -1395,23 +1529,25 @@ class SourceWorkspaceManager:
             return
         if current != journal.predecessor:
             raise SourceWorkspaceError("source workspace transition receipt is stale")
-        if journal.phase in {
-            "successor_created",
-            "authority_minted",
-            "receipt_pending",
-        } and self._physical_matches_receipt(journal.successor):
-            # A fully materialized successor whose receipt could not be
-            # committed is recovery evidence, not an incomplete deletion.
-            # Keep both the checkout and journal. A later transition cannot
-            # authorize the mismatched receipt, so it fails closed without
-            # discarding this checkout or replacing the original failure.
+        if (
+            finalize_exact_successor
+            and journal.phase
+            in {
+                "successor_created",
+                "authority_minted",
+                "receipt_pending",
+            }
+            and self._physical_matches_receipt(journal.successor)
+        ):
+            self._write_receipt(journal.successor)
+            self._remove_writer_transition(item_number)
             return
         self._restore_transition_predecessor(journal)
         self._remove_writer_transition(item_number)
 
     def _physical_matches_receipt(self, receipt: SourceWorkspaceReceipt) -> bool:
         """Return whether a checkout exactly matches a durable receipt."""
-        if not receipt.path.exists() or self._is_dirty(receipt.path):
+        if receipt.path.is_symlink() or not receipt.path.exists() or self._is_dirty(receipt.path):
             return False
         branch = self._head_branch(receipt.path)
         expected_branch = None if receipt.detached else f"refs/heads/{receipt.branch}"
@@ -1421,8 +1557,17 @@ class SourceWorkspaceManager:
         self, journal: _ImplementationWriterTransitionJournal
     ) -> None:
         """Restore the exact predecessor after an incomplete replacement."""
+        with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+            self._restore_transition_predecessor_locked(journal)
+
+    def _restore_transition_predecessor_locked(
+        self, journal: _ImplementationWriterTransitionJournal
+    ) -> None:
+        """Restore an exact predecessor while the Git metadata lock is held."""
         predecessor = journal.predecessor
-        path = predecessor.path.resolve()
+        path = predecessor.path
+        if path.is_symlink():
+            raise SourceWorkspaceError("source workspace transition path is invalid")
         if path.exists():
             if self._is_dirty(path):
                 raise SourceWorkspaceError("source workspace transition checkout is dirty")
@@ -1436,8 +1581,15 @@ class SourceWorkspaceManager:
                 if physical_revision == predecessor.revision and physical_branch == (
                     None if predecessor.detached else f"refs/heads/{predecessor.branch}"
                 ):
+                    self._restore_transition_target_ref(journal)
                     return
                 raise SourceWorkspaceError("source workspace transition checkout is ambiguous")
+            removed = _git(self.repo_root, "worktree", "remove", str(path), check=False)
+            if removed.returncode:
+                raise SourceWorkspaceError(
+                    removed.stderr.strip() or "source workspace transition removal failed"
+                )
+        self._restore_transition_target_ref(journal)
         if not predecessor.detached:
             if predecessor.branch is None:
                 raise SourceWorkspaceError(
@@ -1455,27 +1607,86 @@ class SourceWorkspaceManager:
             holder = self._branch_holder(predecessor.branch)
             if holder is not None and holder.resolve() != path:
                 raise SourceWorkspaceError("source workspace transition predecessor branch is held")
-        self._replace_worktree(
+        self._replace_worktree_locked(
             path,
             predecessor.revision,
             branch=None if predecessor.detached else predecessor.branch,
             owns_branch=not predecessor.detached,
+            deadline=None,
         )
         if not self._physical_matches_receipt(predecessor):
             raise SourceWorkspaceError("source workspace transition predecessor recovery failed")
 
+    def _local_branch_revision(self, branch: str) -> str | None:
+        """Return one local branch revision, or ``None`` when it is absent."""
+        ref = f"refs/heads/{branch}"
+        present = _git(self.repo_root, "show-ref", "--verify", "--quiet", ref, check=False)
+        if present.returncode == 1:
+            return None
+        if present.returncode != 0:
+            raise SourceWorkspaceError("cannot inspect source workspace transition target branch")
+        result = _git(self.repo_root, "rev-parse", "--verify", ref, check=False)
+        if result.returncode != 0:
+            raise SourceWorkspaceError("cannot inspect source workspace transition target branch")
+        revision = result.stdout.strip()
+        if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision) is None:
+            raise SourceWorkspaceError("source workspace transition target branch is invalid")
+        return revision
+
+    def _restore_transition_target_ref(
+        self, journal: _ImplementationWriterTransitionJournal
+    ) -> None:
+        """Restore the journal-proved local target ref by compare-and-swap."""
+        branch = journal.successor.branch
+        if branch is None:  # pragma: no cover - rejected by journal validation
+            raise SourceWorkspaceError("source workspace transition target branch is invalid")
+        current = self._local_branch_revision(branch)
+        prior = journal.target_ref_revision
+        if current == prior:
+            return
+        holder = self._branch_holder(branch)
+        if holder is not None:
+            raise SourceWorkspaceError(
+                f"source workspace transition target branch is held: {holder}"
+            )
+        if journal.phase not in {
+            "successor_creating",
+            "successor_created",
+            "authority_minted",
+            "receipt_pending",
+        }:
+            raise SourceWorkspaceError("source workspace transition target branch changed")
+        if current != journal.successor.revision:
+            raise SourceWorkspaceError("source workspace transition target branch changed")
+        ref = f"refs/heads/{branch}"
+        if prior is None:
+            result = _git(
+                self.repo_root,
+                "update-ref",
+                "-d",
+                ref,
+                current,
+                check=False,
+            )
+        else:
+            result = _git(
+                self.repo_root,
+                "update-ref",
+                ref,
+                prior,
+                current,
+                check=False,
+            )
+        if result.returncode != 0 or self._local_branch_revision(branch) != prior:
+            raise SourceWorkspaceError("source workspace transition target branch recovery failed")
+
     def _branch_holder(self, branch: str) -> Path | None:
-        """Return the worktree that holds a local branch, if any."""
-        result = _git(self.repo_root, "worktree", "list", "--porcelain", check=False)
-        if result.returncode:
-            raise SourceWorkspaceError("cannot inspect source workspace branch holder")
-        current_path: Path | None = None
-        for line in result.stdout.splitlines():
-            if line.startswith("worktree "):
-                current_path = Path(line.removeprefix("worktree ")).resolve()
-            elif line == f"branch refs/heads/{branch}" and current_path is not None:
-                return current_path
-        return None
+        """Return the attached or rebasing worktree that holds a local branch."""
+        manager = WorktreeManager(repo_root=self.repo_root, base_dir=self.base_dir)
+        try:
+            return manager._worktree_holding_branch(branch)
+        except RuntimeError as exc:
+            raise SourceWorkspaceError("cannot inspect source workspace branch holder") from exc
 
     def _lane_lock_path(self, item_number: int, lane: SourceLane) -> Path:
         return WorktreeManager.source_lane_lock_path(self.repo_root, item_number, lane.value)
@@ -1509,6 +1720,7 @@ class SourceWorkspaceManager:
             path,
             json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
         )
+        self._fsync_state_dir()
 
     def _reject_foreign_owner(
         self,

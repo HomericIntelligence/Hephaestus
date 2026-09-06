@@ -628,6 +628,7 @@ class WorktreeManager:
                 # release the worker's lock when this scope exits.
                 with file_lock(self._git_metadata_lock_path()):
                     direct_predecessor = False
+                    direct_target_ref_revision: str | None = None
                     if source_lane == "impl" and not adopting_implementation_writer:
                         direct_predecessor = self._assert_implementation_writer_is_controlled(
                             issue_number=issue_number,
@@ -694,6 +695,21 @@ class WorktreeManager:
                                 predecessor_branch = self._implementation_writer_branch(
                                     worktree_path, timeout=timeout
                                 )
+                                direct_target_ref_revision = self._local_branch_revision(
+                                    branch_name,
+                                    timeout=timeout,
+                                )
+                                self._assert_writer_transition_holder_state(
+                                    worktree_path=worktree_path,
+                                    predecessor_detached=predecessor_branch is None,
+                                    predecessor_branch=(
+                                        predecessor_branch.removeprefix("refs/heads/")
+                                        if predecessor_branch is not None
+                                        else None
+                                    ),
+                                    successor_branch=branch_name,
+                                    timeout=timeout,
+                                )
                                 predecessor_evidence = (
                                     implementation_writer_handoff._consume_writer_transition(
                                         path=worktree_path,
@@ -707,6 +723,7 @@ class WorktreeManager:
                                         successor_branch=branch_name,
                                         successor_revision=base_sha,
                                         transition="direct",
+                                        target_ref_revision=direct_target_ref_revision,
                                     )
                                 )
                                 predecessor_is_clean = is_clean_working_tree(
@@ -771,6 +788,7 @@ class WorktreeManager:
                         worktree_key=worktree_key,
                         worktree_path=worktree_path,
                         branch_name=branch_name,
+                        allowed_local_branch_revision=direct_target_ref_revision,
                         timeout=timeout,
                     )
                     try:
@@ -784,13 +802,23 @@ class WorktreeManager:
                                 implementation_writer_handoff=implementation_writer_handoff,
                             )
                         else:
-                            self._add_worktree_for_branch(
-                                worktree_path,
-                                branch_name,
-                                base_sha=base_sha,
-                                refresh_base=refresh_base,
-                                timeout=timeout,
-                            )
+                            if direct_target_ref_revision is None:
+                                self._add_worktree_for_branch(
+                                    worktree_path,
+                                    branch_name,
+                                    base_sha=base_sha,
+                                    refresh_base=refresh_base,
+                                    timeout=timeout,
+                                )
+                            else:
+                                self._add_worktree_for_branch(
+                                    worktree_path,
+                                    branch_name,
+                                    base_sha=base_sha,
+                                    refresh_base=refresh_base,
+                                    replace_existing_base_branch=True,
+                                    timeout=timeout,
+                                )
                             if source_lane == "impl":
                                 if direct_predecessor:
                                     if not isinstance(
@@ -1056,6 +1084,17 @@ class WorktreeManager:
                         raise WorktreeCreationReceiptError(
                             "implementation writer predecessor is not clean"
                         )
+                    self._assert_writer_transition_holder_state(
+                        worktree_path=worktree_path,
+                        predecessor_detached=predecessor_branch is None,
+                        predecessor_branch=(
+                            predecessor_branch.removeprefix("refs/heads/")
+                            if predecessor_branch is not None
+                            else None
+                        ),
+                        successor_branch=branch_name,
+                        timeout=timeout,
+                    )
                     implementation_writer_handoff._validate_writer_transition(
                         path=worktree_path,
                         predecessor_revision=predecessor_revision,
@@ -1068,6 +1107,10 @@ class WorktreeManager:
                         successor_branch=branch_name,
                         successor_revision=reserved_remote_branch_sha,
                         transition="direct",
+                        target_ref_revision=self._local_branch_revision(
+                            branch_name,
+                            timeout=timeout,
+                        ),
                     )
                 except Exception as exc:
                     raise WorktreeCreationReceiptError(
@@ -1295,6 +1338,7 @@ class WorktreeManager:
         worktree_key: int | str,
         worktree_path: Path,
         branch_name: str,
+        allowed_local_branch_revision: str | None = None,
         timeout: int | None,
     ) -> None:
         """Reject direct-scope inputs that could reuse or move a pinned base."""
@@ -1306,10 +1350,16 @@ class WorktreeManager:
             raise RuntimeError("direct scope base pin cannot create an isolated worktree")
         if worktree_key in self.worktrees:
             raise RuntimeError("direct scope refuses stale worktree reuse")
+        local_branch_changed = (
+            self._direct_scope_local_branch_exists(branch_name, timeout=timeout)
+            if allowed_local_branch_revision is None
+            else self._local_branch_revision(branch_name, timeout=timeout)
+            != allowed_local_branch_revision
+        )
         if (
             worktree_path.exists()
             or self._worktree_holding_branch(branch_name, timeout=timeout) is not None
-            or self._direct_scope_local_branch_exists(branch_name, timeout=timeout)
+            or local_branch_changed
         ):
             raise RuntimeError("direct scope refuses stale branch or worktree reuse")
 
@@ -1327,6 +1377,40 @@ class WorktreeManager:
         if local.returncode != 1:
             raise RuntimeError(f"cannot verify local branch {branch_name!r}")
         return False
+
+    def _local_branch_revision(self, branch_name: str, *, timeout: int | None) -> str | None:
+        """Return the exact local branch revision, or ``None`` if it is absent."""
+        ref = f"refs/heads/{branch_name}"
+        present = run(
+            ["git", "show-ref", "--verify", "--quiet", ref],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=False,
+            **_timeout_kw(timeout),
+        )
+        if present.returncode == 1:
+            return None
+        if present.returncode != 0:
+            raise WorktreeCreationReceiptError(
+                "cannot safely verify local implementation writer branch"
+            )
+        result = run(
+            ["git", "rev-parse", "--verify", ref],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=False,
+            **_timeout_kw(timeout),
+        )
+        if result.returncode != 0:
+            raise WorktreeCreationReceiptError(
+                "cannot safely verify local implementation writer branch"
+            )
+        revision = result.stdout.strip()
+        if not _is_full_commit_sha(revision):
+            raise WorktreeCreationReceiptError(
+                "local implementation writer branch revision is invalid"
+            )
+        return revision
 
     def _release_failed_direct_scope_local_branch(
         self,
@@ -1512,6 +1596,21 @@ class WorktreeManager:
                     **_timeout_kw(timeout),
                 )
                 predecessor_branch = predecessor_symbolic_ref.stdout.strip() or None
+                target_ref_revision = self._local_branch_revision(
+                    branch_name,
+                    timeout=timeout,
+                )
+                self._assert_writer_transition_holder_state(
+                    worktree_path=worktree_path,
+                    predecessor_detached=predecessor_branch is None,
+                    predecessor_branch=(
+                        predecessor_branch.removeprefix("refs/heads/")
+                        if predecessor_branch is not None
+                        else None
+                    ),
+                    successor_branch=branch_name,
+                    timeout=timeout,
+                )
                 try:
                     predecessor_evidence = implementation_writer_handoff._consume_writer_transition(
                         path=worktree_path,
@@ -1525,6 +1624,7 @@ class WorktreeManager:
                         successor_branch=branch_name,
                         successor_revision=expected_head,
                         transition="adopted",
+                        target_ref_revision=target_ref_revision,
                     )
                 except RuntimeError as exc:
                     raise WorktreeCreationReceiptError(str(exc)) from exc
@@ -1616,6 +1716,7 @@ class WorktreeManager:
         *,
         base_sha: str | None = None,
         refresh_base: bool = False,
+        replace_existing_base_branch: bool = False,
         timeout: int | None = None,
     ) -> None:
         """Add a git worktree, choosing the right source for ``branch_name``.
@@ -1639,8 +1740,17 @@ class WorktreeManager:
 
         """
         if base_sha is not None:
+            branch_mode = "-B" if replace_existing_base_branch else "-b"
             run(
-                ["git", "worktree", "add", "-b", branch_name, str(worktree_path), base_sha],
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    branch_mode,
+                    branch_name,
+                    str(worktree_path),
+                    base_sha,
+                ],
                 cwd=self.repo_root,
                 **_timeout_kw(timeout),
             )
@@ -2145,6 +2255,65 @@ class WorktreeManager:
             if rebase_ref == target_ref:
                 return worktree_path
         return None
+
+    def _assert_writer_transition_holder_state(
+        self,
+        *,
+        worktree_path: Path,
+        predecessor_detached: bool,
+        predecessor_branch: str | None,
+        successor_branch: str,
+        timeout: int | None,
+    ) -> None:
+        """Require the exact predecessor and target holder sets before removal."""
+        if worktree_path.is_symlink():
+            raise WorktreeCreationReceiptError("implementation writer transition path is invalid")
+        worktrees = self.list_worktrees(raise_on_error=True, timeout=timeout)
+        normalized_path = worktree_path.resolve()
+        path_records = [
+            worktree
+            for worktree in worktrees
+            if isinstance(path := worktree.get("path"), str)
+            and Path(path).resolve() == normalized_path
+        ]
+        expected_predecessor_ref = (
+            None if predecessor_detached else f"refs/heads/{predecessor_branch}"
+        )
+        if len(path_records) != 1 or path_records[0].get("branch") != expected_predecessor_ref:
+            raise WorktreeCreationReceiptError("implementation writer predecessor holder changed")
+
+        relevant_refs = {f"refs/heads/{successor_branch}"}
+        if predecessor_branch is not None:
+            relevant_refs.add(f"refs/heads/{predecessor_branch}")
+        holders: dict[str, set[Path]] = {ref: set() for ref in relevant_refs}
+        common_git_dir = self._common_git_dir(timeout=timeout)
+        for worktree in worktrees:
+            path_value = worktree.get("path")
+            if not isinstance(path_value, str) or not path_value:
+                raise WorktreeCreationReceiptError("implementation writer holder record is invalid")
+            holder_path = Path(path_value).resolve()
+            ref = worktree.get("branch")
+            if not isinstance(ref, str):
+                ref = self._detached_rebase_head_ref(
+                    Path(path_value),
+                    common_git_dir=common_git_dir,
+                    timeout=timeout,
+                )
+            if ref in holders:
+                holders[ref].add(holder_path)
+
+        if predecessor_branch is not None:
+            predecessor_ref = f"refs/heads/{predecessor_branch}"
+            if holders[predecessor_ref] != {normalized_path}:
+                raise WorktreeCreationReceiptError(
+                    "implementation writer predecessor holder changed"
+                )
+        successor_ref = f"refs/heads/{successor_branch}"
+        expected_successor_holders = (
+            {normalized_path} if predecessor_branch == successor_branch else set()
+        )
+        if holders[successor_ref] != expected_successor_holders:
+            raise WorktreeCreationReceiptError("implementation writer target holder changed")
 
     def _common_git_dir(self, *, timeout: int | None = None) -> Path:
         """Return the repository's resolved common Git metadata directory."""

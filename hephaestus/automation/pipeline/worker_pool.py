@@ -4152,32 +4152,30 @@ class WorkerPool:
             and implementation_writer_handoff is not None
             and (base_sha is not None or adopting_implementation_writer)
         ):
-            writer_path = base_dir / source_worktree_name(cast(int, kwargs["issue_number"]), "impl")
-            if writer_path.exists():
-                try:
-                    item_number = cast(int, kwargs["issue_number"])
-                    if adopting_implementation_writer:
-                        source_manager.authorize_adopted_implementation_writer_transition(
-                            item_number,
-                            branch=branch_name,
-                            expected_head=cast(str, implementation_adoption_head),
-                            handoff=implementation_writer_handoff,
-                        )
-                    else:
-                        source_manager.authorize_direct_implementation_writer_transition(
-                            item_number,
-                            branch=branch_name,
-                            base_sha=cast(str, base_sha),
-                            handoff=implementation_writer_handoff,
-                        )
-                except SourceWorkspaceError as exc:
-                    return self._creation_receipt_failure(
-                        base_dir=base_dir,
-                        item_number=kwargs.get("issue_number"),
-                        exc=exc,
-                        branch_name=branch_name,
-                        base_sha=base_sha,
+            try:
+                item_number = cast(int, kwargs["issue_number"])
+                if adopting_implementation_writer:
+                    source_manager.authorize_adopted_implementation_writer_transition(
+                        item_number,
+                        branch=branch_name,
+                        expected_head=cast(str, implementation_adoption_head),
+                        handoff=implementation_writer_handoff,
                     )
+                else:
+                    source_manager.authorize_direct_implementation_writer_transition(
+                        item_number,
+                        branch=branch_name,
+                        base_sha=cast(str, base_sha),
+                        handoff=implementation_writer_handoff,
+                    )
+            except SourceWorkspaceError as exc:
+                return self._creation_receipt_failure(
+                    base_dir=base_dir,
+                    item_number=kwargs.get("issue_number"),
+                    exc=exc,
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                )
         created_or_failure = self._create_managed_worktree(
             manager=manager,
             kwargs=kwargs,

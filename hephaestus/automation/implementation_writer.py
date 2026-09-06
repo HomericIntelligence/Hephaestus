@@ -41,6 +41,7 @@ if TYPE_CHECKING:
             successor_revision: str,
             transition: str,
             journal_digest: str,
+            target_ref_revision: str | None,
             phase_writer: Callable[[str], None],
             commit_writer: Callable[[], None],
         ) -> None:
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
             successor_branch: str,
             successor_revision: str,
             transition: str,
+            target_ref_revision: str | None,
         ) -> None:
             raise NotImplementedError
 
@@ -91,6 +93,7 @@ if TYPE_CHECKING:
             successor_branch: str,
             successor_revision: str,
             transition: str,
+            target_ref_revision: str | None,
         ) -> object:
             raise NotImplementedError
 
@@ -148,6 +151,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             "predecessor_generation",
             "predecessor_revision",
             "successor_revision",
+            "target_ref_revision",
             "transition",
         )
 
@@ -163,6 +167,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             base_sha: str,
             transition: str = "direct",
             journal_digest: str = "",
+            target_ref_revision: str | None = None,
         ) -> None:
             self.path = path.resolve()
             self.predecessor_generation = predecessor_generation
@@ -174,6 +179,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             self.successor_revision = base_sha
             self.transition = transition
             self.journal_digest = journal_digest
+            self.target_ref_revision = target_ref_revision
 
     class _ImplementationWriterHandoff:
         """Opaque capability issued only by the handoff context manager."""
@@ -234,6 +240,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 successor_revision=base_sha,
                 transition="direct",
                 journal_digest="",
+                target_ref_revision=None,
                 phase_writer=lambda _phase: None,
                 commit_writer=lambda: None,
             )
@@ -250,6 +257,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             successor_revision: str,
             transition: str,
             journal_digest: str,
+            target_ref_revision: str | None,
             phase_writer: Callable[[str], None],
             commit_writer: Callable[[], None],
         ) -> None:
@@ -268,6 +276,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                     base_sha=successor_revision,
                     transition=transition,
                     journal_digest=journal_digest,
+                    target_ref_revision=target_ref_revision,
                 ),
             )
             object.__setattr__(self, "_phase_writer", phase_writer)
@@ -290,6 +299,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 successor_branch=branch,
                 successor_revision=base_sha,
                 transition="direct",
+                target_ref_revision=None,
             )
 
         def _validate_writer_transition(
@@ -302,6 +312,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             successor_branch: str,
             successor_revision: str,
             transition: str,
+            target_ref_revision: str | None,
         ) -> None:
             evidence = self._direct_transition
             if (
@@ -314,6 +325,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 or evidence.branch != successor_branch
                 or evidence.successor_revision != successor_revision
                 or evidence.transition != transition
+                or evidence.target_ref_revision != target_ref_revision
             ):
                 message = (
                     "implementation writer direct transition is invalid"
@@ -339,6 +351,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 successor_branch=branch,
                 successor_revision=base_sha,
                 transition="direct",
+                target_ref_revision=None,
             )
 
         def _consume_writer_transition(
@@ -351,6 +364,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             successor_branch: str,
             successor_revision: str,
             transition: str,
+            target_ref_revision: str | None,
         ) -> object:
             self._validate_writer_transition(
                 path=path,
@@ -360,6 +374,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 successor_branch=successor_branch,
                 successor_revision=successor_revision,
                 transition=transition,
+                target_ref_revision=target_ref_revision,
             )
             phase_writer = self._phase_writer
             if phase_writer is None:
