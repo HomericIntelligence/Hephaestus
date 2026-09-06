@@ -20,6 +20,12 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2
 pi --version
 ```
 
+Then install and preflight the managed package set:
+
+```bash
+hephaestus-install-pi-plugins --global --yes --no-approve
+```
+
 Create a private alias file owned by the invoking user with mode `0600`:
 
 ```toml
@@ -184,6 +190,8 @@ This Pi package contract does not gate host-owned Athena `advise` or `learn`.
 Those operations use Hephaestus's provider-neutral Athena contract and do not
 invoke or preflight any agent harness. Pi validation applies only to work that
 actually executes through `--agent pi`.
+Use `--disable-pi-automation` when a run must omit Pi while leaving host-owned
+Athena work unchanged.
 The reviewed external capabilities remain separate catalog-pinned packages:
 `pi-subagents` supplies delegation and `pi-web-access` supplies explicitly
 scoped web access. Athena bundles neither package.

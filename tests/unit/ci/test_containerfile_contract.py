@@ -68,6 +68,17 @@ def test_baked_environment_is_not_made_world_writable() -> None:
     assert "chmod -R a+rwX /opt/hephaestus-venv" not in source
 
 
+def test_baked_console_scripts_do_not_depend_on_builder_source_tree() -> None:
+    """The runtime image must import project CLIs before a checkout is mounted."""
+    source = CONTAINERFILE.read_text(encoding="utf-8")
+
+    assert "uv sync --all-groups --all-extras --locked --no-editable" in source
+    assert "uv run --no-sync pre-commit install-hooks" in source
+    assert source.index("WORKDIR /home/ci") < source.index(
+        "RUN hephaestus-install-pi-plugins --global --yes --no-approve"
+    )
+
+
 def test_runtime_tools_follow_the_requested_build_architecture() -> None:
     """The image must select its executable artifacts for the build platform."""
     source = CONTAINERFILE.read_text(encoding="utf-8")

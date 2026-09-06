@@ -82,10 +82,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install Pi CLI
-        if: matrix.test-type == 'unit'
-        uses: ./.github/actions/setup-pi-cli
-
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
@@ -93,6 +89,10 @@ jobs:
 
       - name: Install locked project environment
         run: uv sync --all-groups --all-extras --locked
+
+      - name: Install managed Pi runtime
+        if: matrix.test-type == 'unit'
+        uses: ./.github/actions/setup-pi-cli
 
       - name: Run unit tests
         if: matrix.test-type == 'unit'

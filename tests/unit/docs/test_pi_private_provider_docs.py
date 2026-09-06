@@ -57,4 +57,6 @@ def test_pi_bootstrap_docs_preserve_the_later_admission_boundary() -> None:
     assert "hephaestus-install-pi-plugins" in text
     assert "pi --version" in text
     assert "--no-approve" in text
+    assert "Then install and preflight the managed package set" in text
+    assert "--disable-pi-automation" in text
     assert "#2518" in text
