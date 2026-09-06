@@ -86,7 +86,10 @@ def test_installer_can_install_catalog_pinned_pi_cli(install_script: str) -> Non
     assert "PI_CODING_AGENT_NPM_PACKAGE=" not in install_script
     assert 'npm install -g --ignore-scripts "$pi_package"' in install_script
     assert "pi --version" in install_script
-    assert 'uv --project "$HEPHAESTUS_REPO_ROOT" run --locked hephaestus-install-pi-plugins' in install_script
+    assert (
+        'uv --project "$HEPHAESTUS_REPO_ROOT" run --locked '
+        "hephaestus-install-pi-plugins"
+    ) in install_script
     assert "managed Pi package set ready" in install_script
 
 
