@@ -9,8 +9,10 @@ unreviewed setting cannot widen the host execution boundary.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from hephaestus.automation.linux_host_verification_contract import MAX_TIMEOUT_SECONDS
 
@@ -40,6 +42,16 @@ def _outside(path: str, boundary: str, field_name: str) -> None:
     """Reject a path that is equal to or nested under a writable boundary."""
     if os.path.commonpath((path, boundary)) == boundary:
         raise ValueError(f"{field_name} must be outside shared_root")
+
+
+def _absolute_ancestry(path: str) -> tuple[str, ...]:
+    """Return the root-to-leaf path components for one absolute path."""
+    current = Path("/")
+    ancestors = [str(current)]
+    for part in Path(path).parts[1:]:
+        current /= part
+        ancestors.append(str(current))
+    return tuple(ancestors)
 
 
 @dataclass(frozen=True)
@@ -83,3 +95,32 @@ class LinuxHostVerificationConfig:
             trusted_slurm_bin_dir=trusted_slurm_bin_dir,
             timeout_seconds=timeout_seconds,
         )
+
+    def trusted_slurm_executable(self, executable_name: str) -> str:
+        """Return a verified absolute ``sbatch`` or ``srun`` executable path.
+
+        Every component from the filesystem root through the executable must
+        be root-owned, non-writable by group or other users, and free of
+        symlinks. This prevents configuration or path traversal from selecting
+        a scheduler binary outside the reviewed trust boundary.
+        """
+        if executable_name not in {"sbatch", "srun"}:
+            raise ValueError("Slurm executable name is not trusted")
+        executable_path = f"{self.trusted_slurm_bin_dir}/{executable_name}"
+        ancestors = _absolute_ancestry(executable_path)
+        for index, path in enumerate(ancestors):
+            try:
+                file_status = os.lstat(path)
+            except OSError as error:
+                raise ValueError("trusted Slurm executable path is unavailable") from error
+            if file_status.st_uid != 0 or file_status.st_mode & 0o022:
+                raise ValueError("trusted Slurm executable path ownership is unsafe")
+            if stat.S_ISLNK(file_status.st_mode):
+                raise ValueError("trusted Slurm executable path must not contain symlinks")
+            is_leaf = index == len(ancestors) - 1
+            if is_leaf:
+                if not stat.S_ISREG(file_status.st_mode) or file_status.st_mode & 0o111 == 0:
+                    raise ValueError("trusted Slurm executable is invalid")
+            elif not stat.S_ISDIR(file_status.st_mode):
+                raise ValueError("trusted Slurm executable ancestor is not a directory")
+        return executable_path
