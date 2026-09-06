@@ -1853,6 +1853,8 @@ class ImplementationStage(Stage):
                     head_sha = value.get("head_sha")
                     if is_full_commit_sha(head_sha):
                         item.payload["_impl_source_revision"] = head_sha
+                        if value.get("published") is True:
+                            item.payload["_post_remediation_review_head_sha"] = head_sha
                     item.payload["rebase_complete"] = True
             elif result.error == "mechanical rebase hit conflicts; resolution required":
                 logger.warning(
@@ -1873,6 +1875,8 @@ class ImplementationStage(Stage):
                 head_sha = value.get("head_sha")
                 if is_full_commit_sha(head_sha):
                     item.payload["_impl_source_revision"] = head_sha
+                    if value.get("published") is True:
+                        item.payload["_post_remediation_review_head_sha"] = head_sha
                 item.payload["rebase_complete"] = True
             elif (result.error or "").startswith("rebase conflict resolution required"):
                 self._record_rebase_conflict(item, result)
