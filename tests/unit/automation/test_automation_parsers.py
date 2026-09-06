@@ -195,7 +195,7 @@ def _host_verification_pyxis_specs() -> tuple[ActionSpec, ...]:
             "host_verification_pyxis_image",
             "_StoreAction",
             None,
-            help_text="Owner-only local Enroot squashfs path for Linux host verification.",
+            help_text="Owner-only Enroot squashfs path shared with Slurm compute nodes.",
         ),
         _action_spec(
             ("--host-verification-pyxis-sha256",),
@@ -216,7 +216,7 @@ def _host_verification_pyxis_specs() -> tuple[ActionSpec, ...]:
             "host_verification_pyxis_quota_root",
             "_StoreAction",
             None,
-            help_text="Private Linux filesystem with a verified maximum 1 GiB capacity.",
+            help_text="Private maximum-1-GiB filesystem shared with Slurm compute nodes.",
         ),
     )
 

@@ -736,7 +736,7 @@ def add_host_verification_pyxis_image_arg(parser: argparse.ArgumentParser) -> No
         type=Path,
         default=None,
         metavar="PATH",
-        help=("Owner-only local Enroot squashfs path for Linux host verification."),
+        help=("Owner-only Enroot squashfs path shared with Slurm compute nodes."),
     )
     parser.add_argument(
         "--host-verification-pyxis-sha256",
@@ -756,5 +756,5 @@ def add_host_verification_pyxis_image_arg(parser: argparse.ArgumentParser) -> No
         type=Path,
         default=None,
         metavar="PATH",
-        help="Private Linux filesystem with a verified maximum 1 GiB capacity.",
+        help="Private maximum-1-GiB filesystem shared with Slurm compute nodes.",
     )
