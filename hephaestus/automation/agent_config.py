@@ -91,7 +91,7 @@ from hephaestus.agents.model_selection import (
     resolve_codex_model_selection,
     validate_codex_role_model_reference,
 )
-from hephaestus.agents.runtime import agent_uses_configured_model_default
+from hephaestus.agents.runtime import agent_uses_configured_model_default, is_codex
 from hephaestus.constants import (
     AGENT_IMPL_TIMEOUT,
     AGENT_LEARN_TIMEOUT,
@@ -190,7 +190,7 @@ def _resolve_model(value: str | None, default: str, *, agent: str = "claude") ->
         return ""
     if value is None:
         return default
-    if agent == "codex":
+    if is_codex(agent):
         validate_codex_role_model_reference(value)
         return resolve_codex_model_selection(value).reference
     resolved = _normalize_configured_model(value)

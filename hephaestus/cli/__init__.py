@@ -4,7 +4,6 @@ from hephaestus.cli.colors import Colors
 from hephaestus.cli.utils import (
     COMMAND_REGISTRY,
     DRY_RUN_HELP_CAVEAT,
-    MODEL_REFERENCE_HELP,
     CommandRegistry,
     add_advise_timeout_arg,
     add_agent_timeout_arg,
@@ -33,7 +32,6 @@ from hephaestus.cli.utils import (
 __all__ = [
     "COMMAND_REGISTRY",
     "DRY_RUN_HELP_CAVEAT",
-    "MODEL_REFERENCE_HELP",
     "Colors",
     "CommandRegistry",
     "add_advise_timeout_arg",

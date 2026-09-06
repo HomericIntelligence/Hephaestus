@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from hephaestus.agents import model_selection
@@ -43,9 +45,10 @@ def test_codex_role_alias_map_is_immutable_and_complete() -> None:
         "luna": model_selection.AgentModelSelection("gpt-5.6-luna", "medium"),
     }
     with pytest.raises(TypeError):
-        model_selection.CODEX_ROLE_MODEL_ALIASES["other"] = model_selection.AgentModelSelection(
-            "gpt-5.6-other", "high"
-        )  # type: ignore[index]
+        aliases = cast(
+            dict[str, model_selection.AgentModelSelection], model_selection.CODEX_ROLE_MODEL_ALIASES
+        )
+        aliases["other"] = model_selection.AgentModelSelection("gpt-5.6-other", "high")
 
 
 @pytest.mark.parametrize(
