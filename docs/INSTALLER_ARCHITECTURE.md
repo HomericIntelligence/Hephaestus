@@ -42,15 +42,19 @@ The final summary block (`install.sh:968–988`) aggregates results from **all s
 
 The entry-point guard at `install.sh:178–180` returns early when the script is
 sourced rather than executed (its inline comment anticipates Odysseus phase
-scripts as the intended sourcing consumer).
+scripts as the intended sourcing consumer). The Pi-specific helper
+`run_pi_package_manager()` is defined before that guard, so sourced regression
+tests can exercise the production dispatch path without running the numbered
+sections.
 
 **The guard is load-bearing.** The regression suite
 `tests/shell/scripts/test_install_install_branches.bats` sources `install.sh`
 in its `setup()` (line 15) and depends on the guard returning before argument
-parsing so it can exercise the helper functions (`check_pass`/`check_fail`) and
-counters (`_PASS`/`_FAIL`/`_WARN`/`_SKIP`) directly. The suite's first test,
-`@test "sourcing guard exposes helpers and counters"`, explicitly asserts the
-guard worked. The guard must not be removed without updating that suite.
+parsing so it can exercise the helper functions (`check_pass`/`check_fail`),
+the counters (`_PASS`/`_FAIL`/`_WARN`/`_SKIP`), and the Pi package dispatch
+helper directly. The suite's first test, `@test "sourcing guard exposes
+helpers and counters"`, explicitly asserts the guard worked. The guard must
+not be removed without updating that suite.
 
 An honest grep that includes `tests/` confirms the in-repo consumer exists:
 

@@ -111,6 +111,22 @@ network-facing service. Its security posture reflects that scope:
   non-production exception. Certificate and key material must be provided as
   runtime file paths, never committed to the repository.
 
+### Managed Pi supply chain
+
+- The Pi catalog pins the CLI package, the Athena commit, and the companion
+  package identities. Keep those pins exact and review every catalog update.
+- Install the pinned Pi CLI from the npm registry, then use
+  `hephaestus-install-pi-plugins` to install and preflight the managed package
+  set. Do not trust a raw `npm install -g` result as package admission.
+- Approval and sandbox requests that Pi cannot enforce must fail closed before
+  provider execution.
+- Private aliases, endpoints, checkpoint names, and other operator-local Pi
+  inputs stay outside the repository and outside shared logs.
+- Operators can omit Pi with `--disable-pi-automation` or by not selecting
+  `--agent pi`; host-owned Athena `advise` and `learn` remain available.
+- Roll back the managed Pi state by rerunning the managed installer against a
+  prior catalog revision. Do not rely on an unreviewed local package tree.
+
 ### Static Analysis Coverage
 
 Each source surface has a dedicated, CI-gating static security scanner, so
