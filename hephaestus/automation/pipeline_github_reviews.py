@@ -1,6 +1,6 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
-from .pipeline.stages.base import ImplementationReplyProgress
+from .pipeline.github_jobs import ImplementationReplyProgress
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 
