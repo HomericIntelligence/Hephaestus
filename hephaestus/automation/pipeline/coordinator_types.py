@@ -84,6 +84,9 @@ from jinja2 import TemplateNotFound as TemplateNotFound
 
 import hephaestus.automation.pipeline.admission as _admission
 from hephaestus.automation.issue_waves import WaveLease as WaveLease
+from hephaestus.automation.linux_host_verification import (
+    LinuxHostVerificationConfig as LinuxHostVerificationConfig,
+)
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE as DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
 )
@@ -293,6 +296,9 @@ class PipelineConfig:
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
     event_log_path: Path | None = None
     evidence_receipt_dir: Path | None = None
+    # Only the production worker pool consumes this sealed backend setting.
+    # Stages and GitHub payloads do not receive backend configuration details.
+    linux_host_verification: LinuxHostVerificationConfig | None = None
     # Recent local diagnostic retention.  These limits intentionally do not
     # alter the GitHub journal or restart behavior.
     event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY

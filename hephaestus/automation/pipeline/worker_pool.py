@@ -87,6 +87,7 @@ from hephaestus.automation.host_verification_bootstrap import (
 )
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
+from hephaestus.automation.linux_host_verification import LinuxHostVerificationConfig
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
@@ -3574,6 +3575,7 @@ class WorkerPool:
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
         host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
+        linux_host_verification: LinuxHostVerificationConfig | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -3601,6 +3603,8 @@ class WorkerPool:
             host_verification_pyxis_authority: Host-owned image provenance file.
             host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
             host_verification_pyxis_placement: Optional host-selected allocation and node.
+            linux_host_verification: Optional sealed configuration for the
+                Linux host-verification backend.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -3624,6 +3628,7 @@ class WorkerPool:
         self._host_verification_pyxis_authority = host_verification_pyxis_authority
         self._host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
         self._host_verification_pyxis_placement = host_verification_pyxis_placement
+        self._linux_host_verification = linux_host_verification
 
     @contextmanager
     def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:

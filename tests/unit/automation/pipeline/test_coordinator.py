@@ -27,6 +27,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
+from hephaestus.automation.linux_host_verification import LinuxHostVerificationConfig
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
@@ -4276,6 +4277,38 @@ class TestConfigWiring:
         ctx = coordinator._ctx_for_repo("repo-a")
 
         assert ctx.budget("merge") == 3
+
+    def test_linux_host_verification_config_reaches_production_worker_pool(
+        self, tmp_path: Path
+    ) -> None:
+        """The backend config is worker-only and retains object identity."""
+        linux_config = LinuxHostVerificationConfig.from_mapping(
+            {
+                "shared_root": "/srv/hephaestus-runs",
+                "image_path": "/srv/hephaestus-images/verify.sqsh",
+                "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+                "trusted_slurm_bin_dir": "/usr/bin",
+                "timeout_seconds": 900,
+            }
+        )
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            linux_host_verification=linux_config,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            install_signals=False,
+        )
+        try:
+            assert coordinator.pool._linux_host_verification is linux_config
+            stage_config = coordinator._ctx_for_repo("repo-a").config
+            assert stage_config.linux_host_verification is linux_config
+        finally:
+            coordinator.pool.shutdown()
+            coordinator.auxiliary_pool.shutdown()
 
     def test_pipeline_config_is_stage_context_authority(self, tmp_path: Path) -> None:
         """Every stage receives the exact authoritative PipelineConfig object."""
