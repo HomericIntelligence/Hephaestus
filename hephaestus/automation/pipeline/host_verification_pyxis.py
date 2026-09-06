@@ -5,17 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hephaestus.automation.pyxis_artifact_io import (
     PyxisArtifactIOError,
-    effective_user_id,
     read_private_regular_file,
     stage_private_content_addressed_file,
     validate_private_capacity_root,
+    validate_private_squashfs_file,
 )
 
 DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE = Path("build/host-verification/hephaestus-ci.sqsh")
@@ -54,14 +53,10 @@ def validate_pyxis_image(
         raise PyxisImageValidationError("Pyxis image authority is missing")
     if not isinstance(expected_sha256, str) or _SHA256_RE.fullmatch(expected_sha256) is None:
         raise PyxisImageValidationError("Pyxis expected digest is invalid")
-    resolved = _local_squashfs_image(image)
+    resolved, actual = _local_squashfs_image(image)
     authority = _read_authority(provenance)
     if authority["squashfs_sha256"] != expected_sha256:
         raise PyxisImageValidationError("Pyxis authority does not match expected digest")
-    try:
-        actual = image_sha256(resolved)
-    except OSError as exc:
-        raise PyxisImageValidationError("Pyxis image digest cannot be read") from exc
     if actual != expected_sha256:
         raise PyxisImageValidationError("Pyxis image digest does not match expected digest")
     return PyxisImageMetadata(
@@ -109,30 +104,18 @@ def _read_authority(path: Path) -> dict[str, str]:
     return authority
 
 
-def _local_squashfs_image(image: Path) -> Path:
-    """Return a verified local squashfs file for the Pyxis image."""
+def _local_squashfs_image(image: Path) -> tuple[Path, str]:
+    """Return one verified local squashfs path and digest."""
     if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(image)):
         raise PyxisImageValidationError("Pyxis image must be a local filesystem path")
-    candidate = Path(image).expanduser()
     try:
-        path_metadata = candidate.lstat()
-        if (
-            not stat.S_ISREG(path_metadata.st_mode)
-            or path_metadata.st_uid != effective_user_id()
-            or stat.S_IMODE(path_metadata.st_mode) & 0o277
-        ):
-            raise PyxisImageValidationError(
-                "Pyxis image must be an owner-only, read-only regular local file"
-            )
-        resolved = candidate.resolve(strict=True)
-        with resolved.open("rb") as stream:
-            if stream.read(4) != b"hsqs":
-                raise PyxisImageValidationError("Pyxis image is not a squashfs file")
-    except PyxisImageValidationError:
-        raise
-    except OSError as exc:
+        return validate_private_squashfs_file(image)
+    except PyxisArtifactIOError as exc:
+        if str(exc) == "artifact is not a squashfs file":
+            raise PyxisImageValidationError("Pyxis image is not a squashfs file") from exc
+        if "changed" in str(exc):
+            raise PyxisImageValidationError("Pyxis image changed during validation") from exc
         raise PyxisImageValidationError("Pyxis image is not a regular local file") from exc
-    return resolved
 
 
 def stage_verified_pyxis_image(
