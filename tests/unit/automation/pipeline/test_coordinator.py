@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import subprocess
+import threading
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -18,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -46,6 +49,7 @@ from hephaestus.automation.pipeline.jobs import (
     JobHandle,
     JobResult,
 )
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import (
     Disposition,
     PipelineScope,
@@ -60,7 +64,9 @@ from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_RESERVATION_KEY,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -82,6 +88,34 @@ def _agent_job(repo: str = "repo-a", issue: int = 1) -> AgentJob:
         descr="stub agent job",
     )
 
+
+def _git(path: Path, *args: str) -> str:
+    """Run one test Git command and return its standard output."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _writer_repository(tmp_path: Path) -> tuple[Path, str]:
+    """Create one local repository and bare origin for writer handoff tests."""
+    repo = tmp_path / "writer-repository"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    revision = _git(repo, "rev-parse", "HEAD")
+    remote = tmp_path / "writer-remote.git"
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    return repo, revision
 
 class StubStage:
     """Scripted stage: each step() pops the next scripted StepResult."""
@@ -1629,6 +1663,98 @@ class TestImplementationAdmission:
         assert prepare_source.call_args_list == [expected_prepare, expected_prepare]
         assert item.state == "IMPLEMENT_WAIT"
         assert item.result is None
+
+    def test_restarted_direct_writer_reaches_implementation_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real direct-writer restart reaches the implementation request."""
+        repo, revision = _writer_repository(tmp_path)
+        first_branch = f"7-auto-impl-direct-{'a' * 32}"
+        second_branch = f"7-auto-impl-direct-{'b' * 32}"
+        completion_q: CompletionQueue = queue.Queue()
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        first_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="org/repo-a",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": first_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": revision,
+                "direct_worktree_nonce": "a" * 32,
+            },
+        )
+        second_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="org/repo-a",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": second_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": revision,
+                "direct_worktree_nonce": "b" * 32,
+            },
+        )
+        try:
+            with patch.object(
+                worker,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
+            ):
+                assert worker._git_create_worktree(first_job).ok is True
+                restarted_result = worker._git_create_worktree(second_job)
+        finally:
+            worker.shutdown(mark_interrupted=False)
+
+        assert restarted_result.ok is True
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            serialize_file_overlap=False,
+        )
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=7,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=second_branch,
+            payload={
+                DIRECT_SCOPE_BASE_SHA_KEY: revision,
+                "issue_title": "Recover the direct writer",
+                "issue_body": "Continue after a clean restart.",
+            },
+        )
+        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        worktree_handle = JobHandle(job=second_job, on_done_state="DIRTY_DECISION_WAIT")
+        coordinator.in_flight[worktree_handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+
+        coordinator._handle_completion(worktree_handle, restarted_result)
+
+        advice_handle, advice_result = coordinator.completion_q.get_nowait()
+        assert isinstance(advice_handle.job, AthenaSkillJob)
+        coordinator._handle_completion(advice_handle, advice_result)
+
+        implementation_handle = next(iter(coordinator.in_flight))
+        assert isinstance(implementation_handle.job, AgentJob)
+        assert implementation_handle.job.descr == "implement"
+        assert implementation_handle.job.issue == 7
+        assert implementation_handle.job.cwd == Path(str(restarted_result.value["path"]))
+        assert item.payload["_impl_source_revision"] == revision
+        assert item.state == "IMPLEMENT_WAIT"
 
     def test_relative_writer_path_matches_an_absolute_git_holder(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
