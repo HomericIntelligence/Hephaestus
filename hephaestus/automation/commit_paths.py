@@ -26,6 +26,7 @@ _PORCELAIN_STATUS_PAIRS: frozenset[str] = frozenset(
     | {f" {worktree_status}" for worktree_status in "AMDTRC"}
     | {f"{index_status}{worktree_status}" for index_status in "MTARC" for worktree_status in " MTD"}
 )
+_UNMERGED_STATUS_PAIRS: frozenset[str] = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,8 @@ def select_commit_paths(
     add_paths: list[str] = []
     update_paths: list[str] = []
     for status, path in entries:
+        if status in _UNMERGED_STATUS_PAIRS:
+            raise RuntimeError("Cannot commit an unresolved merge")
         if allowed is not None and path not in allowed:
             logger.debug("Skipping non-allowlisted file: %r", path)
             continue
@@ -91,6 +94,25 @@ def select_commit_paths(
         else:
             add_paths.append(path)
     return CommitPaths(tuple(add_paths), tuple(update_paths))
+
+
+def reject_filtered_path_shape_changes(
+    entries: Collection[tuple[str, str]],
+    selected: CommitPaths,
+) -> None:
+    """Reject a selected path that can implicitly stage a filtered path."""
+    add_paths = set(selected.add_paths)
+    selected_paths = add_paths | set(selected.update_paths)
+    filtered_paths = {path for _status, path in entries if path not in selected_paths}
+    for selected_path in selected_paths:
+        selected_prefix = f"{selected_path}/"
+        for filtered_path in filtered_paths:
+            selected_add_replaces_descendant = (
+                selected_path in add_paths and filtered_path.startswith(selected_prefix)
+            )
+            selected_descendant_replaces_filtered = selected_path.startswith(f"{filtered_path}/")
+            if selected_add_replaces_descendant or selected_descendant_replaces_filtered:
+                raise RuntimeError("A selected file-tree change overlaps a filtered path")
 
 
 def head_tracked_commit_paths(

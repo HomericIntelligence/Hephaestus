@@ -4438,11 +4438,13 @@ class TestCommitPushAndPrCreate:
                     "head_sha": "a" * 40,
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                 },
+                "remediation_recovery_commit_sha": "b" * 40,
             }
         )
 
         assert ImplementationStage().step(item, make_ctx()) == expected
         assert "remediation_writer_inspection" not in item.payload
+        assert "remediation_recovery_commit_sha" not in item.payload
 
     def test_remediation_reply_handoff_waits_for_github_head_visibility(
         self, make_ctx: Any, make_work_item: Any

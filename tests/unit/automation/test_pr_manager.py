@@ -237,6 +237,21 @@ class TestCommitChanges:
             with pytest.raises(RuntimeError, match="All changes appear to be secret"):
                 pr_manager.commit_changes(2, Path("/tmp/wt"))
 
+    @pytest.mark.parametrize(
+        "porcelain",
+        (
+            _porcelain(" D directory/.env", "?? directory"),
+            _porcelain(" D token.pem", "?? token.pem/safe.txt"),
+        ),
+    )
+    def test_secret_path_shape_changes_raise_before_staging(self, porcelain: str) -> None:
+        """An implicit tree replacement cannot stage a filtered secret path."""
+        with patch.object(pr_manager, "run", return_value=_status(porcelain)) as run_mock:
+            with pytest.raises(RuntimeError, match="overlaps a filtered path"):
+                pr_manager.commit_changes(2, Path("/tmp/wt"))
+
+        assert run_mock.call_count == 1
+
     def test_filters_secrets_and_commits(self) -> None:
         porcelain = _porcelain(" M src/foo.py", "?? .env", "?? data.key", " M src/bar.py")
         run_mock = MagicMock(
@@ -265,6 +280,37 @@ class TestCommitChanges:
         assert "src/bar.py" in add_call
         assert ".env" not in add_call
         assert "data.key" not in add_call
+
+    def test_commit_changes_returns_the_exact_requested_receipt(self) -> None:
+        """A recovery commit returns its exact full revision."""
+        child = "b" * 40
+        run_mock = MagicMock(
+            side_effect=[
+                _status(_porcelain(" M src/foo.py")),
+                _status(""),
+                _status(""),
+                _status("M\tsrc/foo.py\n"),
+                _status(" src/foo.py | 1 +\n"),
+                _status(""),
+                _status(""),
+                _status(""),
+                _status(f"{child}\n"),
+            ]
+        )
+        issue = MagicMock(title="Fix recovery")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            result = pr_manager.commit_changes(
+                3,
+                Path("/tmp/wt"),
+                return_commit_sha=True,
+            )
+
+        assert result == child
+        assert run_mock.call_args_list[-1].args[0] == ["git", "rev-parse", "HEAD"]
 
     def test_allowed_paths_prevent_staging_unlisted_artifacts(self) -> None:
         porcelain = _porcelain(" M hephaestus/automation/ci_driver.py", "?? output.log")
@@ -419,8 +465,8 @@ class TestCommitChanges:
         assert add_call == [
             "git",
             "--literal-pathspecs",
-            "add",
-            "-u",
+            "update-index",
+            "--force-remove",
             "--",
             "hephaestus/github/fleet_sync.py",
         ]

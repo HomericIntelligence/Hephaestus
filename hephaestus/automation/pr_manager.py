@@ -42,6 +42,7 @@ from .commit_paths import (
     CommitPaths,
     head_tracked_commit_paths,
     parse_porcelain_status,
+    reject_filtered_path_shape_changes,
     select_commit_paths,
 )
 from .commit_policy import (
@@ -788,7 +789,14 @@ def _stage_commit_paths(
     )
     if paths.update_paths:
         run(
-            ["git", "--literal-pathspecs", "add", "-u", "--", *paths.update_paths],
+            [
+                "git",
+                "--literal-pathspecs",
+                "update-index",
+                "--force-remove",
+                "--",
+                *paths.update_paths,
+            ],
             cwd=worktree_path,
             **_git_timeout_kw(git_timeout),
         )
@@ -832,9 +840,10 @@ def commit_changes(
     agent_model: str | None = None,
     *,
     expected_tree_sha: str | None = None,
+    return_commit_sha: bool = False,
     signing_env: dict[str, str] | None = None,
     pi_dir: Path | None = None,
-) -> None:
+) -> str | None:
     """Commit changes in worktree, filtering out secret files.
 
     Args:
@@ -853,6 +862,7 @@ def commit_changes(
             the deterministic lightweight-message default is used.
         signing_env: Optional validated Git environment for commit signing.
         expected_tree_sha: Optional immutable tree that staging must produce.
+        return_commit_sha: Return the exact new commit SHA after the commit.
 
     Raises:
         RuntimeError: If there are no changes, or all changes are secret files.
@@ -865,12 +875,14 @@ def commit_changes(
             "Check if the implementation was successful or if the plan needs revision."
         )
 
-    paths = _select_commit_paths(_parse_porcelain_status(porcelain), allowed_paths)
+    status_entries = _parse_porcelain_status(porcelain)
+    paths = _select_commit_paths(status_entries, allowed_paths)
     if not paths.add_paths and not paths.update_paths:
         raise RuntimeError(
             f"No non-secret files to commit for issue {issue_ref(issue_number)}. "
             "All changes appear to be secret files."
         )
+    reject_filtered_path_shape_changes(status_entries, paths)
 
     _stage_commit_paths(paths, worktree_path, git_timeout)
     if expected_tree_sha is not None:
@@ -903,6 +915,16 @@ def commit_changes(
     _clear_local_committer_identity(worktree_path, git_timeout)
 
     _commit_with_signature(commit_message, worktree_path, git_timeout, signing_env)
+    if not return_commit_sha:
+        return None
+    commit_sha = run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree_path,
+        **_git_timeout_kw(git_timeout),
+    ).stdout.strip()
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit_sha) is None:
+        raise RuntimeError("The committed revision is unavailable")
+    return commit_sha
 
 
 def ensure_pr_created(

@@ -17,6 +17,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import Future
 from contextlib import ExitStack, nullcontext
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -74,6 +75,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _repo_lock_path,
     _run_bounded_git_output,
     _run_bounded_host_command,
+    _terminate_bounded_process_tree,
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
@@ -2698,8 +2700,25 @@ class TestGitOps:
             "worktree_path": str(writer),
         }
 
-    def test_path_content_identity_rejects_symlinked_ancestor(self, tmp_path: Path) -> None:
-        """A dirty path cannot leave its root through a parent symbolic link."""
+    def test_path_content_identity_accepts_an_empty_set_without_posix_support(
+        self, tmp_path: Path
+    ) -> None:
+        """A clean writer does not require host path-traversal primitives."""
+        with patch(f"{_WP}.os.name", "nt"):
+            digest = _path_content_identity(tmp_path, "", seed_digest="seed")
+
+        expected = hashlib.sha256(b"Dseed").hexdigest()
+        assert digest == expected
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
+    def test_path_content_identity_does_not_follow_a_symlinked_ancestor(
+        self, tmp_path: Path
+    ) -> None:
+        """A shadowed descendant does not bind bytes outside its root."""
         root = tmp_path / "root"
         outside = tmp_path / "outside"
         root.mkdir()
@@ -2707,13 +2726,25 @@ class TestGitOps:
         (outside / "payload").write_text("outside\n", encoding="utf-8")
         (root / "link").symlink_to(outside, target_is_directory=True)
 
-        with pytest.raises(RuntimeError, match="unsafe path"):
-            _path_content_identity(
-                root,
-                "link/payload\0",
-                remaining_content_bytes=[64],
-            )
+        before = _path_content_identity(
+            root,
+            "link/payload\0",
+            remaining_content_bytes=[64],
+        )
+        (outside / "payload").write_text("different outside bytes\n", encoding="utf-8")
+        after = _path_content_identity(
+            root,
+            "link/payload\0",
+            remaining_content_bytes=[64],
+        )
 
+        assert after == before
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
     def test_path_content_identity_limits_bytes_read_after_file_growth(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2745,6 +2776,11 @@ class TestGitOps:
             )
         assert grew is True
 
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
     def test_path_content_identity_hashes_a_leaf_symlink_without_following_it(
         self, tmp_path: Path
     ) -> None:
@@ -2766,6 +2802,311 @@ class TestGitOps:
         assert unchanged == first
         assert changed != first
 
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
+    def test_path_content_identity_rejects_a_regular_leaf_swap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A regular leaf cannot become a link between metadata and open."""
+        root = tmp_path / "root"
+        outside = tmp_path / "outside"
+        root.mkdir()
+        outside.write_text("outside bytes\n", encoding="utf-8")
+        target = root / "payload"
+        target.write_text("inside\n", encoding="utf-8")
+        original_open = os.open
+        swapped = False
+
+        def swap_before_open(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal swapped
+            if path == "payload" and dir_fd is not None and not swapped:
+                swapped = True
+                target.unlink()
+                target.symlink_to(outside)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "open", swap_before_open)
+        monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, swap_before_open})
+
+        with pytest.raises(OSError):
+            _path_content_identity(root, "payload\0", remaining_content_bytes=[64])
+        assert swapped is True
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
+    def test_path_content_identity_rejects_a_symlink_leaf_swap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A link target cannot change between metadata and target reads."""
+        root = tmp_path / "root"
+        root.mkdir()
+        link = root / "link"
+        link.symlink_to("short")
+        original_readlink = os.readlink
+        swapped = False
+
+        def swap_before_readlink(
+            path: str,
+            *,
+            dir_fd: int | None = None,
+        ) -> str:
+            nonlocal swapped
+            if path == "link" and dir_fd is not None and not swapped:
+                swapped = True
+                link.unlink()
+                link.symlink_to("a-much-longer-target")
+            return original_readlink(path, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "readlink", swap_before_readlink)
+        monkeypatch.setattr(
+            os,
+            "supports_dir_fd",
+            {*os.supports_dir_fd, swap_before_readlink},
+        )
+
+        with pytest.raises(RuntimeError, match="changed during inspection"):
+            _path_content_identity(root, "link\0", remaining_content_bytes=[64])
+        assert swapped is True
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
+    def test_candidate_tree_rejects_growth_during_bounded_capture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Candidate creation cannot stage bytes beyond the snapshot quota."""
+        _repo, writer, head = self._inspection_writer(tmp_path)
+        target = writer / "tracked.txt"
+        target.write_bytes(b"changed\n")
+        target_identity = (target.stat().st_dev, target.stat().st_ino)
+        original_read = os.read
+        grew = False
+
+        def grow_before_read(fd: int, size: int) -> bytes:
+            nonlocal grew
+            metadata = os.fstat(fd)
+            if not grew and (metadata.st_dev, metadata.st_ino) == target_identity:
+                grew = True
+                with target.open("ab") as stream:
+                    stream.write(b"x" * (8 * 1024 * 1024 + 1))
+            return original_read(fd, size)
+
+        monkeypatch.setattr(os, "read", grow_before_read)
+
+        with pytest.raises(RuntimeError, match="content limit exceeded"):
+            _candidate_commit_tree_evidence(writer, head, timeout=60)
+        assert grew is True
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
+    def test_candidate_tree_matches_a_directory_replaced_by_a_symlink(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A shadowed descendant does not cause traversal through a new link."""
+        repo = tmp_path / "repo"
+        writer = repo / "build" / "writer"
+        branch = "2973-auto-impl"
+        repo.mkdir(parents=True)
+
+        def git(*args: str, cwd: Path = repo) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        tracked_dir = repo / "directory"
+        tracked_dir.mkdir()
+        (tracked_dir / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git("add", "directory/tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD")
+        git("worktree", "add", "-q", "-b", branch, str(writer))
+        writer_dir = writer / "directory"
+        shutil.rmtree(writer_dir)
+        outside = tmp_path / "outside" / "created-by-escape"
+        writer_dir.symlink_to(outside, target_is_directory=True)
+
+        candidate, _diff = _candidate_commit_tree_evidence(writer, head, timeout=60)
+        inspection = pool._git_inspect_implementation_worktree(
+            GitJob(
+                repo="test/repo",
+                op="inspect_implementation_worktree",
+                timeout_s=60,
+                kwargs={
+                    "repo_root": str(repo),
+                    "worktree_path": str(writer),
+                    "branch": branch,
+                    "expected_head": head,
+                },
+            )
+        )
+        assert inspection.ok is True
+        assert inspection.value["candidate_tree_sha"] == candidate
+        git("read-tree", "HEAD", cwd=writer)
+        git(
+            "--literal-pathspecs",
+            "update-index",
+            "--force-remove",
+            "--",
+            "directory/tracked.txt",
+            cwd=writer,
+        )
+        git("--literal-pathspecs", "add", "--", "directory", cwd=writer)
+
+        assert not outside.exists()
+        assert git("write-tree", cwd=writer) == candidate
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Git link tests require POSIX")
+    def test_candidate_tree_matches_a_symlink_replaced_by_a_directory(self, tmp_path: Path) -> None:
+        """A new descendant and removed link produce the production tree."""
+        repo = tmp_path / "repo"
+        writer = repo / "build" / "writer"
+        repo.mkdir(parents=True)
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.name", "Test User")
+        _git(repo, "config", "user.email", "test@example.invalid")
+        (repo / "directory").symlink_to("missing")
+        _git(repo, "add", "directory")
+        _git(repo, "commit", "--no-gpg-sign", "-m", "test: base")
+        head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "worktree", "add", "-b", "2973-auto-impl", str(writer))
+        (writer / "directory").unlink()
+        (writer / "directory").mkdir()
+        (writer / "directory" / "safe.txt").write_text("safe\n", encoding="utf-8")
+
+        candidate, _diff = _candidate_commit_tree_evidence(writer, head, timeout=60)
+        _git(writer, "read-tree", "HEAD")
+        _git(
+            writer,
+            "--literal-pathspecs",
+            "update-index",
+            "--force-remove",
+            "--",
+            "directory",
+        )
+        _git(writer, "--literal-pathspecs", "add", "--", "directory/safe.txt")
+
+        assert _git(writer, "write-tree") == candidate
+
+    @pytest.mark.parametrize("direction", ("directory-to-file", "file-to-directory"))
+    def test_candidate_tree_rejects_secret_path_shape_changes(
+        self, tmp_path: Path, direction: str
+    ) -> None:
+        """A selected shape change cannot stage one filtered secret path."""
+        repo = tmp_path / "repo"
+        writer = repo / "build" / "writer"
+        repo.mkdir(parents=True)
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.name", "Test User")
+        _git(repo, "config", "user.email", "test@example.invalid")
+        if direction == "directory-to-file":
+            (repo / "directory").mkdir()
+            (repo / "directory" / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+            _git(repo, "add", "directory/.env")
+        else:
+            (repo / "token.pem").write_text("secret\n", encoding="utf-8")
+            _git(repo, "add", "token.pem")
+        _git(repo, "commit", "--no-gpg-sign", "-m", "test: base")
+        head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "worktree", "add", "-b", "2973-auto-impl", str(writer))
+        if direction == "directory-to-file":
+            shutil.rmtree(writer / "directory")
+            (writer / "directory").write_text("safe\n", encoding="utf-8")
+        else:
+            (writer / "token.pem").unlink()
+            (writer / "token.pem").mkdir()
+            (writer / "token.pem" / "safe.txt").write_text("safe\n", encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="overlaps a filtered path"):
+            _candidate_commit_tree_evidence(writer, head, timeout=60)
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Executable mode tests require POSIX")
+    def test_untracked_executable_mode_changes_the_content_identity(self, tmp_path: Path) -> None:
+        """The snapshot binds the Git executable bit of an untracked file."""
+        root = tmp_path / "root"
+        root.mkdir()
+        target = root / "script"
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        target.chmod(0o644)
+        regular = _path_content_identity(root, "script\0", remaining_content_bytes=[64])
+        target.chmod(0o755)
+        executable = _path_content_identity(root, "script\0", remaining_content_bytes=[64])
+
+        assert executable != regular
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Executable mode tests require POSIX")
+    def test_candidate_tree_rejects_chmod_during_capture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An executable-bit race cannot produce a candidate receipt."""
+        _repo, writer, head = self._inspection_writer(tmp_path)
+        target = writer / "script"
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        target.chmod(0o644)
+        identity = (target.stat().st_dev, target.stat().st_ino)
+        original_read = os.read
+        changed = False
+
+        def chmod_before_read(fd: int, size: int) -> bytes:
+            nonlocal changed
+            metadata = os.fstat(fd)
+            if not changed and (metadata.st_dev, metadata.st_ino) == identity:
+                changed = True
+                target.chmod(0o755)
+            return original_read(fd, size)
+
+        monkeypatch.setattr(os, "read", chmod_before_read)
+
+        with pytest.raises(RuntimeError, match="changed during inspection"):
+            _candidate_commit_tree_evidence(writer, head, timeout=60)
+        assert changed is True
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Executable mode tests require POSIX")
+    def test_candidate_tree_matches_an_untracked_executable(self, tmp_path: Path) -> None:
+        """Candidate and production staging use the same executable mode."""
+        _repo, writer, head = self._inspection_writer(tmp_path)
+        target = writer / "script"
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        target.chmod(0o755)
+
+        candidate, _diff = _candidate_commit_tree_evidence(writer, head, timeout=60)
+        _git(writer, "read-tree", "HEAD")
+        _git(writer, "--literal-pathspecs", "add", "--", "script")
+
+        assert _git(writer, "write-tree") == candidate
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
     def test_path_content_identity_enforces_its_deadline(self, tmp_path: Path) -> None:
         """Content reads stop when their inspection time is exhausted."""
         root = tmp_path / "root"
@@ -2849,9 +3190,10 @@ class TestGitOps:
         script = (
             "import subprocess, sys; "
             "subprocess.Popen([sys.executable, '-c', "
-            "'import time; time.sleep(3)'])"
+            "'import time; time.sleep(3)'], start_new_session=True)"
         )
         started = time.monotonic()
+        prior_threads = set(threading.enumerate())
         with (
             patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False),
             pytest.raises(subprocess.TimeoutExpired),
@@ -2865,14 +3207,48 @@ class TestGitOps:
             )
 
         assert time.monotonic() - started < 2.0
+        assert [thread for thread in threading.enumerate() if thread not in prior_threads] == []
+
+    @pytest.mark.parametrize(
+        "termination_error",
+        (OSError("missing taskkill"), subprocess.TimeoutExpired(("taskkill",), 5)),
+    )
+    def test_windows_tree_termination_always_kills_and_waits_for_the_parent(
+        self, termination_error: BaseException
+    ) -> None:
+        """A Windows tree-helper failure cannot skip direct-child cleanup."""
+        process = MagicMock(pid=1234)
+        with (
+            patch(f"{_WP}.os.name", "nt"),
+            patch(f"{_WP}._trusted_windows_taskkill", return_value=r"C:\Windows\taskkill.exe"),
+            patch(f"{_WP}.subprocess.run", side_effect=termination_error),
+        ):
+            _terminate_bounded_process_tree(process, process_group=True)
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
 
     def test_bounded_git_output_thread_backend_reports_pipe_read_errors(self) -> None:
         """A reader failure cannot produce a successful inspection receipt."""
-        process = MagicMock()
-        process.stdout.read.side_effect = OSError("read failed")
-        process.stderr.read.return_value = b""
+        process = subprocess.Popen(
+            (sys.executable, "-c", "import time; time.sleep(10)"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        stdout_fd = process.stdout.fileno()
+        original_read = os.read
 
-        with pytest.raises(RuntimeError, match="stdout pipe read failed"):
+        def fail_stdout(fd: int, size: int) -> bytes:
+            if fd == stdout_fd:
+                raise OSError("read failed")
+            return original_read(fd, size)
+
+        with (
+            patch(f"{_WP}.os.read", side_effect=fail_stdout),
+            pytest.raises(RuntimeError, match="stdout pipe read failed"),
+        ):
             _read_bounded_git_output_with_threads(
                 process,
                 ("git", "status"),
@@ -2881,7 +3257,7 @@ class TestGitOps:
                 retain_text=True,
             )
 
-        process.kill.assert_called_once_with()
+        assert process.poll() is not None
 
     def test_inspect_implementation_worktree_includes_staged_changes_in_diff(
         self,
@@ -3006,6 +3382,119 @@ class TestGitOps:
         assert ".env" not in diff.text
         assert "TOP_SECRET" not in diff.text
         assert "safe.txt" in diff.text
+
+    def test_candidate_tree_matches_staged_delete_with_present_worktree_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A duplicate update/add path produces the same final staged tree."""
+        _repo, writer, head = self._inspection_writer(tmp_path, "2973-auto-impl")
+        _git(writer, "rm", "--cached", "tracked.txt")
+
+        candidate, _diff = _candidate_commit_tree_evidence(writer, head, timeout=60)
+        _git(writer, "read-tree", "HEAD")
+        _git(
+            writer,
+            "--literal-pathspecs",
+            "update-index",
+            "--force-remove",
+            "--",
+            "tracked.txt",
+        )
+        _git(writer, "--literal-pathspecs", "add", "--", "tracked.txt")
+
+        assert _git(writer, "write-tree") == candidate
+
+    def test_candidate_tree_matches_a_tracked_directory_replaced_by_a_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing descendant and present ancestor form one exact tree."""
+        repo = tmp_path / "repo"
+        writer = repo / "build" / "writer"
+        repo.mkdir(parents=True)
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.name", "Test User")
+        _git(repo, "config", "user.email", "test@example.invalid")
+        tracked_dir = repo / "directory"
+        tracked_dir.mkdir()
+        (tracked_dir / "tracked.txt").write_text("base\n", encoding="utf-8")
+        _git(repo, "add", "directory/tracked.txt")
+        _git(repo, "commit", "--no-gpg-sign", "-m", "test: base")
+        head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "worktree", "add", "-b", "2973-auto-impl", str(writer))
+        shutil.rmtree(writer / "directory")
+        (writer / "directory").write_text("replacement\n", encoding="utf-8")
+
+        candidate, _diff = _candidate_commit_tree_evidence(writer, head, timeout=60)
+        _git(writer, "read-tree", "HEAD")
+        _git(
+            writer,
+            "--literal-pathspecs",
+            "add",
+            "-u",
+            "--",
+            "directory/tracked.txt",
+        )
+        _git(writer, "--literal-pathspecs", "add", "--", "directory")
+
+        assert _git(writer, "write-tree") == candidate
+
+    @pytest.mark.parametrize(
+        ("current_change", "other_change", "expected_status"),
+        (("modify", "delete", "UD"), ("delete", "modify", "DU")),
+    )
+    def test_candidate_tree_rejects_real_unmerged_delete_states(
+        self,
+        tmp_path: Path,
+        current_change: str,
+        other_change: str,
+        expected_status: str,
+    ) -> None:
+        """A real modify-delete conflict cannot become a candidate deletion."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.name", "Test User")
+        _git(repo, "config", "user.email", "test@example.invalid")
+        target = repo / "conflict.txt"
+        target.write_text("base\n", encoding="utf-8")
+        _git(repo, "add", target.name)
+        _git(repo, "commit", "--no-gpg-sign", "-m", "test: base")
+        _git(repo, "branch", "other")
+
+        if current_change == "modify":
+            target.write_text("current\n", encoding="utf-8")
+            _git(repo, "add", target.name)
+        else:
+            _git(repo, "rm", target.name)
+        _git(repo, "commit", "--no-gpg-sign", "-m", "test: current")
+        _git(repo, "switch", "other")
+        if other_change == "modify":
+            target.write_text("other\n", encoding="utf-8")
+            _git(repo, "add", target.name)
+        else:
+            _git(repo, "rm", target.name)
+        _git(repo, "commit", "--no-gpg-sign", "-m", "test: other")
+        _git(repo, "switch", "main")
+
+        merge = subprocess.run(
+            ["git", "merge", "--no-commit", "other"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        assert merge.returncode == 1
+        porcelain = _git(
+            repo,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--no-renames",
+        )
+        assert porcelain.startswith(f"{expected_status} conflict.txt")
+
+        with pytest.raises(RuntimeError, match="unresolved merge"):
+            _candidate_commit_tree_evidence(repo, _git(repo, "rev-parse", "HEAD"), timeout=60)
 
     @pytest.mark.parametrize("rename_state", ("staged", "unstaged", "staged-deleted"))
     def test_candidate_tree_handles_rename_states(self, tmp_path: Path, rename_state: str) -> None:
@@ -8961,6 +9450,87 @@ class TestGitOps:
             "recovery_commit_sha": child,
         }
 
+    def test_recovered_reply_postcommit_head_failure_preserves_commit_receipt(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The commit helper receipt survives a later HEAD-read failure."""
+        old_head = "a" * 40
+        child = "b" * 40
+        tree = "c" * 40
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2973,
+                "worktree_path": str(tmp_path),
+                "branch": "2973-auto-impl",
+                "expected_recovery_head": old_head,
+                "expected_recovery_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "expected_recovery_tree_sha": tree,
+            },
+        )
+        with (
+            patch.object(
+                pool,
+                "_read_publish_head",
+                side_effect=[old_head, JobResult(ok=False, error="head read failed")],
+            ),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch.object(
+                pool,
+                "_commit_if_changes_with_controlled_signing",
+                return_value=child,
+            ),
+        ):
+            result = pool._git_commit_push(job)
+
+        assert result.ok is False
+        assert result.error == "head read failed"
+        assert result.value == {"recovery_commit_sha": child}
+
+    def test_recovered_reply_rejects_a_malformed_commit_receipt(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A malformed commit receipt cannot become publication authority."""
+        old_head = "a" * 40
+        tree = "c" * 40
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2973,
+                "worktree_path": str(tmp_path),
+                "branch": "2973-auto-impl",
+                "expected_recovery_head": old_head,
+                "expected_recovery_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "expected_recovery_tree_sha": tree,
+            },
+        )
+        with (
+            patch.object(pool, "_read_publish_head", return_value=old_head),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch.object(
+                pool,
+                "_commit_if_changes_with_controlled_signing",
+                return_value="not-a-full-sha",
+            ),
+            patch.object(pool, "_publish_recovery_commit") as publish,
+        ):
+            result = pool._git_commit_push(job)
+
+        assert result == JobResult(ok=False, error="remediation commit receipt is invalid")
+        publish.assert_not_called()
+
     def test_recovered_reply_retry_publishes_the_exact_existing_child(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -9006,6 +9576,264 @@ class TestGitOps:
             source_sha=child,
             expected_remote_sha=old_head,
         )
+
+    def test_recovered_reply_retry_rejects_an_unpinned_local_child(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A local child cannot become publication authority without a pin."""
+        old_head = "a" * 40
+        child = "b" * 40
+        tree = "c" * 40
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2973,
+                "worktree_path": str(tmp_path),
+                "branch": "2973-auto-impl",
+                "expected_recovery_head": old_head,
+                "expected_recovery_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "expected_recovery_tree_sha": tree,
+            },
+        )
+        with (
+            patch.object(pool, "_read_publish_head", return_value=child),
+            patch.object(pool, "_is_exact_recovery_commit") as exact,
+            patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
+            patch.object(pool, "_publish_recovery_commit") as publish,
+        ):
+            result = pool._git_commit_push(job)
+
+        assert result.ok is False
+        assert result.error == "remediation writer head drift before commit"
+        commit.assert_not_called()
+        exact.assert_not_called()
+        publish.assert_not_called()
+
+    def test_recovered_reply_retry_rejects_a_missing_pinned_child(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A retry cannot replace its recorded child after a local reset."""
+        old_head = "a" * 40
+        child = "b" * 40
+        tree = "c" * 40
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2973,
+                "worktree_path": str(tmp_path),
+                "branch": "2973-auto-impl",
+                "expected_recovery_head": old_head,
+                "expected_recovery_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "expected_recovery_tree_sha": tree,
+                "expected_recovery_commit_sha": child,
+            },
+        )
+        with (
+            patch.object(pool, "_read_publish_head", return_value=old_head),
+            patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
+            patch.object(pool, "_publish_recovery_commit") as publish,
+        ):
+            result = pool._git_commit_push(job)
+
+        assert result.ok is False
+        assert result.error == "remediation writer retry commit is unavailable"
+        commit.assert_not_called()
+        publish.assert_not_called()
+
+    def test_recovered_reply_retry_rejects_head_change_after_child_selection(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The selected recovery child cannot change before publication."""
+        old_head = "a" * 40
+        child = "b" * 40
+        replacement = "c" * 40
+        tree = "d" * 40
+        kwargs: dict[str, object] = {
+            "issue_number": 2973,
+            "worktree_path": str(tmp_path),
+            "branch": "2973-auto-impl",
+            "expected_recovery_head": old_head,
+            "expected_recovery_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            "expected_recovery_tree_sha": tree,
+        }
+        kwargs["expected_recovery_commit_sha"] = child
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs=kwargs,
+        )
+        with (
+            patch.object(pool, "_read_publish_head", side_effect=[child, replacement]),
+            patch.object(pool, "_is_exact_recovery_commit", return_value=True),
+            patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
+            patch.object(pool, "_publish_recovery_commit") as publish,
+        ):
+            result = pool._git_commit_push(job)
+
+        assert result.ok is False
+        assert result.error == "remediation writer head changed after recovery selection"
+        assert result.value == {"recovery_commit_sha": child}
+        commit.assert_not_called()
+        publish.assert_not_called()
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="The signed local Git publication test requires POSIX tools",
+    )
+    def test_recovered_reply_real_git_retry_publishes_the_same_signed_child(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A failed real publication retries one exact signed child."""
+        origin = tmp_path / "origin.git"
+        checkout = tmp_path / "checkout"
+        signing_key = tmp_path / "signing-key"
+        branch = "2973-auto-impl"
+
+        subprocess.run(
+            ["git", "init", "--bare", "--quiet", str(origin)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                _executable_path("ssh-keygen"),
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                str(signing_key),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        for key, value in (
+            ("user.name", "Test User"),
+            ("user.email", "test@example.invalid"),
+            ("gpg.format", "ssh"),
+            ("user.signingkey", str(signing_key)),
+            ("commit.gpgsign", "false"),
+        ):
+            git("config", key, value)
+        git("remote", "add", "origin", str(origin))
+        (checkout / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "--quiet", "--no-gpg-sign", "-m", "test: base")
+        git("switch", "--quiet", "-c", branch)
+        git("push", "--quiet", "-u", "origin", branch)
+        old_head = git("rev-parse", "HEAD")
+        (checkout / "tracked.txt").write_text("recovered\n", encoding="utf-8")
+        snapshot = _dirty_worktree_content_snapshot(checkout, timeout=60)
+        tree, _diff = _candidate_commit_tree_evidence(checkout, old_head, timeout=60)
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2973,
+                "worktree_path": str(checkout),
+                "branch": branch,
+                "expected_recovery_head": old_head,
+                "expected_recovery_content_snapshot": snapshot,
+                "expected_recovery_tree_sha": tree,
+            },
+        )
+        commit_count = 0
+
+        def commit_once(*_args: object, **_kwargs: object) -> str:
+            nonlocal commit_count
+            commit_count += 1
+            git("add", "--all")
+            git("commit", "--quiet", "-S", "-s", "-m", "fix: recover reply")
+            return git("rev-parse", "HEAD")
+
+        remote_configuration = (os.environ.copy(), ())
+
+        def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
+            return remote_configuration
+
+        real_push = git_utils.push_head_to_branch
+        push_attempts = 0
+
+        def fail_first_push(*args: object, **kwargs: object) -> None:
+            nonlocal push_attempts
+            push_attempts += 1
+            if push_attempts == 1:
+                raise git_utils.DetachedHeadPushRemoteProbeError(
+                    "injected first-push failure",
+                    failure_kind="transport",
+                )
+            real_push(*args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch.object(
+                pool,
+                "_commit_if_changes_with_controlled_signing",
+                side_effect=commit_once,
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=revalidate_remote,
+            ),
+            patch(f"{_WP}.git_utils.push_head_to_branch", side_effect=fail_first_push),
+        ):
+            first = pool._git_commit_push(job)
+            assert first.ok is False
+            child = cast(dict[str, object], first.value)["recovery_commit_sha"]
+            assert isinstance(child, str)
+            retry = pool._git_commit_push(
+                replace(
+                    job,
+                    kwargs={**job.kwargs, "expected_recovery_commit_sha": child},
+                )
+            )
+
+        assert retry == JobResult(ok=True, value={"pushed": True, "head_sha": child})
+        assert commit_count == 1
+        assert push_attempts == 2
+        assert git("rev-list", "--count", f"{old_head}..HEAD") == "1"
+        assert git("rev-parse", "HEAD^") == old_head
+        assert git("rev-parse", "HEAD^{tree}") == tree
+        raw_commit = git("cat-file", "-p", child)
+        assert "gpgsig " in raw_commit
+        assert "Signed-off-by:" in raw_commit
+        remote_head = subprocess.run(
+            ["git", "ls-remote", str(origin), f"refs/heads/{branch}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()[0]
+        assert remote_head == child
 
     def test_recovered_reply_rejects_a_commit_with_a_different_tree(
         self, pool: WorkerPool, tmp_path: Path

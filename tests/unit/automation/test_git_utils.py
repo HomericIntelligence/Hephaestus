@@ -174,6 +174,36 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
         )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_returns_the_requested_commit_receipt(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A recovery caller receives the exact commit helper SHA."""
+        child = "b" * 40
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
+        mock_commit.return_value = child
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "codex",
+                expected_tree_sha="c" * 40,
+                return_commit_sha=True,
+            )
+            == child
+        )
+
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            expected_tree_sha="c" * 40,
+            return_commit_sha=True,
+            git_message_timeout=1200,
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_threads_timeout_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:

@@ -1085,7 +1085,10 @@ Architectural contract:
   registered repository path, branch, and expected head without a change. The
   worker rejects executable or path-redirection Git configuration before it
   reads the writer. Fixed byte, file-count, and snapshot limits bound the
-  inspection. A clean, invalid, or oversized inspection finishes with
+  inspection. Empty path sets do not require host path traversal. Nonempty
+  path inspection requires POSIX no-follow directory-descriptor operations;
+  another host fails closed instead of following a reparse point. A clean,
+  invalid, or oversized inspection finishes with
   `implementation_reply_failed`. A dirty inspection permits one read-only
   reply-recovery turn with `Read,Glob,Grep`. That turn cannot edit, run Git,
   publish, call GitHub, or resolve threads. It must produce one valid exhaustive

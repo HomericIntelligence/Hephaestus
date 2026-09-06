@@ -176,6 +176,12 @@ class TestSelectCommitPaths:
         with pytest.raises(FrozenInstanceError):
             paths.add_paths = ()  # type: ignore[misc]
 
+    @pytest.mark.parametrize("status", ("DD", "AU", "UD", "UA", "DU", "AA", "UU"))
+    def test_rejects_unmerged_delete_states(self, status: str) -> None:
+        """An unresolved file cannot become an automated deletion."""
+        with pytest.raises(RuntimeError, match="unresolved merge"):
+            pr_manager._select_commit_paths(((status, "conflict.txt"),), None)
+
     def test_escapes_control_characters_in_skip_logs(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -245,7 +251,14 @@ class TestStageCommitPaths:
                 timeout=19,
             ),
             call(
-                ["git", "--literal-pathspecs", "add", "-u", "--", "src/delete.py"],
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "update-index",
+                    "--force-remove",
+                    "--",
+                    "src/delete.py",
+                ],
                 cwd=worktree_path,
                 timeout=19,
             ),

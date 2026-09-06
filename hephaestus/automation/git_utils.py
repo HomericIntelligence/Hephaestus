@@ -114,10 +114,11 @@ def commit_if_changes(
     committed_log_message: str = "Committed changes for issue #%s",
     allowed_paths: Collection[str] | None = None,
     expected_tree_sha: str | None = None,
+    return_commit_sha: bool = False,
     timeout: int | None = None,
     git_message_timeout: int = 1200,
     signing_env_factory: Callable[[], dict[str, str]] | None = None,
-) -> bool:
+) -> bool | str:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
     Args:
@@ -131,6 +132,7 @@ def commit_if_changes(
         allowed_paths: Optional exact path allowlist forwarded to the commit
             helper. When set, only those porcelain paths may be staged.
         expected_tree_sha: Optional immutable tree required after staging.
+        return_commit_sha: Return the exact commit SHA instead of ``True``.
         timeout: Optional timeout in seconds for local git commands.
         signing_env_factory: Optional lazy provider for the controlled Git
             signing environment. It is invoked only after a dirty check.
@@ -158,6 +160,8 @@ def commit_if_changes(
         commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}
         if expected_tree_sha is not None:
             commit_kwargs["expected_tree_sha"] = expected_tree_sha
+        if return_commit_sha:
+            commit_kwargs["return_commit_sha"] = True
         if agent_model is not None:
             commit_kwargs["agent_model"] = agent_model
         if pi_dir is not None:
@@ -167,13 +171,17 @@ def commit_if_changes(
         commit_kwargs["git_message_timeout"] = git_message_timeout
         if signing_env_factory is not None:
             commit_kwargs["signing_env"] = signing_env_factory()
-        commit_changes(
+        committed_sha = commit_changes(
             issue_number,
             worktree_path,
             agent,
             **commit_kwargs,
         )
         logger.info(committed_log_message, issue_number)
+        if return_commit_sha:
+            if not isinstance(committed_sha, str):
+                raise RuntimeError("Commit helper did not return the committed revision")
+            return committed_sha
         return True
     except SigningEnvironmentUnavailableError:
         raise
