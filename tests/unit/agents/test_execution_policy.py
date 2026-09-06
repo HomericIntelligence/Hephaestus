@@ -715,6 +715,7 @@ def test_pi_session_start_binds_the_operator_default_and_thinking_level(
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B","defaultThinkingLevel":"high"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
     received: dict[str, object] = {}
     monkeypatch.setattr(
         agent_runtime,
@@ -905,6 +906,7 @@ def test_pi_resume_rejects_a_changed_operator_default(
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B","defaultThinkingLevel":"low"}',
         encoding="utf-8",
     )
+    (pi_dir / "settings.json").chmod(0o600)
     binding = create_pi_binding(
         session_id="pi-session-default",
         cwd=tmp_path,
