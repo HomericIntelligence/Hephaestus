@@ -87,6 +87,28 @@ and DCO trailers in Actions. The classic matrix contexts and
 run is early failure feedback only; it does not grant
 `state:implementation-go` and does not replace GitHub's exact-head checks.
 
+## Linux PR-review host verification
+
+Linux PR-review host verification runs the candidate command in a read-only
+Pyxis/Enroot container. The host mounts the candidate source and Git metadata
+read-only, and uses separate writable scratch and Pi-log paths. The container
+has no network namespace and receives a scrubbed offline environment. The
+image must be a regular local squashfs file with a matching `.sha256` sidecar.
+The preparation command also records the OCI image ID and image digest in a
+local JSON provenance record:
+
+```bash
+just host-verification-pyxis-image
+```
+
+Use `--host-verification-pyxis-image PATH` to select another attested local
+image. Missing Pyxis, Enroot, the image, or its digest proof produces a failed
+host-verification receipt. It does not produce a passing skip. The opt-in
+integration test skips by default; run it with
+`--require-pyxis-host-verification` only on a host with a real Pyxis/Enroot
+allocation. macOS continues to use its native sandbox boundary. Other
+platforms remain fail-closed until a reviewed isolation backend exists.
+
 ## Current required contexts
 
 Classic branch protection requires:

@@ -108,6 +108,12 @@ from hephaestus.automation.pipeline.github_jobs import (
     InspectAdoptedRemediationPrStateRequest,
     InspectDirtyDirectPrStateRequest,
 )
+from hephaestus.automation.pipeline.host_verification_pyxis import (
+    DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+    build_pyxis_environment as _build_pyxis_environment,
+    build_pyxis_srun_command as _build_pyxis_srun_command,
+    validate_pyxis_image as _validate_pyxis_image,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -1746,6 +1752,7 @@ def _run_bounded_host_command(
     environment: dict[str, str],
     timeout_s: int,
     shutdown: threading.Event,
+    additional_writable_paths: tuple[Path, ...] = (),
 ) -> JobResult:
     """Run the sandboxed child with bounded files, time, and scratch usage."""
     output = scratch / "outputs"
@@ -1776,7 +1783,10 @@ def _run_bounded_host_command(
                             value={"failure_kind": "runner"},
                             interrupted=True,
                         )
-                    if _scratch_usage_exceeds_limit(scratch):
+                    if any(
+                        _scratch_usage_exceeds_limit(writable_path)
+                        for writable_path in (scratch, *additional_writable_paths)
+                    ):
                         resource_breach = True
                         _terminate_process_group(process)
                         break
@@ -3506,6 +3516,7 @@ class WorkerPool:
         athena_skill_executor: AthenaSkillExecutor | None = None,
         rebase_policy_selector: RebasePolicySelector | None = None,
         evidence_receipt_dir: Path | None = None,
+        host_verification_pyxis_image: Path | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -3527,6 +3538,8 @@ class WorkerPool:
                 repository-agnostic.
             evidence_receipt_dir: Optional private directory for bounded typed
                 agent and Athena result receipts.
+            host_verification_pyxis_image: Local Enroot squashfs image for Linux
+                immutable host verification.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -3549,6 +3562,7 @@ class WorkerPool:
         self._pretest_successes: dict[str, _PretestSuccess] = {}
         self._pretest_capacity = size
         self._pretest_closed = False
+        self._host_verification_pyxis_image = host_verification_pyxis_image
 
     @contextmanager
     def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
@@ -4806,10 +4820,8 @@ class WorkerPool:
         if checkout_error is not None:
             return JobResult(ok=False, error=checkout_error)
 
-        # The reviewed isolation backend is currently macOS-only.  Record an
-        # explicit platform-bound skip before resolving tools, archiving the
-        # source, or executing any PR-controlled bytes.  A missing macOS
-        # primitive still fails closed below; this branch is not a fallback.
+        if sys.platform == "linux":
+            return self._run_linux_immutable_build_test(job)
         if sys.platform != "darwin":
             return JobResult(
                 ok=False,
@@ -4870,6 +4882,7 @@ class WorkerPool:
                             validation_argv=job.argv,
                             source=source,
                             scratch=scratch,
+                            additional_writable_paths=(pi_smoke_logs,),
                             environment=_host_verification_env(
                                 scratch, executable, runtime_environment, git_executable
                             ),
@@ -4895,6 +4908,105 @@ class WorkerPool:
                             else "runner"
                         ),
                         "platform": sys.platform,
+                        "status": "passed" if result.ok else "failed",
+                    },
+                )
+        except _HostVerificationBoundaryError as exc:
+            return JobResult(ok=False, error=str(exc))
+        except subprocess.TimeoutExpired as exc:
+            return JobResult(
+                ok=False,
+                error="timeout",
+                stdout_tail=str(exc.stdout or "")[-_TAIL:],
+                stderr_tail=str(exc.stderr or "")[-_TAIL:],
+            )
+        except OSError as exc:
+            return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
+
+    def _run_linux_immutable_build_test(self, job: BuildTestJob) -> JobResult:
+        """Run one fixed check in the local, read-only Pyxis CI image."""
+        configured_image = self._host_verification_pyxis_image
+        image_path = Path(configured_image or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE)
+        if not image_path.is_absolute():
+            image_path = Path.cwd() / image_path
+        try:
+            image = _validate_pyxis_image(image_path)
+        except (OSError, ValueError):
+            return JobResult(
+                ok=False,
+                error="host_verification_pyxis_image_unavailable",
+                value={
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": False,
+                    "failure_kind": "runner",
+                    "platform": "linux",
+                    "status": "failed",
+                },
+            )
+
+        git_executable = _trusted_git_executable()
+        if git_executable is None:
+            return JobResult(ok=False, error="host_verification_git_unavailable")
+        try:
+            with tempfile.TemporaryDirectory(prefix="hephaestus-host-verification-") as temp_dir:
+                root = Path(temp_dir)
+                source = root / "source"
+                source.mkdir()
+                archive, _archive_stderr = _bounded_git_archive(
+                    job.cwd, job.expected_head_sha, job.timeout_s
+                )
+                _extract_immutable_archive(archive, source)
+                git_metadata = _prepare_immutable_git_metadata(
+                    job.cwd, job.expected_head_sha, source, root, git_executable
+                )
+                scratch = root / "scratch"
+                scratch.mkdir(mode=0o777)
+                pi_smoke_logs = source / "pi-smoke-logs"
+                pi_smoke_logs.mkdir(mode=0o777)
+                _prepare_host_output_aliases(source, scratch)
+                _seal_host_runtime(source)
+                # The logs directory is the one source-side writable mount.
+                pi_smoke_logs.chmod(0o777)
+                environment = _build_pyxis_environment(source=source, scratch=scratch)
+                command = _build_pyxis_srun_command(
+                    image=image,
+                    source=source,
+                    runtime_environment=Path("/opt/hephaestus-venv"),
+                    git_metadata=git_metadata,
+                    scratch=scratch,
+                    pi_smoke_logs=pi_smoke_logs,
+                    argv=job.argv,
+                    environment=environment,
+                )
+                result = _run_bounded_host_command(
+                    command,
+                    validation_argv=job.argv,
+                    source=source,
+                    scratch=scratch,
+                    additional_writable_paths=(pi_smoke_logs,),
+                    environment=environment,
+                    timeout_s=job.timeout_s,
+                    shutdown=self._shutdown,
+                )
+                checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
+                if checkout_error is not None:
+                    return JobResult(
+                        ok=False,
+                        error=checkout_error,
+                        stdout_tail=result.stdout_tail,
+                        stderr_tail=result.stderr_tail,
+                    )
+                result_value = result.value if isinstance(result.value, dict) else {}
+                return replace(
+                    result,
+                    value={
+                        **result_value,
+                        "container_image": str(image.path),
+                        "container_image_sha256": image.sha256,
+                        "container_runtime": image.container_runtime,
+                        "head_sha": job.expected_head_sha,
+                        "immutable_source": True,
+                        "platform": "linux",
                         "status": "passed" if result.ok else "failed",
                     },
                 )

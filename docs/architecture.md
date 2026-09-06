@@ -1198,13 +1198,15 @@ later branch push does not invalidate that posted review; only the final
 `state:implementation-go` transition requires the reviewed head to still be
 the current open, unarmed PR head.
 
-For the registered host-verification plan, the reviewed execution boundary
-currently requires macOS `sandbox-exec` plus disposable, quota-backed disk
-images. Other platforms record an exact-head, platform-bound `skipped` receipt
-before they resolve tools, archive source, or execute PR code. That receipt is
-a blocking host-verification gap. It is not passing execution evidence, and it
-cannot grant implementation authority. Add a Linux or Windows backend as a
-separately reviewed isolation implementation; there is no unsandboxed fallback.
+For the registered host-verification plan, macOS uses `sandbox-exec` plus
+disposable, quota-backed disk images. Linux uses a local, attested Pyxis/Enroot
+squashfs image. The image is read-only, source and Git metadata are mounted
+read-only, and scratch and Pi logs use separate writable paths. The preparation
+script records the image digest and immutable OCI image ID in a local
+provenance record. A missing image, digest proof, Pyxis allocation, or Enroot
+runtime produces a failed receipt; it cannot become a passing skip. Other
+platforms remain fail-closed until a separately reviewed isolation backend
+exists. There is no unsandboxed fallback.
 
 A narrow source-review exception for PR #3006 is specified in
 [ADR-0046](adr/0046-review-host-verification-bootstrap.md). An authenticated

@@ -84,6 +84,9 @@ from jinja2 import TemplateNotFound as TemplateNotFound
 
 import hephaestus.automation.pipeline.admission as _admission
 from hephaestus.automation.issue_waves import WaveLease as WaveLease
+from hephaestus.automation.pipeline.host_verification_pyxis import (
+    DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE as DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+)
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER as PIPELINE_ORDER,
     ROUTES as ROUTES,
@@ -317,6 +320,9 @@ class PipelineConfig:
     explicit_pr_review: bool = False
     # This selector is not grant authority. Keep new fields at the end.
     host_verification_bootstrap_comment_id: int | None = None
+    host_verification_pyxis_image: Path = field(
+        default_factory=lambda: DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
+    )
 
     @property
     def enable_advise(self) -> bool:

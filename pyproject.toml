@@ -249,6 +249,7 @@ markers = [
     "nightly: high-cost functional tests run by the scheduled nightly workflow",
     "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
     "contract: opt-in sandboxed contract tests against real gh/agent CLIs; selected with --run-contract-tests",
+    "pyxis: live Linux Pyxis/Enroot host-verification integration test",
 ]
 
 [tool.mypy]

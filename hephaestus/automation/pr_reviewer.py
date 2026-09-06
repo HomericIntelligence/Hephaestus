@@ -207,6 +207,7 @@ def main() -> int:
             scope=PipelineScope(_PR_REVIEWER_SCOPE_STAGES),
             gh_extra_path_root=args.gh_extra_path_root,
             explicit_pr_review=True,
+            host_verification_pyxis_image=args.host_verification_pyxis_image,
         )
 
         rc = run_pipeline(config)
