@@ -80,7 +80,7 @@ def test_resolve_codex_model_selection_preserves_effort(
     assert model_selection.resolve_codex_model_selection(reference).reference == expected
 
 
-@pytest.mark.parametrize("reference", ["unknown", "unknown:high"])
+@pytest.mark.parametrize("reference", ["unknown", "unknown:high", "terra-lite:high"])
 def test_validate_codex_model_reference_rejects_unknown_short_alias(reference: str) -> None:
     """Unknown short aliases fail before a Codex process can start."""
     with pytest.raises(model_selection.UnknownModelAliasError, match="Unknown Codex model alias"):

@@ -106,6 +106,7 @@ _CODEX_ROLE_MODEL_IDS = frozenset(
 )
 _SHORT_MODEL_ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _CODEX_LEGACY_ALIASES = frozenset({"fable", "opus", "sonnet", "haiku"})
+_CODEX_ALIAS_PREFIXES = tuple(f"{alias}-" for alias in (*CODEX_ROLE_MODEL_ALIASES, "astra"))
 
 
 def _normalize_model_id(model: str) -> str:
@@ -167,12 +168,15 @@ def validate_codex_role_model_reference(reference: str) -> None:
         return
 
     model_key = model.casefold()
+    unknown_alias = bool(_SHORT_MODEL_ALIAS_RE.fullmatch(model)) or model_key.startswith(
+        _CODEX_ALIAS_PREFIXES
+    )
     if (
         model_key in CODEX_ROLE_MODEL_ALIASES
         or model_key in _CODEX_ROLE_MODEL_IDS
         or model_key in _CODEX_LEGACY_ALIASES
         or model_key == "astra"
-        or not _SHORT_MODEL_ALIAS_RE.fullmatch(model)
+        or not unknown_alias
     ):
         return
 

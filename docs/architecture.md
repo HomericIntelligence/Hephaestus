@@ -1826,6 +1826,11 @@ Provider argument construction and the bounded Codex retry are in
 [`runtime.py`](../hephaestus/agents/runtime.py). The loop option definitions
 are in [`loop_runner.py`](../hephaestus/automation/loop_runner.py).
 
+Configured Codex aliases normalize to their provider model IDs before work
+starts. For example, `terra:high` becomes `gpt-5.6-terra:high`. A Codex alias
+that is not configured fails before agent authentication or pipeline work.
+Exact provider model IDs remain available.
+
 The default pipeline accepts `--loops`, `--parallel-repos`, and the staged
 `--issue-limit` selector, which advances 1 → 2 → 4 → 8 → all only after the
 repository checkpoint verifies the previous wave. It also accepts
