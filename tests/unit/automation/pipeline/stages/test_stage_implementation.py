@@ -3192,6 +3192,14 @@ class TestImplementBudget:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
         assert result.note == "agent_error"
+        assert item.state == "IMPLEMENT_WAIT"
+
+        retry = stage.step(item, ctx)
+
+        assert isinstance(retry, JobRequest)
+        assert isinstance(retry.job, AgentJob)
+        assert retry.job.descr == "implement"
+        assert item.attempts["implement"] == 1
 
     def test_invalid_remediation_mapping_stops_before_tests_or_publication(
         self, make_ctx: Any, make_work_item: Any
