@@ -55,16 +55,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         return StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-        """Hydrate review inputs, require an unarmed PR, and reset the round counter.
+        """Hydrate review inputs, require an unarmed PR, and reset the review round.
 
-        The per-cycle review budget lives in ``payload["pr_review_round"]``.
-        Its reset keys on ``attempts["implement"]``
-        so it fires exactly once per implementation pass: a same-cycle
-        re-entry (e.g. the ERROR-path RETRY) keeps its round count and its
-        Args:
-            item: The work item being processed.
-            ctx: The stage context.
-
+        The counter resets once per implementation pass.
         """
         if item.pr is not None:
             item.payload.pop("reviewed_pr_head_sha", None)
