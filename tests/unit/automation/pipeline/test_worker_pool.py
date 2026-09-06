@@ -2479,6 +2479,7 @@ class TestWorkerPoolSubmitComplete:
     ) -> None:
         """Linux host verification records the exact local Pyxis image proof."""
         image = tmp_path / "host-verification.sqsh"
+        launch_binding = MagicMock()
         metadata = PyxisImageMetadata(
             path=image.resolve(),
             sha256="b" * 64,
@@ -2486,6 +2487,7 @@ class TestWorkerPoolSubmitComplete:
             container_image_reference="podman://sha256:" + ("c" * 64),
             containerfile_sha256="d" * 64,
             source_revision="a" * 40,
+            launch_binding=launch_binding,
         )
         pool._host_verification_pyxis_sha256 = "b" * 64
         pool._host_verification_pyxis_authority = tmp_path / "authority.json"
@@ -2537,6 +2539,109 @@ class TestWorkerPoolSubmitComplete:
         immutable_source = extract_archive.call_args.args[1]
         assert immutable_source.parent == staging_root
         assert staging_root.parent == image.parent
+
+    @pytest.mark.parametrize("replaced_path", ("image", "source", "git_metadata", "quota_root"))
+    def test_linux_pyxis_revalidates_cross_node_paths_at_launch(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        replaced_path: str,
+    ) -> None:
+        """A path replacement after staging must stop the Slurm launch."""
+        image = tmp_path / "host-verification.sqsh"
+        image.write_bytes(b"hsqs" + b"image")
+        image.chmod(0o400)
+        digest = hashlib.sha256(image.read_bytes()).hexdigest()
+        metadata = PyxisImageMetadata(
+            path=image,
+            sha256=digest,
+            container_image_id="sha256:" + ("c" * 64),
+            container_image_reference="podman://sha256:" + ("c" * 64),
+            containerfile_sha256="d" * 64,
+            source_revision="a" * 40,
+        )
+        quota_root = tmp_path / "quota"
+        quota_root.mkdir(mode=0o700)
+        pool._host_verification_pyxis_quota_root = quota_root
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+        built: dict[str, object] = {}
+
+        def stage_image(value: PyxisImageMetadata, root: Path) -> PyxisImageMetadata:
+            target = root / f"sha256-{value.sha256}.sqsh"
+            target.write_bytes(value.path.read_bytes())
+            target.chmod(0o400)
+            return PyxisImageMetadata(
+                path=target,
+                sha256=value.sha256,
+                container_image_id=value.container_image_id,
+                container_image_reference=value.container_image_reference,
+                containerfile_sha256=value.containerfile_sha256,
+                source_revision=value.source_revision,
+            )
+
+        def prepare_git(
+            _checkout: Path,
+            _head: str,
+            _source: Path,
+            root: Path,
+            _git: str,
+        ) -> Path:
+            path = root / "metadata.git"
+            path.mkdir(mode=0o500)
+            return path
+
+        def build_command(**kwargs: object) -> tuple[str, ...]:
+            built.update(kwargs)
+            return ("srun", "true")
+
+        def replace_before_launch(*_args: object, **kwargs: object) -> JobResult:
+            selected_value = quota_root if replaced_path == "quota_root" else built[replaced_path]
+            selected = (
+                selected_value.path
+                if isinstance(selected_value, PyxisImageMetadata)
+                else cast(Path, selected_value)
+            )
+            moved = selected.with_name(f"{selected.name}.original")
+            if replaced_path != "quota_root":
+                selected.parent.chmod(0o700)
+            selected.rename(moved)
+            if replaced_path == "image":
+                selected.write_bytes(b"hsqs" + b"replacement")
+                selected.chmod(0o400)
+            else:
+                selected.mkdir(mode=0o500 if replaced_path != "quota_root" else 0o700)
+            pre_launch = kwargs.get("pre_launch")
+            if callable(pre_launch):
+                pre_launch()
+            return JobResult(ok=True, value={"failure_kind": "none"})
+
+        with (
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
+            patch(f"{_WP}._validate_pyxis_quota_root", return_value=quota_root),
+            patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
+            patch(f"{_WP}._stage_verified_pyxis_image", side_effect=stage_image),
+            patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
+            patch(f"{_WP}._extract_immutable_archive"),
+            patch(f"{_WP}._prepare_immutable_git_metadata", side_effect=prepare_git),
+            patch(f"{_WP}._prepare_host_output_aliases"),
+            patch(f"{_WP}._build_pyxis_environment", return_value={"UV_OFFLINE": "1"}),
+            patch(f"{_WP}._build_pyxis_srun_command", side_effect=build_command),
+            patch(f"{_WP}._run_bounded_host_command", side_effect=replace_before_launch),
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is False
+        assert result.error is not None
+        assert "cross-node" in result.error
 
     def test_linux_resource_wrapper_sets_all_inherited_limits(self) -> None:
         """The Linux Slurm launcher inherits fixed OS limits before dispatch."""

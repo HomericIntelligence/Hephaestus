@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -101,6 +102,37 @@ def test_prepare_image_uses_content_addressed_import_and_private_authority(
     assert stat.S_IMODE(output.stat().st_mode) == 0o400
     assert stat.S_IMODE(authority_path.stat().st_mode) == 0o400
     assert not output.with_name(f"{output.name}.sha256").exists()
+
+
+def test_prepare_image_publishes_from_the_target_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Image publication must not use a cross-filesystem rename."""
+    module = _module()
+    calls: list[tuple[str, ...]] = []
+    output = tmp_path / "out" / "hephaestus-ci.sqsh"
+    image_id = "sha256:" + ("c" * 64)
+    real_replace = module.os.replace
+
+    def reject_cross_parent_replace(
+        source: str | os.PathLike[str], target: str | os.PathLike[str]
+    ) -> None:
+        if Path(source).parent != Path(target).parent:
+            raise OSError(errno.EXDEV, "cross-device link")
+        real_replace(source, target)
+
+    monkeypatch.setattr(module.os, "replace", reject_cross_parent_replace)
+
+    result = module.prepare_image(
+        repo_root=_repo(tmp_path),
+        output=output,
+        rebuild=True,
+        engine="podman",
+        runner=_engine_runner(output=output, image_id=image_id, calls=calls),
+    )
+
+    assert result["sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o400
 
 
 def test_prepare_image_reuse_validates_exact_id_and_does_not_rewrite_authority(

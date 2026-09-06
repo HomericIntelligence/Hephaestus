@@ -6,10 +6,12 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 from hephaestus.automation.pyxis_artifact_io import (
+    CrossNodePathBinding,
     PyxisArtifactIOError,
     read_private_regular_file,
     stage_private_content_addressed_file,
@@ -40,6 +42,11 @@ class PyxisImageMetadata:
     containerfile_sha256: str
     source_revision: str
     container_runtime: str = "pyxis"
+    launch_binding: CrossNodePathBinding | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 def validate_pyxis_image(
@@ -123,10 +130,18 @@ def stage_verified_pyxis_image(
 ) -> PyxisImageMetadata:
     """Copy authorized bytes to one private content-addressed execution path."""
     try:
-        target = stage_private_content_addressed_file(image.path, destination_root, image.sha256)
+        binding = cast(
+            CrossNodePathBinding,
+            stage_private_content_addressed_file(
+                image.path,
+                destination_root,
+                image.sha256,
+                retain_binding=True,
+            ),
+        )
     except PyxisArtifactIOError as exc:
         raise PyxisImageValidationError(f"Pyxis image staging failed: {exc}") from exc
-    return replace(image, path=target)
+    return replace(image, path=binding.path / f"sha256-{image.sha256}.sqsh", launch_binding=binding)
 
 
 def build_pyxis_environment(*, source: Path, scratch: Path) -> dict[str, str]:
@@ -209,15 +224,24 @@ def build_pyxis_srun_command(
     )
 
 
-def validate_pyxis_quota_root(root: Path) -> Path:
+def validate_pyxis_quota_root(
+    root: Path, *, retain_binding: bool = False
+) -> Path | CrossNodePathBinding:
     """Return a private filesystem whose total capacity is a hard limit."""
     try:
-        resolved, total_bytes = validate_private_capacity_root(root)
+        validated, total_bytes = validate_private_capacity_root(
+            root,
+            retain_binding=retain_binding,
+        )
     except PyxisArtifactIOError as exc:
         raise PyxisImageValidationError("Pyxis writable quota root is unavailable") from exc
     if total_bytes < 1 or total_bytes > PYXIS_WRITABLE_FILESYSTEM_MAX_BYTES:
+        if isinstance(validated, CrossNodePathBinding):
+            validated.close()
         raise PyxisImageValidationError("Pyxis writable storage has no verified hard quota")
-    return resolved
+    if retain_binding:
+        return cast(CrossNodePathBinding, validated)
+    return cast(Path, validated)
 
 
 def image_sha256(image: Path) -> str:
