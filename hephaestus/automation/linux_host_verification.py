@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import tomllib
 from collections.abc import Mapping
@@ -270,3 +271,41 @@ def prepare_linux_host_verification_run(
         request_path=root / "request.json",
         receipt_path=root / "receipt.json",
     )
+
+
+def cleanup_linux_host_verification_run(
+    config: LinuxHostVerificationConfig, run: LinuxHostVerificationRun
+) -> None:
+    """Remove only the exact private run directory that this config created."""
+    if not isinstance(run, LinuxHostVerificationRun):
+        raise ValueError("Linux host-verification run is invalid")
+    expected_root = Path(config.shared_root) / run.run_id
+    expected_paths = {
+        "root": expected_root,
+        "source_archive_path": expected_root / "source.tar",
+        "source_extract_path": expected_root / "source",
+        "git_metadata_archive_path": expected_root / "git-metadata.tar",
+        "git_metadata_extract_path": expected_root / "git-metadata",
+        "scratch_path": expected_root / "scratch",
+        "stdout_path": expected_root / "stdout.log",
+        "stderr_path": expected_root / "stderr.log",
+        "request_path": expected_root / "request.json",
+        "receipt_path": expected_root / "receipt.json",
+    }
+    if any(getattr(run, name) != path for name, path in expected_paths.items()):
+        raise ValueError("Linux host-verification run paths are not exact")
+    try:
+        root_status = os.lstat(expected_root)
+    except OSError as error:
+        raise ValueError("Linux host-verification run is unavailable") from error
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or stat.S_ISLNK(root_status.st_mode)
+        or root_status.st_mode & 0o077
+        or not shutil.rmtree.avoids_symlink_attacks
+    ):
+        raise ValueError("Linux host-verification run cleanup is unsafe")
+    try:
+        shutil.rmtree(expected_root)
+    except OSError as error:
+        raise ValueError("Linux host-verification run cleanup failed") from error

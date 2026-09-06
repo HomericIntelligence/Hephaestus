@@ -292,3 +292,76 @@ def test_prepare_run_rejects_existing_or_unsafe_shared_root(tmp_path: Path) -> N
     )
     with pytest.raises(ValueError):
         prepare_linux_host_verification_run(unsafe_config, "run-20260906-76543210")
+
+
+def test_cleanup_run_removes_only_the_exact_private_run(tmp_path: Path) -> None:
+    """Cleanup releases one verified run without touching a sibling or root."""
+    from hephaestus.automation.linux_host_verification import (
+        LinuxHostVerificationConfig,
+        cleanup_linux_host_verification_run,
+        prepare_linux_host_verification_run,
+    )
+
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir(mode=0o700)
+    config = LinuxHostVerificationConfig.from_mapping(
+        {
+            "shared_root": str(shared_root),
+            "image_path": "/srv/hephaestus-images/verify.sqsh",
+            "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+            "trusted_slurm_bin_dir": "/usr/bin",
+            "timeout_seconds": 900,
+        }
+    )
+    run = prepare_linux_host_verification_run(config, "run-20260906-01234567")
+    sibling = shared_root / "other-run"
+    sibling.mkdir(mode=0o700)
+
+    cleanup_linux_host_verification_run(config, run)
+
+    assert not run.root.exists()
+    assert shared_root.is_dir()
+    assert sibling.is_dir()
+
+
+def test_cleanup_run_rejects_foreign_or_unverified_path(tmp_path: Path) -> None:
+    """Cleanup fails closed if a caller supplies paths outside its exact run."""
+    from hephaestus.automation.linux_host_verification import (
+        LinuxHostVerificationConfig,
+        LinuxHostVerificationRun,
+        cleanup_linux_host_verification_run,
+        prepare_linux_host_verification_run,
+    )
+
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir(mode=0o700)
+    config = LinuxHostVerificationConfig.from_mapping(
+        {
+            "shared_root": str(shared_root),
+            "image_path": "/srv/hephaestus-images/verify.sqsh",
+            "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+            "trusted_slurm_bin_dir": "/usr/bin",
+            "timeout_seconds": 900,
+        }
+    )
+    run = prepare_linux_host_verification_run(config, "run-20260906-01234567")
+    foreign = tmp_path / "foreign"
+    foreign.mkdir(mode=0o700)
+    forged = LinuxHostVerificationRun(
+        run_id=run.run_id,
+        root=foreign,
+        source_archive_path=foreign / "source.tar",
+        source_extract_path=foreign / "source",
+        git_metadata_archive_path=foreign / "git-metadata.tar",
+        git_metadata_extract_path=foreign / "git-metadata",
+        scratch_path=foreign / "scratch",
+        stdout_path=foreign / "stdout.log",
+        stderr_path=foreign / "stderr.log",
+        request_path=foreign / "request.json",
+        receipt_path=foreign / "receipt.json",
+    )
+
+    with pytest.raises(ValueError):
+        cleanup_linux_host_verification_run(config, forged)
+    assert foreign.is_dir()
+    assert run.root.is_dir()
