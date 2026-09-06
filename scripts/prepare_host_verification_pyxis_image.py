@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -177,6 +178,64 @@ def _write_private_json(path: Path, value: dict[str, str]) -> Path:
     return temporary
 
 
+def _publish_private_image(source: Path, target: Path, expected_sha256: str) -> None:
+    """Copy verified image bytes to same-parent staging and publish them."""
+    parent_descriptor = -1
+    source_descriptor = -1
+    target_descriptor = -1
+    temporary_name = ""
+    try:
+        parent_descriptor = os.open(
+            target.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        before = os.fstat(source_descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise HostVerificationImagePreparationError("Enroot image is not a regular file")
+        target_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        os.fchmod(target_descriptor, 0o400)
+        digest = hashlib.sha256()
+        while chunk := os.read(source_descriptor, 1024 * 1024):
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(target_descriptor, view) :]
+        os.fsync(target_descriptor)
+        after = os.fstat(source_descriptor)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) or digest.hexdigest() != expected_sha256:
+            raise HostVerificationImagePreparationError("Enroot image changed during publication")
+        os.lseek(target_descriptor, 0, os.SEEK_SET)
+        published_digest = hashlib.sha256()
+        while chunk := os.read(target_descriptor, 1024 * 1024):
+            published_digest.update(chunk)
+        if published_digest.hexdigest() != expected_sha256:
+            raise HostVerificationImagePreparationError("published image digest is invalid")
+        os.replace(temporary_name, target)
+        temporary_name = ""
+        os.fsync(parent_descriptor)
+    except OSError as exc:
+        raise HostVerificationImagePreparationError("image publication failed") from exc
+    finally:
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+        if temporary_name:
+            Path(temporary_name).unlink(missing_ok=True)
+
+
 def _authority(
     *,
     image_id: str,
@@ -308,9 +367,16 @@ def prepare_image(
         )
         temporary_authority = _write_private_json(authority_path, authority)
         try:
-            temporary_image.chmod(0o400)
-            os.replace(temporary_image, target)
+            _publish_private_image(temporary_image, target, digest)
             os.replace(temporary_authority, authority_path)
+            parent_descriptor = os.open(
+                target.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
         finally:
             temporary_authority.unlink(missing_ok=True)
 

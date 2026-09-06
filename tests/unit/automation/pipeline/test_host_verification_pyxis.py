@@ -22,6 +22,7 @@ from hephaestus.automation.pipeline.stages.pr_review_receipts import (
     _host_verification_receipt_matches,
 )
 from hephaestus.automation.pipeline.stages.pr_review_verification import _HostVerificationSpec
+from hephaestus.automation.pyxis_artifact_io import CrossNodePathBinding
 
 
 def _image(tmp_path: Path, *, sidecar: bool = True) -> tuple[Path, str]:
@@ -152,10 +153,13 @@ def test_stage_verified_pyxis_image_uses_content_addressed_read_only_bytes(
     )
 
     staged = stage_verified_pyxis_image(metadata, stage_root)
-
-    assert staged.path == stage_root / f"sha256-{digest}.sqsh"
-    assert hashlib.sha256(staged.path.read_bytes()).hexdigest() == digest
-    assert staged.path.stat().st_mode & 0o777 == 0o400
+    try:
+        assert staged.path == stage_root / f"sha256-{digest}.sqsh"
+        assert hashlib.sha256(staged.path.read_bytes()).hexdigest() == digest
+        assert staged.path.stat().st_mode & 0o777 == 0o400
+    finally:
+        assert staged.launch_binding is not None
+        staged.launch_binding.close()
 
 
 def test_stage_verified_pyxis_image_reuses_verified_digest_target(tmp_path: Path) -> None:
@@ -172,9 +176,14 @@ def test_stage_verified_pyxis_image_reuses_verified_digest_target(tmp_path: Path
 
     first = stage_verified_pyxis_image(metadata, stage_root)
     second = stage_verified_pyxis_image(metadata, stage_root)
-
-    assert second.path == first.path
-    assert hashlib.sha256(second.path.read_bytes()).hexdigest() == digest
+    try:
+        assert second.path == first.path
+        assert hashlib.sha256(second.path.read_bytes()).hexdigest() == digest
+    finally:
+        assert first.launch_binding is not None
+        assert second.launch_binding is not None
+        first.launch_binding.close()
+        second.launch_binding.close()
 
 
 def test_stage_verified_pyxis_image_preserves_conflicting_digest_target(
@@ -264,6 +273,38 @@ def test_stage_verified_pyxis_image_rejects_substitution_after_validation(
 
     with pytest.raises(PyxisImageValidationError, match="changed during staging"):
         stage_verified_pyxis_image(metadata, stage_root)
+
+
+@pytest.mark.parametrize("replace_root", (False, True))
+def test_staged_image_binding_rejects_post_staging_replacement(
+    tmp_path: Path, replace_root: bool
+) -> None:
+    """The retained binding rejects a leaf or root swap before launch."""
+    image, digest = _image(tmp_path)
+    authority = _authority(image, digest)
+    stage_root = tmp_path / "stage"
+    stage_root.mkdir(mode=0o700)
+    staged = stage_verified_pyxis_image(
+        validate_pyxis_image(image, expected_sha256=digest, provenance=authority),
+        stage_root,
+    )
+    binding = staged.launch_binding
+    assert binding is not None
+    try:
+        if replace_root:
+            moved = stage_root.with_name("original-stage")
+            stage_root.rename(moved)
+            stage_root.mkdir(mode=0o700)
+        else:
+            replacement = stage_root / "replacement.sqsh"
+            replacement.write_bytes(b"hsqs" + b"replacement")
+            replacement.chmod(0o400)
+            os.replace(replacement, staged.path)
+
+        with pytest.raises(OSError, match="cross-node"):
+            binding.revalidate()
+    finally:
+        binding.close()
 
 
 def test_validate_pyxis_image_rejects_missing_sidecar(tmp_path: Path) -> None:
@@ -418,8 +459,15 @@ def test_validate_pyxis_quota_root_requires_finite_private_filesystem(
     """A private one-GiB filesystem can hold Linux writable outputs."""
     tmp_path.chmod(0o700)
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.statvfs",
-        lambda _: SimpleNamespace(f_frsize=4096, f_blocks=262_144),
+        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        lambda _: SimpleNamespace(
+            f_bsize=4096,
+            f_frsize=4096,
+            f_blocks=262_144,
+            f_fsid=1,
+            f_flag=0,
+            f_namemax=255,
+        ),
     )
 
     assert validate_pyxis_quota_root(tmp_path) == tmp_path.resolve()
@@ -431,12 +479,59 @@ def test_validate_pyxis_quota_root_rejects_polling_only_storage(
     """A large host filesystem is not a hard writable-space quota."""
     tmp_path.chmod(0o700)
     monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.statvfs",
-        lambda _: SimpleNamespace(f_frsize=4096, f_blocks=262_145),
+        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        lambda _: SimpleNamespace(
+            f_bsize=4096,
+            f_frsize=4096,
+            f_blocks=262_145,
+            f_fsid=1,
+            f_flag=0,
+            f_namemax=255,
+        ),
     )
 
     with pytest.raises(PyxisImageValidationError, match="hard quota"):
         validate_pyxis_quota_root(tmp_path)
+
+
+def test_validate_pyxis_quota_root_rejects_untrusted_ancestry(tmp_path: Path) -> None:
+    """A group-writable ancestor cannot authorize a cross-node mount."""
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o770)
+    shared.chmod(0o770)
+    quota = shared / "quota"
+    quota.mkdir(mode=0o700)
+
+    with pytest.raises(PyxisImageValidationError, match="quota root"):
+        validate_pyxis_quota_root(quota)
+
+
+def test_retained_quota_binding_revalidates_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed filesystem identity stops launch-time quota reuse."""
+    tmp_path.chmod(0o700)
+    original = os.statvfs(tmp_path)
+    filesystem_id = [original.f_fsid]
+    monkeypatch.setattr(
+        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        lambda _: SimpleNamespace(
+            f_bsize=original.f_bsize,
+            f_frsize=4096,
+            f_blocks=262_144,
+            f_fsid=filesystem_id[0],
+            f_flag=original.f_flag,
+            f_namemax=original.f_namemax,
+        ),
+    )
+    binding = validate_pyxis_quota_root(tmp_path, retain_binding=True)
+    assert isinstance(binding, CrossNodePathBinding)
+    filesystem_id[0] += 1
+    try:
+        with pytest.raises(OSError, match="filesystem changed"):
+            binding.revalidate()
+    finally:
+        binding.close()
 
 
 def test_build_pyxis_environment_is_scrubbed_and_source_bound(tmp_path: Path) -> None:
