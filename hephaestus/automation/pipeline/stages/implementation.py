@@ -1473,6 +1473,7 @@ class ImplementationStage(Stage):
             # The implement job hard-failed. The attempt was counted in
             # on_job_done (doc: agent_error consumes the implement
             # budget); RETRY re-enters the stage for the next attempt.
+            item.state = IMPLEMENT_WAIT
             return StageOutcome(Disposition.RETRY, "agent_error")
         is_hephaestus = (ctx.org.casefold(), item.repo.casefold()) == (
             "homericintelligence",
