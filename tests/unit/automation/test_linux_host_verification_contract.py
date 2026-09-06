@@ -10,6 +10,9 @@ from typing import cast
 
 import pytest
 
+from hephaestus.automation.linux_host_verification import (
+    linux_host_verification_job_result,
+)
 from hephaestus.automation.linux_host_verification_contract import (
     LinuxHostVerificationReceipt,
     LinuxHostVerificationRequest,
@@ -202,6 +205,59 @@ def test_success_receipt_rejects_failed_boundary_or_failure_state() -> None:
     failed_state["failure_classification"] = "execution"
     with pytest.raises(ValueError, match="passed receipt"):
         LinuxHostVerificationReceipt.from_mapping(failed_state)
+
+
+def test_receipt_conversion_requires_exact_request_binding() -> None:
+    """Only the exact request-bound Linux receipt can pass a worker job."""
+    request = LinuxHostVerificationRequest.from_mapping(_request_payload())
+    receipt = LinuxHostVerificationReceipt.from_mapping(_receipt_payload())
+
+    result = linux_host_verification_job_result(request, receipt)
+
+    assert result.ok is True
+    assert result.error is None
+    assert result.value == {
+        "head_sha": request.expected_head_sha,
+        "immutable_source": True,
+        "backend": "linux-pyxis",
+        "command_id": request.command_id,
+        "allocation_job_id": "12345;cluster-a",
+        "allocation_hostname": "compute-01",
+        "failure_kind": "none",
+        "status": "passed",
+    }
+    assert result.stdout_tail == "all checks passed\n"
+
+    mismatched = deepcopy(_receipt_payload())
+    mismatched["image_sha256"] = "9" * 64
+    mismatch_result = linux_host_verification_job_result(
+        request,
+        LinuxHostVerificationReceipt.from_mapping(mismatched),
+    )
+    assert mismatch_result.ok is False
+    assert mismatch_result.error == "linux_host_verification_receipt_invalid"
+    assert mismatch_result.stdout_tail == ""
+    assert mismatch_result.stderr_tail == ""
+
+
+def test_receipt_conversion_reports_valid_failed_execution() -> None:
+    """A valid failed receipt retains bounded diagnostics and a stable category."""
+    request = LinuxHostVerificationRequest.from_mapping(_request_payload())
+    failed = _receipt_payload()
+    failed["return_code"] = 1
+    failed["outcome"] = "failed"
+    failed["failure_classification"] = "execution"
+    failed["stderr_tail"] = "ruff failed\n"
+
+    result = linux_host_verification_job_result(
+        request,
+        LinuxHostVerificationReceipt.from_mapping(failed),
+    )
+
+    assert result.ok is False
+    assert result.error == "linux_host_verification_execution"
+    assert result.value["failure_kind"] == "execution"
+    assert result.stderr_tail == "ruff failed\n"
 
 
 def test_request_and_receipt_files_round_trip_atomically(tmp_path: Path) -> None:

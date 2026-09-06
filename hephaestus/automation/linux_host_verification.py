@@ -15,7 +15,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.linux_host_verification_contract import MAX_TIMEOUT_SECONDS
+from hephaestus.automation.linux_host_verification_contract import (
+    MAX_TIMEOUT_SECONDS,
+    LinuxHostVerificationReceipt,
+    LinuxHostVerificationRequest,
+)
+from hephaestus.automation.pipeline.job_results import JobResult
 
 _CONFIG_FIELDS = frozenset(
     {
@@ -87,6 +92,47 @@ def load_linux_host_verification_config(config_path: Path) -> LinuxHostVerificat
     if not isinstance(table, dict):
         raise ValueError("Linux host-verification config table is invalid")
     return LinuxHostVerificationConfig.from_mapping(table)
+
+
+def linux_host_verification_job_result(
+    request: LinuxHostVerificationRequest,
+    receipt: LinuxHostVerificationReceipt,
+) -> JobResult:
+    """Convert one request-bound Linux allocation receipt into ``JobResult``.
+
+    A receipt is untrusted until every identity and digest agrees with its
+    request. A mismatched receipt exposes no diagnostic text because it could
+    belong to another allocation. A valid failed receipt retains only the
+    contract-bounded diagnostic tails.
+    """
+    try:
+        receipt.validate_against_request(request)
+    except ValueError:
+        return JobResult(ok=False, error="linux_host_verification_receipt_invalid")
+    value: dict[str, object] = {
+        "head_sha": request.expected_head_sha,
+        "immutable_source": True,
+        "backend": receipt.backend,
+        "command_id": receipt.command_id,
+        "allocation_job_id": receipt.allocation_job_id,
+        "allocation_hostname": receipt.allocation_hostname,
+        "failure_kind": receipt.failure_classification,
+        "status": receipt.outcome,
+    }
+    if receipt.outcome == "passed":
+        return JobResult(
+            ok=True,
+            value=value,
+            stdout_tail=receipt.stdout_tail,
+            stderr_tail=receipt.stderr_tail,
+        )
+    return JobResult(
+        ok=False,
+        value=value,
+        error=f"linux_host_verification_{receipt.failure_classification}",
+        stdout_tail=receipt.stdout_tail,
+        stderr_tail=receipt.stderr_tail,
+    )
 
 
 @dataclass(frozen=True)
