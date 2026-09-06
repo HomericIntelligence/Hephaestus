@@ -78,6 +78,7 @@ from .github_api import (
     gh_list_open_issues as gh_list_open_issues,
 )
 from .implementer_state import ImplementationStateManager
+from .linux_host_verification import load_linux_host_verification_config
 from .models import (
     ImplementationState,
     ImplementerOptions,
@@ -258,6 +259,13 @@ Examples:
     )
     parser.add_argument("--poll-max-wait", type=positive_int, default=1200, metavar="SECONDS")
     parser.add_argument("--run-pre-pr-tests", action="store_true")
+    parser.add_argument(
+        "--linux-host-verification-config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Sealed TOML configuration for the optional Linux host-verification backend.",
+    )
     return parser
 
 
@@ -560,6 +568,11 @@ def main() -> int:
     # twice.
     issues = list(dict.fromkeys(issues))
     log.info("Issues to implement: %s", issues)
+    linux_host_verification = (
+        load_linux_host_verification_config(args.linux_host_verification_config)
+        if args.linux_host_verification_config is not None
+        else None
+    )
 
     config = PipelineConfig(
         org=org,
@@ -621,6 +634,7 @@ def main() -> int:
         host_verification_pyxis_sha256=args.host_verification_pyxis_sha256,
         host_verification_pyxis_authority=args.host_verification_pyxis_authority,
         host_verification_pyxis_quota_root=args.host_verification_pyxis_quota_root,
+        linux_host_verification=linux_host_verification,
     )
 
     rc = run_pipeline(config)

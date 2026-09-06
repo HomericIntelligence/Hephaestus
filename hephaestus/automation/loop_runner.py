@@ -64,6 +64,10 @@ from hephaestus.automation.event_log_retention import (
     event_log_lifecycle,
 )
 from hephaestus.automation.github_api import gh_call
+from hephaestus.automation.linux_host_verification import (
+    LinuxHostVerificationConfig,
+    load_linux_host_verification_config,
+)
 from hephaestus.automation.loop_repo_manager import (
     _clone_missing_repos as _clone_missing_repos,
     _detect_cwd_repo as _detect_cwd_repo,
@@ -272,6 +276,7 @@ class LoopConfig:
     codex_isolation_adapter: str | None = None
     codex_isolation_deployment_lock: Path | None = None
     codex_isolation_deployment_lock_sha256: str | None = None
+    linux_host_verification: LinuxHostVerificationConfig | None = None
     issues: list[int] = field(default_factory=list)
     reset_plan_review_session: bool = False
     prs: list[int] = field(default_factory=list)
@@ -653,6 +658,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write private typed queue-job receipts beneath PATH (disabled by default).",
     )
     p.add_argument(
+        "--linux-host-verification-config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Sealed TOML configuration for the optional Linux host-verification backend.",
+    )
+    p.add_argument(
         "--repos",
         type=_parse_repo_list,
         default=None,
@@ -1019,6 +1031,7 @@ def _build_pipeline_config(
         host_verification_pyxis_sha256=cfg.host_verification_pyxis_sha256,
         host_verification_pyxis_authority=cfg.host_verification_pyxis_authority,
         host_verification_pyxis_quota_root=cfg.host_verification_pyxis_quota_root,
+        linux_host_verification=cfg.linux_host_verification,
         projects_dir=cfg.projects_dir,
         repo_roots=cfg.repo_roots,
         json_out=args.json,
@@ -1165,6 +1178,11 @@ def main(argv: list[str] | None = None) -> int:
         return _error_exit(args, err)
 
     projects_dir = resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True)
+    linux_host_verification = (
+        load_linux_host_verification_config(args.linux_host_verification_config)
+        if args.linux_host_verification_config is not None
+        else None
+    )
     streaming_org_scope = args.org is not None and not args.repos and not (args.issues or args.prs)
     root_scope_repos = repos
     if streaming_org_scope:
@@ -1194,6 +1212,7 @@ def main(argv: list[str] | None = None) -> int:
         codex_isolation_adapter=args.codex_isolation_adapter,
         codex_isolation_deployment_lock=args.codex_isolation_deployment_lock,
         codex_isolation_deployment_lock_sha256=args.codex_isolation_deployment_lock_sha256,
+        linux_host_verification=linux_host_verification,
         issues=args.issues or [],
         reset_plan_review_session=args.reset_plan_review_session,
         prs=args.prs or [],

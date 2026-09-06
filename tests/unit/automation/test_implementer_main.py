@@ -205,6 +205,29 @@ def test_codex_isolation_inputs_thread_into_pipeline_config(tmp_path: Path) -> N
     assert config.codex_isolation_deployment_lock_sha256 == digest
 
 
+def test_linux_host_verification_config_threads_into_pipeline(tmp_path: Path) -> None:
+    """The implementer loads the sealed backend config after health checks."""
+    config_path = tmp_path / "linux-host-verification.toml"
+    config_path.write_text(
+        """[linux_host_verification]
+shared_root = \"/srv/hephaestus-runs\"
+image_path = \"/srv/hephaestus-images/verify.sqsh\"
+image_manifest_path = \"/srv/hephaestus-images/verify.manifest.json\"
+trusted_slurm_bin_dir = \"/usr/bin\"
+timeout_seconds = 900
+""",
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--linux-host-verification-config", str(config_path)], tmp_path
+    )
+
+    assert captured["config"].linux_host_verification is not None
+    assert captured["config"].linux_host_verification.timeout_seconds == 900
+
+
 @pytest.mark.parametrize("agent", ["opencode", "pi"])
 def test_provider_owned_defaults_remain_empty(tmp_path: Path, agent: str) -> None:
     """The implementer wrapper must not inject Claude defaults into direct providers."""

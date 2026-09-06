@@ -783,6 +783,32 @@ def _capture_main_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> ob
     return captured["config"]
 
 
+def test_main_threads_linux_host_verification_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The loop loads the sealed Linux backend configuration for PR review."""
+    config_path = tmp_path / "linux-host-verification.toml"
+    config_path.write_text(
+        """[linux_host_verification]
+shared_root = \"/srv/hephaestus-runs\"
+image_path = \"/srv/hephaestus-images/verify.sqsh\"
+image_manifest_path = \"/srv/hephaestus-images/verify.manifest.json\"
+trusted_slurm_bin_dir = \"/usr/bin\"
+timeout_seconds = 900
+""",
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    config = cast(
+        PipelineConfig,
+        _capture_config(["--linux-host-verification-config", str(config_path)], monkeypatch),
+    )
+
+    assert config.linux_host_verification is not None
+    assert config.linux_host_verification.timeout_seconds == 900
+
+
 def test_main_applies_default_phase_timeout_when_flag_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
