@@ -214,8 +214,7 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
     """Read both child pipes with bounded reader threads."""
     if process.stdout is None or process.stderr is None:  # pragma: no cover
         raise RuntimeError("Git output pipes are unavailable")
-    for stream in (process.stdout, process.stderr):
-        os.set_blocking(stream.fileno(), False)
+    streams = (process.stdout, process.stderr)
     events: queue_mod.Queue[tuple[str, bytes | BaseException | None]] = queue_mod.Queue(maxsize=16)
     stop = threading.Event()
 
@@ -243,29 +242,35 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
         finally:
             put_event(name, None)
 
-    readers = (
-        threading.Thread(
-            target=read_pipe,
-            args=("stdout", process.stdout),
-            name=f"hephaestus-git-pipe-{process.pid}-stdout",
-            daemon=True,
-        ),
-        threading.Thread(
-            target=read_pipe,
-            args=("stderr", process.stderr),
-            name=f"hephaestus-git-pipe-{process.pid}-stderr",
-            daemon=True,
-        ),
-    )
-    for reader in readers:
-        reader.start()
+    readers: tuple[threading.Thread, ...] = ()
+    started_readers: list[threading.Thread] = []
     digest = hashlib.sha256()
     output = bytearray()
     stderr_tail = bytearray()
     byte_count = 0
     ended: set[str] = set()
     deadline = time.monotonic() + timeout
+    process_completed = False
     try:
+        for stream in streams:
+            os.set_blocking(stream.fileno(), False)
+        readers = (
+            threading.Thread(
+                target=read_pipe,
+                args=("stdout", process.stdout),
+                name=f"hephaestus-git-pipe-{process.pid}-stdout",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=read_pipe,
+                args=("stderr", process.stderr),
+                name=f"hephaestus-git-pipe-{process.pid}-stderr",
+                daemon=True,
+            ),
+        )
+        for reader in readers:
+            reader.start()
+            started_readers.append(reader)
         while len(ended) != len(readers):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -294,15 +299,19 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
         if remaining <= 0:
             raise subprocess.TimeoutExpired(argv, timeout)
         returncode = process.wait(timeout=remaining)
-    except BaseException:
-        _terminate_bounded_process_tree(process, process_group=process_group)
-        raise
+        process_completed = True
     finally:
         stop.set()
-        for reader in readers:
+        if not process_completed:
+            _terminate_bounded_process_tree(process, process_group=process_group)
+        for reader in started_readers:
             reader.join(timeout=1.0)
         for reader, stream in zip(readers, (process.stdout, process.stderr), strict=True):
-            if not reader.is_alive():
+            if reader not in started_readers or not reader.is_alive():
+                with suppress(OSError):
+                    stream.close()
+        if not readers:
+            for stream in streams:
                 with suppress(OSError):
                     stream.close()
     text = output.decode("utf-8", errors="surrogateescape") if retain_text else ""
@@ -328,9 +337,9 @@ def _run_bounded_git_output(  # noqa: C901
     """Run Git with bounded memory and return an exact output digest."""
     thread_backend = not _subprocess_pipe_selector_supported()
     process_options: dict[str, object] = {}
-    if thread_backend and os.name == "posix":
+    if os.name == "posix":
         process_options["start_new_session"] = True
-    elif thread_backend and os.name == "nt":  # pragma: no cover - Windows only
+    elif os.name == "nt":  # pragma: no cover - Windows only
         process_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(
         argv,
@@ -342,8 +351,7 @@ def _run_bounded_git_output(  # noqa: C901
         **cast(Any, process_options),
     )
     if process.stdout is None or process.stderr is None:  # pragma: no cover
-        process.kill()
-        process.wait()
+        _terminate_bounded_process_tree(process, process_group=True)
         raise RuntimeError("Git output pipes are unavailable")
     if thread_backend:
         return _read_bounded_git_output_with_threads(
@@ -354,22 +362,22 @@ def _run_bounded_git_output(  # noqa: C901
             retain_text=retain_text,
             process_group=True,
         )
-    os.set_blocking(process.stdout.fileno(), False)
-    os.set_blocking(process.stderr.fileno(), False)
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    selector: selectors.BaseSelector | None = None
     digest = hashlib.sha256()
     output = bytearray()
     stderr_tail = bytearray()
     byte_count = 0
     deadline = time.monotonic() + timeout
+    process_completed = False
     try:
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                process.kill()
-                process.wait()
                 raise subprocess.TimeoutExpired(argv, timeout)
             for key, _events in selector.select(timeout=min(remaining, 0.1)):
                 try:
@@ -386,22 +394,24 @@ def _run_bounded_git_output(  # noqa: C901
                     continue
                 byte_count += len(chunk)
                 if byte_count > max_bytes:
-                    process.kill()
-                    process.wait()
                     raise _GitInspectionResourceLimitError("Git output limit exceeded")
                 digest.update(chunk)
                 if retain_text:
                     output.extend(chunk)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            process.kill()
-            process.wait()
             raise subprocess.TimeoutExpired(argv, timeout)
         returncode = process.wait(timeout=remaining)
+        process_completed = True
     finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
+        if not process_completed:
+            _terminate_bounded_process_tree(process, process_group=True)
+        if selector is not None:
+            selector.close()
+        with suppress(OSError):
+            process.stdout.close()
+        with suppress(OSError):
+            process.stderr.close()
     text = output.decode("utf-8", errors="surrogateescape") if retain_text else ""
     if returncode != 0:
         raise subprocess.CalledProcessError(

@@ -8,6 +8,7 @@ import logging
 import os
 import queue
 import re
+import selectors
 import shlex
 import shutil
 import subprocess
@@ -3258,6 +3259,79 @@ class TestGitOps:
             )
 
         assert process.poll() is not None
+
+    @pytest.mark.parametrize("failure_point", ("register", "read"))
+    def test_bounded_git_output_selector_setup_and_read_failures_reap_child(
+        self, failure_point: str
+    ) -> None:
+        """A selector failure cannot leave its Git child running."""
+        original_popen = subprocess.Popen
+        created: list[subprocess.Popen[bytes]] = []
+
+        def launch(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+            process = cast(subprocess.Popen[bytes], original_popen(*args, **kwargs))
+            created.append(process)
+            return process
+
+        selector = selectors.DefaultSelector()
+        with ExitStack() as stack:
+            stack.enter_context(patch(f"{_WP}.subprocess.Popen", side_effect=launch))
+            stack.enter_context(patch(f"{_WP}.selectors.DefaultSelector", return_value=selector))
+            if failure_point == "register":
+                stack.enter_context(
+                    patch.object(selector, "register", side_effect=OSError("register"))
+                )
+            else:
+                stack.enter_context(patch.object(selector, "select", side_effect=OSError("read")))
+            with pytest.raises(OSError, match=failure_point):
+                _run_bounded_git_output(
+                    (sys.executable, "-c", "import time; time.sleep(30)"),
+                    cwd=Path.cwd(),
+                    timeout=10,
+                    max_bytes=64,
+                    retain_text=True,
+                )
+
+        assert len(created) == 1
+        assert created[0].poll() is not None
+
+    def test_bounded_git_output_partial_thread_start_reaps_child_and_reader(self) -> None:
+        """A second reader start failure stops the child and first reader."""
+        original_popen = subprocess.Popen
+        original_start = threading.Thread.start
+        created: list[subprocess.Popen[bytes]] = []
+        starts = 0
+
+        def launch(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+            process = cast(subprocess.Popen[bytes], original_popen(*args, **kwargs))
+            created.append(process)
+            return process
+
+        def fail_second_start(thread: threading.Thread) -> None:
+            nonlocal starts
+            starts += 1
+            if starts == 2:
+                raise RuntimeError("thread resource unavailable")
+            original_start(thread)
+
+        prior_threads = set(threading.enumerate())
+        with (
+            patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False),
+            patch(f"{_WP}.subprocess.Popen", side_effect=launch),
+            patch(f"{_WP}.threading.Thread.start", new=fail_second_start),
+            pytest.raises(RuntimeError, match="thread resource unavailable"),
+        ):
+            _run_bounded_git_output(
+                (sys.executable, "-c", "import time; time.sleep(30)"),
+                cwd=Path.cwd(),
+                timeout=10,
+                max_bytes=64,
+                retain_text=True,
+            )
+
+        assert len(created) == 1
+        assert created[0].poll() is not None
+        assert [thread for thread in threading.enumerate() if thread not in prior_threads] == []
 
     def test_inspect_implementation_worktree_includes_staged_changes_in_diff(
         self,

@@ -104,15 +104,22 @@ def reject_filtered_path_shape_changes(
     add_paths = set(selected.add_paths)
     selected_paths = add_paths | set(selected.update_paths)
     filtered_paths = {path for _status, path in entries if path not in selected_paths}
+    filtered_components = {tuple(path.split("/")) for path in filtered_paths}
+    filtered_ancestors = {
+        components[:length]
+        for components in filtered_components
+        for length in range(1, len(components))
+    }
     for selected_path in selected_paths:
-        selected_prefix = f"{selected_path}/"
-        for filtered_path in filtered_paths:
-            selected_add_replaces_descendant = (
-                selected_path in add_paths and filtered_path.startswith(selected_prefix)
-            )
-            selected_descendant_replaces_filtered = selected_path.startswith(f"{filtered_path}/")
-            if selected_add_replaces_descendant or selected_descendant_replaces_filtered:
-                raise RuntimeError("A selected file-tree change overlaps a filtered path")
+        components = tuple(selected_path.split("/"))
+        selected_add_replaces_descendant = (
+            selected_path in add_paths and components in filtered_ancestors
+        )
+        selected_descendant_replaces_filtered = any(
+            components[:length] in filtered_components for length in range(1, len(components))
+        )
+        if selected_add_replaces_descendant or selected_descendant_replaces_filtered:
+            raise RuntimeError("A selected file-tree change overlaps a filtered path")
 
 
 def head_tracked_commit_paths(

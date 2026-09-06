@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from hephaestus.automation import pr_manager
+from hephaestus.automation.commit_paths import reject_filtered_path_shape_changes
 
 
 def _status(stdout: str = "") -> MagicMock:
@@ -181,6 +182,17 @@ class TestSelectCommitPaths:
         """An unresolved file cannot become an automated deletion."""
         with pytest.raises(RuntimeError, match="unresolved merge"):
             pr_manager._select_commit_paths(((status, "conflict.txt"),), None)
+
+    def test_high_cardinality_filtered_paths_use_bounded_prefix_work(self) -> None:
+        """Many paths do not create a selected-by-filtered cross-product."""
+        entries = tuple(("??", f"safe/{index}.txt") for index in range(10_000)) + tuple(
+            ("??", f"secrets/{index}.pem") for index in range(10_000)
+        )
+        selected = pr_manager._select_commit_paths(entries, None)
+
+        reject_filtered_path_shape_changes(entries, selected)
+
+        assert len(selected.add_paths) == 10_000
 
     def test_escapes_control_characters_in_skip_logs(
         self, caplog: pytest.LogCaptureFixture
