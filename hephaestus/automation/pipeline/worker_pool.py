@@ -31,7 +31,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, suppress
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, TypeGuard, cast
 
 import hephaestus.automation.claude_invoke as claude_invoke
@@ -2702,13 +2702,20 @@ def _normalized_metadata_path(base: Path, value: str) -> Path:
 def _portable_read_branch_ref(common_dir: Path, branch_ref: str) -> str:
     """Read one loose or packed branch through portable validated paths."""
     components = tuple(branch_ref.split("/"))
+    windows_components = tuple(PureWindowsPath(component) for component in components)
     if (
         len(components) < 3
         or components[:2] != ("refs", "heads")
         or any(component in {"", ".", ".."} for component in components)
+        or any(
+            component.drive or component.root or component.parts != (value,)
+            for value, component in zip(components, windows_components, strict=True)
+        )
     ):
         raise RuntimeError("linked worktree branch reference is invalid")
     loose = common_dir.joinpath(*components)
+    if not loose.is_relative_to(common_dir):
+        raise RuntimeError("linked worktree branch reference is invalid")
     try:
         payload, _identity = _portable_read_bounded_regular(loose, max_bytes=4096)
     except FileNotFoundError:
@@ -3042,28 +3049,7 @@ def _compare_and_swap_linked_branch(  # noqa: C901
     ):
         raise RuntimeError("remediation branch update has an invalid reference")
     if not _secure_dir_fd_supported():
-        if _portable_path_identity(binding.common_dir, directory=True) != binding.common_identity:
-            raise RuntimeError("remediation branch metadata identity changed")
-        observed = _portable_read_branch_ref(binding.common_dir, binding.branch_ref)
-        if observed == new_sha:
-            return
-        if observed != expected_sha:
-            raise RuntimeError("remediation branch changed before local update")
-        env = _git_environment_for_binding(binding)
-        git_utils.run(
-            [
-                "git",
-                "-c",
-                f"core.hooksPath={os.devnull}",
-                "update-ref",
-                binding.branch_ref,
-                new_sha,
-                expected_sha,
-            ],
-            cwd=binding.worktree,
-            env=env,
-        )
-        return
+        raise RuntimeError("secure branch update is unavailable")
     common_fd, common_identity = _open_directory_no_follow(binding.common_dir)
     if common_identity != binding.common_identity:
         os.close(common_fd)

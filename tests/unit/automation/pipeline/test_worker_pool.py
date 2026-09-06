@@ -3615,11 +3615,11 @@ class TestGitOps:
         assert _git(repo, "rev-parse", branch) == new_head
         assert branch_path.read_text(encoding="ascii").strip() == new_head
 
-    def test_recovery_cas_uses_the_portable_exact_update(
+    def test_recovery_cas_fails_closed_without_secure_directory_descriptors(
         self,
         tmp_path: Path,
     ) -> None:
-        """A host without dir-fd support can make one exact branch update."""
+        """A host without secure directory descriptors cannot update a branch."""
         from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 
         branch = "2973-portable-cas"
@@ -3630,14 +3630,42 @@ class TestGitOps:
         _git(repo, "commit", "--no-gpg-sign", "-m", "test: next")
         new_head = _git(repo, "rev-parse", "HEAD")
 
-        with patch(f"{_WP}._secure_dir_fd_supported", return_value=False):
+        with (
+            patch(f"{_WP}._secure_dir_fd_supported", return_value=False),
+            pytest.raises(RuntimeError, match="secure branch update is unavailable"),
+        ):
             worker_pool_module._compare_and_swap_linked_branch(
                 linked_env.binding,
                 expected_sha=old_head,
                 new_sha=new_head,
             )
 
-        assert _git(repo, "rev-parse", branch) == new_head
+        assert _git(repo, "rev-parse", branch) == old_head
+
+    @pytest.mark.parametrize(
+        "branch_ref",
+        (
+            r"refs/heads/..\..\outside",
+            r"refs/heads/C:\outside\ref",
+            r"refs/heads/\\server\share\ref",
+        ),
+        ids=("backslash-parent", "drive-root", "unc-root"),
+    )
+    def test_portable_branch_read_rejects_windows_path_escape(
+        self,
+        tmp_path: Path,
+        branch_ref: str,
+    ) -> None:
+        """A portable branch path cannot escape the bound common directory."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        with (
+            patch(f"{_WP}._portable_read_bounded_regular") as read_regular,
+            pytest.raises(RuntimeError, match="branch reference is invalid"),
+        ):
+            worker_pool_module._portable_read_branch_ref(tmp_path, branch_ref)
+
+        read_regular.assert_not_called()
 
     @pytest.mark.parametrize("outcome", ("mismatch", "idempotent"))
     def test_recovery_cas_preserves_ref_and_cleans_lock_on_no_update(
