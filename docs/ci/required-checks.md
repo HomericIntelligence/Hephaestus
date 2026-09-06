@@ -98,7 +98,8 @@ receives a scrubbed offline environment.
 
 The preparation command builds an exact committed Git tree. It exports the
 immutable local OCI image ID, not a mutable tag. It writes an owner-read-only
-squashfs and a separate owner-read-only authority file:
+squashfs and a separate owner-read-only authority file on a filesystem that is
+visible at the same absolute path on each Slurm compute node:
 
 ```bash
 just host-verification-pyxis-image
@@ -106,10 +107,11 @@ just host-verification-pyxis-image
 
 The command prints the exact digest and authority path. Supply them with
 `--host-verification-pyxis-sha256 SHA256` and
-`--host-verification-pyxis-authority PATH`. Supply the dedicated filesystem
-with `--host-verification-pyxis-quota-root PATH`. The worker verifies the
-authority, copies the authorized bytes to a private digest-named path, and
-executes only that copy. It does not mount a host virtual environment.
+`--host-verification-pyxis-authority PATH`. Supply a capacity-bounded shared
+filesystem with `--host-verification-pyxis-quota-root PATH`. The worker verifies
+the authority. It puts the authorized image, immutable source, and Git metadata
+in one private directory beside the source image. It executes only the copied
+image. It does not mount a host virtual environment.
 
 The authoritative Linux host lane must run the integration test with
 `--require-pyxis-host-verification`. Missing Pyxis, Enroot, an allocation, the

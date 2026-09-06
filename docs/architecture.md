@@ -1202,12 +1202,14 @@ For the registered host-verification plan, macOS uses `sandbox-exec` plus
 disposable, quota-backed disk images. Linux uses a local Pyxis/Enroot squashfs
 image. A separate host-owned authority binds the expected digest, committed
 source revision, Containerfile digest, immutable OCI image ID, and local
-content-addressed reference. The worker verifies the authority and copies the
-exact bytes to a private digest-named path before dispatch. Source and Git
-metadata are read-only. The host virtual environment is not mounted.
+content-addressed reference. The image path must be visible at the same absolute
+path on each Slurm compute node. The worker verifies the authority and puts the
+exact image bytes, immutable source, and Git metadata in one private directory
+on that shared filesystem before dispatch. Source and Git metadata are
+read-only. The host virtual environment is not mounted.
 
-Scratch and Pi logs are on an owner-private filesystem with a maximum 1 GiB
-capacity. Slurm and inherited OS limits bound CPU, memory, process count,
+Scratch and Pi logs are on an owner-private shared filesystem with a maximum
+1 GiB capacity. Slurm and inherited OS limits bound CPU, memory, process count,
 file size, and wall-clock time. The authoritative Linux lane runs the real
 integration test with `--require-pyxis-host-verification`. A missing image,
 authority, bounded filesystem, Pyxis allocation, or Enroot runtime produces a
