@@ -8,12 +8,15 @@ unreviewed setting cannot widen the host execution boundary.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import stat
+import tempfile
 import tomllib
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +38,8 @@ _CONFIG_FIELDS = frozenset(
 )
 _CONFIG_TABLE = "linux_host_verification"
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+MAX_STAGED_ARCHIVE_BYTES = 1 << 30
+"""The largest immutable archive accepted for one Linux verification lease."""
 
 
 def _absolute_path(value: object, field_name: str) -> str:
@@ -309,3 +314,63 @@ def cleanup_linux_host_verification_run(
         shutil.rmtree(expected_root)
     except OSError as error:
         raise ValueError("Linux host-verification run cleanup failed") from error
+
+
+def stage_linux_host_verification_archive(
+    run: LinuxHostVerificationRun, archive_kind: str, payload: bytes
+) -> str:
+    """Atomically stage one exact immutable archive and return its SHA-256."""
+    destinations = {
+        "source": run.source_archive_path,
+        "git_metadata": run.git_metadata_archive_path,
+    }
+    destination = destinations.get(archive_kind)
+    if destination is None or type(payload) is not bytes or len(payload) > MAX_STAGED_ARCHIVE_BYTES:
+        raise ValueError("Linux host-verification archive is invalid")
+    expected = run.root / destination.name
+    if destination != expected:
+        raise ValueError("Linux host-verification archive path is not exact")
+    try:
+        root_status = os.lstat(run.root)
+        os.lstat(destination)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ValueError("Linux host-verification archive path is unavailable") from error
+    else:
+        if not stat.S_ISDIR(root_status.st_mode) or stat.S_ISLNK(root_status.st_mode):
+            raise ValueError("Linux host-verification archive root is unsafe")
+        raise ValueError("Linux host-verification archive already exists")
+    try:
+        root_status = os.lstat(run.root)
+    except OSError as error:
+        raise ValueError("Linux host-verification archive root is unavailable") from error
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or stat.S_ISLNK(root_status.st_mode)
+        or root_status.st_mode & 0o077
+    ):
+        raise ValueError("Linux host-verification archive root is unsafe")
+    descriptor = -1
+    temporary_path = ""
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=run.root, text=False
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=False) as archive_file:
+            archive_file.write(payload)
+            archive_file.flush()
+            os.fsync(archive_file.fileno())
+        os.link(temporary_path, destination, follow_symlinks=False)
+        os.unlink(temporary_path)
+        temporary_path = ""
+    except OSError as error:
+        raise ValueError("Linux host-verification archive staging failed") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path:
+            with suppress(OSError):
+                os.unlink(temporary_path)
+    return hashlib.sha256(payload).hexdigest()

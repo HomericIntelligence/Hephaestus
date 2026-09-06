@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import stat
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -365,3 +367,61 @@ def test_cleanup_run_rejects_foreign_or_unverified_path(tmp_path: Path) -> None:
         cleanup_linux_host_verification_run(config, forged)
     assert foreign.is_dir()
     assert run.root.is_dir()
+
+
+def test_stage_archive_writes_exact_private_bytes_once(tmp_path: Path) -> None:
+    """Immutable source bytes stage once and return their exact SHA-256."""
+    from hephaestus.automation.linux_host_verification import (
+        LinuxHostVerificationConfig,
+        prepare_linux_host_verification_run,
+        stage_linux_host_verification_archive,
+    )
+
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir(mode=0o700)
+    config = LinuxHostVerificationConfig.from_mapping(
+        {
+            "shared_root": str(shared_root),
+            "image_path": "/srv/hephaestus-images/verify.sqsh",
+            "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+            "trusted_slurm_bin_dir": "/usr/bin",
+            "timeout_seconds": 900,
+        }
+    )
+    run = prepare_linux_host_verification_run(config, "run-20260906-01234567")
+    payload = b"immutable Git archive bytes"
+
+    digest = stage_linux_host_verification_archive(run, "source", payload)
+
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert run.source_archive_path.read_bytes() == payload
+    assert run.source_archive_path.stat().st_mode & 0o077 == 0
+    with pytest.raises(ValueError):
+        stage_linux_host_verification_archive(run, "source", payload)
+
+
+def test_stage_archive_rejects_unknown_kind_or_non_bytes(tmp_path: Path) -> None:
+    """Only the two exact immutable archive roles accept byte content."""
+    from hephaestus.automation.linux_host_verification import (
+        LinuxHostVerificationConfig,
+        prepare_linux_host_verification_run,
+        stage_linux_host_verification_archive,
+    )
+
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir(mode=0o700)
+    config = LinuxHostVerificationConfig.from_mapping(
+        {
+            "shared_root": str(shared_root),
+            "image_path": "/srv/hephaestus-images/verify.sqsh",
+            "image_manifest_path": "/srv/hephaestus-images/verify.manifest.json",
+            "trusted_slurm_bin_dir": "/usr/bin",
+            "timeout_seconds": 900,
+        }
+    )
+    run = prepare_linux_host_verification_run(config, "run-20260906-01234567")
+
+    with pytest.raises(ValueError):
+        stage_linux_host_verification_archive(run, "receipt", b"bytes")
+    with pytest.raises(ValueError):
+        stage_linux_host_verification_archive(run, "source", cast(bytes, bytearray(b"bytes")))
