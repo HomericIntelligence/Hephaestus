@@ -36,4 +36,3 @@ Athena `advise` or `learn`, and it does not grant Pi automation by itself.
   catalog update or a local repair.
 - If `--agent pi` fails, confirm the pinned CLI is present, the managed package
   set is installed, and the selected adapter entry point is valid.
-
