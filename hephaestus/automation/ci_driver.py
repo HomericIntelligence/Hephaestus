@@ -336,6 +336,9 @@ def main() -> int:
             json_out=args.json,
             scope=PipelineScope(_CI_DRIVER_SCOPE_STAGES),
             host_verification_pyxis_image=args.host_verification_pyxis_image,
+            host_verification_pyxis_sha256=args.host_verification_pyxis_sha256,
+            host_verification_pyxis_authority=args.host_verification_pyxis_authority,
+            host_verification_pyxis_quota_root=args.host_verification_pyxis_quota_root,
         )
 
         rc = run_pipeline(config)

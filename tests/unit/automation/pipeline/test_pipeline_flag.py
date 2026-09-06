@@ -134,10 +134,27 @@ def test_build_pipeline_config_maps_pyxis_image_path(
     """The loop exposes the local Pyxis image override to the pipeline."""
     image = tmp_path / "hephaestus-ci.sqsh"
 
-    loop_runner.main(["--host-verification-pyxis-image", str(image)])
+    authority = tmp_path / "authority.json"
+    quota_root = tmp_path / "quota"
+    digest = "a" * 64
+    loop_runner.main(
+        [
+            "--host-verification-pyxis-image",
+            str(image),
+            "--host-verification-pyxis-sha256",
+            digest,
+            "--host-verification-pyxis-authority",
+            str(authority),
+            "--host-verification-pyxis-quota-root",
+            str(quota_root),
+        ]
+    )
 
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.host_verification_pyxis_image == image
+    assert config.host_verification_pyxis_sha256 == digest
+    assert config.host_verification_pyxis_authority == authority
+    assert config.host_verification_pyxis_quota_root == quota_root
 
 
 def test_event_log_retention_flags_reach_lifecycle(

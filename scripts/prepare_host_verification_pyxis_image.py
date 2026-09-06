@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
-"""Build and export the local CI image used by Linux host verification."""
+"""Build and authorize the local CI image used by Linux host verification."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
+import tarfile
+import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+    PYXIS_AUTHORITY_SCHEMA,
+    image_sha256,
+    validate_pyxis_image,
 )
 
-IMAGE_TAG = "hephaestus-ci:local"
+IMAGE_TAG_PREFIX = "hephaestus-ci:host-verification"
 _CONTAINERFILE = Path("ci/Containerfile")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_COMMAND_TIMEOUT_S = 1800
 
 
 class HostVerificationImagePreparationError(RuntimeError):
@@ -26,15 +34,10 @@ class HostVerificationImagePreparationError(RuntimeError):
 
 
 def _validate_local_import_uri(uri: str) -> str:
-    """Return a local Enroot URI and reject registry-backed sources."""
-    if not (uri.startswith("podman://") or uri.startswith("dockerd://")):
+    """Return a content-addressed local Enroot URI or fail closed."""
+    if re.fullmatch(r"(?:podman|dockerd)://sha256:[0-9a-f]{64}", uri) is None:
         raise HostVerificationImagePreparationError(
-            "Enroot import must use a local podman:// or dockerd:// image"
-        )
-    image = uri.split("://", 1)[1]
-    if not image or "/" in image or "@" in image:
-        raise HostVerificationImagePreparationError(
-            "Enroot import must use a local image, not a registry URI"
+            "Enroot import must use a content-addressed local image"
         )
     return uri
 
@@ -79,9 +82,12 @@ def _select_engine(which: Callable[[str], str | None] = shutil.which) -> str:
 
 
 def _run(
-    argv: Sequence[str], *, cwd: Path, runner: Callable[..., subprocess.CompletedProcess[str]]
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
-    """Run one host-owned preparation command with captured diagnostics."""
+    """Run one bounded host-owned command with captured diagnostics."""
     try:
         result = runner(
             tuple(argv),
@@ -89,6 +95,7 @@ def _run(
             capture_output=True,
             text=True,
             check=False,
+            timeout=_COMMAND_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise HostVerificationImagePreparationError(f"preparation command failed: {exc}") from exc
@@ -108,6 +115,88 @@ def _read_image_id(result: subprocess.CompletedProcess[str]) -> str:
     return image_id
 
 
+def _source_revision(root: Path, runner: Callable[..., subprocess.CompletedProcess[str]]) -> str:
+    """Return the exact committed build source revision."""
+    revision = _run(("git", "rev-parse", "HEAD"), cwd=root, runner=runner).stdout.strip()
+    if _COMMIT_RE.fullmatch(revision) is None:
+        raise HostVerificationImagePreparationError("source revision is invalid")
+    return revision
+
+
+def _committed_containerfile_sha256(
+    root: Path,
+    revision: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> str:
+    """Return the digest of the committed Containerfile bytes."""
+    result = _run(("git", "show", f"{revision}:{_CONTAINERFILE}"), cwd=root, runner=runner)
+    return hashlib.sha256(result.stdout.encode()).hexdigest()
+
+
+def _extract_committed_context(
+    root: Path,
+    revision: str,
+    destination: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    """Extract an exact Git tree as the OCI build context."""
+    archive = destination.parent / "context.tar"
+    _run(
+        ("git", "archive", "--format=tar", f"--output={archive}", revision),
+        cwd=root,
+        runner=runner,
+    )
+    try:
+        with tarfile.open(archive, "r:") as stream:
+            stream.extractall(destination, filter="data")
+    except (OSError, tarfile.TarError) as exc:
+        raise HostVerificationImagePreparationError("committed build context is invalid") from exc
+
+
+def _authority_path(target: Path) -> Path:
+    """Return the separate host authority path for one squashfs."""
+    return target.with_suffix(".authority.json")
+
+
+def _write_private_json(path: Path, value: dict[str, str]) -> Path:
+    """Write one owner-read-only JSON file and return its temporary path."""
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o400)
+        payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(descriptor, view) :]
+        os.fsync(descriptor)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(descriptor)
+    return temporary
+
+
+def _authority(
+    *,
+    image_id: str,
+    image_reference: str,
+    containerfile_sha256: str,
+    source_revision: str,
+    squashfs_sha256: str,
+) -> dict[str, str]:
+    """Return the exact independently consumed image authority."""
+    return {
+        "schema": PYXIS_AUTHORITY_SCHEMA,
+        "containerfile": str(_CONTAINERFILE),
+        "containerfile_sha256": containerfile_sha256,
+        "container_image_id": image_id,
+        "container_image_reference": image_reference,
+        "source_revision": source_revision,
+        "squashfs_sha256": squashfs_sha256,
+    }
+
+
 def prepare_image(
     *,
     repo_root: Path,
@@ -117,78 +206,124 @@ def prepare_image(
     which: Callable[[str], str | None] = shutil.which,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, object]:
-    """Build, export, and attest one local CI image for Pyxis."""
+    """Build, export, and authorize one content-addressed local CI image."""
     root = repo_root.expanduser().resolve()
     _regular_path(root, _CONTAINERFILE)
     if (root / "ci").is_symlink():
         raise HostVerificationImagePreparationError("CI build context cannot be a symlink")
     target = _safe_output_path(root, output)
+    authority_path = _safe_output_path(root, _authority_path(target))
     target.parent.mkdir(parents=True, exist_ok=True)
     selected_engine = engine or _select_engine(which)
     executable = _engine_command(selected_engine)
-    if rebuild or not target.exists():
+    revision = _source_revision(root, runner)
+    committed_containerfile_sha256 = _committed_containerfile_sha256(root, revision, runner)
+
+    if target.exists() and not rebuild:
+        if authority_path.is_symlink() or not authority_path.is_file():
+            raise HostVerificationImagePreparationError("existing image authority is unavailable")
+        try:
+            value = json.loads(authority_path.read_text(encoding="utf-8"))
+            expected_sha256 = value["squashfs_sha256"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise HostVerificationImagePreparationError(
+                "existing image authority is invalid"
+            ) from exc
+        try:
+            metadata = validate_pyxis_image(
+                target, expected_sha256=expected_sha256, provenance=authority_path
+            )
+        except (OSError, ValueError) as exc:
+            raise HostVerificationImagePreparationError("existing image is not authorized") from exc
+        current_id = _read_image_id(
+            _run(
+                (*executable, "image", "inspect", "--format={{.Id}}", metadata.container_image_id),
+                cwd=root,
+                runner=runner,
+            )
+        )
+        if (
+            current_id != metadata.container_image_id
+            or metadata.source_revision != revision
+            or metadata.containerfile_sha256 != committed_containerfile_sha256
+        ):
+            raise HostVerificationImagePreparationError("existing image provenance is stale")
+        return {
+            "image": str(metadata.path),
+            "sha256": metadata.sha256,
+            "image_id": metadata.container_image_id,
+            "image_reference": metadata.container_image_reference,
+            "authority": str(authority_path),
+            "engine": selected_engine,
+            "source_revision": revision,
+            "reused": True,
+        }
+
+    with tempfile.TemporaryDirectory(prefix="hephaestus-pyxis-build-") as temp_dir:
+        temporary_root = Path(temp_dir)
+        context = temporary_root / "context"
+        context.mkdir()
+        _extract_committed_context(root, revision, context, runner)
+        containerfile = _regular_path(context, _CONTAINERFILE)
+        containerfile_sha256 = image_sha256(containerfile)
+        if containerfile_sha256 != committed_containerfile_sha256:
+            raise HostVerificationImagePreparationError(
+                "committed Containerfile digest changed during preparation"
+            )
+        tag = f"{IMAGE_TAG_PREFIX}-{revision[:12]}-{containerfile_sha256[:12]}"
         _run(
-            (*executable, "build", "-f", str(_CONTAINERFILE), "-t", IMAGE_TAG, "."),
-            cwd=root,
+            (*executable, "build", "-f", str(_CONTAINERFILE), "-t", tag, "."),
+            cwd=context,
             runner=runner,
         )
-        source_uri = f"{selected_engine}://{IMAGE_TAG}"
-        if selected_engine == "docker":
-            source_uri = f"dockerd://{IMAGE_TAG}"
-        source_uri = _validate_local_import_uri(source_uri)
+        image_id = _read_image_id(
+            _run(
+                (*executable, "image", "inspect", "--format={{.Id}}", tag),
+                cwd=context,
+                runner=runner,
+            )
+        )
+        scheme = "podman" if selected_engine == "podman" else "dockerd"
+        source_uri = _validate_local_import_uri(f"{scheme}://{image_id}")
+        temporary_image = temporary_root / "hephaestus-ci.sqsh"
         _run(
-            ("enroot", "import", "--output", str(target), source_uri),
-            cwd=root,
+            ("enroot", "import", "--output", str(temporary_image), source_uri),
+            cwd=context,
             runner=runner,
         )
-    if not target.is_file() or target.is_symlink():
-        raise HostVerificationImagePreparationError(
-            "Enroot did not create a regular squashfs image"
+        if temporary_image.is_symlink() or not temporary_image.is_file():
+            raise HostVerificationImagePreparationError(
+                "Enroot did not create a regular squashfs image"
+            )
+        with temporary_image.open("rb") as stream:
+            if stream.read(4) != b"hsqs":
+                raise HostVerificationImagePreparationError("Enroot image is not squashfs")
+        digest = image_sha256(temporary_image)
+        authority = _authority(
+            image_id=image_id,
+            image_reference=source_uri,
+            containerfile_sha256=containerfile_sha256,
+            source_revision=revision,
+            squashfs_sha256=digest,
         )
-    image_id = _read_image_id(
-        _run(
-            (*executable, "image", "inspect", "--format={{.Id}}", IMAGE_TAG),
-            cwd=root,
-            runner=runner,
-        )
-    )
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    sidecar = target.with_name(f"{target.name}.sha256")
-    if sidecar.is_symlink():
-        raise HostVerificationImagePreparationError("output image sidecar cannot be a symlink")
-    sidecar.write_text(f"{digest}  {target.name}\n", encoding="ascii")
-    contract = target.with_suffix(".contract.json")
-    if contract.is_symlink():
-        raise HostVerificationImagePreparationError("output image contract cannot be a symlink")
-    contract.write_text(
-        json.dumps(
-            {
-                "schema": "hephaestus-host-verification-pyxis-v1",
-                "containerfile": str(_CONTAINERFILE),
-                "container_engine": selected_engine,
-                "local_import_uri": (
-                    f"{selected_engine}://{IMAGE_TAG}"
-                    if selected_engine == "podman"
-                    else f"dockerd://{IMAGE_TAG}"
-                ),
-                "container_image": IMAGE_TAG,
-                "container_image_id": image_id,
-                "container_image_sha256": digest,
-                "squashfs": str(target),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+        temporary_authority = _write_private_json(authority_path, authority)
+        try:
+            temporary_image.chmod(0o400)
+            os.replace(temporary_image, target)
+            os.replace(temporary_authority, authority_path)
+        finally:
+            temporary_authority.unlink(missing_ok=True)
+
+    metadata = validate_pyxis_image(target, expected_sha256=digest, provenance=authority_path)
     return {
-        "image": str(target),
-        "sha256": digest,
-        "image_id": image_id,
-        "sidecar": str(sidecar),
-        "contract": str(contract),
+        "image": str(metadata.path),
+        "sha256": metadata.sha256,
+        "image_id": metadata.container_image_id,
+        "image_reference": metadata.container_image_reference,
+        "authority": str(authority_path),
         "engine": selected_engine,
+        "source_revision": revision,
+        "reused": False,
     }
 
 

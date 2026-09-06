@@ -761,14 +761,31 @@ def add_pipeline_runtime_args(
 
 
 def add_host_verification_pyxis_image_arg(parser: argparse.ArgumentParser) -> None:
-    """Add the local Enroot squashfs image override for Linux host checks."""
+    """Add the independent Pyxis trust inputs for Linux host checks."""
     parser.add_argument(
         "--host-verification-pyxis-image",
         type=Path,
         default=None,
         metavar="PATH",
-        help=(
-            "Local Enroot squashfs path for Linux host verification. The path "
-            "must have a matching .sha256 sidecar."
-        ),
+        help=("Owner-only local Enroot squashfs path for Linux host verification."),
+    )
+    parser.add_argument(
+        "--host-verification-pyxis-sha256",
+        default=None,
+        metavar="SHA256",
+        help="Expected squashfs SHA-256 from a separate host-owned authority.",
+    )
+    parser.add_argument(
+        "--host-verification-pyxis-authority",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Owner-only provenance authority for the expected squashfs.",
+    )
+    parser.add_argument(
+        "--host-verification-pyxis-quota-root",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Private Linux filesystem with a verified maximum 1 GiB capacity.",
     )
