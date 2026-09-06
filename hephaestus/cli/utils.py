@@ -29,6 +29,7 @@ __version__ = get_version()
 __all__ = [
     "COMMAND_REGISTRY",
     "DRY_RUN_HELP_CAVEAT",
+    "MODEL_REFERENCE_HELP",
     "CommandRegistry",
     "add_advise_timeout_arg",
     "add_agent_timeout_arg",
@@ -59,6 +60,10 @@ _SUPPORTED_OUTPUT_FORMATS = ("json", "table", "text")
 _POSITIVE_TIMEOUT_HELP = (
     " Must be a positive integer; zero does not disable the timeout. "
     "Omit the flag to use the configured default."
+)
+MODEL_REFERENCE_HELP = (
+    "MODEL[:EFFORT]. Codex accepts sol, terra, and luna aliases, full model IDs, and free-form "
+    "effort values. Use default to select the provider default."
 )
 
 
@@ -686,7 +691,12 @@ def add_pipeline_runtime_args(
 ) -> None:
     """Add shared explicit configuration for a standalone pipeline wrapper."""
     for flag in ("model", f"{role}-model", "fallback-model"):
-        parser.add_argument(f"--{flag}", default="", metavar="MODEL[:EFFORT]")
+        parser.add_argument(
+            f"--{flag}",
+            default="",
+            metavar="MODEL[:EFFORT]",
+            help=MODEL_REFERENCE_HELP,
+        )
     parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
     parser.add_argument(
         "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True

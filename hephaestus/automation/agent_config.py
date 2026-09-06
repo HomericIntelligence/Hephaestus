@@ -22,8 +22,9 @@ default mapping reflects the cost/quality tradeoff for each phase:
 - Git/PR message writing is tiny metadata generation → Haiku
 
 Model overrides are resolved once by CLI entry points and passed explicitly.
-Unknown overrides emit a **warning** but are still accepted so operators can
-experiment with preview models without a code change.
+Unknown non-Codex overrides emit a **warning** but are still accepted so
+operators can experiment with preview models without a code change. Codex
+short aliases are validated before provider work starts.
 
 Reasoning effort
 ----------------
@@ -75,6 +76,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from hephaestus.agents.model_selection import (
+    CODEX_ROLE_MODEL_ALIASES,
     GPT_6_ASTRA,
     IFM_MODELS,
     K2_HORIZON_09B,
@@ -87,7 +89,10 @@ from hephaestus.agents.model_selection import (
     normalize_model_reference,
     parse_model_selection,
 )
-from hephaestus.agents.runtime import agent_uses_configured_model_default
+from hephaestus.agents.runtime import (
+    agent_uses_configured_model_default,
+    normalize_provider_model_reference,
+)
 from hephaestus.constants import (
     AGENT_IMPL_TIMEOUT,
     AGENT_LEARN_TIMEOUT,
@@ -141,6 +146,7 @@ _KNOWN_MODELS: frozenset[str] = (
             MYTHOS,
             GPT_6_ASTRA,
             "astra",
+            *(selection.model for selection in CODEX_ROLE_MODEL_ALIASES.values()),
             MUSE_SPARK_12,
             MUSE_SPARK_12_HIGH,
             MUSE_SPARK_12_MEDIUM,
@@ -185,7 +191,7 @@ def _resolve_model(value: str | None, default: str, *, agent: str = "claude") ->
         return ""
     if value is None:
         return default
-    resolved = _normalize_configured_model(value)
+    resolved = _normalize_configured_model(normalize_provider_model_reference(agent, value))
     selection = parse_model_selection(resolved)
     if selection.model and selection.model not in _KNOWN_MODELS:
         logger.warning(
