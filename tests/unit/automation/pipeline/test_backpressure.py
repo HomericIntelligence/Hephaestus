@@ -31,6 +31,7 @@ class _RecordingWorkerPool:
         athena_skill_executor: Any = None,
         rebase_policy_selector: Any = None,
         evidence_receipt_dir: Path | None = None,
+        host_verification_pyxis_image: Path | None = None,
     ) -> None:
         del lock_dir
         self.size = size
@@ -41,6 +42,7 @@ class _RecordingWorkerPool:
         self.athena_skill_executor = athena_skill_executor
         self.rebase_policy_selector = rebase_policy_selector
         self.evidence_receipt_dir = evidence_receipt_dir
+        self.host_verification_pyxis_image = host_verification_pyxis_image
 
 
 def _config(
@@ -87,6 +89,7 @@ def test_coordinator_uses_independent_main_and_learning_capacities(
     assert coordinator.pool.github_job_runner is not None
     assert coordinator.pool.athena_skill_executor is not None
     assert coordinator.pool.evidence_receipt_dir is None
+    assert coordinator.pool.host_verification_pyxis_image == config.host_verification_pyxis_image
 
 
 def test_coordinator_passes_extra_gh_root_to_worker_pool(
