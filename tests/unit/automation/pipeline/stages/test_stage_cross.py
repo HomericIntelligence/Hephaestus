@@ -15,6 +15,8 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     ReconcileScopeExpansionDependenciesRequest,
@@ -287,6 +289,96 @@ def test_pushed_remediation_head_survives_stale_review_entry_read(
     request = second.job.request
     assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
     assert request.source_head_sha == "b" * 40
+
+
+@pytest.mark.parametrize("rebase_state", ["REBASE_WAIT", "REBASE_CONTINUE_WAIT"])
+def test_published_rebase_head_survives_stale_review_entry_read(
+    make_ctx: Any, make_work_item: Any, rebase_state: str
+) -> None:
+    """A published rebase head waits for visibility before dependency review."""
+
+    class SequencedHeadGitHub(FakeStageGitHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
+
+        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+            del pr_number
+            head = self.heads.popleft() if len(self.heads) > 1 else self.heads[0]
+            return {
+                "state": "OPEN",
+                "headRefOid": head,
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+            }
+
+    github = SequencedHeadGitHub()
+    ctx = make_ctx(github=github)
+    implementation = ImplementationStage()
+    implementation_item = make_work_item(issue=1, pr=1001, state=rebase_state)
+
+    implementation.on_job_done(
+        implementation_item,
+        JobResult(
+            ok=True,
+            value={"rebased": True, "published": True, "head_sha": "b" * 40},
+        ),
+        ctx,
+    )
+
+    assert implementation_item.payload["_post_remediation_review_head_sha"] == "b" * 40
+
+    review = PrReviewStage()
+    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
+    review_item.payload.update(implementation_item.payload)
+    assert review.on_enter(review_item, ctx) is None
+
+    first = review.step(review_item, ctx)
+
+    assert first == StageOutcome(Disposition.RETRY, "post_remediation_head_visibility")
+    assert not isinstance(first, JobRequest)
+
+    second = review.step(review_item, ctx)
+
+    assert isinstance(second, JobRequest)
+    assert isinstance(second.job, GitHubJob)
+    request = second.job.request
+    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
+    assert request.source_head_sha == "b" * 40
+
+
+def test_noop_rebase_does_not_wait_for_published_head_visibility(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An unchanged writer head enters review without a visibility wait."""
+    github = FakeStageGitHub()
+    ctx = make_ctx(github=github)
+    implementation = ImplementationStage()
+    implementation_item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+
+    implementation.on_job_done(
+        implementation_item,
+        JobResult(
+            ok=True,
+            value={"rebased": False, "published": False, "head_sha": "a" * 40},
+        ),
+        ctx,
+    )
+
+    assert "_post_remediation_review_head_sha" not in implementation_item.payload
+
+    review = PrReviewStage()
+    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
+    review_item.payload.update(implementation_item.payload)
+    assert review.on_enter(review_item, ctx) is None
+
+    result = review.step(review_item, ctx)
+
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, GitHubJob)
+    request = result.job.request
+    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
+    assert request.source_head_sha == "a" * 40
 
 
 class TestEmptyDiffReroutesToSubstantiveImplementation:
