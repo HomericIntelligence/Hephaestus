@@ -42,8 +42,9 @@ if TYPE_CHECKING:
             transition: str,
             journal_digest: str,
             target_ref_revision: str | None,
-            phase_writer: Callable[[str], None],
-            commit_writer: Callable[[], None],
+            journal_validator: Callable[[str], None],
+            phase_writer: Callable[[str, str], None],
+            commit_writer: Callable[[str], None],
         ) -> None:
             raise NotImplementedError
 
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
             predecessor_branch: str | None,
             branch: str,
             base_sha: str,
+            target_ref_revision: str | None = None,
         ) -> None:
             raise NotImplementedError
 
@@ -80,6 +82,7 @@ if TYPE_CHECKING:
             predecessor_branch: str | None,
             branch: str,
             base_sha: str,
+            target_ref_revision: str | None = None,
         ) -> object:
             raise NotImplementedError
 
@@ -127,6 +130,7 @@ if TYPE_CHECKING:
             branch: str,
             successor_revision: str | None,
             transition: str,
+            journal_digest: str | None,
         ) -> None:
             raise NotImplementedError
 
@@ -191,8 +195,9 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
         _repo_root: Path
         _direct_transition: _WriterTransitionEvidence | None
         _consumed_direct_transition: _WriterTransitionEvidence | None
-        _phase_writer: Callable[[str], None] | None
-        _commit_writer: Callable[[], None] | None
+        _journal_validator: Callable[[str], None] | None
+        _phase_writer: Callable[[str, str], None] | None
+        _commit_writer: Callable[[str], None] | None
 
         __slots__ = (
             "_active",
@@ -201,6 +206,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             "_consumed_direct_transition",
             "_direct_transition",
             "_item_number",
+            "_journal_validator",
             "_lock_path",
             "_phase_writer",
             "_repo_root",
@@ -235,14 +241,19 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 predecessor_generation=predecessor_generation,
                 predecessor_revision=predecessor_revision,
                 predecessor_detached=predecessor_branch is None,
-                predecessor_branch=predecessor_branch,
+                predecessor_branch=(
+                    predecessor_branch.removeprefix("refs/heads/")
+                    if predecessor_branch is not None
+                    else None
+                ),
                 successor_branch=branch,
                 successor_revision=base_sha,
                 transition="direct",
                 journal_digest="",
                 target_ref_revision=None,
-                phase_writer=lambda _phase: None,
-                commit_writer=lambda: None,
+                journal_validator=lambda _digest: None,
+                phase_writer=lambda _digest, _phase: None,
+                commit_writer=lambda _digest: None,
             )
 
         def _arm_writer_transition(
@@ -258,8 +269,9 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             transition: str,
             journal_digest: str,
             target_ref_revision: str | None,
-            phase_writer: Callable[[str], None],
-            commit_writer: Callable[[], None],
+            journal_validator: Callable[[str], None],
+            phase_writer: Callable[[str, str], None],
+            commit_writer: Callable[[str], None],
         ) -> None:
             if not self._active or self._direct_transition is not None:
                 raise RuntimeError("implementation writer direct transition is unavailable")
@@ -279,6 +291,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                     target_ref_revision=target_ref_revision,
                 ),
             )
+            object.__setattr__(self, "_journal_validator", journal_validator)
             object.__setattr__(self, "_phase_writer", phase_writer)
             object.__setattr__(self, "_commit_writer", commit_writer)
 
@@ -290,16 +303,21 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             predecessor_branch: str | None,
             branch: str,
             base_sha: str,
+            target_ref_revision: str | None = None,
         ) -> None:
             self._validate_writer_transition(
                 path=path,
                 predecessor_revision=predecessor_revision,
                 predecessor_detached=predecessor_branch is None,
-                predecessor_branch=predecessor_branch,
+                predecessor_branch=(
+                    predecessor_branch.removeprefix("refs/heads/")
+                    if predecessor_branch is not None
+                    else None
+                ),
                 successor_branch=branch,
                 successor_revision=base_sha,
                 transition="direct",
-                target_ref_revision=None,
+                target_ref_revision=target_ref_revision,
             )
 
         def _validate_writer_transition(
@@ -333,6 +351,10 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                     else "implementation writer transition is invalid"
                 )
                 raise RuntimeError(message)
+            journal_validator = self._journal_validator
+            if journal_validator is None:
+                raise RuntimeError("implementation writer transition journal is unavailable")
+            journal_validator(evidence.journal_digest)
 
         def _consume_direct_transition(
             self,
@@ -342,16 +364,21 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             predecessor_branch: str | None,
             branch: str,
             base_sha: str,
+            target_ref_revision: str | None = None,
         ) -> object:
             return self._consume_writer_transition(
                 path=path,
                 predecessor_revision=predecessor_revision,
                 predecessor_detached=predecessor_branch is None,
-                predecessor_branch=predecessor_branch,
+                predecessor_branch=(
+                    predecessor_branch.removeprefix("refs/heads/")
+                    if predecessor_branch is not None
+                    else None
+                ),
                 successor_branch=branch,
                 successor_revision=base_sha,
                 transition="direct",
-                target_ref_revision=None,
+                target_ref_revision=target_ref_revision,
             )
 
         def _consume_writer_transition(
@@ -379,10 +406,10 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             phase_writer = self._phase_writer
             if phase_writer is None:
                 raise RuntimeError("implementation writer transition journal is unavailable")
-            phase_writer("predecessor_removing")
             evidence = self._direct_transition
             if evidence is None:  # pragma: no cover - guarded above
                 raise RuntimeError("implementation writer transition is invalid")
+            phase_writer(evidence.journal_digest, "predecessor_removing")
             object.__setattr__(self, "_direct_transition", None)
             object.__setattr__(self, "_consumed_direct_transition", evidence)
             return evidence
@@ -395,7 +422,10 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             phase_writer = self._phase_writer
             if phase_writer is None:
                 raise RuntimeError("implementation writer transition journal is unavailable")
-            phase_writer(phase)
+            evidence = self._direct_transition or self._consumed_direct_transition
+            if evidence is None:  # pragma: no cover - guarded above
+                raise RuntimeError("implementation writer transition is unavailable")
+            phase_writer(evidence.journal_digest, phase)
 
         def _complete_writer_transition(self) -> None:
             if not self._active:
@@ -403,9 +433,13 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             commit_writer = self._commit_writer
             if commit_writer is None:
                 raise RuntimeError("implementation writer transition journal is unavailable")
-            commit_writer()
+            evidence = self._direct_transition or self._consumed_direct_transition
+            if evidence is None:
+                raise RuntimeError("implementation writer transition is unavailable")
+            commit_writer(evidence.journal_digest)
             object.__setattr__(self, "_direct_transition", None)
             object.__setattr__(self, "_consumed_direct_transition", None)
+            object.__setattr__(self, "_journal_validator", None)
             object.__setattr__(self, "_phase_writer", None)
             object.__setattr__(self, "_commit_writer", None)
 
@@ -429,6 +463,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 branch=branch,
                 successor_revision=None,
                 transition="direct",
+                journal_digest=None,
             )
 
         def _validate_consumed_writer_transition(
@@ -443,6 +478,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             branch: str,
             successor_revision: str | None,
             transition: str,
+            journal_digest: str | None,
         ) -> None:
             expected = self._consumed_direct_transition
             if (
@@ -456,6 +492,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                 or expected.predecessor_branch != predecessor_branch
                 or expected.branch != branch
                 or expected.transition != transition
+                or (journal_digest is not None and expected.journal_digest != journal_digest)
                 or (
                     successor_revision is not None
                     and expected.successor_revision != successor_revision
@@ -467,6 +504,10 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
                     else "implementation writer transition evidence is invalid"
                 )
                 raise RuntimeError(message)
+            journal_validator = self._journal_validator
+            if journal_validator is None:
+                raise RuntimeError("implementation writer transition journal is unavailable")
+            journal_validator(expected.journal_digest)
 
     @contextmanager
     def implementation_writer_handoff(
@@ -483,6 +524,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
         object.__setattr__(handoff, "_repo_root", normalized_root)
         object.__setattr__(handoff, "_direct_transition", None)
         object.__setattr__(handoff, "_consumed_direct_transition", None)
+        object.__setattr__(handoff, "_journal_validator", None)
         object.__setattr__(handoff, "_phase_writer", None)
         object.__setattr__(handoff, "_commit_writer", None)
         with file_lock(normalized_lock_path, require_exclusive=True):
@@ -492,6 +534,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             finally:
                 object.__setattr__(handoff, "_direct_transition", None)
                 object.__setattr__(handoff, "_consumed_direct_transition", None)
+                object.__setattr__(handoff, "_journal_validator", None)
                 object.__setattr__(handoff, "_phase_writer", None)
                 object.__setattr__(handoff, "_commit_writer", None)
                 object.__setattr__(handoff, "_active", False)

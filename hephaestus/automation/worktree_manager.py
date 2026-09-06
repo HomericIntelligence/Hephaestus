@@ -711,18 +711,12 @@ class WorktreeManager:
                                     timeout=timeout,
                                 )
                                 predecessor_evidence = (
-                                    implementation_writer_handoff._consume_writer_transition(
+                                    implementation_writer_handoff._consume_direct_transition(
                                         path=worktree_path,
                                         predecessor_revision=predecessor_revision,
-                                        predecessor_detached=predecessor_branch is None,
-                                        predecessor_branch=(
-                                            predecessor_branch.removeprefix("refs/heads/")
-                                            if predecessor_branch is not None
-                                            else None
-                                        ),
-                                        successor_branch=branch_name,
-                                        successor_revision=base_sha,
-                                        transition="direct",
+                                        predecessor_branch=predecessor_branch,
+                                        branch=branch_name,
+                                        base_sha=base_sha,
                                         target_ref_revision=direct_target_ref_revision,
                                     )
                                 )
@@ -1095,18 +1089,12 @@ class WorktreeManager:
                         successor_branch=branch_name,
                         timeout=timeout,
                     )
-                    implementation_writer_handoff._validate_writer_transition(
+                    implementation_writer_handoff._validate_direct_transition(
                         path=worktree_path,
                         predecessor_revision=predecessor_revision,
-                        predecessor_detached=predecessor_branch is None,
-                        predecessor_branch=(
-                            predecessor_branch.removeprefix("refs/heads/")
-                            if predecessor_branch is not None
-                            else None
-                        ),
-                        successor_branch=branch_name,
-                        successor_revision=reserved_remote_branch_sha,
-                        transition="direct",
+                        predecessor_branch=predecessor_branch,
+                        branch=branch_name,
+                        base_sha=reserved_remote_branch_sha,
                         target_ref_revision=self._local_branch_revision(
                             branch_name,
                             timeout=timeout,
@@ -1572,7 +1560,11 @@ class WorktreeManager:
             timeout=timeout,
         )
         registered = self._registered_worktree_at_path(worktree_path, timeout=timeout)
-        if registered is not None and registered.get("branch") != f"refs/heads/{branch_name}":
+        if (
+            registered is not None
+            and registered.get("branch") != f"refs/heads/{branch_name}"
+            and not isinstance(implementation_writer_handoff, ImplementationWriterHandoff)
+        ):
             raise BranchWorktreeOwnedError(branch_name, worktree_path)
         predecessor_evidence = None
         if worktree_path.exists():
