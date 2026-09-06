@@ -117,6 +117,7 @@ def _writer_repository(tmp_path: Path) -> tuple[Path, str]:
     _git(repo, "push", "--set-upstream", "origin", "main")
     return repo, revision
 
+
 class StubStage:
     """Scripted stage: each step() pops the next scripted StepResult."""
 
@@ -1739,6 +1740,89 @@ class TestImplementationAdmission:
         )
         coordinator._ctx_for(item).paths.source_workspaces = source_manager
         worktree_handle = JobHandle(job=second_job, on_done_state="DIRTY_DECISION_WAIT")
+        coordinator.in_flight[worktree_handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+
+        coordinator._handle_completion(worktree_handle, restarted_result)
+
+        advice_handle, advice_result = coordinator.completion_q.get_nowait()
+        assert isinstance(advice_handle.job, AthenaSkillJob)
+        coordinator._handle_completion(advice_handle, advice_result)
+
+        implementation_handle = next(iter(coordinator.in_flight))
+        assert isinstance(implementation_handle.job, AgentJob)
+        assert implementation_handle.job.descr == "implement"
+        assert implementation_handle.job.issue == 7
+        assert implementation_handle.job.cwd == Path(str(restarted_result.value["path"]))
+        assert item.payload["_impl_source_revision"] == revision
+        assert item.state == "IMPLEMENT_WAIT"
+
+    def test_restarted_adopted_writer_reaches_implementation_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real adopted-writer restart reaches the implementation request."""
+        repo, revision = _writer_repository(tmp_path)
+        branch = "7-adopted"
+        _git(repo, "switch", "-c", branch)
+        _git(repo, "push", "--set-upstream", "origin", branch)
+        _git(repo, "switch", "main")
+        completion_q: CompletionQueue = queue.Queue()
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="org/repo-a",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "sync_to_remote": True,
+                "pr_number": 7,
+                "implementation_adoption_head": revision,
+            },
+        )
+        try:
+            with (
+                patch.object(
+                    worker,
+                    "_authenticated_remote_git_configuration",
+                    return_value=({}, ("-c", "credential.helper=")),
+                ),
+                patch.object(worker, "_sync_worktree_to_remote_branch"),
+            ):
+                assert worker._git_create_worktree(job).ok is True
+                restarted_result = worker._git_create_worktree(job)
+        finally:
+            worker.shutdown(mark_interrupted=False)
+
+        assert restarted_result.ok is True
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            serialize_file_overlap=False,
+        )
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=7,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=branch,
+            payload={
+                "issue_title": "Recover the adopted writer",
+                "issue_body": "Continue after a clean adopted restart.",
+            },
+        )
+        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        worktree_handle = JobHandle(job=job, on_done_state="DIRTY_DECISION_WAIT")
         coordinator.in_flight[worktree_handle] = item
         coordinator.inflight_per_repo[item.repo] = 1
 
