@@ -114,9 +114,12 @@ def test_validate_pyxis_image_rejects_wrong_authority_owner(
     image, digest = _image(tmp_path)
     authority = _authority(image, digest)
     real_fstat = os.fstat
+    authority_inode = authority.stat().st_ino
 
     def wrong_owner(descriptor: int) -> os.stat_result:
         result = real_fstat(descriptor)
+        if result.st_ino != authority_inode:
+            return result
         values = list(result)
         values[4] = result.st_uid + 1
         return os.stat_result(values)
@@ -152,6 +155,93 @@ def test_stage_verified_pyxis_image_uses_content_addressed_read_only_bytes(
     assert staged.path == stage_root / f"sha256-{digest}.sqsh"
     assert hashlib.sha256(staged.path.read_bytes()).hexdigest() == digest
     assert staged.path.stat().st_mode & 0o777 == 0o400
+
+
+def test_stage_verified_pyxis_image_reuses_verified_digest_target(tmp_path: Path) -> None:
+    """A retry reuses an unchanged private digest target."""
+    image, digest = _image(tmp_path)
+    authority = _authority(image, digest)
+    stage_root = tmp_path / "stage"
+    stage_root.mkdir(mode=0o700)
+    metadata = validate_pyxis_image(
+        image,
+        expected_sha256=digest,
+        provenance=authority,
+    )
+
+    first = pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+    second = pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+
+    assert second.path == first.path
+    assert hashlib.sha256(second.path.read_bytes()).hexdigest() == digest
+
+
+def test_stage_verified_pyxis_image_preserves_conflicting_digest_target(
+    tmp_path: Path,
+) -> None:
+    """A conflicting existing target fails closed and stays intact."""
+    image, digest = _image(tmp_path)
+    authority = _authority(image, digest)
+    stage_root = tmp_path / "stage"
+    stage_root.mkdir(mode=0o700)
+    target = stage_root / f"sha256-{digest}.sqsh"
+    target.write_bytes(b"conflict")
+    target.chmod(0o400)
+    metadata = validate_pyxis_image(
+        image,
+        expected_sha256=digest,
+        provenance=authority,
+    )
+
+    with pytest.raises(PyxisImageValidationError, match="staging"):
+        pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+
+    assert target.read_bytes() == b"conflict"
+
+
+def test_stage_verified_pyxis_image_rejects_root_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replaced staging root cannot redirect a content-addressed write."""
+    image, digest = _image(tmp_path)
+    authority = _authority(image, digest)
+    stage_root = tmp_path / "stage"
+    moved_root = tmp_path / "moved-stage"
+    stage_root.mkdir(mode=0o700)
+    metadata = validate_pyxis_image(
+        image,
+        expected_sha256=digest,
+        provenance=authority,
+    )
+    real_open = os.open
+    substituted = False
+
+    def substitute_root(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal substituted
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if not substituted and Path(path) == image:
+            stage_root.rename(moved_root)
+            stage_root.mkdir(mode=0o700)
+            substituted = True
+        return descriptor
+
+    monkeypatch.setattr(
+        "hephaestus.automation.pyxis_artifact_io.os.open",
+        substitute_root,
+    )
+
+    with pytest.raises(PyxisImageValidationError, match="staging"):
+        pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+
+    target_name = f"sha256-{digest}.sqsh"
+    assert not (stage_root / target_name).exists()
+    assert not (moved_root / target_name).exists()
 
 
 def test_stage_verified_pyxis_image_rejects_substitution_after_validation(
@@ -194,6 +284,45 @@ def test_validate_pyxis_image_rejects_mutable_symlink(tmp_path: Path) -> None:
             link,
             expected_sha256="f" * 64,
             provenance=tmp_path / "authority.json",
+        )
+
+
+def test_validate_pyxis_image_rejects_path_substitution_after_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement after the image opens cannot change the verified path."""
+    image, digest = _image(tmp_path)
+    authority = _authority(image, digest)
+    replacement = tmp_path / "replacement.sqsh"
+    replacement.write_bytes(image.read_bytes())
+    replacement.chmod(0o400)
+    real_open = os.open
+    substituted = False
+
+    def substitute_image(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal substituted
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if not substituted and Path(path) == image:
+            os.replace(replacement, image)
+            substituted = True
+        return descriptor
+
+    monkeypatch.setattr(
+        "hephaestus.automation.pyxis_artifact_io.os.open",
+        substitute_image,
+    )
+
+    with pytest.raises(PyxisImageValidationError, match="changed"):
+        validate_pyxis_image(
+            image,
+            expected_sha256=digest,
+            provenance=authority,
         )
 
 
