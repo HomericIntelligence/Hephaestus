@@ -33,6 +33,7 @@ from .pr_review_bootstrap import (
     store_host_verification_result,
 )
 from .pr_review_diagnostics import publish_host_verification_failure
+from .pr_review_receipts import HOST_KEYS
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
     empty_diff_outcome,
@@ -51,7 +52,6 @@ from .pr_review_threads import (
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
-HOST_KEYS = ("container_runtime", "container_image", "container_image_sha256")
 
 
 class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):

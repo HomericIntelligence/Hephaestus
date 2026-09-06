@@ -338,6 +338,9 @@ class LoopConfig:
     event_log_retention_days: int = DEFAULT_EVENT_LOG_RETENTION_DAYS
     event_log_retention_count: int = DEFAULT_EVENT_LOG_RETENTION_COUNT
     host_verification_pyxis_image: Path | None = None
+    host_verification_pyxis_sha256: str | None = None
+    host_verification_pyxis_authority: Path | None = None
+    host_verification_pyxis_quota_root: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1013,6 +1016,9 @@ def _build_pipeline_config(
         host_verification_pyxis_image=(
             cfg.host_verification_pyxis_image or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
         ),
+        host_verification_pyxis_sha256=cfg.host_verification_pyxis_sha256,
+        host_verification_pyxis_authority=cfg.host_verification_pyxis_authority,
+        host_verification_pyxis_quota_root=cfg.host_verification_pyxis_quota_root,
         projects_dir=cfg.projects_dir,
         repo_roots=cfg.repo_roots,
         json_out=args.json,
@@ -1250,6 +1256,9 @@ def main(argv: list[str] | None = None) -> int:
         event_log_retention_days=args.event_log_retention_days,
         event_log_retention_count=args.event_log_retention_count,
         host_verification_pyxis_image=args.host_verification_pyxis_image,
+        host_verification_pyxis_sha256=args.host_verification_pyxis_sha256,
+        host_verification_pyxis_authority=args.host_verification_pyxis_authority,
+        host_verification_pyxis_quota_root=args.host_verification_pyxis_quota_root,
         evidence_receipt_dir=args.evidence_receipt_dir,
     )
 

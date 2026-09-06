@@ -112,7 +112,9 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
     build_pyxis_environment as _build_pyxis_environment,
     build_pyxis_srun_command as _build_pyxis_srun_command,
+    stage_verified_pyxis_image as _stage_verified_pyxis_image,
     validate_pyxis_image as _validate_pyxis_image,
+    validate_pyxis_quota_root as _validate_pyxis_quota_root,
 )
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
@@ -880,6 +882,7 @@ _HOST_VERIFICATION_CPU_MAX_S = 240
 _HOST_VERIFICATION_PROCESS_HEADROOM = 64
 _HOST_VERIFICATION_POLL_S = 0.05
 _HOST_VERIFICATION_SETUP_TIMEOUT_S = 30
+_HOST_VERIFICATION_OPEN_FILES_MAX = 1024
 
 
 def _agent_exception_result(exc: Exception) -> JobResult:
@@ -1334,6 +1337,22 @@ def _host_verification_command(
         str(profile),
         *argv,
     )
+
+
+def _linux_resource_limited_command(command: tuple[str, ...], *, timeout_s: int) -> tuple[str, ...]:
+    """Apply inherited Linux limits before Slurm dispatches the fixed command."""
+    if timeout_s < 1:
+        raise _HostVerificationBoundaryError("host_verification_timeout_invalid")
+    cpu_limit = min(timeout_s, _HOST_VERIFICATION_CPU_MAX_S)
+    limits = (
+        "set -e; "
+        f"ulimit -S -t {cpu_limit}; "
+        f"ulimit -S -f {_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS}; "
+        f"ulimit -S -u {_HOST_VERIFICATION_PROCESS_HEADROOM}; "
+        f"ulimit -S -n {_HOST_VERIFICATION_OPEN_FILES_MAX}; "
+        'exec "$@"'
+    )
+    return ("/bin/sh", "-c", limits, "host-verification-linux-limits", *command)
 
 
 def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
@@ -3517,6 +3536,9 @@ class WorkerPool:
         rebase_policy_selector: RebasePolicySelector | None = None,
         evidence_receipt_dir: Path | None = None,
         host_verification_pyxis_image: Path | None = None,
+        host_verification_pyxis_sha256: str | None = None,
+        host_verification_pyxis_authority: Path | None = None,
+        host_verification_pyxis_quota_root: Path | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -3540,6 +3562,9 @@ class WorkerPool:
                 agent and Athena result receipts.
             host_verification_pyxis_image: Local Enroot squashfs image for Linux
                 immutable host verification.
+            host_verification_pyxis_sha256: Independent expected image digest.
+            host_verification_pyxis_authority: Host-owned image provenance file.
+            host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -3563,6 +3588,9 @@ class WorkerPool:
         self._pretest_capacity = size
         self._pretest_closed = False
         self._host_verification_pyxis_image = host_verification_pyxis_image
+        self._host_verification_pyxis_sha256 = host_verification_pyxis_sha256
+        self._host_verification_pyxis_authority = host_verification_pyxis_authority
+        self._host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
 
     @contextmanager
     def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
@@ -4930,7 +4958,14 @@ class WorkerPool:
         if not image_path.is_absolute():
             image_path = Path.cwd() / image_path
         try:
-            image = _validate_pyxis_image(image_path)
+            image = _validate_pyxis_image(
+                image_path,
+                expected_sha256=self._host_verification_pyxis_sha256,
+                provenance=self._host_verification_pyxis_authority,
+            )
+            if self._host_verification_pyxis_quota_root is None:
+                raise ValueError("Pyxis writable quota root is missing")
+            quota_root = _validate_pyxis_quota_root(self._host_verification_pyxis_quota_root)
         except (OSError, ValueError):
             return JobResult(
                 ok=False,
@@ -4948,8 +4983,17 @@ class WorkerPool:
         if git_executable is None:
             return JobResult(ok=False, error="host_verification_git_unavailable")
         try:
-            with tempfile.TemporaryDirectory(prefix="hephaestus-host-verification-") as temp_dir:
+            with (
+                tempfile.TemporaryDirectory(prefix="hephaestus-host-verification-") as temp_dir,
+                tempfile.TemporaryDirectory(
+                    prefix=".hephaestus-pyxis-exec-", dir=image.path.parent
+                ) as image_temp_dir,
+            ):
                 root = Path(temp_dir)
+                # Pyxis resolves the image on the execution host. Stage it on
+                # the same shared filesystem as the authorized source image.
+                staging = Path(image_temp_dir)
+                staged_image = _stage_verified_pyxis_image(image, staging)
                 source = root / "source"
                 source.mkdir()
                 archive, _archive_stderr = _bounded_git_archive(
@@ -4959,35 +5003,38 @@ class WorkerPool:
                 git_metadata = _prepare_immutable_git_metadata(
                     job.cwd, job.expected_head_sha, source, root, git_executable
                 )
-                scratch = root / "scratch"
-                scratch.mkdir(mode=0o777)
-                pi_smoke_logs = source / "pi-smoke-logs"
-                pi_smoke_logs.mkdir(mode=0o777)
-                _prepare_host_output_aliases(source, scratch)
-                _seal_host_runtime(source)
-                # The logs directory is the one source-side writable mount.
-                pi_smoke_logs.chmod(0o777)
-                environment = _build_pyxis_environment(source=source, scratch=scratch)
-                command = _build_pyxis_srun_command(
-                    image=image,
-                    source=source,
-                    runtime_environment=Path("/opt/hephaestus-venv"),
-                    git_metadata=git_metadata,
-                    scratch=scratch,
-                    pi_smoke_logs=pi_smoke_logs,
-                    argv=job.argv,
-                    environment=environment,
-                )
-                result = _run_bounded_host_command(
-                    command,
-                    validation_argv=job.argv,
-                    source=source,
-                    scratch=scratch,
-                    additional_writable_paths=(pi_smoke_logs,),
-                    environment=environment,
-                    timeout_s=job.timeout_s,
-                    shutdown=self._shutdown,
-                )
+                with tempfile.TemporaryDirectory(
+                    prefix="hephaestus-host-verification-run-", dir=quota_root
+                ) as quota_temp_dir:
+                    quota_run = Path(quota_temp_dir)
+                    scratch = quota_run / "scratch"
+                    scratch.mkdir(mode=0o700)
+                    pi_smoke_logs = quota_run / "pi-smoke-logs"
+                    pi_smoke_logs.mkdir(mode=0o700)
+                    (source / "pi-smoke-logs").mkdir()
+                    _prepare_host_output_aliases(source, scratch)
+                    _seal_host_runtime(source)
+                    environment = _build_pyxis_environment(source=source, scratch=scratch)
+                    command = _build_pyxis_srun_command(
+                        image=staged_image,
+                        source=source,
+                        git_metadata=git_metadata,
+                        scratch=scratch,
+                        pi_smoke_logs=pi_smoke_logs,
+                        argv=job.argv,
+                        environment=environment,
+                        timeout_s=job.timeout_s,
+                    )
+                    result = _run_bounded_host_command(
+                        _linux_resource_limited_command(command, timeout_s=job.timeout_s),
+                        validation_argv=job.argv,
+                        source=source,
+                        scratch=scratch,
+                        additional_writable_paths=(pi_smoke_logs,),
+                        environment=environment,
+                        timeout_s=job.timeout_s,
+                        shutdown=self._shutdown,
+                    )
                 checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
                 if checkout_error is not None:
                     return JobResult(
@@ -5001,9 +5048,13 @@ class WorkerPool:
                     result,
                     value={
                         **result_value,
-                        "container_image": str(image.path),
-                        "container_image_sha256": image.sha256,
-                        "container_runtime": image.container_runtime,
+                        "container_image": str(staged_image.path),
+                        "container_image_sha256": staged_image.sha256,
+                        "container_image_id": staged_image.container_image_id,
+                        "container_image_reference": staged_image.container_image_reference,
+                        "containerfile_sha256": staged_image.containerfile_sha256,
+                        "container_source_revision": staged_image.source_revision,
+                        "container_runtime": staged_image.container_runtime,
                         "head_sha": job.expected_head_sha,
                         "immutable_source": True,
                         "platform": "linux",

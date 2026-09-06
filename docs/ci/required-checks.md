@@ -91,23 +91,32 @@ run is early failure feedback only; it does not grant
 
 Linux PR-review host verification runs the candidate command in a read-only
 Pyxis/Enroot container. The host mounts the candidate source and Git metadata
-read-only, and uses separate writable scratch and Pi-log paths. The container
-has no network namespace and receives a scrubbed offline environment. The
-image must be a regular local squashfs file with a matching `.sha256` sidecar.
-The preparation command also records the OCI image ID and image digest in a
-local JSON provenance record:
+read-only. It mounts scratch and Pi logs from an owner-private filesystem whose
+total capacity is not more than 1 GiB. Slurm enforces the CPU, memory, process,
+file-size, and wall-clock limits. The container has no network namespace and
+receives a scrubbed offline environment.
+
+The preparation command builds an exact committed Git tree. It exports the
+immutable local OCI image ID, not a mutable tag. It writes an owner-read-only
+squashfs and a separate owner-read-only authority file:
 
 ```bash
 just host-verification-pyxis-image
 ```
 
-Use `--host-verification-pyxis-image PATH` to select another attested local
-image. Missing Pyxis, Enroot, the image, or its digest proof produces a failed
-host-verification receipt. It does not produce a passing skip. The opt-in
-integration test skips by default; run it with
-`--require-pyxis-host-verification` only on a host with a real Pyxis/Enroot
-allocation. macOS continues to use its native sandbox boundary. Other
-platforms remain fail-closed until a reviewed isolation backend exists.
+The command prints the exact digest and authority path. Supply them with
+`--host-verification-pyxis-sha256 SHA256` and
+`--host-verification-pyxis-authority PATH`. Supply the dedicated filesystem
+with `--host-verification-pyxis-quota-root PATH`. The worker verifies the
+authority, copies the authorized bytes to a private digest-named path, and
+executes only that copy. It does not mount a host virtual environment.
+
+The authoritative Linux host lane must run the integration test with
+`--require-pyxis-host-verification`. Missing Pyxis, Enroot, an allocation, the
+image authority, or the bounded filesystem causes a failure in that lane. It
+does not produce a passing skip. macOS continues to use its native sandbox
+boundary. Other platforms remain fail-closed until a reviewed isolation
+backend exists.
 
 ## Current required contexts
 

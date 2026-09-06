@@ -323,6 +323,9 @@ class PipelineConfig:
     host_verification_pyxis_image: Path = field(
         default_factory=lambda: DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
     )
+    host_verification_pyxis_sha256: str | None = None
+    host_verification_pyxis_authority: Path | None = None
+    host_verification_pyxis_quota_root: Path | None = None
 
     @property
     def enable_advise(self) -> bool:

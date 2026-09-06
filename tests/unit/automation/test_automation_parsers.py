@@ -187,16 +187,36 @@ def _gh_extra_path_root_spec() -> ActionSpec:
     )
 
 
-def _host_verification_pyxis_image_spec() -> ActionSpec:
-    """Return the local Pyxis image path option spec."""
-    return _action_spec(
-        ("--host-verification-pyxis-image",),
-        "host_verification_pyxis_image",
-        "_StoreAction",
-        None,
-        help_text=(
-            "Local Enroot squashfs path for Linux host verification. The path "
-            "must have a matching .sha256 sidecar."
+def _host_verification_pyxis_specs() -> tuple[ActionSpec, ...]:
+    """Return the independent Linux Pyxis trust option specs."""
+    return (
+        _action_spec(
+            ("--host-verification-pyxis-image",),
+            "host_verification_pyxis_image",
+            "_StoreAction",
+            None,
+            help_text="Owner-only local Enroot squashfs path for Linux host verification.",
+        ),
+        _action_spec(
+            ("--host-verification-pyxis-sha256",),
+            "host_verification_pyxis_sha256",
+            "_StoreAction",
+            None,
+            help_text="Expected squashfs SHA-256 from a separate host-owned authority.",
+        ),
+        _action_spec(
+            ("--host-verification-pyxis-authority",),
+            "host_verification_pyxis_authority",
+            "_StoreAction",
+            None,
+            help_text="Owner-only provenance authority for the expected squashfs.",
+        ),
+        _action_spec(
+            ("--host-verification-pyxis-quota-root",),
+            "host_verification_pyxis_quota_root",
+            "_StoreAction",
+            None,
+            help_text="Private Linux filesystem with a verified maximum 1 GiB capacity.",
         ),
     )
 
@@ -285,7 +305,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ),
         _agent_spec(),
         _gh_extra_path_root_spec(),
-        _host_verification_pyxis_image_spec(),
+        *_host_verification_pyxis_specs(),
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and agent calls (classify + preview only).")
         ),
@@ -392,7 +412,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ),
         _agent_spec(),
         _gh_extra_path_root_spec(),
-        _host_verification_pyxis_image_spec(),
+        *_host_verification_pyxis_specs(),
         _max_workers_spec(COMMON_REVIEW_MAX_WORKERS),
         *_github_throttle_specs(),
         _dry_run_spec(
@@ -446,7 +466,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             ),
         ),
         _agent_spec(),
-        _host_verification_pyxis_image_spec(),
+        *_host_verification_pyxis_specs(),
         _max_workers_spec(COMMON_REVIEW_MAX_WORKERS),
         _dry_run_spec(
             _dry_help("Suppress GitHub writes and git pushes (no comments, no merges, no pushes).")
@@ -518,7 +538,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ),
         _agent_spec(),
         _gh_extra_path_root_spec(),
-        _host_verification_pyxis_image_spec(),
+        *_host_verification_pyxis_specs(),
         _store_true(
             "--analyze",
             "analyze",
@@ -603,7 +623,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _version_spec(),
     ),
     "loop_runner": (
-        _host_verification_pyxis_image_spec(),
+        *_host_verification_pyxis_specs(),
         _dry_run_spec(
             _dry_help(
                 "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."
