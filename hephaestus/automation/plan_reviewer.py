@@ -24,6 +24,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resolve_agent,
@@ -743,14 +744,20 @@ def main() -> int:
     """
     args = _parse_args()
     configure_cli_logging(verbose=args.verbose, log_format=args.log_format)
-    agent = resolve_agent(
-        args.agent,
-        disable_pi_automation=args.disable_pi_automation,
-        auth_status_timeout=args.auth_status_timeout,
-        pi_isolation_adapter=args.pi_isolation_adapter,
-        pi_dir=args.pi_dir,
-        model_references=(args.reviewer_model or args.model,),
-    )
+    try:
+        agent = resolve_agent(
+            args.agent,
+            disable_pi_automation=args.disable_pi_automation,
+            auth_status_timeout=args.auth_status_timeout,
+            pi_isolation_adapter=args.pi_isolation_adapter,
+            pi_dir=args.pi_dir,
+            model_references=(
+                args.reviewer_model or args.model,
+                args.fallback_model or args.model,
+            ),
+        )
+    except UnknownModelAliasError as exc:
+        _build_parser().error(str(exc))
 
     log = logging.getLogger(__name__)
 

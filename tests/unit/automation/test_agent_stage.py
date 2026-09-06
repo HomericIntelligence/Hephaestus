@@ -237,10 +237,16 @@ def test_main_normalizes_codex_alias_before_agent_execution(
     assert seen["model"] == "gpt-5.6-terra:high"
 
 
-def test_main_rejects_unknown_codex_alias_before_agent_or_prompt_work(
+@pytest.mark.parametrize(
+    ("agent", "model"),
+    [("codex", "terra-lite:high"), ("claude", "terra-lite:high")],
+)
+def test_main_rejects_unknown_fixed_provider_alias_before_agent_or_prompt_work(
     tmp_path: Path,
+    agent: str,
+    model: str,
 ) -> None:
-    """An unknown Codex alias fails before authentication or prompt work."""
+    """An unknown fixed-provider alias fails before authentication or prompt work."""
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("stage prompt", encoding="utf-8")
 
@@ -261,9 +267,9 @@ def test_main_rejects_unknown_codex_alias_before_agent_or_prompt_work(
                 "--output",
                 str(tmp_path / "out.txt"),
                 "--agent",
-                "codex",
+                agent,
                 "--model",
-                "terra-lite:high",
+                model,
             ]
         )
 

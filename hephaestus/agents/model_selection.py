@@ -107,6 +107,7 @@ _CODEX_ROLE_MODEL_IDS = frozenset(
 _SHORT_MODEL_ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _CODEX_LEGACY_ALIASES = frozenset({"fable", "opus", "sonnet", "haiku"})
 _CODEX_ALIAS_PREFIXES = tuple(f"{alias}-" for alias in (*CODEX_ROLE_MODEL_ALIASES, "astra"))
+_CLAUDE_MODEL_ALIASES = frozenset({"fable", "mythos"})
 
 
 def _normalize_model_id(model: str) -> str:
@@ -133,7 +134,7 @@ def normalize_model_reference(reference: str) -> str:
 
 
 class UnknownModelAliasError(ValueError):
-    """Raised when a Codex reference uses an unknown short alias."""
+    """Raised when a fixed-provider reference uses an unknown alias."""
 
 
 def resolve_codex_model_selection(reference: str) -> AgentModelSelection:
@@ -185,6 +186,22 @@ def validate_codex_role_model_reference(reference: str) -> None:
     )
 
 
+def validate_claude_model_reference(reference: str) -> None:
+    """Reject an unknown alias in a Claude model reference."""
+    selection = parse_model_selection(reference)
+    model = selection.model
+    if not model:
+        return
+
+    model_key = model.casefold()
+    if model_key in _CLAUDE_MODEL_ALIASES or model_key.startswith("claude-") or "/" in model:
+        return
+
+    raise UnknownModelAliasError(
+        f"Unknown Claude model alias {model!r}; use fable, mythos, or a full model ID"
+    )
+
+
 __all__ = [
     "CODEX_ROLE_MODEL_ALIASES",
     "GPT_6_ASTRA",
@@ -204,5 +221,6 @@ __all__ = [
     "normalize_model_reference",
     "parse_model_selection",
     "resolve_codex_model_selection",
+    "validate_claude_model_reference",
     "validate_codex_role_model_reference",
 ]

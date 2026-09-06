@@ -77,12 +77,12 @@ def test_timeout_flags_thread_into_pipeline_config() -> None:
             "--reviewer-timeout",
             "12",
             "--reviewer-model",
-            "review-model",
+            "claude-review-model",
         ]
     )
     config = captured["config"]
     assert (config.planner_timeout, config.reviewer_timeout) == (11, 12)
-    assert config.reviewer_model == "review-model"
+    assert config.reviewer_model == "claude-review-model"
 
 
 def test_codex_role_aliases_reach_planner_config() -> None:

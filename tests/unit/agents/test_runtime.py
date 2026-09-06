@@ -4060,6 +4060,15 @@ def test_resolve_agent_rejects_unknown_codex_alias_before_authentication(referen
     authenticated.assert_not_called()
 
 
+def test_resolve_agent_rejects_unknown_claude_alias_before_authentication() -> None:
+    """Claude alias validation runs before the provider authentication probe."""
+    with patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated:
+        with pytest.raises(ValueError, match="Unknown Claude model alias"):
+            agent_runtime.resolve_agent("claude", model_references=("terra-lite:high",))
+
+    authenticated.assert_not_called()
+
+
 def test_resolve_agent_explicit_rejects_uninstalled_agent() -> None:
     """An explicit --agent for a CLI not on PATH should fail immediately."""
     with patch("hephaestus.agents.runtime.shutil.which", return_value=None):
