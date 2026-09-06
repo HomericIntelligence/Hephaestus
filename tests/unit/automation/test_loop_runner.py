@@ -1004,7 +1004,7 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
         auth_status_timeout=10,
         pi_isolation_adapter=None,
         pi_dir=None,
-        model_references=("", "", ""),
+        model_references=("", "", "", ""),
     )
     assert config.agent == "codex"  # type: ignore[attr-defined]
 
@@ -1013,18 +1013,22 @@ def test_main_rejects_unknown_codex_alias_before_scope_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The loop rejects an unknown alias before repository discovery or dispatch."""
+
+    def reject_unknown_fallback(agent: str | None, **kwargs: object) -> str:
+        assert agent == "codex"
+        assert kwargs["model_references"] == ("", "", "", "unknown")
+        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+
     monkeypatch.setattr(
         loop_runner,
         "resolve_agent",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            UnknownModelAliasError("Unknown Codex model alias 'unknown'")
-        ),
+        reject_unknown_fallback,
     )
     resolve_scope = patch.object(loop_runner, "_resolve_org_and_repos")
     run_pipeline = patch("hephaestus.automation.pipeline.coordinator.run_pipeline")
     with resolve_scope as mock_resolve_scope, run_pipeline as mock_run_pipeline:
         with pytest.raises(SystemExit) as error:
-            main(["--agent", "codex", "--model", "unknown:high"])
+            main(["--agent", "codex", "--fallback-model", "unknown"])
 
     assert error.value.code == 2
     mock_resolve_scope.assert_not_called()

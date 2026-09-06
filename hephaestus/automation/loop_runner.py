@@ -1079,6 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.planner_model or args.model,
                 args.reviewer_model or args.model,
                 args.implementer_model or args.model,
+                args.fallback_model or args.model,
             ),
         )
     except UnknownModelAliasError as exc:

@@ -135,6 +135,7 @@ def test_affected_cli_mains_forward_logging_arguments(module_name: str) -> None:
         model=None,
         planner_model=None,
         reviewer_model=None,
+        fallback_model=None,
     )
 
     with ExitStack() as stack:

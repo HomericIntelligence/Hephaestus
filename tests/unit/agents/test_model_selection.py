@@ -50,6 +50,17 @@ def test_codex_role_alias_map_is_immutable_and_complete() -> None:
         )
         aliases["other"] = model_selection.AgentModelSelection("gpt-5.6-other", "high")
 
+    with pytest.raises(AttributeError):
+        object.__setattr__(
+            model_selection.CODEX_ROLE_MODEL_ALIASES["sol"], "model", "unapproved-model"
+        )
+    with pytest.raises(AttributeError):
+        object.__setattr__(
+            model_selection.CODEX_ROLE_MODEL_ALIASES["terra"], "reasoning_effort", "low"
+        )
+    with pytest.raises(AttributeError):
+        _ = model_selection.CODEX_ROLE_MODEL_ALIASES["luna"].__dict__
+
 
 @pytest.mark.parametrize(
     ("reference", "expected"),

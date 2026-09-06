@@ -107,12 +107,29 @@ def test_codex_role_aliases_reach_planner_config() -> None:
 
 def test_main_rejects_unknown_codex_alias_before_repo_resolution() -> None:
     """Planner rejects an unknown alias before repository or pipeline work."""
+
+    def reject_unknown_fallback(agent: str | None, **kwargs: Any) -> str:
+        assert agent == "codex"
+        assert kwargs["model_references"] == ("", "", "unknown")
+        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+
     with (
-        patch("sys.argv", ["hephaestus-plan-issues", "--issues", "123"]),
+        patch(
+            "sys.argv",
+            [
+                "hephaestus-plan-issues",
+                "--issues",
+                "123",
+                "--agent",
+                "codex",
+                "--fallback-model",
+                "unknown",
+            ],
+        ),
         patch.object(
             planner_mod,
             "resolve_agent",
-            side_effect=UnknownModelAliasError("Unknown Codex model alias 'unknown'"),
+            side_effect=reject_unknown_fallback,
         ),
         patch.object(planner_mod, "_resolve_repo") as resolve_repo,
         patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,

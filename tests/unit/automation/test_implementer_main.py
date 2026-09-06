@@ -130,12 +130,30 @@ def test_main_rejects_unknown_codex_alias_before_state_or_pipeline_work(
     tmp_path: Path,
 ) -> None:
     """Implementer rejects an unknown alias before state or pipeline work."""
+
+    def reject_unknown_fallback(agent: str | None, **kwargs: Any) -> str:
+        assert agent == "codex"
+        assert kwargs["model_references"] == ("", "", "unknown")
+        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+
     with (
-        patch.object(sys, "argv", ["hephaestus-implement-issues", "--issues", "123"]),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "hephaestus-implement-issues",
+                "--issues",
+                "123",
+                "--agent",
+                "codex",
+                "--fallback-model",
+                "unknown",
+            ],
+        ),
         patch.object(
             implementer_mod,
             "resolve_agent",
-            side_effect=UnknownModelAliasError("Unknown Codex model alias 'unknown'"),
+            side_effect=reject_unknown_fallback,
         ),
         patch.object(implementer_mod, "get_repo_root", return_value=tmp_path) as get_repo_root,
         patch.object(implementer_mod, "_resolve_repo") as resolve_repo,

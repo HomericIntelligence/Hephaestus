@@ -515,6 +515,7 @@ def main() -> int:
             model_references=(
                 args.implementer_model or args.model,
                 args.reviewer_model or args.model,
+                args.fallback_model or args.model,
             ),
         )
     except UnknownModelAliasError as exc:

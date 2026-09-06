@@ -68,16 +68,24 @@ _IFM_ALIASES: dict[str, str] = {
 class AgentModelSelection(str):
     """A canonical model identifier and its optional reasoning effort."""
 
-    model: str
-    reasoning_effort: str
+    __slots__ = ()
 
     def __new__(cls, model: str, reasoning_effort: str = "") -> AgentModelSelection:
         """Create a string-compatible selection with separate model metadata."""
         reference = f"{model}:{reasoning_effort}" if reasoning_effort else model
-        selection = super().__new__(cls, reference)
-        selection.model = model
-        selection.reasoning_effort = reasoning_effort
-        return selection
+        return super().__new__(cls, reference)
+
+    @property
+    def model(self) -> str:
+        """Return the model part of the selection."""
+        model, separator, effort = self.rpartition(":")
+        return model if separator and effort else str(self)
+
+    @property
+    def reasoning_effort(self) -> str:
+        """Return the optional reasoning-effort part of the selection."""
+        _model, separator, effort = self.rpartition(":")
+        return effort if separator and effort else ""
 
     @property
     def reference(self) -> str:
