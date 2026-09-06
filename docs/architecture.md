@@ -1554,13 +1554,15 @@ source-capable job whose raw `cwd` is the reusable primary checkout is rejected
 before provider resolution.
 
 The reusable default-branch checkout is only the Git synchronization and
-worktree-management control plane. For each issue or linked PR, all writer-side
-source reads reuse `build/.worktrees/auto-<#>-impl`; all reviewer-side source
-reads reuse the detached `build/.worktrees/auto-<#>-review`. Changed revisions
-rebind the same path and increment its receipt generation. Review never creates
-a review branch. The stable `auto-<#>-guard` ref is a CAS-protected ownership
-record only and never owns a third worktree. Dirty lanes and lanes with durable
-learning or cleanup obligations are preserved.
+worktree-management control plane. For each issue or linked PR, planning and
+reviewer source reads reuse the detached
+`build/.worktrees/auto-<#>-review` source at the captured default-branch
+revision. Implementation, remediation, and writer recovery source reads reuse
+`build/.worktrees/auto-<#>-impl`. Changed revisions rebind the same path and
+increment its receipt generation. Review never creates a review branch. The
+stable `auto-<#>-guard` ref is a CAS-protected ownership record only and never
+owns a third worktree. Dirty lanes and lanes with durable learning or cleanup
+obligations are preserved.
 The exhaustive classification is maintained in the
 [source-agent workspace inventory](source-agent-workspace-inventory.md).
 

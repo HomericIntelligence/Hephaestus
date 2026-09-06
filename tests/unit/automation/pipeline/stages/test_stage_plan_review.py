@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.agents.model_selection import AgentModelSelection
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_learning_preparation import (
@@ -758,6 +760,39 @@ class TestPlanReviewStageStep:
         assert result.job.prompt_kwargs["prior_review"] is None  # first round
         assert result.job.prompt_kwargs["plan_text"] == "# Plan"
 
+    def test_review_wait_uses_captured_default_branch_source(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Review ignores stale implementation and PR revisions."""
+        calls: list[tuple[Any, ...]] = []
+        binding = SimpleNamespace(cwd=Path("/tmp/planning"), revision="a" * 40, detached=True)
+
+        class Manager:
+            def prepare(self, *args: Any, **kwargs: Any) -> object:
+                calls.append((*args, kwargs))
+                return binding
+
+        item = make_work_item(
+            issue=2998,
+            state="REVIEW_WAIT",
+            payload={
+                "plan_text": "# Plan",
+                "_worktree_cleanup_head_sha": "b" * 40,
+                "_impl_source_revision": "c" * 40,
+                "reviewed_pr_head_sha": "d" * 40,
+                "pr_head_sha": "e" * 40,
+                "_synced_default_branch_sha": "a" * 40,
+            },
+        )
+        ctx = make_ctx(paths=SimpleNamespace(source_workspaces=Manager()))
+
+        result = PlanReviewStage().step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.workspace is binding
+        assert calls == [(2998, SourceLane.REVIEW, "a" * 40, {"branch": None})]
+
     def test_review_wait_threads_prior_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """A later review round passes the prior review text to the prompt."""
         stage = PlanReviewStage()
@@ -1241,6 +1276,38 @@ class TestPlanReviewStageStep:
             "prior_review": "Feedback: improve clarity",
             "plan_history": "",
         }
+
+    def test_amend_wait_uses_captured_default_branch_source(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Amendment ignores stale implementation and PR revisions."""
+        calls: list[tuple[Any, ...]] = []
+        binding = SimpleNamespace(cwd=Path("/tmp/planning"), revision="a" * 40, detached=True)
+
+        class Manager:
+            def prepare(self, *args: Any, **kwargs: Any) -> object:
+                calls.append((*args, kwargs))
+                return binding
+
+        item = make_work_item(
+            issue=2998,
+            state="AMEND_WAIT",
+            payload={
+                "_worktree_cleanup_head_sha": "b" * 40,
+                "_impl_source_revision": "c" * 40,
+                "reviewed_pr_head_sha": "d" * 40,
+                "pr_head_sha": "e" * 40,
+                "_synced_default_branch_sha": "a" * 40,
+            },
+        )
+        ctx = make_ctx(paths=SimpleNamespace(source_workspaces=Manager()))
+
+        result = PlanReviewStage().step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.workspace is binding
+        assert calls == [(2998, SourceLane.REVIEW, "a" * 40, {"branch": None})]
 
     def test_plan_review_never_submits_learning_job(
         self, make_ctx: Any, make_work_item: Any

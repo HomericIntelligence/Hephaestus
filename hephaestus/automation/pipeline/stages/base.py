@@ -109,6 +109,7 @@ __all__ = [
     "WorkItem",
     "agent_provider",
     "athena_advise_failure_reason",
+    "planning_source_workspace_binding",
     "source_workspace_binding",
     "stage_model",
     "stage_timeout",
@@ -785,14 +786,18 @@ def source_workspace_binding(
     item_number = item.issue or item.pr
     if item_number is None:
         raise RuntimeError("source workspace requires an issue or pull request number")
-    target = revision or str(
-        item.payload.get("_worktree_cleanup_head_sha")
-        or item.payload.get("_impl_source_revision")
-        or item.payload.get("reviewed_pr_head_sha")
-        or item.payload.get("pr_head_sha")
-        or item.payload.get("_synced_default_branch_sha")
-        or item.payload.get("_direct_scope_base_sha")
-        or ""
+    target = (
+        revision
+        if revision is not None
+        else str(
+            item.payload.get("_worktree_cleanup_head_sha")
+            or item.payload.get("_impl_source_revision")
+            or item.payload.get("reviewed_pr_head_sha")
+            or item.payload.get("pr_head_sha")
+            or item.payload.get("_synced_default_branch_sha")
+            or item.payload.get("_direct_scope_base_sha")
+            or ""
+        )
     )
     if len(target) != 40:
         raise RuntimeError("source workspace requires a captured full revision")
@@ -816,6 +821,32 @@ def source_workspace_binding(
     if lane is SourceLane.IMPLEMENTATION:
         item.payload["_impl_source_revision"] = binding.revision
     return cast(WorkspaceBinding, binding)
+
+
+def planning_source_workspace_binding(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    preparation_timeout_s: float | None = None,
+) -> WorkspaceBinding | None:
+    """Prepare the detached review lane for a planning source read.
+
+    Planning uses the captured default-branch revision. It does not use
+    implementation, cleanup, or pull-request revisions because those values
+    can refer to a preserved writer workspace or a stale source.
+    """
+    synced_revision = item.payload.get("_synced_default_branch_sha")
+    if synced_revision is None:
+        synced_revision = item.payload.get("_direct_scope_base_sha")
+    selected_revision = synced_revision if isinstance(synced_revision, str) else ""
+    return source_workspace_binding(
+        item,
+        ctx,
+        SourceLane.REVIEW,
+        revision=selected_revision,
+        branch=None,
+        preparation_timeout_s=preparation_timeout_s,
+    )
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
