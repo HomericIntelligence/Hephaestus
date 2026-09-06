@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import SupportsIndex
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from hephaestus.automation import pr_manager
-from hephaestus.automation.commit_paths import reject_filtered_path_shape_changes
+from hephaestus.automation.commit_paths import (
+    CommitPaths,
+    is_bounded_commit_paths,
+    reject_filtered_path_shape_changes,
+)
 
 
 def _status(stdout: str = "") -> MagicMock:
@@ -185,14 +191,65 @@ class TestSelectCommitPaths:
 
     def test_high_cardinality_filtered_paths_use_bounded_prefix_work(self) -> None:
         """Many paths do not create a selected-by-filtered cross-product."""
-        entries = tuple(("??", f"safe/{index}.txt") for index in range(10_000)) + tuple(
-            ("??", f"secrets/{index}.pem") for index in range(10_000)
-        )
-        selected = pr_manager._select_commit_paths(entries, None)
+        prefix_checks = 0
+
+        class CountingPath(str):
+            """Count prefix comparisons without depending on machine timing."""
+
+            def startswith(
+                self,
+                prefix: str | tuple[str, ...],
+                start: SupportsIndex | None = 0,
+                end: SupportsIndex | None = None,
+            ) -> bool:
+                nonlocal prefix_checks
+                prefix_checks += 1
+                if prefix_checks > 1_000:
+                    raise AssertionError("Path classification used pairwise prefix checks")
+                if end is None:
+                    return super().startswith(prefix, start)
+                return super().startswith(prefix, start, end)
+
+        selected_paths = tuple(CountingPath(f"safe/{index}.txt") for index in range(100))
+        filtered_paths = tuple(CountingPath(f"secrets/{index}.pem") for index in range(100))
+        entries = tuple(("??", path) for path in selected_paths + filtered_paths)
+        selected = pr_manager._CommitPaths(add_paths=selected_paths, update_paths=())
 
         reject_filtered_path_shape_changes(entries, selected)
 
-        assert len(selected.add_paths) == 10_000
+        assert prefix_checks <= 1_000
+
+    @pytest.mark.parametrize(
+        "paths",
+        (
+            CommitPaths(("same.py", "same.py"), ()),
+            CommitPaths((), ("same.py", "same.py")),
+        ),
+    )
+    def test_bounded_manifest_rejects_duplicates_within_one_operation(
+        self, paths: CommitPaths
+    ) -> None:
+        """One staging operation cannot contain the same path two times."""
+        assert not is_bounded_commit_paths(paths, max_paths=10, max_bytes=1_000)
+
+    @pytest.mark.parametrize(
+        "path",
+        ("dir//file.py", "dir/./file.py", "./file.py", "dir/../file.py"),
+    )
+    def test_bounded_manifest_rejects_unnormalized_paths(self, path: str) -> None:
+        """A host manifest contains only canonical repository-relative paths."""
+        assert not is_bounded_commit_paths(
+            CommitPaths((path,), ()),
+            max_paths=10,
+            max_bytes=1_000,
+        )
+
+    def test_bounded_manifest_permits_one_path_in_each_operation(self) -> None:
+        """A staged deletion can also have a present worktree replacement."""
+        paths = CommitPaths(("node",), ("node",))
+
+        assert is_bounded_commit_paths(paths, max_paths=2, max_bytes=100)
+        assert not is_bounded_commit_paths(paths, max_paths=1, max_bytes=100)
 
     def test_escapes_control_characters_in_skip_logs(
         self, caplog: pytest.LogCaptureFixture
@@ -228,64 +285,92 @@ class TestSelectCommitPaths:
 class TestStageCommitPaths:
     """Tests for staging selected paths."""
 
+    def test_near_limit_manifest_keeps_each_path_out_of_argv(self) -> None:
+        """A large inspected manifest reaches Git through NUL-delimited files."""
+        update_paths = tuple(f"old/{index:03d}-{'x' * 116}" for index in range(256))
+        add_paths = tuple(f"new/{index:03d}-{'x' * 116}" for index in range(256))
+        update_payload = b"\0".join(os.fsencode(path) for path in update_paths) + b"\0"
+        add_payload = b"\0".join(os.fsencode(path) for path in add_paths) + b"\0"
+        assert 60 * 1024 < len(update_payload) + len(add_payload) < 64 * 1024
+        paths = CommitPaths(add_paths=add_paths, update_paths=update_paths)
+        worktree_path = Path("/tmp/worktree")
+
+        with (
+            patch.object(pr_manager, "run", return_value=_status()) as run_mock,
+            patch.object(Path, "write_bytes", autospec=True, return_value=1) as write_bytes,
+        ):
+            pr_manager._stage_commit_paths(paths, worktree_path, git_timeout=19)
+
+        assert run_mock.call_args_list[0].args[0] == ["git", "read-tree", "HEAD"]
+        remove_command = run_mock.call_args_list[1].args[0]
+        add_command = run_mock.call_args_list[2].args[0]
+        assert remove_command[:-2] == [
+            "git",
+            "--literal-pathspecs",
+            "rm",
+            "-r",
+            "-f",
+            "--cached",
+            "--ignore-unmatch",
+        ]
+        assert add_command[:-2] == ["git", "--literal-pathspecs", "add", "-A"]
+        assert remove_command[-1] == add_command[-1] == "--pathspec-file-nul"
+        manifest_paths = (*update_paths, *add_paths)
+        assert all(
+            path not in command
+            for path in manifest_paths
+            for command in (remove_command, add_command)
+        )
+        update_manifest = Path(remove_command[-2].split("=", 1)[1])
+        add_manifest = Path(add_command[-2].split("=", 1)[1])
+        assert write_bytes.call_args_list == [
+            call(update_manifest, update_payload),
+            call(add_manifest, add_payload),
+        ]
+
     def test_stages_deleted_paths_before_regular_paths_with_timeout(self) -> None:
         paths = pr_manager._CommitPaths(
             add_paths=("src/add.py", 'src/quote"name.py'),
             update_paths=("src/delete.py",),
         )
         worktree_path = Path("/tmp/worktree")
-        with patch.object(
-            pr_manager,
-            "run",
-            side_effect=[_status("src/delete.py\0"), _status(), _status(), _status()],
-        ) as run_mock:
+        with (
+            patch.object(
+                pr_manager,
+                "run",
+                side_effect=[_status(), _status(), _status()],
+            ) as run_mock,
+            patch.object(Path, "write_bytes", autospec=True, return_value=1) as write_bytes,
+        ):
             pr_manager._stage_commit_paths(paths, worktree_path, git_timeout=19)
 
-        assert run_mock.call_args_list == [
-            call(
-                [
-                    "git",
-                    "--literal-pathspecs",
-                    "ls-tree",
-                    "-r",
-                    "-z",
-                    "--name-only",
-                    "HEAD",
-                    "--",
-                    "src/delete.py",
-                ],
-                cwd=worktree_path,
-                timeout=19,
-            ),
-            call(
-                ["git", "read-tree", "HEAD"],
-                cwd=worktree_path,
-                timeout=19,
-            ),
-            call(
-                [
-                    "git",
-                    "--literal-pathspecs",
-                    "update-index",
-                    "--force-remove",
-                    "--",
-                    "src/delete.py",
-                ],
-                cwd=worktree_path,
-                timeout=19,
-            ),
-            call(
-                [
-                    "git",
-                    "--literal-pathspecs",
-                    "add",
-                    "--",
-                    "src/add.py",
-                    'src/quote"name.py',
-                ],
-                cwd=worktree_path,
-                timeout=19,
-            ),
+        assert run_mock.call_args_list[0] == call(
+            ["git", "read-tree", "HEAD"],
+            cwd=worktree_path,
+            timeout=19,
+        )
+        remove_command = run_mock.call_args_list[1].args[0]
+        assert remove_command[:7] == [
+            "git",
+            "--literal-pathspecs",
+            "rm",
+            "-r",
+            "-f",
+            "--cached",
+            "--ignore-unmatch",
+        ]
+        assert remove_command[-1] == "--pathspec-file-nul"
+        update_manifest = Path(remove_command[-2].split("=", 1)[1])
+        assert update_manifest.name == "update-paths"
+        add_command = run_mock.call_args_list[2].args[0]
+        assert add_command[:4] == ["git", "--literal-pathspecs", "add", "-A"]
+        assert add_command[-1] == "--pathspec-file-nul"
+        add_manifest = Path(add_command[-2].split("=", 1)[1])
+        assert add_manifest.name == "add-paths"
+        assert update_manifest.parent == add_manifest.parent
+        assert write_bytes.call_args_list == [
+            call(update_manifest, b"src/delete.py\0"),
+            call(add_manifest, b'src/add.py\0src/quote"name.py\0'),
         ]
 
     def test_discards_a_prestaged_secret_before_staging_safe_paths(self, tmp_path: Path) -> None:
@@ -375,6 +460,32 @@ class TestCommitWithSignature:
 
         run_mock.assert_called_once_with(
             ["git", "commit", "-S", "-s", "-m", "refactor: split commit helper"],
+            cwd=worktree_path,
+            timeout=23,
+        )
+
+    def test_recovery_commit_disables_hooks_for_one_command(self) -> None:
+        """A validated recovery commit bypasses repository hooks only once."""
+        worktree_path = Path("/tmp/worktree")
+        with patch.object(pr_manager, "run") as run_mock:
+            pr_manager._commit_with_signature(
+                "fix: recover push",
+                worktree_path,
+                23,
+                disable_hooks=True,
+            )
+
+        run_mock.assert_called_once_with(
+            [
+                "git",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "commit",
+                "-S",
+                "-s",
+                "-m",
+                "fix: recover push",
+            ],
             cwd=worktree_path,
             timeout=23,
         )

@@ -7,10 +7,11 @@ and GitHub-API calls.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -38,6 +39,38 @@ def _status(stdout: str = "", returncode: int = 0) -> MagicMock:
 def _porcelain(*records: str) -> str:
     """Build mocked ``git status --porcelain=v1 -z`` output."""
     return "\0".join(records) + ("\0" if records else "")
+
+
+def _assert_nul_pathspec(
+    command: list[str],
+    write_bytes: Mock,
+    expected_paths: tuple[str, ...],
+    *,
+    operation: str = "add",
+) -> None:
+    """Assert that one Git staging command uses an exact NUL path manifest."""
+    expected_prefix = (
+        ["git", "--literal-pathspecs", "add", "-A"]
+        if operation == "add"
+        else [
+            "git",
+            "--literal-pathspecs",
+            "rm",
+            "-r",
+            "-f",
+            "--cached",
+            "--ignore-unmatch",
+        ]
+    )
+    assert command[: len(expected_prefix)] == expected_prefix
+    assert command[-1] == "--pathspec-file-nul"
+    manifest_argument = command[-2]
+    assert manifest_argument.startswith("--pathspec-from-file=")
+    manifest_path = Path(manifest_argument.removeprefix("--pathspec-from-file="))
+    assert manifest_path.name == f"{operation}-paths"
+    assert manifest_path.parent.name.startswith("hephaestus-commit-pathspec-")
+    expected = b"\0".join(os.fsencode(path) for path in expected_paths) + b"\0"
+    write_bytes.assert_any_call(manifest_path, expected)
 
 
 def _assert_metadata_fences(
@@ -271,15 +304,12 @@ class TestCommitChanges:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+            patch.object(Path, "write_bytes", autospec=True, return_value=1) as write_bytes,
         ):
             pr_manager.commit_changes(3, Path("/tmp/wt"))
 
-        # git add must include the .py files but not .env or .key
         add_call = run_mock.call_args_list[2].args[0]
-        assert "src/foo.py" in add_call
-        assert "src/bar.py" in add_call
-        assert ".env" not in add_call
-        assert "data.key" not in add_call
+        _assert_nul_pathspec(add_call, write_bytes, ("src/foo.py", "src/bar.py"))
 
     def test_commit_changes_returns_the_exact_requested_receipt(self) -> None:
         """A recovery commit returns its exact full revision."""
@@ -312,6 +342,44 @@ class TestCommitChanges:
         assert result == child
         assert run_mock.call_args_list[-1].args[0] == ["git", "rev-parse", "HEAD"]
 
+    def test_inspected_manifest_bypasses_live_status_enumeration(self) -> None:
+        """An exact host manifest is not replaced by a live status snapshot."""
+        paths = pr_manager._CommitPaths(
+            add_paths=("src/add.py",),
+            update_paths=("src/delete.py",),
+        )
+        git_env = {"GIT_CONFIG_NOSYSTEM": "1"}
+        with (
+            patch.object(
+                pr_manager,
+                "_read_porcelain_status",
+                side_effect=AssertionError("must not enumerate live status"),
+            ) as read_status,
+            patch.object(pr_manager, "_stage_commit_paths") as stage_paths,
+            patch.object(pr_manager, "fetch_issue_info", return_value=MagicMock(title="Fix")),
+            patch.object(pr_manager, "_generate_commit_message", return_value="fix: test"),
+            patch.object(pr_manager, "_clear_local_committer_identity") as clear_identity,
+            patch.object(pr_manager, "_commit_with_signature") as commit,
+        ):
+            pr_manager.commit_changes(
+                3010,
+                Path("/tmp/wt"),
+                git_env=git_env,
+                expected_add_paths=paths.add_paths,
+                expected_update_paths=paths.update_paths,
+            )
+
+        read_status.assert_not_called()
+        stage_paths.assert_called_once_with(paths, Path("/tmp/wt"), None, env=git_env)
+        clear_identity.assert_called_once_with(Path("/tmp/wt"), None)
+        commit.assert_called_once_with(
+            "fix: test",
+            Path("/tmp/wt"),
+            None,
+            git_env,
+            disable_hooks=False,
+        )
+
     def test_allowed_paths_prevent_staging_unlisted_artifacts(self) -> None:
         porcelain = _porcelain(" M hephaestus/automation/ci_driver.py", "?? output.log")
         run_mock = MagicMock(
@@ -331,6 +399,7 @@ class TestCommitChanges:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+            patch.object(Path, "write_bytes", autospec=True, return_value=1) as write_bytes,
         ):
             pr_manager.commit_changes(
                 1405,
@@ -339,13 +408,11 @@ class TestCommitChanges:
             )
 
         add_call = run_mock.call_args_list[2].args[0]
-        assert add_call == [
-            "git",
-            "--literal-pathspecs",
-            "add",
-            "--",
-            "hephaestus/automation/ci_driver.py",
-        ]
+        _assert_nul_pathspec(
+            add_call,
+            write_bytes,
+            ("hephaestus/automation/ci_driver.py",),
+        )
 
     def test_commit_uses_cryptographic_signature_and_dco_signoff(self) -> None:
         porcelain = _porcelain(" M src/foo.py")
@@ -376,10 +443,16 @@ class TestCommitChanges:
         commit_cmd = run_mock.call_args_list[-1].args[0]
         assert commit_cmd[:4] == ["git", "commit", "-S", "-s"]
         assert "-m" in commit_cmd
-        assert run_mock.call_args_list[-1].kwargs["env"] == {
+        signing_env = {
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "gpg.format",
         }
+        injected_keys = {
+            value for key, value in signing_env.items() if key.startswith("GIT_CONFIG_KEY_")
+        }
+        assert "core.hooksPath" not in injected_keys
+        assert f"core.hooksPath={os.devnull}" not in commit_cmd
+        assert all(call.kwargs["env"] == signing_env for call in run_mock.call_args_list)
 
     def test_commit_changes_threads_git_timeout(self) -> None:
         porcelain = _porcelain(" M src/foo.py")
@@ -433,19 +506,19 @@ class TestCommitChanges:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+            patch.object(Path, "write_bytes", autospec=True, return_value=1) as write_bytes,
         ):
             pr_manager.commit_changes(4, Path("/tmp/wt"))
         add_call = run_mock.call_args_list[2].args[0]
-        assert "new.py" in add_call
+        _assert_nul_pathspec(add_call, write_bytes, ("new.py",))
 
     def test_stages_deleted_files_without_pathspec(self) -> None:
         porcelain = _porcelain(" D hephaestus/github/fleet_sync.py")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),
-                _status("hephaestus/github/fleet_sync.py\0"),
-                _status(""),
-                _status(""),
+                _status(""),  # git read-tree
+                _status(""),  # git rm
                 _status("D\thephaestus/github/fleet_sync.py\n"),
                 _status(" hephaestus/github/fleet_sync.py | 10 ----------\n"),
                 _status(""),  # git config --unset user.email
@@ -458,18 +531,17 @@ class TestCommitChanges:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+            patch.object(Path, "write_bytes", autospec=True, return_value=1) as write_bytes,
         ):
             pr_manager.commit_changes(1406, Path("/tmp/wt"))
 
-        add_call = run_mock.call_args_list[3].args[0]
-        assert add_call == [
-            "git",
-            "--literal-pathspecs",
-            "update-index",
-            "--force-remove",
-            "--",
-            "hephaestus/github/fleet_sync.py",
-        ]
+        add_call = run_mock.call_args_list[2].args[0]
+        _assert_nul_pathspec(
+            add_call,
+            write_bytes,
+            ("hephaestus/github/fleet_sync.py",),
+            operation="update",
+        )
 
     def test_uses_message_agent_for_commit_subject_and_body(self) -> None:
         porcelain = _porcelain(" M LICENSE", " M NOTICE")

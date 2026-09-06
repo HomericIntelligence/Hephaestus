@@ -1939,6 +1939,8 @@ class TestWorktreeAndAdvise:
                     "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
                     "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
                     "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
                     "changed_file_count": 1,
                     "worktree_path": "/tmp/implementation-writer",
                 },
@@ -2138,6 +2140,8 @@ class TestWorktreeAndAdvise:
                     "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
                     "diff_sha256": hashlib.sha256(b"+guard\n").hexdigest(),
                     "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
                     "changed_file_count": 1,
                     "worktree_path": "/tmp/implementation-writer",
                 },
@@ -2180,9 +2184,12 @@ class TestWorktreeAndAdvise:
         assert isinstance(publish, JobRequest)
         assert isinstance(publish.job, GitJob)
         assert publish.job.op == "commit_push"
+        assert publish.job.kwargs["repo_root"] == "/tmp/repo"
         assert publish.job.kwargs["expected_recovery_head"] == "a" * 40
         assert publish.job.kwargs["expected_recovery_content_snapshot"] == (_DIRTY_CONTENT_SNAPSHOT)
         assert publish.job.kwargs["expected_recovery_tree_sha"] == "c" * 40
+        assert publish.job.kwargs["expected_recovery_add_paths"] == ("module.py",)
+        assert publish.job.kwargs["expected_recovery_update_paths"] == ()
 
     def test_successful_inspection_resets_the_consecutive_git_failure_count(
         self, make_ctx: Any, make_work_item: Any
@@ -2215,6 +2222,8 @@ class TestWorktreeAndAdvise:
                     "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
                     "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
                     "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
                     "changed_file_count": 1,
                     "worktree_path": item.worktree,
                 },
@@ -4950,6 +4959,7 @@ class TestCommitPushAndPrCreate:
         assert result.job.op == "commit_push"
         assert result.job.kwargs == {
             "issue_number": 1,
+            "repo_root": "/tmp/repo",
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
@@ -5344,6 +5354,8 @@ class TestCommitPushAndPrCreate:
                     "head_sha": "a" * 40,
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                     "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
                 },
             }
         )
@@ -5366,7 +5378,10 @@ class TestCommitPushAndPrCreate:
 
         assert isinstance(retry_job, JobRequest)
         assert isinstance(retry_job.job, GitJob)
+        assert retry_job.job.kwargs["repo_root"] == "/tmp/repo"
         assert retry_job.job.kwargs["expected_recovery_commit_sha"] == "b" * 40
+        assert retry_job.job.kwargs["expected_recovery_add_paths"] == ("module.py",)
+        assert retry_job.job.kwargs["expected_recovery_update_paths"] == ()
 
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""

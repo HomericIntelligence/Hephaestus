@@ -1,6 +1,7 @@
 """Tests for git utility functions."""
 
 import inspect
+import os
 import subprocess
 import sys
 from collections.abc import Generator
@@ -204,6 +205,66 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
         )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_inspected_manifest_bypasses_live_status_and_forwards_exact_paths(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A host inspection receipt is the exact input to the commit helper."""
+        git_env = {"GIT_CONFIG_NOSYSTEM": "1"}
+        add_paths = ("src/add.py",)
+        update_paths = ("src/delete.py",)
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "codex",
+                git_env=git_env,
+                expected_add_paths=add_paths,
+                expected_update_paths=update_paths,
+                disable_hooks=True,
+            )
+            is True
+        )
+
+        git_utils_mocks.run.assert_not_called()
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            git_message_timeout=1200,
+            git_env=git_env,
+            expected_add_paths=add_paths,
+            expected_update_paths=update_paths,
+            disable_hooks=True,
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_live_status_and_commit_helper_share_the_git_environment(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Ordinary inspection uses the same isolated Git environment."""
+        git_env = {"GIT_CONFIG_NOSYSTEM": "1"}
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
+
+        assert commit_if_changes(123, tmp_path, "codex", git_env=git_env) is True
+
+        git_utils_mocks.run.assert_called_once_with(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+            env=git_env,
+        )
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            git_message_timeout=1200,
+            git_env=git_env,
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_threads_timeout_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -401,10 +462,10 @@ class TestPushBranch:
 class TestDirectScopeBranchReservation:
     """Atomic server-side ownership checks for direct-scope implementation branches."""
 
-    def test_reserve_requires_remote_branch_to_be_absent_and_bypasses_hooks(
+    def test_reserve_requires_remote_branch_to_be_absent_and_disables_hooks(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
-        """The metadata-only ownership claim is the sole hook-bypassing push."""
+        """The metadata-only ownership claim disables hooks with ``--no-verify``."""
         pin = "a" * 40
 
         reserve_remote_branch_if_absent("2452-auto-impl", pin, tmp_path, timeout=42)
@@ -638,9 +699,10 @@ class TestDirectScopeBranchReservation:
 class TestPushDetachedHead:
     """Tests for publishing direct PR-review commits from a detached checkout."""
 
-    def test_pushes_head_to_branch_with_the_reviewed_head_lease(
+    def test_ordinary_push_retains_hooks_and_uses_the_reviewed_head_lease(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
+        """An ordinary implementation push has no hook-bypass option."""
         reviewed_head = "a" * 40
 
         push_head_to_branch("123-auto-impl", reviewed_head, tmp_path, timeout=42)
@@ -676,11 +738,38 @@ class TestPushDetachedHead:
             f"{source_sha}:refs/heads/123-auto-impl"
         )
 
+    def test_recovery_push_disables_hooks_for_one_command(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A validated recovery push bypasses repository hooks only once."""
+        reviewed_head = "a" * 40
+
+        push_head_to_branch(
+            "123-auto-impl",
+            reviewed_head,
+            tmp_path,
+            disable_hooks=True,
+        )
+
+        git_utils_mocks.run.assert_called_once_with(
+            [
+                "git",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "push",
+                f"--force-with-lease=refs/heads/123-auto-impl:{reviewed_head}",
+                "origin",
+                "HEAD:refs/heads/123-auto-impl",
+            ],
+            cwd=tmp_path,
+        )
+
     def test_push_and_probe_use_supplied_authenticated_transport(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
         """The lease push and its authoritative remote probe share trusted transport."""
         expected_head = "a" * 40
+        remote = "https://github.com/test/repo.git"
         env = {"GIT_TERMINAL_PROMPT": "0"}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         git_utils_mocks.run.side_effect = [
@@ -695,6 +784,7 @@ class TestPushDetachedHead:
                 tmp_path,
                 env=env,
                 remote_config=remote_config,
+                remote=remote,
             )
 
         assert [call.args[0] for call in git_utils_mocks.run.call_args_list] == [
@@ -703,7 +793,7 @@ class TestPushDetachedHead:
                 *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/123-auto-impl:{expected_head}",
-                "origin",
+                remote,
                 "HEAD:refs/heads/123-auto-impl",
             ],
             [
@@ -711,7 +801,7 @@ class TestPushDetachedHead:
                 *remote_config,
                 "ls-remote",
                 "--refs",
-                "origin",
+                remote,
                 "refs/heads/123-auto-impl",
             ],
         ]

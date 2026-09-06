@@ -182,31 +182,33 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
     """An ambiguous failed recovery commit cannot report an unchanged head."""
     remote = tmp_path / "remote.git"
     repo = tmp_path / "repo"
+    writer = repo / "build" / "writer"
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
     repo.mkdir()
 
-    def git(*args: str) -> subprocess.CompletedProcess[str]:
+    def git(*args: str, cwd: Path = repo) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
-            cwd=repo,
+            cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
         )
 
-    git("init", "-q", "-b", "2973-auto-impl")
+    git("init", "-q", "-b", "main")
     git("config", "user.name", "Test User")
     git("config", "user.email", "test@example.invalid")
     (repo / "module.py").write_text("value = 1\n", encoding="utf-8")
     git("add", "module.py")
     git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
     git("remote", "add", "origin", str(remote))
-    git("push", "-q", "-u", "origin", "2973-auto-impl")
-    head = git("rev-parse", "HEAD").stdout.strip()
-    (repo / "module.py").write_text("value = 2\n", encoding="utf-8")
-    snapshot = _dirty_worktree_content_snapshot(repo, timeout=60)
-    candidate_tree, _candidate_diff = _candidate_commit_tree_evidence(repo, head, timeout=60)
-    assert git("rev-list", "--count", "@{upstream}..HEAD").stdout.strip() == "0"
+    git("worktree", "add", "-q", "-b", "2973-auto-impl", str(writer))
+    git("push", "-q", "-u", "origin", "2973-auto-impl", cwd=writer)
+    head = git("rev-parse", "HEAD", cwd=writer).stdout.strip()
+    (writer / "module.py").write_text("value = 2\n", encoding="utf-8")
+    snapshot = _dirty_worktree_content_snapshot(writer, timeout=60)
+    candidate_tree, _candidate_diff = _candidate_commit_tree_evidence(writer, head, timeout=60)
+    assert git("rev-list", "--count", "@{upstream}..HEAD", cwd=writer).stdout.strip() == "0"
 
     item = WorkItem(
         repo="test-repo",
@@ -217,7 +219,7 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
         state="COMMIT_PUSH_WAIT",
     )
     item.branch = "2973-auto-impl"
-    item.worktree = str(repo)
+    item.worktree = str(writer)
     item.payload.update(
         {
             "implementation_remediation": True,
@@ -227,6 +229,8 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
                 "head_sha": head,
                 "content_snapshot": snapshot,
                 "candidate_tree_sha": candidate_tree,
+                "candidate_add_paths": ["module.py"],
+                "candidate_update_paths": [],
             },
             "remediation_thread_snapshots": [{"id": "thread-1"}],
             "remediation_output": {
@@ -271,8 +275,8 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
 
     assert result.ok is False
     assert result.error == "remediation writer commit did not complete"
-    assert git("rev-parse", "HEAD").stdout.strip() == head
-    assert git("status", "--porcelain").stdout.strip() == "M module.py"
+    assert git("rev-parse", "HEAD", cwd=writer).stdout.strip() == head
+    assert git("status", "--porcelain", cwd=writer).stdout.strip() == "M module.py"
     push.assert_not_called()
 
     stage = ImplementationStage()

@@ -8,6 +8,7 @@ Provides helpers for:
 """
 
 import logging
+import os
 import subprocess
 from collections.abc import Callable, Collection
 from pathlib import Path
@@ -104,6 +105,71 @@ def issue_auto_impl_branch_name(issue_number: int | str) -> str:
     return _session_issue_auto_impl_branch_name(issue_number)
 
 
+def _has_pending_commit_input(
+    worktree_path: Path,
+    *,
+    timeout: int | None,
+    git_env: dict[str, str] | None,
+    manifest_supplied: bool,
+) -> bool:
+    """Return whether commit work exists without reading an inspected manifest again."""
+    if manifest_supplied:
+        return True
+    status_kwargs: dict[str, Any] = {
+        "capture_output": True,
+        **_timeout_kw(timeout),
+    }
+    if git_env is not None:
+        status_kwargs["env"] = git_env
+    result = run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree_path,
+        **status_kwargs,
+    )
+    return bool(result.stdout.strip())
+
+
+def _commit_helper_kwargs(
+    *,
+    allowed_paths: Collection[str] | None,
+    expected_tree_sha: str | None,
+    return_commit_sha: bool,
+    agent_model: str | None,
+    pi_dir: Path | None,
+    timeout: int | None,
+    git_message_timeout: int,
+    signing_env_factory: Callable[[], dict[str, str]] | None,
+    git_env: dict[str, str] | None,
+    manifest_supplied: bool,
+    expected_add_paths: tuple[str, ...] | None,
+    expected_update_paths: tuple[str, ...] | None,
+    disable_hooks: bool,
+) -> dict[str, Any]:
+    """Build arguments for the product-layer commit helper."""
+    kwargs: dict[str, Any] = {
+        "allowed_paths": allowed_paths,
+        "git_message_timeout": git_message_timeout,
+    }
+    optional = {
+        "expected_tree_sha": expected_tree_sha,
+        "agent_model": agent_model,
+        "pi_dir": pi_dir,
+        "git_timeout": timeout,
+        "git_env": git_env,
+    }
+    kwargs.update({key: value for key, value in optional.items() if value is not None})
+    if return_commit_sha:
+        kwargs["return_commit_sha"] = True
+    if signing_env_factory is not None:
+        kwargs["signing_env"] = signing_env_factory()
+    if manifest_supplied:
+        kwargs["expected_add_paths"] = expected_add_paths
+        kwargs["expected_update_paths"] = expected_update_paths
+    if disable_hooks:
+        kwargs["disable_hooks"] = True
+    return kwargs
+
+
 def commit_if_changes(
     issue_number: int,
     worktree_path: Path,
@@ -118,6 +184,10 @@ def commit_if_changes(
     timeout: int | None = None,
     git_message_timeout: int = 1200,
     signing_env_factory: Callable[[], dict[str, str]] | None = None,
+    git_env: dict[str, str] | None = None,
+    expected_add_paths: tuple[str, ...] | None = None,
+    expected_update_paths: tuple[str, ...] | None = None,
+    disable_hooks: bool = False,
 ) -> bool | str:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
@@ -136,18 +206,23 @@ def commit_if_changes(
         timeout: Optional timeout in seconds for local git commands.
         signing_env_factory: Optional lazy provider for the controlled Git
             signing environment. It is invoked only after a dirty check.
+        git_env: Optional isolated environment for Git inspection and staging.
+        expected_add_paths: Bounded inspected paths to add without re-enumeration.
+        expected_update_paths: Bounded inspected paths to update without re-enumeration.
+        disable_hooks: Disable commit hooks for a host-validated recovery commit.
 
     Returns:
-        True if a commit was created, otherwise False.
+        The exact commit SHA when ``return_commit_sha`` is true. Otherwise,
+        return ``True`` when a commit was created or ``False`` for a no-op.
 
     """
-    result = run(
-        ["git", "status", "--porcelain"],
-        cwd=worktree_path,
-        capture_output=True,
-        **_timeout_kw(timeout),
-    )
-    if not result.stdout.strip():
+    manifest_supplied = expected_add_paths is not None or expected_update_paths is not None
+    if not _has_pending_commit_input(
+        worktree_path,
+        timeout=timeout,
+        git_env=git_env,
+        manifest_supplied=manifest_supplied,
+    ):
         logger.info("No changes to commit for issue #%s", issue_number)
         return False
 
@@ -157,20 +232,21 @@ def commit_if_changes(
         # state or an import-order dependency.
         from .pr_manager import commit_changes
 
-        commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}
-        if expected_tree_sha is not None:
-            commit_kwargs["expected_tree_sha"] = expected_tree_sha
-        if return_commit_sha:
-            commit_kwargs["return_commit_sha"] = True
-        if agent_model is not None:
-            commit_kwargs["agent_model"] = agent_model
-        if pi_dir is not None:
-            commit_kwargs["pi_dir"] = pi_dir
-        if timeout is not None:
-            commit_kwargs["git_timeout"] = timeout
-        commit_kwargs["git_message_timeout"] = git_message_timeout
-        if signing_env_factory is not None:
-            commit_kwargs["signing_env"] = signing_env_factory()
+        commit_kwargs = _commit_helper_kwargs(
+            allowed_paths=allowed_paths,
+            expected_tree_sha=expected_tree_sha,
+            return_commit_sha=return_commit_sha,
+            agent_model=agent_model,
+            pi_dir=pi_dir,
+            timeout=timeout,
+            git_message_timeout=git_message_timeout,
+            signing_env_factory=signing_env_factory,
+            git_env=git_env,
+            manifest_supplied=manifest_supplied,
+            expected_add_paths=expected_add_paths,
+            expected_update_paths=expected_update_paths,
+            disable_hooks=disable_hooks,
+        )
         committed_sha = commit_changes(
             issue_number,
             worktree_path,
@@ -521,6 +597,8 @@ def push_head_to_branch(
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
     revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
+    disable_hooks: bool = False,
+    remote: str = "origin",
 ) -> None:
     """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
 
@@ -529,25 +607,33 @@ def push_head_to_branch(
     detached ``HEAD`` rather than on the local branch ref. The explicit lease
     permits an address agent to rebase onto current main while refusing to
     overwrite a PR head that changed after its reviewed-head proof.
+
+    Set ``disable_hooks`` only for a host-validated recovery commit. This adds
+    one command-scope null hook path before the lease-protected push.
+
+    Set ``remote`` to a literal trusted URL when mutable repository remote
+    configuration must not select the destination.
     """
     source_ref = source_sha or "HEAD"
     run_kwargs = _timeout_kw(timeout)
     if env is not None:
         run_kwargs["env"] = env
     try:
+        command_config = ("-c", f"core.hooksPath={os.devnull}") if disable_hooks else ()
         run(
             [
                 "git",
+                *command_config,
                 *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
-                "origin",
+                remote,
                 f"{source_ref}:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
             **run_kwargs,
         )
-        logger.info("Published detached HEAD to origin/%s", branch_name)
+        logger.info("Published detached HEAD to the trusted remote branch %s", branch_name)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         # The rejected push can be a local pre-push-hook failure, transport
         # failure, or a server-side lease rejection.  Never infer which from
@@ -565,7 +651,7 @@ def push_head_to_branch(
                     *remote_config,
                     "ls-remote",
                     "--refs",
-                    "origin",
+                    remote,
                     f"refs/heads/{branch_name}",
                 ],
                 cwd=worktree_path,

@@ -93,6 +93,7 @@ from hephaestus.automation.agent_config import (
     implementer_claude_timeout,
     implementer_model,
 )
+from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
 from hephaestus.automation.prompts.address_review import (
     get_address_review_prompt,
@@ -281,9 +282,15 @@ def _is_bounded_inspection_text(value: object, *, max_bytes: int) -> bool:
 
 def _is_valid_dirty_inspection(value: object) -> bool:
     """Return whether a dirty writer receipt is complete and bounded."""
+    if not isinstance(value, dict):
+        return False
+    add_paths = value.get("candidate_add_paths")
+    update_paths = value.get("candidate_update_paths")
+    if not isinstance(add_paths, list) or not isinstance(update_paths, list):
+        return False
+    manifest = CommitPaths(tuple(add_paths), tuple(update_paths))
     return (
-        isinstance(value, dict)
-        and value.get("outcome") == "dirty"
+        value.get("outcome") == "dirty"
         and _is_bounded_inspection_text(
             value.get("status"),
             max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
@@ -302,6 +309,11 @@ def _is_valid_dirty_inspection(value: object) -> bool:
         and value["diff_sha256"]
         == hashlib.sha256(value["diff"].encode("utf-8", "surrogateescape")).hexdigest()
         and is_full_commit_sha(value.get("candidate_tree_sha"))
+        and is_bounded_commit_paths(
+            manifest,
+            max_paths=DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+        )
     )
 
 
@@ -447,17 +459,28 @@ def _recovery_publish_kwargs(item: WorkItem) -> dict[str, object] | None:
     expected_head = inspection.get("head_sha")
     expected_content = inspection.get("content_snapshot")
     expected_tree = inspection.get("candidate_tree_sha")
+    add_paths = inspection.get("candidate_add_paths")
+    update_paths = inspection.get("candidate_update_paths")
     if (
         not is_full_commit_sha(expected_head)
         or expected_head != item.payload.get("_impl_source_revision")
         or not _is_valid_dirty_content_snapshot(expected_content)
         or not is_full_commit_sha(expected_tree)
+        or not isinstance(add_paths, list)
+        or not isinstance(update_paths, list)
+        or not is_bounded_commit_paths(
+            CommitPaths(tuple(add_paths), tuple(update_paths)),
+            max_paths=DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+        )
     ):
         return None
     kwargs: dict[str, object] = {
         "expected_recovery_head": expected_head,
         "expected_recovery_content_snapshot": dict(cast(dict[str, str], expected_content)),
         "expected_recovery_tree_sha": expected_tree,
+        "expected_recovery_add_paths": tuple(add_paths),
+        "expected_recovery_update_paths": tuple(update_paths),
     }
     retry_commit = item.payload.get("remediation_recovery_commit_sha")
     if retry_commit is not None:
@@ -1680,6 +1703,7 @@ class ImplementationStage(Stage):
         kwargs: dict[str, object] = {
             "issue_number": issue,
             "worktree_path": item.worktree,
+            "repo_root": str(ctx.paths.repo_root),
             "branch": item.branch,
             "agent": agent,
             "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),

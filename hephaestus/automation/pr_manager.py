@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +42,7 @@ from .commit_paths import (
     SECRET_FILE_EXTENSIONS as _SECRET_FILE_EXTENSIONS,
     SECRET_FILE_NAMES as _SECRET_FILE_NAMES,
     CommitPaths,
-    head_tracked_commit_paths,
+    is_bounded_commit_paths,
     parse_porcelain_status,
     reject_filtered_path_shape_changes,
     select_commit_paths,
@@ -77,9 +79,11 @@ logger = logging.getLogger(__name__)
 SECRET_FILE_NAMES = _SECRET_FILE_NAMES
 SECRET_FILE_EXTENSIONS = _SECRET_FILE_EXTENSIONS
 _CommitPaths = CommitPaths
-_head_tracked_commit_paths = head_tracked_commit_paths
 _parse_porcelain_status = parse_porcelain_status
 _select_commit_paths = select_commit_paths
+
+_COMMIT_MANIFEST_MAX_PATHS = 512
+_COMMIT_MANIFEST_MAX_BYTES = 64 * 1024
 
 _RESERVED_MESSAGE_LINE = re.compile(
     r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
@@ -231,15 +235,26 @@ def _parse_agent_json(text: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _git_output(worktree_path: Path, args: list[str], *, timeout: int | None = None) -> str:
+def _git_output(
+    worktree_path: Path,
+    args: list[str],
+    *,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
     """Return best-effort git output for message-agent context."""
     try:
+        run_kwargs: dict[str, Any] = {
+            "capture_output": True,
+            "check": False,
+            **_git_timeout_kw(timeout),
+        }
+        if env is not None:
+            run_kwargs["env"] = env
         result = run(
             ["git", *args],
             cwd=worktree_path,
-            capture_output=True,
-            check=False,
-            **_git_timeout_kw(timeout),
+            **run_kwargs,
         )
     except Exception as exc:
         logger.debug("Could not collect git message context for %s: %s", args, exc)
@@ -247,11 +262,26 @@ def _git_output(worktree_path: Path, args: list[str], *, timeout: int | None = N
     return (result.stdout or "").strip()
 
 
-def _staged_change_context(worktree_path: Path, *, timeout: int | None = None) -> tuple[str, str]:
+def _staged_change_context(
+    worktree_path: Path,
+    *,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[str, str]:
     """Return staged changed files and diff stat for commit-message generation."""
     return (
-        _git_output(worktree_path, ["diff", "--cached", "--name-status"], timeout=timeout),
-        _git_output(worktree_path, ["diff", "--cached", "--stat"], timeout=timeout),
+        _git_output(
+            worktree_path,
+            ["diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-status"],
+            timeout=timeout,
+            env=env,
+        ),
+        _git_output(
+            worktree_path,
+            ["diff", "--no-ext-diff", "--no-textconv", "--cached", "--stat"],
+            timeout=timeout,
+            env=env,
+        ),
     )
 
 
@@ -407,9 +437,14 @@ def _generate_commit_message(
     git_timeout: int | None = None,
     agent_model: str | None = None,
     pi_dir: Path | None = None,
+    git_env: dict[str, str] | None = None,
 ) -> str:
     """Generate a commit message via a lightweight agent with deterministic fallback."""
-    changed_files, diff_stat = _staged_change_context(worktree_path, timeout=git_timeout)
+    changed_files, diff_stat = _staged_change_context(
+        worktree_path,
+        timeout=git_timeout,
+        env=git_env,
+    )
     prompt = _commit_message_prompt(
         issue_number=issue_number,
         issue_title=issue_title,
@@ -746,9 +781,20 @@ def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
     )
 
 
-def _read_porcelain_status(worktree_path: Path, git_timeout: int | None) -> str:
+def _read_porcelain_status(
+    worktree_path: Path,
+    git_timeout: int | None,
+    *,
+    env: dict[str, str] | None = None,
+) -> str:
     """Return stable, NUL-delimited porcelain-v1 worktree status."""
     try:
+        run_kwargs: dict[str, Any] = {
+            "capture_output": True,
+            **_git_timeout_kw(git_timeout),
+        }
+        if env is not None:
+            run_kwargs["env"] = env
         result = run(
             [
                 "git",
@@ -759,8 +805,7 @@ def _read_porcelain_status(worktree_path: Path, git_timeout: int | None) -> str:
                 "--no-renames",
             ],
             cwd=worktree_path,
-            capture_output=True,
-            **_git_timeout_kw(git_timeout),
+            **run_kwargs,
         )
     except UnicodeDecodeError as exc:
         raise RuntimeError("Could not decode git status --porcelain=v1 -z output") from exc
@@ -771,41 +816,60 @@ def _stage_commit_paths(
     paths: _CommitPaths,
     worktree_path: Path,
     git_timeout: int | None,
+    *,
+    env: dict[str, str] | None = None,
 ) -> None:
     """Stage selected paths without broad or implicit pathspecs."""
-    paths = _head_tracked_commit_paths(
-        paths,
-        worktree_path,
-        revision="HEAD",
-        git_timeout=git_timeout,
-        runner=run,
-    )
     # Start from the published base so a pre-staged secret or out-of-scope path
     # cannot remain in the commit index after selection filters exclude it.
+    run_kwargs: dict[str, Any] = _git_timeout_kw(git_timeout)
+    if env is not None:
+        run_kwargs["env"] = env
     run(
         ["git", "read-tree", "HEAD"],
         cwd=worktree_path,
-        **_git_timeout_kw(git_timeout),
+        **run_kwargs,
     )
-    if paths.update_paths:
-        run(
-            [
-                "git",
-                "--literal-pathspecs",
-                "update-index",
-                "--force-remove",
-                "--",
-                *paths.update_paths,
-            ],
-            cwd=worktree_path,
-            **_git_timeout_kw(git_timeout),
-        )
-    if paths.add_paths:
-        run(
-            ["git", "--literal-pathspecs", "add", "--", *paths.add_paths],
-            cwd=worktree_path,
-            **_git_timeout_kw(git_timeout),
-        )
+    if paths.add_paths or paths.update_paths:
+        with tempfile.TemporaryDirectory(prefix="hephaestus-commit-pathspec-") as temporary:
+            temporary_root = Path(temporary)
+            if paths.update_paths:
+                update_pathspec = temporary_root / "update-paths"
+                update_pathspec.write_bytes(
+                    b"\0".join(os.fsencode(path) for path in paths.update_paths) + b"\0"
+                )
+                run(
+                    [
+                        "git",
+                        "--literal-pathspecs",
+                        "rm",
+                        "-r",
+                        "-f",
+                        "--cached",
+                        "--ignore-unmatch",
+                        f"--pathspec-from-file={update_pathspec}",
+                        "--pathspec-file-nul",
+                    ],
+                    cwd=worktree_path,
+                    **run_kwargs,
+                )
+            if paths.add_paths:
+                add_pathspec = temporary_root / "add-paths"
+                add_pathspec.write_bytes(
+                    b"\0".join(os.fsencode(path) for path in paths.add_paths) + b"\0"
+                )
+                run(
+                    [
+                        "git",
+                        "--literal-pathspecs",
+                        "add",
+                        "-A",
+                        f"--pathspec-from-file={add_pathspec}",
+                        "--pathspec-file-nul",
+                    ],
+                    cwd=worktree_path,
+                    **run_kwargs,
+                )
 
 
 def _commit_with_signature(
@@ -813,21 +877,67 @@ def _commit_with_signature(
     worktree_path: Path,
     git_timeout: int | None,
     signing_env: dict[str, str] | None = None,
+    *,
+    disable_hooks: bool = False,
 ) -> None:
     """Create the repository-policy signed and DCO-signed commit."""
+    hook_config = ["-c", f"core.hooksPath={os.devnull}"] if disable_hooks else []
+    argv = ["git", *hook_config, "commit", "-S", "-s", "-m", commit_message]
     if signing_env is not None:
         run(
-            ["git", "commit", "-S", "-s", "-m", commit_message],
+            argv,
             cwd=worktree_path,
             env=signing_env,
             **_git_timeout_kw(git_timeout),
         )
         return
     run(
-        ["git", "commit", "-S", "-s", "-m", commit_message],
+        argv,
         cwd=worktree_path,
         **_git_timeout_kw(git_timeout),
     )
+
+
+def _commit_paths_from_input(
+    issue_number: int,
+    worktree_path: Path,
+    *,
+    git_timeout: int | None,
+    operation_env: dict[str, str] | None,
+    allowed_paths: Collection[str] | None,
+    expected_add_paths: tuple[str, ...] | None,
+    expected_update_paths: tuple[str, ...] | None,
+) -> _CommitPaths:
+    """Return validated paths from a host manifest or bounded ordinary status."""
+    manifest_supplied = expected_add_paths is not None or expected_update_paths is not None
+    if manifest_supplied:
+        if not isinstance(expected_add_paths, tuple) or not isinstance(
+            expected_update_paths, tuple
+        ):
+            raise RuntimeError("The inspected commit path manifest is invalid")
+        paths = _CommitPaths(expected_add_paths, expected_update_paths)
+        if not is_bounded_commit_paths(
+            paths,
+            max_paths=_COMMIT_MANIFEST_MAX_PATHS,
+            max_bytes=_COMMIT_MANIFEST_MAX_BYTES,
+        ):
+            raise RuntimeError("The inspected commit path manifest is invalid")
+        return paths
+    porcelain = _read_porcelain_status(worktree_path, git_timeout, env=operation_env)
+    if not porcelain:
+        raise RuntimeError(
+            f"No changes to commit for issue {issue_ref(issue_number)}. "
+            "Check if the implementation was successful or if the plan needs revision."
+        )
+    status_entries = _parse_porcelain_status(porcelain)
+    paths = _select_commit_paths(status_entries, allowed_paths)
+    if not paths.add_paths and not paths.update_paths:
+        raise RuntimeError(
+            f"No non-secret files to commit for issue {issue_ref(issue_number)}. "
+            "All changes appear to be secret files."
+        )
+    reject_filtered_path_shape_changes(status_entries, paths)
+    return paths
 
 
 def commit_changes(
@@ -842,6 +952,10 @@ def commit_changes(
     expected_tree_sha: str | None = None,
     return_commit_sha: bool = False,
     signing_env: dict[str, str] | None = None,
+    git_env: dict[str, str] | None = None,
+    expected_add_paths: tuple[str, ...] | None = None,
+    expected_update_paths: tuple[str, ...] | None = None,
+    disable_hooks: bool = False,
     pi_dir: Path | None = None,
 ) -> str | None:
     """Commit changes in worktree, filtering out secret files.
@@ -861,37 +975,45 @@ def commit_changes(
             command line for the message-generation session. When omitted,
             the deterministic lightweight-message default is used.
         signing_env: Optional validated Git environment for commit signing.
+        git_env: Optional isolated Git environment for status and staging.
+        expected_add_paths: Bounded inspected paths to add without re-enumeration.
+        expected_update_paths: Bounded inspected paths to update without re-enumeration.
+        disable_hooks: Disable hooks for a host-validated recovery commit.
         expected_tree_sha: Optional immutable tree that staging must produce.
         return_commit_sha: Return the exact new commit SHA after the commit.
 
     Raises:
         RuntimeError: If there are no changes, or all changes are secret files.
 
+    Returns:
+        The exact commit SHA when ``return_commit_sha`` is true. Otherwise,
+        return ``None`` after the commit is created.
+
     """
-    porcelain = _read_porcelain_status(worktree_path, git_timeout)
-    if not porcelain:
-        raise RuntimeError(
-            f"No changes to commit for issue {issue_ref(issue_number)}. "
-            "Check if the implementation was successful or if the plan needs revision."
-        )
-
-    status_entries = _parse_porcelain_status(porcelain)
-    paths = _select_commit_paths(status_entries, allowed_paths)
-    if not paths.add_paths and not paths.update_paths:
-        raise RuntimeError(
-            f"No non-secret files to commit for issue {issue_ref(issue_number)}. "
-            "All changes appear to be secret files."
-        )
-    reject_filtered_path_shape_changes(status_entries, paths)
-
-    _stage_commit_paths(paths, worktree_path, git_timeout)
+    operation_env: dict[str, str] | None = None
+    if git_env is not None or signing_env is not None:
+        operation_env = dict(git_env or {})
+        operation_env.update(signing_env or {})
+    paths = _commit_paths_from_input(
+        issue_number,
+        worktree_path,
+        git_timeout=git_timeout,
+        operation_env=operation_env,
+        allowed_paths=allowed_paths,
+        expected_add_paths=expected_add_paths,
+        expected_update_paths=expected_update_paths,
+    )
+    _stage_commit_paths(paths, worktree_path, git_timeout, env=operation_env)
     if expected_tree_sha is not None:
         if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", expected_tree_sha) is None:
             raise RuntimeError("The expected commit tree is invalid")
+        tree_kwargs: dict[str, Any] = _git_timeout_kw(git_timeout)
+        if operation_env is not None:
+            tree_kwargs["env"] = operation_env
         staged_tree = run(
             ["git", "write-tree"],
             cwd=worktree_path,
-            **_git_timeout_kw(git_timeout),
+            **tree_kwargs,
         ).stdout.strip()
         if staged_tree != expected_tree_sha:
             raise RuntimeError("The staged commit tree changed after inspection")
@@ -908,19 +1030,30 @@ def commit_changes(
         pi_dir=pi_dir,
         git_message_timeout=git_message_timeout,
         git_timeout=git_timeout,
+        git_env=operation_env,
     )
 
     # Defense-in-depth: strip any fabricated worktree-local identity a sub-agent
     # may have set, so the commit inherits the operator's verifiable identity (#2110).
-    _clear_local_committer_identity(worktree_path, git_timeout)
+    if signing_env is None:
+        _clear_local_committer_identity(worktree_path, git_timeout)
 
-    _commit_with_signature(commit_message, worktree_path, git_timeout, signing_env)
+    _commit_with_signature(
+        commit_message,
+        worktree_path,
+        git_timeout,
+        operation_env,
+        disable_hooks=disable_hooks,
+    )
     if not return_commit_sha:
         return None
+    revision_kwargs: dict[str, Any] = _git_timeout_kw(git_timeout)
+    if operation_env is not None:
+        revision_kwargs["env"] = operation_env
     commit_sha = run(
         ["git", "rev-parse", "HEAD"],
         cwd=worktree_path,
-        **_git_timeout_kw(git_timeout),
+        **revision_kwargs,
     ).stdout.strip()
     if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit_sha) is None:
         raise RuntimeError("The committed revision is unavailable")

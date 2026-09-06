@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Collection
+import os
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,39 @@ class CommitPaths:
 
     add_paths: tuple[str, ...]
     update_paths: tuple[str, ...]
+
+
+def is_bounded_commit_paths(
+    paths: CommitPaths,
+    *,
+    max_paths: int,
+    max_bytes: int,
+) -> bool:
+    """Return whether an inspected path manifest is safe and bounded."""
+    combined = (*paths.add_paths, *paths.update_paths)
+    if not combined or not all(isinstance(path, str) for path in combined):
+        return False
+    if (
+        len(combined) > max_paths
+        or len(set(paths.add_paths)) != len(paths.add_paths)
+        or len(set(paths.update_paths)) != len(paths.update_paths)
+    ):
+        return False
+    encoded_bytes = 0
+    for path in combined:
+        relative = Path(path)
+        if (
+            not path
+            or "\0" in path
+            or relative.is_absolute()
+            or relative.as_posix() != path
+            or any(component in {"", ".", ".."} for component in relative.parts)
+        ):
+            return False
+        encoded_bytes += len(os.fsencode(path)) + 1
+        if encoded_bytes > max_bytes:
+            return False
+    return True
 
 
 def parse_porcelain_status(output: str) -> tuple[tuple[str, str], ...]:
@@ -120,40 +154,3 @@ def reject_filtered_path_shape_changes(
         )
         if selected_add_replaces_descendant or selected_descendant_replaces_filtered:
             raise RuntimeError("A selected file-tree change overlaps a filtered path")
-
-
-def head_tracked_commit_paths(
-    paths: CommitPaths,
-    worktree_path: Path,
-    *,
-    revision: str,
-    git_timeout: int | None,
-    runner: Callable[..., object],
-    env: dict[str, str] | None = None,
-) -> CommitPaths:
-    """Remove update paths that do not exist in the specified base tree."""
-    if not paths.update_paths:
-        return paths
-    argv = [
-        "git",
-        "--literal-pathspecs",
-        "ls-tree",
-        "-r",
-        "-z",
-        "--name-only",
-        revision,
-        "--",
-        *paths.update_paths,
-    ]
-    if env is None:
-        result = runner(argv, cwd=worktree_path, timeout=git_timeout)
-    else:
-        result = runner(argv, cwd=worktree_path, timeout=git_timeout, env=env)
-    stdout = getattr(result, "stdout", "")
-    tracked_at_head = {
-        path for path in (stdout if isinstance(stdout, str) else "").split("\0") if path
-    }
-    return CommitPaths(
-        add_paths=paths.add_paths,
-        update_paths=tuple(path for path in paths.update_paths if path in tracked_at_head),
-    )

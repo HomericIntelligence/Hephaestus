@@ -1084,10 +1084,13 @@ Architectural contract:
   remediation, the implementation stage asks the Git worker to inspect the
   registered repository path, branch, and expected head without a change. The
   worker rejects executable or path-redirection Git configuration before it
-  reads the writer. Fixed byte, file-count, and snapshot limits bound the
-  inspection. Empty path sets do not require host path traversal. Nonempty
-  path inspection requires POSIX no-follow directory-descriptor operations;
-  another host fails closed instead of following a reparse point. A clean,
+  reads the writer. It binds the linked-worktree metadata with no-follow
+  directory descriptors when the host supplies them. On another host, it
+  rejects each link, junction, and reparse point and compares file identities.
+  Fixed byte, file-count, and snapshot limits bound the inspection. Empty path
+  sets do not require secure content traversal. Nonempty path inspection
+  requires POSIX no-follow directory-descriptor operations; another host fails
+  closed instead of following a reparse point. A clean,
   invalid, or oversized inspection finishes with
   `implementation_reply_failed`. A dirty inspection permits one read-only
   reply-recovery turn with `Read,Glob,Grep`. That turn cannot edit, run Git,
@@ -1096,21 +1099,29 @@ Architectural contract:
   The commit worker compares the captured head, content snapshot, and candidate
   tree immediately before the commit. It requires one signed, DCO-signed child
   commit with the captured head as its only parent and the candidate tree as its
-  exact tree. It also requires a clean worktree after the commit. An ambiguous
-  or false commit result fails and preserves the dirty writer. It cannot prepare
-  a reply handoff for the unchanged head. If publication fails after the commit,
-  the stage records the exact child SHA. A retry can publish only that child with
-  the original remote-head lease. The stage preserves the writer, snapshots,
-  diagnostic, and retry SHA on every recovery failure.
+  exact tree. The worker uses private Git metadata and host signing
+  configuration for this commit. Thus, a late repository configuration change
+  cannot run a filter or select a publication URL. It also requires a clean
+  worktree after the commit. An ambiguous or false commit result fails and
+  preserves the dirty writer. It cannot prepare a reply handoff for the
+  unchanged head. If publication fails after the commit, the stage records the
+  exact child SHA. A retry can publish only that child with the original
+  remote-head lease. The stage preserves the writer, snapshots, diagnostic,
+  and retry SHA on every recovery failure.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That
   metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot
-  turn worker ownership admission into source verification. This is the only
-  hook-bypassing push: it contains no implementation changes, retains the
-  empty `--force-with-lease` expectation for collision safety, and every later
-  implementation, remediation, rebase, release, and developer push continues
-  to run its configured hooks. Pre-commit hooks are unaffected because the
-  reservation creates no commit.
+  turn worker ownership admission into source verification. This push contains
+  no implementation changes and retains the empty `--force-with-lease`
+  expectation for collision safety. One other narrow exception applies to the
+  inspected dirty-writer recovery above. Its exact commit and lease-protected
+  push do not run repository hooks because the repository configuration is
+  untrusted input at that boundary. The bounded path manifest, content
+  snapshot, exact candidate tree, signed DCO child, clean postflight, literal
+  GitHub URL, and remote-head lease replace hook authority for that recovery.
+  All ordinary implementation, remediation, rebase, release, and developer
+  commits and pushes continue to run their configured hooks. Pre-commit hooks
+  are unaffected by branch reservation because it creates no commit.
 - When parallel file-overlap serialization is enabled, normal-item dependency
   order remains authoritative while repeated overlap deferrals raise priority.
   Cross-repo same-number items are interleaved with normal items by that age
