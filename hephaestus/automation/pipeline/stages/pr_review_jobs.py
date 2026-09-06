@@ -44,6 +44,7 @@ from .pr_review_threads import (
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
+HOST_KEYS = ("container_runtime", "container_image", "container_image_sha256")
 
 
 class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
@@ -949,10 +950,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         """Store one disposable-review-worktree cleanup result."""
         if item.payload.get("review_worktree_cleanup_done") != "pending":
             return False
-        if result.ok:
-            item.payload["review_worktree_cleanup_done"] = True
-        else:
-            item.payload["review_worktree_cleanup_error"] = result.error or "remove worktree failed"
+        item.payload[
+            "review_worktree_cleanup_done" if result.ok else "review_worktree_cleanup_error"
+        ] = True if result.ok else result.error or "remove worktree failed"
         return True
 
     @staticmethod
@@ -983,9 +983,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         return True
 
     @staticmethod
-    def _consume_host_verification_result(item: WorkItem, result: JobResult) -> bool:
+    def _consume_host_verification_result(item: WorkItem, _result: JobResult) -> bool:
         """Claim one fixed host-check completion independent of mini-state."""
-        del result
         return item.payload.pop(_HOST_VERIFICATION_PENDING, None) is not None
 
     @staticmethod
@@ -1023,10 +1022,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
             "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
         }
-        for key in ("container_runtime", "container_image", "container_image_sha256"):
-            value = result_value.get(key)
-            if isinstance(value, str):
-                receipt[key] = value
+        rv = result_value
+        receipt |= {key: value for key in HOST_KEYS if isinstance(value := rv.get(key), str)}
         receipts.append(receipt)
 
     def _consume_failed_job(
