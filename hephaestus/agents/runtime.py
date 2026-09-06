@@ -947,6 +947,19 @@ def agent_uses_configured_model_default(agent: str) -> bool:
     return is_opencode(agent) or is_pi(agent)
 
 
+def normalize_provider_model_reference(agent: str, reference: str) -> str:
+    """Return a provider-valid canonical model reference.
+
+    Codex role aliases are provider-specific. Keep their validation and
+    canonicalization inside the runtime adapter so callers do not branch on a
+    provider name.
+    """
+    if is_codex(agent):
+        validate_codex_role_model_reference(reference)
+        return resolve_codex_model_selection(reference).reference
+    return reference
+
+
 def uses_direct_agent_runner(agent: str) -> bool:
     """Return True when the provider is invoked through runtime text/session helpers."""
     if agent not in AGENT_CAPABILITIES:
