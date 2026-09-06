@@ -18,8 +18,8 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.workspace import SourceLane
 from hephaestus.agents.execution_policy import SessionLifecycle
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
