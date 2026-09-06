@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -167,3 +168,50 @@ def test_trusted_slurm_executable_rejects_writable_ancestor(
 
     with pytest.raises(ValueError):
         config.trusted_slurm_executable("sbatch")
+
+
+def test_load_config_reads_one_closed_nonwritable_toml_table(tmp_path: Path) -> None:
+    """The loader accepts exactly one sealed backend configuration table."""
+    from hephaestus.automation.linux_host_verification import load_linux_host_verification_config
+
+    config_path = tmp_path / "linux-host-verification.toml"
+    config_path.write_text(
+        """[linux_host_verification]
+shared_root = \"/srv/hephaestus-runs\"
+image_path = \"/srv/hephaestus-images/verify.sqsh\"
+image_manifest_path = \"/srv/hephaestus-images/verify.manifest.json\"
+trusted_slurm_bin_dir = \"/usr/bin\"
+timeout_seconds = 900
+""",
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    config = load_linux_host_verification_config(config_path)
+
+    assert config.shared_root == "/srv/hephaestus-runs"
+    assert config.timeout_seconds == 900
+
+
+@pytest.mark.parametrize(
+    ("contents", "mode"),
+    [
+        ("", 0o600),
+        ("[linux_host_verification]\nunknown = 1\n", 0o600),
+        ("[linux_host_verification]\ntimeout_seconds = 0\n", 0o600),
+        ("[other]\nvalue = 1\n", 0o600),
+        ("[linux_host_verification]\n", 0o622),
+    ],
+)
+def test_load_config_rejects_malformed_or_writable_file(
+    tmp_path: Path, contents: str, mode: int
+) -> None:
+    """The loader fails closed when config data or file mode is unsafe."""
+    from hephaestus.automation.linux_host_verification import load_linux_host_verification_config
+
+    config_path = tmp_path / "linux-host-verification.toml"
+    config_path.write_text(contents, encoding="utf-8")
+    config_path.chmod(mode)
+
+    with pytest.raises(ValueError):
+        load_linux_host_verification_config(config_path)

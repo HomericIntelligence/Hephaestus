@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ _CONFIG_FIELDS = frozenset(
         "timeout_seconds",
     }
 )
+_CONFIG_TABLE = "linux_host_verification"
 
 
 def _absolute_path(value: object, field_name: str) -> str:
@@ -52,6 +54,39 @@ def _absolute_ancestry(path: str) -> tuple[str, ...]:
         current /= part
         ancestors.append(str(current))
     return tuple(ancestors)
+
+
+def load_linux_host_verification_config(config_path: Path) -> LinuxHostVerificationConfig:
+    """Load one sealed Linux backend configuration from a TOML file.
+
+    The operator-controlled file is a security boundary. It must be an
+    absolute, non-symlink regular file that group and other users cannot
+    modify. The file contains exactly one named table, so unrelated settings
+    cannot silently affect backend behavior.
+    """
+    if not isinstance(config_path, Path) or not config_path.is_absolute():
+        raise ValueError("Linux host-verification config path must be absolute")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(config_path, flags)
+    except OSError as error:
+        raise ValueError("Linux host-verification config cannot be opened") from error
+    try:
+        file_status = os.fstat(descriptor)
+        if not stat.S_ISREG(file_status.st_mode) or file_status.st_mode & 0o022:
+            raise ValueError("Linux host-verification config file is unsafe")
+        with os.fdopen(descriptor, "rb", closefd=False) as config_file:
+            parsed = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError("Linux host-verification config is invalid") from error
+    finally:
+        os.close(descriptor)
+    if set(parsed) != {_CONFIG_TABLE}:
+        raise ValueError("Linux host-verification config tables are invalid")
+    table = parsed[_CONFIG_TABLE]
+    if not isinstance(table, dict):
+        raise ValueError("Linux host-verification config table is invalid")
+    return LinuxHostVerificationConfig.from_mapping(table)
 
 
 @dataclass(frozen=True)
