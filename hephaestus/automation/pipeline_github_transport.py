@@ -12,7 +12,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
-from urllib.parse import quote
 
 import hephaestus.automation.github_api as github_api
 from hephaestus.automation._review_utils import (
@@ -188,34 +187,6 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
     return "\n".join([f"[Review] {body}", *markers])
 
 
-def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
-    """Return whether the classic protection response grants no PR bypasses.
-
-    Classic branch protection exposes actor allowances that may bypass pull
-    request requirements under ``required_pull_request_reviews``.  A missing
-    review-requirement object means this response exposes no such allowance.
-    GitHub also omits the allowance field itself when no PR bypass is
-    configured. Once the field is present, every allowance collection must be
-    present, list-typed, and empty. This is deliberately fail-closed because a
-    merge actor must not infer that a malformed allowance is safe.
-    """
-    reviews = protection.get("required_pull_request_reviews")
-    if reviews is None:
-        return True
-    if not isinstance(reviews, dict):
-        return False
-    if "bypass_pull_request_allowances" not in reviews:
-        return True
-    allowances = reviews["bypass_pull_request_allowances"]
-    if not isinstance(allowances, dict):
-        return False
-    for actor_type in ("users", "teams", "apps"):
-        actors = allowances.get(actor_type)
-        if not isinstance(actors, list) or actors:
-            return False
-    return True
-
-
 def _compat(name: str) -> Any:
     facade = sys.modules.get("hephaestus.automation.pipeline_github")
     return getattr(
@@ -332,6 +303,21 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
             call=_run_internal_graphql,
         )
 
+    def _graphql_with_timeout(self, spec: GraphQLMutationSpec[T], operation_timeout_s: float) -> T:
+        """Run one typed mutation within an aggregate operation deadline."""
+
+        def _run_internal_graphql(
+            argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            return gh_call(
+                argv,
+                _graphql_internal=True,
+                timeout=operation_timeout_s,
+                **kwargs,
+            )
+
+        return run_graphql(spec, call=_run_internal_graphql)
+
     def _with_repo(self, argv: list[str]) -> list[str]:
         """Append an explicit repo selector when this accessor is repo-scoped."""
         if self._repo_slug is None:
@@ -415,11 +401,11 @@ __all__ = [
     'ConditionalMergeResult', 'ImplementationThreadReplyResult', 'IssueComment',
     'LockUnavailableError', 'Path', 'PipelineGitHubTransport',
     'ReviewerThreadReconciliationResult', '_CompatCallable', '_compat',
-    '_has_no_explicit_pull_request_bypasses', '_parse_included_http_response',
-    '_rate_budget_ok_impl', '_with_severity_marker', 'annotations', 'blocked_audit_recovery_body',
+    '_parse_included_http_response', '_rate_budget_ok_impl', '_with_severity_marker',
+    'annotations', 'blocked_audit_recovery_body',
     'close_issue_as_covered', 'ensure_state_dir', 'file_lock', 'find_merged_closing_pr',
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
     'github_api', 'has_exact_closing_line', 'has_label', 'hashlib', 'is_implementation_go',
     'issue_auto_impl_branch_name', 'json', 'logger', 'logging', 'normalize_scope_retraction_paths',
-    'quote', 'rate_budget_ok', 'rate_limit_remaining', 're',
+    'rate_budget_ok', 'rate_limit_remaining', 're',
     'scope_retraction_marker', 'subprocess', 'sys', 'time']

@@ -16,6 +16,7 @@ from hephaestus.automation.github_api.graphql import (
     GraphQLResponseError,
     GraphQLRetryableError,
     ReviewCommentNotEditableError,
+    enqueue_pull_request_mutation,
     run_graphql,
     update_review_comment_mutation,
 )
@@ -148,6 +149,71 @@ def test_mutation_factory_owns_fresh_correlation_id_and_hides_body() -> None:
         content_hashes=(("body", "hash"),),
     )
     assert "secret body" not in prepared_intent.safe_summary()
+
+
+def test_enqueue_pull_request_receipt_is_bound_to_the_expected_head() -> None:
+    """Queue admission validates its PR, head, base, and correlation receipt."""
+    spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
+    assert spec.query.count("{") == spec.query.count("}")
+    response = {
+        "data": {
+            "enqueuePullRequest": {
+                "clientMutationId": "queue-id",
+                "mergeQueueEntry": {
+                    "id": "MQE_node",
+                    "state": "QUEUED",
+                    "baseCommit": {"oid": "b" * 40},
+                    "pullRequest": {"id": "PR_node", "headRefOid": "a" * 40},
+                },
+            }
+        }
+    }
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response)),
+        ) as raw_call,
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+    ):
+        receipt = run_graphql(spec)
+
+    assert receipt["id"] == "MQE_node"
+    request = " ".join(raw_call.call_args.args[0])
+    assert "expectedHeadOid=" + "a" * 40 in request
+    assert "enablePullRequestAutoMerge" not in request
+
+
+def test_enqueue_pull_request_rejects_a_wrong_head_receipt() -> None:
+    """A queue receipt for a different PR head has an unknown outcome."""
+    spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
+    response = {
+        "data": {
+            "enqueuePullRequest": {
+                "clientMutationId": "queue-id",
+                "mergeQueueEntry": {
+                    "id": "MQE_node",
+                    "state": "QUEUED",
+                    "baseCommit": {"oid": "b" * 40},
+                    "pullRequest": {"id": "PR_node", "headRefOid": "c" * 40},
+                },
+            }
+        }
+    }
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response)),
+        ),
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+        pytest.raises(GraphQLMutationOutcomeUnknownError),
+    ):
+        run_graphql(spec)
 
 
 def test_operation_kind_is_structural() -> None:

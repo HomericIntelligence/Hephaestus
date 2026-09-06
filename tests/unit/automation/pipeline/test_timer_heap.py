@@ -218,9 +218,8 @@ class TestRetryDelayConsumption:
                 self,
                 pr_number: int,
                 reviewed_sha: str,
-                authorization: MergeAuthorization,
+                **_kwargs: Any,
             ) -> ConditionalMergeResult:
-                assert authorization.head_sha == reviewed_sha
                 self.puts += 1
                 return ConditionalMergeResult(status=405, body={"message": "not ready"})
 
@@ -307,9 +306,8 @@ class TestRetryDelayConsumption:
                 self,
                 pr_number: int,
                 reviewed_sha: str,
-                authorization: MergeAuthorization,
+                **_kwargs: Any,
             ) -> ConditionalMergeResult:
-                assert authorization.head_sha == reviewed_sha
                 self.puts += 1
                 return ConditionalMergeResult(status=None, body=None, transport_error=True)
 

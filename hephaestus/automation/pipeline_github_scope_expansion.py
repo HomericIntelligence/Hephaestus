@@ -343,7 +343,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         owner, name = self._owner_name()
         matching = [
             review
-            for review in self.merge_authorization_reviews(pr_number)
+            for review in self.pull_request_reviews(pr_number)
             if review.get("state") == "COMMENTED"
             and review.get("viewerDidAuthor") is True
             and str(review.get("body") or "") == body
@@ -374,7 +374,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
             raise RuntimeError("blocking review publication was not confirmed")
         matching = [
             review
-            for review in self.merge_authorization_reviews(pr_number)
+            for review in self.pull_request_reviews(pr_number)
             if review.get("state") == "COMMENTED"
             and review.get("viewerDidAuthor") is True
             and str(review.get("body") or "") == body

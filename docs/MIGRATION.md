@@ -4,12 +4,13 @@
 
 ## Current main (unreleased)
 
-The 15-minute operational readiness wait described below is part of the released
-0.10.2 behavior.
+The operational readiness wait described below is part of the released 0.10.2
+behavior.
 
-Before a request, `merge_wait` may wait up to 15 minutes for operational GitHub
-readiness without spending a merge attempt; readiness is not authorization, and the
-exact-head/label admission is repeated before every request.
+Before a request, `merge_wait` may wait for operational GitHub readiness without
+spending a merge attempt. The `--poll-max-wait` option controls this wait. Its
+default is 1,200 seconds (20 minutes). Readiness is not authorization, and the
+exact-head and label admission checks repeat before every request.
 
 ### Model effort selection
 
