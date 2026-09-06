@@ -113,6 +113,7 @@ def commit_if_changes(
     pi_dir: Path | None = None,
     committed_log_message: str = "Committed changes for issue #%s",
     allowed_paths: Collection[str] | None = None,
+    expected_tree_sha: str | None = None,
     timeout: int | None = None,
     git_message_timeout: int = 1200,
     signing_env_factory: Callable[[], dict[str, str]] | None = None,
@@ -129,6 +130,7 @@ def commit_if_changes(
         committed_log_message: ``logging`` format string for a successful commit.
         allowed_paths: Optional exact path allowlist forwarded to the commit
             helper. When set, only those porcelain paths may be staged.
+        expected_tree_sha: Optional immutable tree required after staging.
         timeout: Optional timeout in seconds for local git commands.
         signing_env_factory: Optional lazy provider for the controlled Git
             signing environment. It is invoked only after a dirty check.
@@ -154,6 +156,8 @@ def commit_if_changes(
         from .pr_manager import commit_changes
 
         commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}
+        if expected_tree_sha is not None:
+            commit_kwargs["expected_tree_sha"] = expected_tree_sha
         if agent_model is not None:
             commit_kwargs["agent_model"] = agent_model
         if pi_dir is not None:

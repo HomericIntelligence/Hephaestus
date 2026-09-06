@@ -1090,12 +1090,15 @@ Architectural contract:
   reply-recovery turn with `Read,Glob,Grep`. That turn cannot edit, run Git,
   publish, call GitHub, or resolve threads. It must produce one valid exhaustive
   thread-reply mapping before tests, commits, pushes, or review can continue.
-  The commit worker compares the captured head and content snapshot immediately
-  before the commit. An ambiguous or false commit result fails and preserves
-  the dirty writer. It cannot prepare a reply handoff for the unchanged head.
-  The worker binds the new head and content snapshot again before the push. The
-  stage preserves the writer, snapshots, and diagnostic on every recovery
-  failure.
+  The commit worker compares the captured head, content snapshot, and candidate
+  tree immediately before the commit. It requires one signed, DCO-signed child
+  commit with the captured head as its only parent and the candidate tree as its
+  exact tree. It also requires a clean worktree after the commit. An ambiguous
+  or false commit result fails and preserves the dirty writer. It cannot prepare
+  a reply handoff for the unchanged head. If publication fails after the commit,
+  the stage records the exact child SHA. A retry can publish only that child with
+  the original remote-head lease. The stage preserves the writer, snapshots,
+  diagnostic, and retry SHA on every recovery failure.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That
   metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot
@@ -1642,9 +1645,9 @@ The exhaustive classification is maintained in the
  fixed host-review verification registry). A non-null
  `verified_runner_source_revision` keeps launcher construction in the closed
  worker boundary.
-- [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
- sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
- rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
+- [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op` is one operation
+ in the canonical [`GIT_OPS`](../hephaestus/automation/pipeline/git_jobs.py)
+ inventory. `__post_init__` validates the operation. Before a PR-review
  agent job, `verify_pr_review_checkout` receives the worktree path, branch,
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and

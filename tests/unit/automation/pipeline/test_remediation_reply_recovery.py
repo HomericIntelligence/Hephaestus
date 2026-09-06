@@ -26,6 +26,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
+    _candidate_commit_tree_evidence,
     _dirty_worktree_content_snapshot,
 )
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -134,8 +135,10 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
     assert inspection.ok is True
     assert isinstance(inspection.value, dict)
     assert inspection.value["outcome"] == "dirty"
-    item.state = inspection_request.on_done_state
+    # The coordinator delivers completion while the item is still in its
+    # submitting state. It assigns ``on_done_state`` after this callback.
     stage.on_job_done(item, inspection, ctx)
+    item.state = inspection_request.on_done_state
     mapped_route = stage.step(item, ctx)
     assert mapped_route == Continue(next_state="REMEDIATION_REPLY_RECOVERY_WAIT")
     item.state = mapped_route.next_state
@@ -169,6 +172,10 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
         commit_request.job.kwargs["expected_recovery_content_snapshot"]
         == (inspection.value["content_snapshot"])
     )
+    assert (
+        commit_request.job.kwargs["expected_recovery_tree_sha"]
+        == (inspection.value["candidate_tree_sha"])
+    )
 
 
 def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: Path) -> None:
@@ -198,6 +205,7 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
     head = git("rev-parse", "HEAD").stdout.strip()
     (repo / "module.py").write_text("value = 2\n", encoding="utf-8")
     snapshot = _dirty_worktree_content_snapshot(repo, timeout=60)
+    candidate_tree, _candidate_diff = _candidate_commit_tree_evidence(repo, head, timeout=60)
     assert git("rev-list", "--count", "@{upstream}..HEAD").stdout.strip() == "0"
 
     item = WorkItem(
@@ -218,6 +226,7 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
             "remediation_writer_inspection": {
                 "head_sha": head,
                 "content_snapshot": snapshot,
+                "candidate_tree_sha": candidate_tree,
             },
             "remediation_thread_snapshots": [{"id": "thread-1"}],
             "remediation_output": {

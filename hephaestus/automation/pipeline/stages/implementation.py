@@ -63,6 +63,7 @@ binding contract):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -296,6 +297,11 @@ def _is_valid_dirty_inspection(value: object) -> bool:
         and _is_valid_dirty_content_snapshot(value.get("content_snapshot"))
         and _is_sha256(value.get("status_sha256"))
         and _is_sha256(value.get("diff_sha256"))
+        and value["status_sha256"]
+        == hashlib.sha256(value["status"].encode("utf-8", "surrogateescape")).hexdigest()
+        and value["diff_sha256"]
+        == hashlib.sha256(value["diff"].encode("utf-8", "surrogateescape")).hexdigest()
+        and is_full_commit_sha(value.get("candidate_tree_sha"))
     )
 
 
@@ -440,16 +446,33 @@ def _recovery_publish_kwargs(item: WorkItem) -> dict[str, object] | None:
         return None
     expected_head = inspection.get("head_sha")
     expected_content = inspection.get("content_snapshot")
+    expected_tree = inspection.get("candidate_tree_sha")
     if (
         not is_full_commit_sha(expected_head)
         or expected_head != item.payload.get("_impl_source_revision")
         or not _is_valid_dirty_content_snapshot(expected_content)
+        or not is_full_commit_sha(expected_tree)
     ):
         return None
-    return {
+    kwargs: dict[str, object] = {
         "expected_recovery_head": expected_head,
         "expected_recovery_content_snapshot": dict(cast(dict[str, str], expected_content)),
+        "expected_recovery_tree_sha": expected_tree,
     }
+    retry_commit = item.payload.get("remediation_recovery_commit_sha")
+    if retry_commit is not None:
+        if not is_full_commit_sha(retry_commit):
+            return None
+        kwargs["expected_recovery_commit_sha"] = retry_commit
+    return kwargs
+
+
+def _clear_remediation_cycle(item: WorkItem) -> None:
+    """Remove state that is valid only for the completed remediation cycle."""
+    item.payload.pop("implementation_remediation", None)
+    item.payload.pop("remediation_output", None)
+    item.payload.pop("remediation_writer_inspection", None)
+    item.payload.pop("remediation_recovery_commit_sha", None)
 
 
 def _remediation_reply_head(
@@ -1012,6 +1035,7 @@ class ImplementationStage(Stage):
                         "status",
                         "status_sha256",
                         "diff_sha256",
+                        "candidate_tree_sha",
                         "content_snapshot",
                         "worktree_path",
                     )
@@ -1846,24 +1870,25 @@ class ImplementationStage(Stage):
             ctx: Stage context.
 
         """
+        if item.payload.pop("remediation_writer_inspection_inflight", False):
+            value = result.value if isinstance(result.value, dict) else {}
+            receipt = dict(value)
+            if not result.ok and receipt.get("outcome") != "failed":
+                receipt = {
+                    "outcome": "failed",
+                    "failure_kind": "worker_error",
+                    "cause": redact_diagnostic_text(
+                        result.error or "remediation writer inspection failed"
+                    )[:REMEDIATION_FAILURE_DIAGNOSTIC_MAX],
+                }
+            item.payload["remediation_writer_inspection_receipt"] = receipt
+            return
+
         if item.state == WORKTREE_WAIT:
             self._on_worktree_done(item, result)
             return
 
         if item.state == DIRTY_DECISION_WAIT:
-            if item.payload.pop("remediation_writer_inspection_inflight", False):
-                value = result.value if isinstance(result.value, dict) else {}
-                receipt = dict(value)
-                if not result.ok and receipt.get("outcome") != "failed":
-                    receipt = {
-                        "outcome": "failed",
-                        "failure_kind": "worker_error",
-                        "cause": redact_diagnostic_text(
-                            result.error or "remediation writer inspection failed"
-                        )[:REMEDIATION_FAILURE_DIAGNOSTIC_MAX],
-                    }
-                item.payload["remediation_writer_inspection_receipt"] = receipt
-                return
             if item.payload.pop("dirty_recovery_inflight", False):
                 value = result.value if isinstance(result.value, dict) else {}
                 item.payload["dirty_recovery_receipt"] = dict(value)
@@ -2136,6 +2161,7 @@ class ImplementationStage(Stage):
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
         """Record commit+push success, no-commit skip, or git failure."""
         if result.ok:
+            item.payload.pop("remediation_recovery_commit_sha", None)
             receipt = result.value if isinstance(result.value, dict) else {}
             receipt_head = receipt.get("head_sha")
             if is_full_commit_sha(receipt_head):
@@ -2174,6 +2200,10 @@ class ImplementationStage(Stage):
             item.payload["no_commits"] = True
             return
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
+        receipt = result.value if isinstance(result.value, dict) else {}
+        recovery_commit = receipt.get("recovery_commit_sha")
+        if is_full_commit_sha(recovery_commit):
+            item.payload["remediation_recovery_commit_sha"] = recovery_commit
         item.payload["git_error"] = True
 
     @staticmethod
@@ -2895,8 +2925,7 @@ class ImplementationStage(Stage):
         if handoff_result == "blocked":
             item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-            item.payload.pop("implementation_remediation", None)
-            item.payload.pop("remediation_output", None)
+            _clear_remediation_cycle(item)
             return StageOutcome(Disposition.ADVANCE, "implementation_reply_handoff_blocked")
         if handoff_result in {"failed", "invalid"}:
             return StageOutcome(
@@ -2906,15 +2935,13 @@ class ImplementationStage(Stage):
                 else "implementation_reply_handoff_invalid",
             )
         if handoff_result == "stale":
-            item.payload.pop("implementation_remediation", None)
-            item.payload.pop("remediation_output", None)
+            _clear_remediation_cycle(item)
             return StageOutcome(
                 Disposition.ADVANCE,
                 f"PR #{item.pr} ready for fresh review after stale reply handoff",
             )
         if handoff_result == "completed":
-            item.payload.pop("implementation_remediation", None)
-            item.payload.pop("remediation_output", None)
+            _clear_remediation_cycle(item)
         if item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF) is not None:
             return Continue(next_state=REPLY_HANDOFF_WAIT)
 

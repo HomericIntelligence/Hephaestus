@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -1935,8 +1936,9 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+change\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
                     "changed_file_count": 1,
                     "worktree_path": "/tmp/implementation-writer",
                 },
@@ -2057,8 +2059,9 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+change\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
                     "changed_file_count": 1,
                     "worktree_path": item.worktree,
                 },
@@ -2067,6 +2070,39 @@ class TestWorktreeAndAdvise:
         )
 
         assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
+    def test_remediation_inspection_rejects_text_digest_mismatch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A mapping prompt cannot use text outside its receipt digest."""
+        item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
+                "remediation_thread_snapshots": [{"id": "thread-1"}],
+                "remediation_failure_diagnostic": "file_change failed",
+                "remediation_writer_inspection": {
+                    "outcome": "dirty",
+                    "branch": "1-auto-impl",
+                    "head_sha": "a" * 40,
+                    "status": " M module.py\n",
+                    "diff": "+changed after digest\n",
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+original\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
+                    "changed_file_count": 1,
+                    "worktree_path": "/tmp/implementation-writer",
+                },
+            }
+        )
+
+        assert ImplementationStage().step(item, make_ctx()) == StageOutcome(
             Disposition.FINISH_FAIL,
             "implementation_reply_failed",
         )
@@ -2099,8 +2135,9 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+guard\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+guard\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
                     "changed_file_count": 1,
                     "worktree_path": "/tmp/implementation-writer",
                 },
@@ -2114,8 +2151,14 @@ class TestWorktreeAndAdvise:
         assert request.job.descr == "recover_remediation_reply"
         assert request.job.allowed_tools == "Read,Glob,Grep"
         assert request.job.sandbox == "read-only"
-        assert request.job.prompt_kwargs["inspection_status"]["status_sha256"] == "4" * 64
-        assert request.job.prompt_kwargs["inspection_status"]["diff_sha256"] == "5" * 64
+        assert (
+            request.job.prompt_kwargs["inspection_status"]["status_sha256"]
+            == hashlib.sha256(b" M module.py\n").hexdigest()
+        )
+        assert (
+            request.job.prompt_kwargs["inspection_status"]["diff_sha256"]
+            == hashlib.sha256(b"+guard\n").hexdigest()
+        )
 
         stage.on_job_done(
             item,
@@ -2139,6 +2182,7 @@ class TestWorktreeAndAdvise:
         assert publish.job.op == "commit_push"
         assert publish.job.kwargs["expected_recovery_head"] == "a" * 40
         assert publish.job.kwargs["expected_recovery_content_snapshot"] == (_DIRTY_CONTENT_SNAPSHOT)
+        assert publish.job.kwargs["expected_recovery_tree_sha"] == "c" * 40
 
     def test_successful_inspection_resets_the_consecutive_git_failure_count(
         self, make_ctx: Any, make_work_item: Any
@@ -2168,8 +2212,9 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+change\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
                     "changed_file_count": 1,
                     "worktree_path": item.worktree,
                 },
@@ -4355,6 +4400,50 @@ class TestCommitPushAndPrCreate:
         assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in github.mutation_log
         assert "implementation_remediation" not in item.payload
 
+    @pytest.mark.parametrize(
+        ("handoff_result", "expected"),
+        [
+            (
+                "blocked",
+                StageOutcome(Disposition.ADVANCE, "implementation_reply_handoff_blocked"),
+            ),
+            (
+                "stale",
+                StageOutcome(
+                    Disposition.ADVANCE,
+                    "PR #1001 ready for fresh review after stale reply handoff",
+                ),
+            ),
+            (
+                "completed",
+                StageOutcome(Disposition.ADVANCE, "PR #1001 ready for review"),
+            ),
+        ],
+    )
+    def test_terminal_reply_handoff_clears_the_writer_inspection(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        handoff_result: str,
+        expected: StageOutcome,
+    ) -> None:
+        """A later remediation cycle cannot inherit the prior writer identity."""
+        item = make_work_item(issue=1, pr=1001, state="PR_CREATE")
+        item.payload.update(
+            {
+                implementation_module._REPLY_HANDOFF_RESULT: handoff_result,
+                "implementation_remediation": True,
+                "remediation_output": {"addressed": [], "replies": {}},
+                "remediation_writer_inspection": {
+                    "head_sha": "a" * 40,
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                },
+            }
+        )
+
+        assert ImplementationStage().step(item, make_ctx()) == expected
+        assert "remediation_writer_inspection" not in item.payload
+
     def test_remediation_reply_handoff_waits_for_github_head_visibility(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -5236,6 +5325,46 @@ class TestCommitPushAndPrCreate:
         assert isinstance(retry_job.job, GitJob)
         assert retry_job.job.op == "commit_push"
         assert github.mutation_log == []
+
+    def test_recovery_push_failure_pins_the_exact_commit_for_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A retry can publish only the child returned by the failed push."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=9, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.branch = "9-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
+                "remediation_writer_inspection": {
+                    "head_sha": "a" * 40,
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "candidate_tree_sha": "c" * 40,
+                },
+            }
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="recovery commit publication failed",
+                value={"recovery_commit_sha": "b" * 40},
+            ),
+            make_ctx(),
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.RETRY,
+            "commit_push failed",
+        )
+        retry_job = stage.step(item, make_ctx())
+
+        assert isinstance(retry_job, JobRequest)
+        assert isinstance(retry_job.job, GitJob)
+        assert retry_job.job.kwargs["expected_recovery_commit_sha"] == "b" * 40
 
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""

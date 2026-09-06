@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -27,7 +28,14 @@ class TestReadPorcelainStatus:
 
         assert status == "?? file.py\0"
         run_mock.assert_called_once_with(
-            ["git", "status", "--porcelain=v1", "-z"],
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+            ],
             cwd=worktree_path,
             capture_output=True,
             timeout=17,
@@ -38,6 +46,43 @@ class TestReadPorcelainStatus:
         with patch.object(pr_manager, "run", side_effect=decode_error):
             with pytest.raises(RuntimeError, match="Could not decode"):
                 pr_manager._read_porcelain_status(Path("/tmp/worktree"), git_timeout=None)
+
+    def test_enumerates_nested_untracked_files_before_secret_filtering(
+        self, tmp_path: Path
+    ) -> None:
+        """A new directory cannot hide a secret file behind one status entry."""
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"],
+            cwd=tmp_path,
+            check=True,
+        )
+        tracked = tmp_path / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", tracked.name], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "--no-gpg-sign", "-m", "test: base"],
+            cwd=tmp_path,
+            check=True,
+        )
+        nested = tmp_path / "new"
+        nested.mkdir()
+        (nested / ".env").write_text("TOP_SECRET=1\n", encoding="utf-8")
+        (nested / "safe.txt").write_text("safe\n", encoding="utf-8")
+
+        status = pr_manager._read_porcelain_status(tmp_path, git_timeout=10)
+        paths = pr_manager._select_commit_paths(pr_manager._parse_porcelain_status(status), None)
+        pr_manager._stage_commit_paths(paths, tmp_path, 10)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+
+        assert b"new/safe.txt" in staged
+        assert b"new/.env" not in staged
 
 
 class TestParsePorcelainStatus:
@@ -146,7 +191,7 @@ class TestSelectCommitPaths:
             ("??", control_path),
         )
 
-        with caplog.at_level(logging.DEBUG, logger=pr_manager.logger.name):
+        with caplog.at_level(logging.DEBUG):
             paths = pr_manager._select_commit_paths(entries, allowed_paths=(control_path,))
 
         # Selection semantics unchanged: newline_path filtered (not allowlisted),
@@ -171,21 +216,128 @@ class TestStageCommitPaths:
             update_paths=("src/delete.py",),
         )
         worktree_path = Path("/tmp/worktree")
-        with patch.object(pr_manager, "run") as run_mock:
+        with patch.object(
+            pr_manager,
+            "run",
+            side_effect=[_status("src/delete.py\0"), _status(), _status(), _status()],
+        ) as run_mock:
             pr_manager._stage_commit_paths(paths, worktree_path, git_timeout=19)
 
         assert run_mock.call_args_list == [
             call(
-                ["git", "add", "-u", "--", "src/delete.py"],
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "ls-tree",
+                    "-r",
+                    "-z",
+                    "--name-only",
+                    "HEAD",
+                    "--",
+                    "src/delete.py",
+                ],
                 cwd=worktree_path,
                 timeout=19,
             ),
             call(
-                ["git", "add", "--", "src/add.py", 'src/quote"name.py'],
+                ["git", "read-tree", "HEAD"],
+                cwd=worktree_path,
+                timeout=19,
+            ),
+            call(
+                ["git", "--literal-pathspecs", "add", "-u", "--", "src/delete.py"],
+                cwd=worktree_path,
+                timeout=19,
+            ),
+            call(
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "add",
+                    "--",
+                    "src/add.py",
+                    'src/quote"name.py',
+                ],
                 cwd=worktree_path,
                 timeout=19,
             ),
         ]
+
+    def test_discards_a_prestaged_secret_before_staging_safe_paths(self, tmp_path: Path) -> None:
+        """A selected safe change cannot carry a pre-staged secret into its tree."""
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"],
+            cwd=tmp_path,
+            check=True,
+        )
+        secret = tmp_path / ".env"
+        safe = tmp_path / "safe.txt"
+        secret.write_text("BASE=1\n", encoding="utf-8")
+        safe.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".env", "safe.txt"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "--no-gpg-sign", "-m", "test: base"],
+            cwd=tmp_path,
+            check=True,
+        )
+        secret.write_text("TOP_SECRET=1\n", encoding="utf-8")
+        safe.write_text("safe\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".env"], cwd=tmp_path, check=True)
+
+        status = pr_manager._read_porcelain_status(tmp_path, git_timeout=10)
+        paths = pr_manager._select_commit_paths(pr_manager._parse_porcelain_status(status), None)
+        pr_manager._stage_commit_paths(paths, tmp_path, 10)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+
+        assert b"safe.txt" in staged
+        assert b".env" not in staged
+
+    def test_stages_only_the_source_deletion_after_a_staged_rename_is_deleted(
+        self, tmp_path: Path
+    ) -> None:
+        """A deleted staged rename target cannot prevent the source deletion."""
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        source = tmp_path / "source.txt"
+        target = tmp_path / "target.txt"
+        source.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", source.name], cwd=tmp_path, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "--no-gpg-sign",
+                "-m",
+                "test: base",
+            ],
+            cwd=tmp_path,
+            check=True,
+        )
+        subprocess.run(["git", "mv", source.name, target.name], cwd=tmp_path, check=True)
+        target.unlink()
+
+        status = pr_manager._read_porcelain_status(tmp_path, git_timeout=10)
+        paths = pr_manager._select_commit_paths(pr_manager._parse_porcelain_status(status), None)
+        pr_manager._stage_commit_paths(paths, tmp_path, 10)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-status", "-z"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        ).stdout
+
+        assert staged == b"D\x00source.txt\x00"
 
 
 class TestCommitWithSignature:

@@ -242,6 +242,7 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\nM\tsrc/bar.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n src/bar.py | 1 +\n"),  # stat context
@@ -259,7 +260,7 @@ class TestCommitChanges:
             pr_manager.commit_changes(3, Path("/tmp/wt"))
 
         # git add must include the .py files but not .env or .key
-        add_call = run_mock.call_args_list[1].args[0]
+        add_call = run_mock.call_args_list[2].args[0]
         assert "src/foo.py" in add_call
         assert "src/bar.py" in add_call
         assert ".env" not in add_call
@@ -270,6 +271,7 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\thephaestus/automation/ci_driver.py\n"),  # changed files context
                 _status(" hephaestus/automation/ci_driver.py | 1 +\n"),  # stat context
@@ -290,9 +292,10 @@ class TestCommitChanges:
                 allowed_paths=("hephaestus/automation/ci_driver.py",),
             )
 
-        add_call = run_mock.call_args_list[1].args[0]
+        add_call = run_mock.call_args_list[2].args[0]
         assert add_call == [
             "git",
+            "--literal-pathspecs",
             "add",
             "--",
             "hephaestus/automation/ci_driver.py",
@@ -303,6 +306,7 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n"),  # stat context
@@ -336,6 +340,7 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n"),  # stat context
@@ -360,6 +365,7 @@ class TestCommitChanges:
             42,
             42,
             42,
+            42,
         ]
 
     def test_handles_renamed_files(self) -> None:
@@ -367,6 +373,7 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),
+                _status(""),
                 _status(""),
                 _status("R\told.py\tnew.py\n"),
                 _status(" new.py | 1 +\n"),
@@ -382,7 +389,7 @@ class TestCommitChanges:
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
         ):
             pr_manager.commit_changes(4, Path("/tmp/wt"))
-        add_call = run_mock.call_args_list[1].args[0]
+        add_call = run_mock.call_args_list[2].args[0]
         assert "new.py" in add_call
 
     def test_stages_deleted_files_without_pathspec(self) -> None:
@@ -390,6 +397,8 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),
+                _status("hephaestus/github/fleet_sync.py\0"),
+                _status(""),
                 _status(""),
                 _status("D\thephaestus/github/fleet_sync.py\n"),
                 _status(" hephaestus/github/fleet_sync.py | 10 ----------\n"),
@@ -406,14 +415,22 @@ class TestCommitChanges:
         ):
             pr_manager.commit_changes(1406, Path("/tmp/wt"))
 
-        add_call = run_mock.call_args_list[1].args[0]
-        assert add_call == ["git", "add", "-u", "--", "hephaestus/github/fleet_sync.py"]
+        add_call = run_mock.call_args_list[3].args[0]
+        assert add_call == [
+            "git",
+            "--literal-pathspecs",
+            "add",
+            "-u",
+            "--",
+            "hephaestus/github/fleet_sync.py",
+        ]
 
     def test_uses_message_agent_for_commit_subject_and_body(self) -> None:
         porcelain = _porcelain(" M LICENSE", " M NOTICE")
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tLICENSE\nM\tNOTICE\n"),  # changed files context
                 _status(" LICENSE | 2 +-\n NOTICE | 2 +-\n"),  # stat context
@@ -459,6 +476,7 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tsrc/feature.py\n"),  # changed files context
                 _status(" src/feature.py | 3 +++\n"),  # stat context
@@ -484,6 +502,7 @@ class TestCommitChanges:
         run_mock = MagicMock(
             side_effect=[
                 _status(_porcelain(" M src/foo.py")),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tsrc/foo.py\n"),  # changed files context
                 _status(" src/foo.py | 1 +\n"),  # stat context
@@ -1032,6 +1051,7 @@ class TestCoAuthorLine:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tsrc/feature.py\n"),  # changed files context
                 _status(" src/feature.py | 1 +\n"),  # stat context
@@ -1065,6 +1085,7 @@ class TestCoAuthorLine:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tsrc/feature.py\n"),  # changed files context
                 _status(" src/feature.py | 1 +\n"),  # stat context
@@ -1092,6 +1113,7 @@ class TestCoAuthorLine:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
@@ -1124,6 +1146,7 @@ class TestCoAuthorLine:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
@@ -1159,6 +1182,7 @@ class TestCoAuthorLine:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
@@ -1192,6 +1216,7 @@ class TestCoAuthorLine:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
@@ -1226,6 +1251,7 @@ class TestCoAuthorLine:
         run_mock = MagicMock(
             side_effect=[
                 _status(porcelain),  # git status
+                _status(""),  # git read-tree
                 _status(""),  # git add
                 _status("M\tfoo.py\n"),  # changed files context
                 _status(" foo.py | 1 +\n"),  # stat context
@@ -1387,3 +1413,28 @@ class TestNormalizeStrictConventionalTitle:
     )
     def test_repairs_strict_title_violations(self, title: str, expected: str) -> None:
         assert normalize_strict_conventional_title(title) == expected
+
+    def test_commit_changes_rejects_a_staged_tree_that_differs_from_inspection(
+        self,
+    ) -> None:
+        """Concurrent writer bytes cannot replace the inspected commit tree."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status(_porcelain(" M module.py")),
+                _status(""),
+                _status(""),
+                _status("b" * 40),
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info") as fetch_issue,
+            pytest.raises(RuntimeError, match="staged commit tree changed"),
+        ):
+            pr_manager.commit_changes(
+                2973,
+                Path("/tmp/wt"),
+                expected_tree_sha="a" * 40,
+            )
+
+        fetch_issue.assert_not_called()
