@@ -10,12 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
-import hephaestus.automation.pipeline.host_verification_pyxis as pyxis_boundary
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     PyxisImageValidationError,
     build_pyxis_environment,
     build_pyxis_srun_command,
+    stage_verified_pyxis_image,
     validate_pyxis_image,
+    validate_pyxis_quota_root,
 )
 from hephaestus.automation.pipeline.stages.pr_review_receipts import (
     _host_verification_receipt_matches,
@@ -150,7 +151,7 @@ def test_stage_verified_pyxis_image_uses_content_addressed_read_only_bytes(
         provenance=authority,
     )
 
-    staged = pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+    staged = stage_verified_pyxis_image(metadata, stage_root)
 
     assert staged.path == stage_root / f"sha256-{digest}.sqsh"
     assert hashlib.sha256(staged.path.read_bytes()).hexdigest() == digest
@@ -169,8 +170,8 @@ def test_stage_verified_pyxis_image_reuses_verified_digest_target(tmp_path: Path
         provenance=authority,
     )
 
-    first = pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
-    second = pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+    first = stage_verified_pyxis_image(metadata, stage_root)
+    second = stage_verified_pyxis_image(metadata, stage_root)
 
     assert second.path == first.path
     assert hashlib.sha256(second.path.read_bytes()).hexdigest() == digest
@@ -194,7 +195,7 @@ def test_stage_verified_pyxis_image_preserves_conflicting_digest_target(
     )
 
     with pytest.raises(PyxisImageValidationError, match="staging"):
-        pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+        stage_verified_pyxis_image(metadata, stage_root)
 
     assert target.read_bytes() == b"conflict"
 
@@ -237,7 +238,7 @@ def test_stage_verified_pyxis_image_rejects_root_substitution(
     )
 
     with pytest.raises(PyxisImageValidationError, match="staging"):
-        pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+        stage_verified_pyxis_image(metadata, stage_root)
 
     target_name = f"sha256-{digest}.sqsh"
     assert not (stage_root / target_name).exists()
@@ -262,7 +263,7 @@ def test_stage_verified_pyxis_image_rejects_substitution_after_validation(
     stage_root.mkdir(mode=0o700)
 
     with pytest.raises(PyxisImageValidationError, match="changed during staging"):
-        pyxis_boundary.stage_verified_pyxis_image(metadata, stage_root)
+        stage_verified_pyxis_image(metadata, stage_root)
 
 
 def test_validate_pyxis_image_rejects_missing_sidecar(tmp_path: Path) -> None:
@@ -421,7 +422,7 @@ def test_validate_pyxis_quota_root_requires_finite_private_filesystem(
         lambda _: SimpleNamespace(f_frsize=4096, f_blocks=262_144),
     )
 
-    assert pyxis_boundary.validate_pyxis_quota_root(tmp_path) == tmp_path.resolve()
+    assert validate_pyxis_quota_root(tmp_path) == tmp_path.resolve()
 
 
 def test_validate_pyxis_quota_root_rejects_polling_only_storage(
@@ -435,7 +436,7 @@ def test_validate_pyxis_quota_root_rejects_polling_only_storage(
     )
 
     with pytest.raises(PyxisImageValidationError, match="hard quota"):
-        pyxis_boundary.validate_pyxis_quota_root(tmp_path)
+        validate_pyxis_quota_root(tmp_path)
 
 
 def test_build_pyxis_environment_is_scrubbed_and_source_bound(tmp_path: Path) -> None:
