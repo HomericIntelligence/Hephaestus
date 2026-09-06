@@ -122,7 +122,7 @@ host-verification-pyxis-image:
 
 # Run the mandatory real-host proof in an authoritative Pyxis lane.
 host-verification-pyxis-e2e:
-    uv run pytest tests/integration/test_host_verification_pyxis_e2e.py --require-pyxis-host-verification -v
+    uv run pytest tests/integration/test_host_verification_pyxis_e2e.py --require-pyxis-host-verification --no-cov -v
 
 # Run CI lint (pre-commit + doc links) in container
 ci-lint:

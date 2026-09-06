@@ -126,3 +126,12 @@ def test_owned_execution_surfaces_do_not_reference_removed_environment_controls(
                 violations.append(f"{path.relative_to(REPO_ROOT)}: {name}")
 
     assert not violations, "legacy environment controls found:\n" + "\n".join(violations)
+
+
+def test_pyxis_e2e_recipe_disables_repository_wide_coverage() -> None:
+    """The single-test real-host recipe does not run the global coverage gate."""
+    recipe = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
+    marker = "host-verification-pyxis-e2e:\n"
+    command = recipe.split(marker, 1)[1].splitlines()[0]
+
+    assert "--no-cov" in command
