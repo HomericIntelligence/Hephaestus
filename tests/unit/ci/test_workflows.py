@@ -419,7 +419,7 @@ class TestPiCliSetup:
             if step.get("name") == "Run Pi conformance tests"
         )
         assert "tests/unit/docs/test_pi_rollout_consistency.py" in command
-        assert "--override-ini=\"addopts=\"" in command
+        assert '--override-ini="addopts="' in command
         assert '-m "not nightly"' in command
 
     def test_container_and_nightly_lane_consume_the_catalog(self) -> None:

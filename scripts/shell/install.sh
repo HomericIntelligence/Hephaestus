@@ -173,7 +173,8 @@ readonly JUST_SHA256_LINUX_AARCH64="bb3886b15e2cbcb9c0eb19956297d36de4eaef45b89d
 readonly JUST_SHA256_DARWIN_X86_64="30aacf9cbf021c2ff36fff5a05c800360e2020e527916e1c0960452ef5a8568c"
 readonly JUST_SHA256_DARWIN_AARCH64="e7a824c4d92cdea270b61474bd48e851aedc4c65f9c5245c12b32df6de9b536f"
 
-readonly HEPHAESTUS_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+HEPHAESTUS_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+readonly HEPHAESTUS_REPO_ROOT
 
 run_pi_package_manager() {
     if has_cmd hephaestus-install-pi-plugins; then
