@@ -100,9 +100,10 @@ def parse_porcelain_status(output: str) -> tuple[tuple[str, str], ...]:
 
 def is_secret_path(path: str) -> bool:
     """Return whether a repository-relative path matches secret-file policy."""
-    filename = Path(path).name
-    return filename in SECRET_FILE_NAMES or any(
-        filename.endswith(extension) for extension in SECRET_FILE_EXTENSIONS
+    return any(
+        component in SECRET_FILE_NAMES
+        or any(component.endswith(extension) for extension in SECRET_FILE_EXTENSIONS)
+        for component in Path(path).parts
     )
 
 

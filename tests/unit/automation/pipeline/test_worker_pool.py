@@ -3100,9 +3100,15 @@ class TestGitOps:
 
         assert _git(writer, "write-tree") == candidate
 
-    @pytest.mark.parametrize("direction", ("directory-to-file", "file-to-directory"))
+    @pytest.mark.parametrize(
+        ("direction", "error"),
+        (
+            ("directory-to-file", "overlaps a filtered path"),
+            ("file-to-directory", "no publishable non-secret paths"),
+        ),
+    )
     def test_candidate_tree_rejects_secret_path_shape_changes(
-        self, tmp_path: Path, direction: str
+        self, tmp_path: Path, direction: str, error: str
     ) -> None:
         """A selected shape change cannot stage one filtered secret path."""
         repo = tmp_path / "repo"
@@ -3129,7 +3135,7 @@ class TestGitOps:
             (writer / "token.pem").mkdir()
             (writer / "token.pem" / "safe.txt").write_text("safe\n", encoding="utf-8")
 
-        with pytest.raises(RuntimeError, match="overlaps a filtered path"):
+        with pytest.raises(RuntimeError, match=error):
             _candidate_commit_tree_evidence(writer, head, timeout=60)
 
     @pytest.mark.requires_posix

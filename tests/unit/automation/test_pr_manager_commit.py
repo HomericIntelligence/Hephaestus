@@ -91,6 +91,41 @@ class TestReadPorcelainStatus:
         assert b"new/safe.txt" in staged
         assert b"new/.env" not in staged
 
+    def test_filters_descendants_of_a_secret_named_directory(self, tmp_path: Path) -> None:
+        """A secret directory cannot expose its descendants as safe paths."""
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"],
+            cwd=tmp_path,
+            check=True,
+        )
+        tracked = tmp_path / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", tracked.name], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "--no-gpg-sign", "-m", "test: base"],
+            cwd=tmp_path,
+            check=True,
+        )
+        secret_directory = tmp_path / ".env"
+        secret_directory.mkdir()
+        (secret_directory / "token.txt").write_text("TOP_SECRET=1\n", encoding="utf-8")
+        (tmp_path / "safe.txt").write_text("safe\n", encoding="utf-8")
+
+        status = pr_manager._read_porcelain_status(tmp_path, git_timeout=10)
+        paths = pr_manager._select_commit_paths(pr_manager._parse_porcelain_status(status), None)
+        pr_manager._stage_commit_paths(paths, tmp_path, 10)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+
+        assert b"safe.txt" in staged
+        assert b".env/token.txt" not in staged
+
 
 class TestParsePorcelainStatus:
     """Tests for NUL-delimited porcelain-v1 parsing."""

@@ -271,16 +271,21 @@ class TestCommitChanges:
                 pr_manager.commit_changes(2, Path("/tmp/wt"))
 
     @pytest.mark.parametrize(
-        "porcelain",
+        ("porcelain", "error"),
         (
-            _porcelain(" D directory/.env", "?? directory"),
-            _porcelain(" D token.pem", "?? token.pem/safe.txt"),
+            (_porcelain(" D directory/.env", "?? directory"), "overlaps a filtered path"),
+            (
+                _porcelain(" D token.pem", "?? token.pem/safe.txt"),
+                "No non-secret files",
+            ),
         ),
     )
-    def test_secret_path_shape_changes_raise_before_staging(self, porcelain: str) -> None:
+    def test_secret_path_shape_changes_raise_before_staging(
+        self, porcelain: str, error: str
+    ) -> None:
         """An implicit tree replacement cannot stage a filtered secret path."""
         with patch.object(pr_manager, "run", return_value=_status(porcelain)) as run_mock:
-            with pytest.raises(RuntimeError, match="overlaps a filtered path"):
+            with pytest.raises(RuntimeError, match=error):
                 pr_manager.commit_changes(2, Path("/tmp/wt"))
 
         assert run_mock.call_count == 1
