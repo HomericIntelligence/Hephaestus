@@ -36,6 +36,20 @@ def restore_logging() -> Iterator[None]:
             logging.getLogger(name).setLevel(level)
 
 
+class TrackingStreamHandler(logging.StreamHandler[io.StringIO]):
+    """Record handler closure through the public method."""
+
+    def __init__(self, stream: io.StringIO) -> None:
+        """Initialize the stream and closure flag."""
+        super().__init__(stream)
+        self.was_closed = False
+
+    def close(self) -> None:
+        """Record closure and preserve the base handler behavior."""
+        self.was_closed = True
+        super().close()
+
+
 class StopAfterLoggingError(RuntimeError):
     """Stop before external dispatch."""
 
@@ -70,13 +84,13 @@ def test_main_replaces_existing_stdout_and_stderr_handlers(
 ) -> None:
     """Check the specified logging contract."""
     streams = [io.StringIO(), io.StringIO()]
-    handlers = [logging.StreamHandler(stream) for stream in streams]
+    handlers = [TrackingStreamHandler(stream) for stream in streams]
     for handler in handlers:
         logging.getLogger().addHandler(handler)
     run_main(monkeypatch, tmp_path / "loop.log")
     assert all(handler not in logging.getLogger().handlers for handler in handlers)
     assert all(stream.getvalue() == "" for stream in streams)
-    assert all(getattr(handler, "_closed") for handler in handlers)
+    assert all(handler.was_closed for handler in handlers)
 
 
 @pytest.mark.parametrize("format_name", ["text", "json"])
@@ -142,13 +156,13 @@ def test_file_only_preserves_other_files_and_reuses_destination(tmp_path: Path) 
 
 def test_failed_target_keeps_root_handlers(tmp_path: Path) -> None:
     """Check the specified logging contract."""
-    handler = logging.StreamHandler(io.StringIO())
+    handler = TrackingStreamHandler(io.StringIO())
     logging.getLogger().addHandler(handler)
     saved = logging.getLogger().handlers[:]
     with pytest.raises(OSError):
         setup_logging(primary_stream=None, log_file=str(tmp_path / "missing" / "x.log"))
     assert logging.getLogger().handlers == saved
-    assert not getattr(handler, "_closed")
+    assert not handler.was_closed
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"log_file": "unused.log", "log_to_stderr": True}])
