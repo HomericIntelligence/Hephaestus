@@ -26,6 +26,11 @@ from ..comment_identity import (
 )
 from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
+from ..requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX,
+    RecoveryCommentSelection,
+    select_recovery_comment,
+)
 from ..review_journal import has_exact_leading_marker
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
@@ -334,7 +339,9 @@ def gh_issue_upsert_comment(
     """Create-or-update the single issue comment keyed by ``marker_prefix``.
 
     The marker must be an opaque canonical marker at byte zero of the outgoing
-    body. Display headings and historical heading-only comments are inert.
+    body. Versioned recovery bodies use the recovery marker family and the
+    complete-journal selector. Display headings and historical heading-only
+    comments are inert.
 
     For a shared plan or review marker, this function delegates to the
     authenticated-actor upsert path. That path rejects foreign, unverifiable,
@@ -355,13 +362,15 @@ def gh_issue_upsert_comment(
 
     Returns:
         The ``databaseId`` of an updated comment. A generic fresh comment
-        returns ``None``. A shared plan or review comment returns its verified
-        actor-owned ``databaseId`` after creation or update.
+        returns ``None``. A shared plan, review, or recovery comment returns
+        its verified actor-owned ``databaseId`` after creation or update.
 
     Raises:
         RuntimeError: If a create/update/delete call fails.
 
     """
+    if marker_prefix == RECOVERY_PROVENANCE_PREFIX:
+        return _gh_issue_upsert_recovery_comment(issue_number, body, repo=repo)
     if not has_exact_leading_marker(body, marker_prefix):
         raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
     if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
@@ -434,6 +443,113 @@ def gh_issue_upsert_comment(
         ):
             raise RuntimeError(
                 f"updated canonical comment {target_id} on #{issue_number} was not confirmed"
+            )
+    return target_id
+
+
+def _recovery_comment_owned_by_viewer(
+    comment: dict[str, Any],
+    viewer_login: str,
+) -> bool:
+    """Return whether comment metadata proves actor ownership."""
+    if "viewerDidAuthor" in comment:
+        return comment.get("viewerDidAuthor") is True
+    user = comment.get("user") or comment.get("author")
+    login = user.get("login") if isinstance(user, dict) else ""
+    return bool(login) and str(login).lower() == viewer_login
+
+
+def _select_recovery_metadata_comment(
+    comments: list[dict[str, Any]],
+    viewer_login: str,
+) -> RecoveryCommentSelection[dict[str, Any]] | None:
+    """Select one recovery comment from complete metadata."""
+    return select_recovery_comment(
+        comments,
+        body_of=lambda comment: str(comment.get("body", "")),
+        owned_of=lambda comment: _recovery_comment_owned_by_viewer(comment, viewer_login),
+    )
+
+
+def _patch_recovery_comment(
+    issue_number: int,
+    comment_id: int,
+    body: str,
+    *,
+    repo: tuple[str, str] | None,
+) -> None:
+    """Patch one recovery comment body and report transport errors."""
+    owner, name = repo if repo is not None else _api.get_repo_info()
+    try:
+        with _body_file(body) as path:
+            _api._gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"/repos/{owner}/{name}/issues/comments/{comment_id}",
+                    "-F",
+                    f"body=@{path}",
+                ]
+            )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(
+            f"Failed to update recovery comment {comment_id} on #{issue_number}: {error}"
+        ) from error
+
+
+def _gh_issue_upsert_recovery_comment(
+    issue_number: int,
+    body: str,
+    *,
+    repo: tuple[str, str] | None,
+) -> int:
+    """Upsert a versioned recovery comment with full-journal readback checks."""
+    validate_planning_body_for_write(RECOVERY_PROVENANCE_PREFIX, body)
+    outgoing = select_recovery_comment(
+        [{"body": body}],
+        body_of=lambda comment: str(comment["body"]),
+        owned_of=lambda _comment: True,
+    )
+    if outgoing is None:
+        raise RuntimeError("recovery comment body did not contain a valid provenance marker")
+    viewer_login = (_api.gh_current_login() or "").strip().lower()
+    if not viewer_login:
+        raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
+
+    comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+    target = _select_recovery_metadata_comment(comments, viewer_login)
+    if target is None:
+        _api.gh_issue_comment(issue_number, body, repo=repo)
+        target = _select_recovery_metadata_comment(
+            _api.fetch_issue_comments_metadata(issue_number, repo),
+            viewer_login,
+        )
+        if target is None:
+            raise RuntimeError(
+                f"created recovery comment on #{issue_number} was not observable as actor-owned"
+            )
+        if str(target.comment.get("body", "")) != body:
+            raise RuntimeError(f"created recovery comment on #{issue_number} was not confirmed")
+
+    target_id = target.comment.get("databaseId")
+    if target_id is None:
+        raise RuntimeError(f"recovery comment on #{issue_number} has no database id")
+    target_id = int(target_id)
+    if str(target.comment.get("body", "")) != body:
+        _patch_recovery_comment(issue_number, target_id, body, repo=repo)
+
+        confirmed = _select_recovery_metadata_comment(
+            _api.fetch_issue_comments_metadata(issue_number, repo),
+            viewer_login,
+        )
+        if (
+            confirmed is None
+            or confirmed.comment.get("databaseId") != target_id
+            or str(confirmed.comment.get("body", "")) != body
+        ):
+            raise RuntimeError(
+                f"updated recovery comment {target_id} on #{issue_number} was not confirmed"
             )
     return target_id
 

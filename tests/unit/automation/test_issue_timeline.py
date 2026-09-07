@@ -330,22 +330,31 @@ def test_compaction_deletes_complete_three_revision_history_chain() -> None:
     assert result.delete_comment_ids == (3, 4, 5, 6)
 
 
-def test_compaction_keeps_one_valid_recovery_or_obsolete_role_per_issue() -> None:
-    """Actor-owned recovery roles stay bounded without touching foreign comments."""
+def test_compaction_keeps_one_recovery_and_obsolete_role_per_issue() -> None:
+    """Compaction keeps the sole recovery role and one obsolete explanation."""
     recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
     obsolete = render_obsolete_explanation("Superseded by #42")
     comments = [
         _comment(1, recovery),
-        _comment(2, recovery),
         _comment(3, obsolete),
         _comment(4, obsolete),
-        _comment(5, recovery, owned=False),
     ]
 
     result = plan_issue_timeline_compaction(comments)
 
-    assert result.delete_comment_ids == (1, 3)
-    assert OBSOLETE_EXPLANATION_MARKER in comments[3].body
+    assert result.delete_comment_ids == (3,)
+    assert OBSOLETE_EXPLANATION_MARKER in comments[2].body
+
+
+def test_compaction_rejects_duplicate_or_foreign_recovery_claims() -> None:
+    """Recovery identity conflicts stop compaction before any deletion plan."""
+    recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
+
+    with pytest.raises(RuntimeError, match="duplicate"):
+        plan_issue_timeline_compaction([_comment(1, recovery), _comment(2, recovery)])
+
+    with pytest.raises(RuntimeError, match="foreign"):
+        plan_issue_timeline_compaction([_comment(1, recovery, owned=False)])
 
 
 def test_malformed_owned_recovery_provenance_fails_before_deletion() -> None:

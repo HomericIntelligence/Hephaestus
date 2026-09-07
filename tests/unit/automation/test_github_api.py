@@ -42,12 +42,57 @@ from hephaestus.automation.github_api import (
 )
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER
+from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX,
+    render_recovered_requirements,
+)
 from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.io import utils as io_utils
 
 # Circuit-breaker reset is now an autouse package-scope fixture in
 # ``tests/unit/automation/conftest.py`` (#708), so it applies to every test
 # under the automation package — not just this file.
+
+
+def _recovery_body(version: int = 3) -> str:
+    """Return a valid versioned recovery body for API tests."""
+    if version < 3:
+        body = render_recovered_requirements("source", "recovered", "b" * 64)
+        return body.replace(":v=2:", f":v={version}:", 1) if version == 1 else body
+    return render_recovered_requirements(
+        "source",
+        "recovered",
+        "b" * 64,
+        issue_title="title",
+        repository_revision="c" * 40,
+    )
+
+
+def _recovery_conflict(body: str, kind: str) -> list[dict[str, Any]]:
+    """Build one post-write recovery identity conflict."""
+    if kind == "foreign":
+        return [{"databaseId": 2, "body": body, "viewerDidAuthor": False}]
+    if kind == "malformed":
+        return [
+            {
+                "databaseId": 2,
+                "body": body.replace(":v=3:", ":v=9:", 1),
+                "viewerDidAuthor": True,
+            }
+        ]
+    if kind == "repeated":
+        marker = body.split("\n", 1)[0]
+        return [
+            {
+                "databaseId": 2,
+                "body": f"{body}\n\n{marker}\n\nrepeated",
+                "viewerDidAuthor": True,
+            }
+        ]
+    return [
+        {"databaseId": 2, "body": body, "viewerDidAuthor": True},
+        {"databaseId": 3, "body": body, "viewerDidAuthor": True},
+    ]
 
 
 class TestGhIssueJson:
@@ -3281,6 +3326,99 @@ class TestUpsertAndDeleteComment:
             for c in mock_gh_call.call_args_list
         )
         assert patched, mock_gh_call.call_args_list
+
+    @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
+    def test_recovery_create_rejects_post_write_identity_conflicts(self, conflict: str) -> None:
+        """A recovery create conflict stops without a second mutation."""
+        body = _recovery_body()
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                side_effect=[[], _recovery_conflict(body, conflict)],
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+            patch("hephaestus.automation.github_api.gh_issue_delete_comment") as mock_delete,
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match=r"recovery|duplicate|foreign|malformed|repeated",
+            ):
+                gh_issue_upsert_comment(
+                    5,
+                    RECOVERY_PROVENANCE_PREFIX,
+                    body,
+                    repo=("o", "r"),
+                )
+
+        mock_create.assert_called_once_with(5, body, repo=("o", "r"))
+        mock_gh_call.assert_not_called()
+        mock_delete.assert_not_called()
+
+    @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
+    def test_recovery_update_rejects_post_write_identity_conflicts(self, conflict: str) -> None:
+        """A recovery update conflict stops without cleanup after one PATCH."""
+        old = {"databaseId": 1, "body": _recovery_body(version=2), "viewerDidAuthor": True}
+        body = _recovery_body()
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                side_effect=[[old], _recovery_conflict(body, conflict)],
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+            patch("hephaestus.automation.github_api.gh_issue_delete_comment") as mock_delete,
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match=r"recovery|duplicate|foreign|malformed|repeated",
+            ):
+                gh_issue_upsert_comment(
+                    5,
+                    RECOVERY_PROVENANCE_PREFIX,
+                    body,
+                    repo=("o", "r"),
+                )
+
+        mock_create.assert_not_called()
+        mock_gh_call.assert_called_once()
+        assert "/repos/o/r/issues/comments/1" in mock_gh_call.call_args.args[0]
+        mock_delete.assert_not_called()
+
+    def test_recovery_update_preserves_comment_id_across_version_migration(self) -> None:
+        """A valid v1 recovery comment updates in place to the current v3 body."""
+        old = {"databaseId": 17, "body": _recovery_body(version=1), "viewerDidAuthor": True}
+        body = _recovery_body()
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                side_effect=[[old], [{**old, "body": body}]],
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+        ):
+            result = gh_issue_upsert_comment(
+                5,
+                RECOVERY_PROVENANCE_PREFIX,
+                body,
+                repo=("o", "r"),
+            )
+
+        assert result == 17
+        mock_create.assert_not_called()
+        mock_gh_call.assert_called_once()
 
     def test_upsert_rejects_older_duplicates_without_deleting_them(self) -> None:
         """More than one matching canonical comment requires manual recovery."""

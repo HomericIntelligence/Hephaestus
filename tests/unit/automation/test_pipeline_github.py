@@ -45,6 +45,10 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
     PLAN_REVIEW_PREFIX,
 )
+from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX,
+    render_recovered_requirements,
+)
 from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
 from hephaestus.automation.review_journal import (
     IssueComment,
@@ -61,6 +65,50 @@ from hephaestus.github.client import GitHubRateLimitError
 from hephaestus.utils.file_lock import LockUnavailableError
 
 _BATCH_NONCE = "b" * 32
+
+
+def _recovery_body(version: int = 3) -> str:
+    """Return a valid versioned recovery body for upsert tests."""
+    if version < 3:
+        body = render_recovered_requirements("source", "recovered", "b" * 64)
+        return body.replace(":v=2:", f":v={version}:", 1) if version == 1 else body
+    return render_recovered_requirements(
+        "source",
+        "recovered",
+        "b" * 64,
+        issue_title="title",
+        repository_revision="c" * 40,
+    )
+
+
+def _recovery_conflict(
+    body: str,
+    kind: str,
+) -> list[dict[str, object]]:
+    """Build one post-write recovery identity conflict."""
+    if kind == "foreign":
+        return [{"body": body, "databaseId": 2, "viewerDidAuthor": False}]
+    if kind == "malformed":
+        return [
+            {
+                "body": body.replace(":v=3:", ":v=9:", 1),
+                "databaseId": 2,
+                "viewerDidAuthor": True,
+            }
+        ]
+    if kind == "repeated":
+        marker = body.split("\n", 1)[0]
+        return [
+            {
+                "body": f"{body}\n\n{marker}\n\nrepeated",
+                "databaseId": 2,
+                "viewerDidAuthor": True,
+            }
+        ]
+    return [
+        {"body": body, "databaseId": 2, "viewerDidAuthor": True},
+        {"body": body, "databaseId": 3, "viewerDidAuthor": True},
+    ]
 
 
 def _direct_merge_policy() -> EffectiveMergePolicy:
@@ -4207,6 +4255,59 @@ class TestMutatorMapping:
 
         with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
             adapter.upsert_plan_comment(5, new)
+
+    @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
+    def test_recovery_create_rejects_post_write_identity_conflicts(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        conflict: str,
+    ) -> None:
+        """A recovery create conflict stops without cleanup or a second write."""
+        body = _recovery_body()
+        fetch = MagicMock(side_effect=[[], _recovery_conflict(body, conflict)])
+        post = MagicMock()
+        patch_comment = MagicMock()
+        delete_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
+
+        with pytest.raises(RuntimeError, match=r"recovery|duplicate|foreign|malformed|repeated"):
+            adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        post.assert_called_once_with(5, body)
+        patch_comment.assert_not_called()
+        delete_comment.assert_not_called()
+
+    @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
+    def test_recovery_update_rejects_post_write_identity_conflicts(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        conflict: str,
+    ) -> None:
+        """A recovery update conflict preserves the selected stable comment ID."""
+        adapter.repo = "repo"
+        old_body = _recovery_body(version=2)
+        new_body = _recovery_body()
+        old = {"body": old_body, "databaseId": 1, "viewerDidAuthor": True}
+        fetch = MagicMock(side_effect=[[old], _recovery_conflict(new_body, conflict)])
+        post = MagicMock()
+        patch_comment = MagicMock()
+        delete_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
+
+        with pytest.raises(RuntimeError, match=r"recovery|duplicate|foreign|malformed|repeated"):
+            adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, new_body)
+
+        post.assert_not_called()
+        patch_comment.assert_called_once_with(1, new_body, repo=("org", "repo"))
+        delete_comment.assert_not_called()
 
     def test_upsert_rejects_foreign_canonical_marker_without_shadow_comment(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

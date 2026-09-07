@@ -16,6 +16,7 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.requirements_recovery import (
     ATHENA_FINALIZED_PLAN_PREFIX,
     HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
+    RecoveryCommentIdentityError,
     RecoveryDisposition,
     RecoveryVerdict,
     build_recovery_prompt,
@@ -28,6 +29,7 @@ from hephaestus.automation.requirements_recovery import (
     parse_recovery_review,
     recovered_requirements_for_context,
     render_recovered_requirements,
+    select_recovery_comment,
     verified_finalized_plan,
 )
 from hephaestus.automation.review_journal import HISTORY_MARKER
@@ -347,6 +349,105 @@ def test_provenance_round_trip_binds_all_three_digests() -> None:
     assert provenance.requirements_digest == hashlib.sha256(requirements.encode()).hexdigest()
     assert provenance.evidence_digest == binding
     assert has_contaminated_issue_body(body) is False
+
+
+def _recovery_body(version: int = 3) -> str:
+    """Return a valid recovery body for selector tests."""
+    body = render_recovered_requirements(
+        "source requirements",
+        "recovered requirements",
+        "b" * 64,
+        issue_title="Issue title",
+        repository_revision="c" * 40,
+    )
+    if version < 3:
+        body = render_recovered_requirements(
+            "source requirements",
+            "recovered requirements",
+            "b" * 64,
+        )
+        if version == 1:
+            body = body.replace(":v=2:", ":v=1:", 1)
+    return body
+
+
+def _recovery_comment(body: str, *, owned: bool = True, comment_id: int = 1) -> dict[str, object]:
+    """Return metadata shaped like a bounded issue-comment journal entry."""
+    return {"body": body, "databaseId": comment_id, "owned": owned}
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_recovery_selector_accepts_each_supported_version(version: int) -> None:
+    body = _recovery_body(version)
+    comment = _recovery_comment(body)
+
+    selected = select_recovery_comment(
+        [comment],
+        body_of=lambda value: str(value["body"]),
+        owned_of=lambda value: bool(value["owned"]),
+    )
+
+    assert selected is not None
+    assert selected.comment is comment
+    assert selected.provenance.version == version
+
+
+def test_recovery_selector_rejects_leading_whitespace_before_marker() -> None:
+    body = "  " + _recovery_body()
+
+    with pytest.raises(RecoveryCommentIdentityError, match="byte zero"):
+        select_recovery_comment(
+            [_recovery_comment(body)],
+            body_of=lambda value: str(value["body"]),
+            owned_of=lambda value: bool(value["owned"]),
+        )
+
+
+def test_recovery_selector_rejects_foreign_marker() -> None:
+    with pytest.raises(RecoveryCommentIdentityError, match="foreign"):
+        select_recovery_comment(
+            [_recovery_comment(_recovery_body(), owned=False)],
+            body_of=lambda value: str(value["body"]),
+            owned_of=lambda value: bool(value["owned"]),
+        )
+
+
+def test_recovery_selector_rejects_malformed_marker() -> None:
+    malformed = _recovery_body().replace(":v=3:", ":v=9:", 1)
+
+    with pytest.raises(RecoveryCommentIdentityError, match="malformed"):
+        select_recovery_comment(
+            [_recovery_comment(malformed)],
+            body_of=lambda value: str(value["body"]),
+            owned_of=lambda value: bool(value["owned"]),
+        )
+
+
+def test_recovery_selector_rejects_repeated_claims_in_one_comment() -> None:
+    first = _recovery_body()
+    second = _recovery_body().split("\n", 1)[0]
+    repeated = f"{first}\n\n{second}\n\nrepeated"
+
+    with pytest.raises(RecoveryCommentIdentityError, match="repeated"):
+        select_recovery_comment(
+            [_recovery_comment(repeated)],
+            body_of=lambda value: str(value["body"]),
+            owned_of=lambda value: bool(value["owned"]),
+        )
+
+
+def test_recovery_selector_rejects_duplicate_actor_owned_comments() -> None:
+    comments = [
+        _recovery_comment(_recovery_body(), comment_id=1),
+        _recovery_comment(_recovery_body(), comment_id=2),
+    ]
+
+    with pytest.raises(RecoveryCommentIdentityError, match="duplicate"):
+        select_recovery_comment(
+            comments,
+            body_of=lambda value: str(value["body"]),
+            owned_of=lambda value: bool(value["owned"]),
+        )
 
 
 def test_tampered_recovered_body_does_not_validate_provenance() -> None:
