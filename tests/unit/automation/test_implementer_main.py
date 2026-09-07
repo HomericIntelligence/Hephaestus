@@ -89,7 +89,7 @@ def test_timeout_flags_thread_into_pipeline_config(tmp_path: Path) -> None:
             "--reviewer-timeout",
             "12",
             "--reviewer-model",
-            "review-model",
+            "claude-review-model",
             "--poll-max-wait",
             "14",
             "--pre-pr-test-timeout",
@@ -102,7 +102,7 @@ def test_timeout_flags_thread_into_pipeline_config(tmp_path: Path) -> None:
     assert (config.implementer_timeout, config.reviewer_timeout) == (11, 12)
     assert (config.git_message_timeout, config.poll_max_wait) == (13, 14)
     assert (config.pre_pr_test_timeout, config.run_pre_pr_tests) == (15, True)
-    assert config.reviewer_model == "review-model"
+    assert config.reviewer_model == "claude-review-model"
 
 
 def test_codex_role_aliases_reach_implementer_config(tmp_path: Path) -> None:

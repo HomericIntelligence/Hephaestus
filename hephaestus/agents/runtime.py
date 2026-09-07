@@ -41,6 +41,7 @@ from hephaestus.agents.model_selection import (
     AgentModelSelection,
     parse_model_selection,
     resolve_codex_model_selection,
+    validate_claude_model_reference,
     validate_codex_role_model_reference,
 )
 from hephaestus.agents.pi_plugins import (
@@ -792,6 +793,25 @@ def _validate_codex_model_references(model_references: Sequence[str] | None) -> 
         validate_codex_role_model_reference(reference)
 
 
+def _validate_claude_model_references(model_references: Sequence[str] | None) -> None:
+    """Validate Claude references before provider authentication."""
+    if model_references is None:
+        return
+    for reference in model_references:
+        validate_claude_model_reference(reference)
+
+
+def _validate_fixed_provider_model_references(
+    agent: str,
+    model_references: Sequence[str] | None,
+) -> None:
+    """Validate references when the selected provider is known."""
+    if agent == "claude":
+        _validate_claude_model_references(model_references)
+    elif agent == "codex":
+        _validate_codex_model_references(model_references)
+
+
 def validate_durable_model_selection(
     provider: str,
     model: str,
@@ -828,8 +848,7 @@ def resolve_agent(
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
-        if agent == "codex":
-            _validate_codex_model_references(model_references)
+        _validate_fixed_provider_model_references(agent, model_references)
         if agent == "pi":
             _validate_pi_model_references_before_admission(
                 model_references,
@@ -885,8 +904,7 @@ def resolve_agent(
 
     for agent_name in installed_agents:
         if is_agent_authenticated(agent_name, auth_status_timeout=auth_status_timeout):
-            if agent_name == "codex":
-                _validate_codex_model_references(model_references)
+            _validate_fixed_provider_model_references(agent_name, model_references)
             return agent_name
 
     raise RuntimeError(
@@ -957,6 +975,8 @@ def normalize_provider_model_reference(agent: str, reference: str) -> str:
     if is_codex(agent):
         validate_codex_role_model_reference(reference)
         return resolve_codex_model_selection(reference).reference
+    if agent == "claude":
+        validate_claude_model_reference(reference)
     return reference
 
 

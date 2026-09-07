@@ -26,6 +26,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resolve_agent,
@@ -279,18 +280,28 @@ def main(argv: list[str] | None = None) -> int:
     configure_github_throttle_from_args(args)
     configure_cli_logging(verbose=args.verbose, log_format=getattr(args, "log_format", "text"))
     selected_agent = "codex" if args.codex else args.agent
-    agent = (
-        selected_agent or "claude"
-        if args.dry_run
-        else resolve_agent(
-            selected_agent,
-            disable_pi_automation=args.disable_pi_automation,
-            auth_status_timeout=args.auth_status_timeout,
-            pi_isolation_adapter=args.pi_isolation_adapter,
-            pi_dir=args.pi_dir,
-            model_references=(args.reviewer_model or args.model,),
+    try:
+        agent = (
+            selected_agent or "claude"
+            if args.dry_run
+            else resolve_agent(
+                selected_agent,
+                disable_pi_automation=args.disable_pi_automation,
+                auth_status_timeout=args.auth_status_timeout,
+                pi_isolation_adapter=args.pi_isolation_adapter,
+                pi_dir=args.pi_dir,
+                model_references=(
+                    args.reviewer_model or args.model,
+                    args.fallback_model or args.model,
+                ),
+            )
         )
-    )
+        resolved_model = reviewer_model(args.reviewer_model or args.model or None, agent=agent)
+        resolved_fallback_model = fallback_model(
+            args.fallback_model or args.model or None, agent=agent
+        )
+    except UnknownModelAliasError as exc:
+        _build_parser().error(str(exc))
 
     shutdown = threading.Event()
     with terminal_guard(shutdown.set):
@@ -300,10 +311,8 @@ def main(argv: list[str] | None = None) -> int:
                 pr_numbers=args.pr_numbers,
                 dry_run=args.dry_run,
                 shutdown_event=shutdown,
-                model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),
-                fallback_model=fallback_model(
-                    args.fallback_model or args.model or None, agent=agent
-                ),
+                model=resolved_model,
+                fallback_model=resolved_fallback_model,
                 timeout=args.agent_timeout,
                 pi_dir=args.pi_dir,
             )

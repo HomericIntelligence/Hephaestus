@@ -4050,11 +4050,21 @@ def test_resolve_agent_explicit_codex_overrides_claude() -> None:
             assert agent_runtime.resolve_agent("codex") == "codex"
 
 
-def test_resolve_agent_rejects_unknown_codex_alias_before_authentication() -> None:
+@pytest.mark.parametrize("reference", ["unknown:high", "terra-lite:high"])
+def test_resolve_agent_rejects_unknown_codex_alias_before_authentication(reference: str) -> None:
     """Codex alias validation runs before the provider authentication probe."""
     with patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated:
         with pytest.raises(ValueError, match="Unknown Codex model alias"):
-            agent_runtime.resolve_agent("codex", model_references=("unknown:high",))
+            agent_runtime.resolve_agent("codex", model_references=(reference,))
+
+    authenticated.assert_not_called()
+
+
+def test_resolve_agent_rejects_unknown_claude_alias_before_authentication() -> None:
+    """Claude alias validation runs before the provider authentication probe."""
+    with patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated:
+        with pytest.raises(ValueError, match="Unknown Claude model alias"):
+            agent_runtime.resolve_agent("claude", model_references=("terra-lite:high",))
 
     authenticated.assert_not_called()
 

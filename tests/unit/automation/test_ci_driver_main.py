@@ -228,3 +228,28 @@ def test_main_installs_sigtstp_handler() -> None:
 
     assert captured["rc"] == 0
     mock_tstp.assert_called_once_with()
+
+
+def test_unknown_claude_alias_stops_before_repository_resolution() -> None:
+    """An invalid Claude alias produces a CLI error before pipeline work."""
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "hephaestus-drive-prs-green",
+                "--agent",
+                "claude",
+                "--reviewer-model",
+                "terra-lite",
+            ],
+        ),
+        patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated,
+        patch.object(ci_driver_mod, "_resolve_repo") as resolve_repo,
+        pytest.raises(SystemExit) as error,
+    ):
+        ci_driver_mod.main()
+
+    assert error.value.code == 2
+    authenticated.assert_not_called()
+    resolve_repo.assert_not_called()

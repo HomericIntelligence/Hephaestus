@@ -80,7 +80,7 @@ def test_resolve_codex_model_selection_preserves_effort(
     assert model_selection.resolve_codex_model_selection(reference).reference == expected
 
 
-@pytest.mark.parametrize("reference", ["unknown", "unknown:high"])
+@pytest.mark.parametrize("reference", ["unknown", "unknown:high", "terra-lite:high"])
 def test_validate_codex_model_reference_rejects_unknown_short_alias(reference: str) -> None:
     """Unknown short aliases fail before a Codex process can start."""
     with pytest.raises(model_selection.UnknownModelAliasError, match="Unknown Codex model alias"):
@@ -94,3 +94,21 @@ def test_validate_codex_model_reference_rejects_unknown_short_alias(reference: s
 def test_validate_codex_model_reference_accepts_full_model_references(reference: str) -> None:
     """Full and provider-qualified model references remain valid."""
     model_selection.validate_codex_role_model_reference(reference)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["", ":provider-default", "fable:high", "mythos", "claude-preview-99-99", "private/claude"],
+)
+def test_validate_claude_model_reference_accepts_configured_or_full_reference(
+    reference: str,
+) -> None:
+    """Claude accepts configured aliases and exact provider model IDs."""
+    model_selection.validate_claude_model_reference(reference)
+
+
+@pytest.mark.parametrize("reference", ["unknown", "terra-lite:high"])
+def test_validate_claude_model_reference_rejects_unknown_alias(reference: str) -> None:
+    """Unknown Claude aliases fail before a provider process can start."""
+    with pytest.raises(model_selection.UnknownModelAliasError, match="Unknown Claude model alias"):
+        model_selection.validate_claude_model_reference(reference)
