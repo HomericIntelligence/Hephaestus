@@ -286,6 +286,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     "prs": self.config.prs,
                     "loops": self.config.loops,
                     "max_workers": self.config.max_workers,
+                    "package_version": self.config.package_version,
+                    "source_revision": self.config.source_revision,
                 },
             )
             self._loops_run = 1
@@ -317,10 +319,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             logger.exception("pipeline run failed")
             self._fatal = True
         finally:
-            # Reap the pool on EVERY exit path — a fatal exception never sets
-            # self.shutdown, so without this the executor and in-flight AgentJob
-            # subprocesses (e.g. claude reviewers) would leak (#2059). Idempotent
-            # via _pool_shut_down, so the signal path's earlier call is a no-op.
+            # Reap the pool on every exit. A fatal exception does not set shutdown,
+            # so the executor and agent subprocesses would leak (#2059). This call is
+            # idempotent, so an earlier signal-path call is a no-op.
             self._shutdown_pool()
             self._finalize_resumable()
             exit_code = self._exit_code()

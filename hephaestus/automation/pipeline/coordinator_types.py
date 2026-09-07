@@ -227,6 +227,8 @@ class PipelineConfig:
     # source state out of the durable configuration and makes reseeds restart
     # discovery from GitHub, which remains the sole routing authority.
     repo_source_factory: Callable[[], Iterator[str]] | None = None
+    package_version: str = "unknown"
+    source_revision: str | None = None
     issues: list[int] = field(default_factory=list)
     prs: list[int] = field(default_factory=list)
     loops: int = 1

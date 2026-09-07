@@ -3161,6 +3161,34 @@ class TestImplementationAdmission:
 class TestDurableEventLog:
     """Optional JSONL event log mirrors the coordinator's in-memory event log."""
 
+    def test_run_start_records_bounded_executable_provenance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The first run event identifies the package and exact source revision."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path / "secret-checkout",
+            event_log_path=event_log_path,
+            package_version="1.2.3",
+            source_revision="a" * 40,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        coordinator.run()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        run_start = records[0]
+        assert run_start["event"] == "run_start"
+        assert run_start["fields"][0]["package_version"] == "1.2.3"
+        assert run_start["fields"][0]["source_revision"] == "a" * 40
+        assert "secret-checkout" not in json.dumps(run_start)
+
     def test_observability_tick_zeroes_previous_circuit_breaker_state(self, tmp_path: Path) -> None:
         """A transition leaves exactly one active state gauge for each breaker."""
         snapshots: dict[str, dict[str, Any]] = {"github": {"state": "closed"}}
