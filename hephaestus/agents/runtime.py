@@ -2902,6 +2902,21 @@ def _require_pi_request(execution_request: ExecutionRequest | None) -> Execution
     return resolve_policy(execution_request)
 
 
+def validate_agent_execution_support(
+    agent: str,
+    execution_request: ExecutionRequest | None,
+) -> None:
+    """Fail when a provider cannot enforce the requested operation boundary."""
+    if (
+        execution_request is not None
+        and execution_request.operation is AgentOperation.REMEDIATION_REPLY
+        and agent not in {"claude", "pi"}
+    ):
+        raise AgentExecutionError(
+            f"{agent} has no enforceable no-tool execution mode for remediation reply"
+        )
+
+
 def _require_pi_execution_policy(
     execution_request: ExecutionRequest | None,
     *,

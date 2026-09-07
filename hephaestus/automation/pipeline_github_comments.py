@@ -281,6 +281,17 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         validate_planning_body_for_write(marker, body)
         if self._skip(f"append immutable {marker!r} comment on #{issue_number}"):
             return
+        try:
+            with self._operation_file_lock(
+                self._implementation_reply_lock_path(issue_number),
+                require_exclusive=True,
+            ):
+                self._append_issue_comment_locked(issue_number, marker, body)
+        except (LockUnavailableError, OSError) as error:
+            raise RuntimeError(f"immutable journal lock failed for marker {marker!r}") from error
+
+    def _append_issue_comment_locked(self, issue_number: int, marker: str, body: str) -> None:
+        """Append one immutable comment while the repository lock is held."""
         comments = self._repo_issue_comments(issue_number)
         matching = [
             comment
@@ -289,10 +300,10 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             and self._comment_owned_by_viewer(comment)
         ]
         if matching:
+            if len(matching) != 1:
+                raise RuntimeError(f"duplicate immutable journal for marker {marker!r}")
             if any(str(comment.get("body", "")) != body for comment in matching):
                 raise RuntimeError(f"immutable journal conflict for marker {marker!r}")
-            # This primitive still supports immutable non-issue artifacts.
-            # Identical actor-owned copies can arise from a create race.
             return
         self._post_issue_comment(issue_number, body)
         comments = self._repo_issue_comments(issue_number)
@@ -302,5 +313,9 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             if has_exact_leading_marker(str(comment.get("body", "")), marker)
             and self._comment_owned_by_viewer(comment)
         ]
+        if not matching:
+            raise RuntimeError(f"immutable journal is not visible for marker {marker!r}")
+        if len(matching) != 1:
+            raise RuntimeError(f"duplicate immutable journal for marker {marker!r}")
         if any(str(comment.get("body", "")) != body for comment in matching):
             raise RuntimeError(f"immutable journal conflict for marker {marker!r}")

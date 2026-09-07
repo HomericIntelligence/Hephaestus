@@ -1284,13 +1284,14 @@ def add_reviewer_feedback_reply_mutation(
 
 
 def create_pending_review_mutation(
-    pull_request_id: str, head_sha: str
+    pull_request_id: str, head_sha: str, body: str
 ) -> GraphQLMutationSpec[dict[str, Any]]:
     """Build the pending-review creation receipt mutation."""
     document = (
-        "mutation CreatePendingReview($pullRequestId:ID!,$headSha:GitObjectID!,$clientMutationId:"
-        "String!){"
-        "addPullRequestReview(input:{pullRequestId:$pullRequestId,commitOID:$headSha,clientMutationId:$clientMutationId}){"
+        "mutation CreatePendingReview($pullRequestId:ID!,$headSha:GitObjectID!,$body:String!,"
+        "$clientMutationId:String!){"
+        "addPullRequestReview(input:{pullRequestId:$pullRequestId,commitOID:$headSha,body:$body,"
+        "clientMutationId:$clientMutationId}){"
         "clientMutationId pullRequestReview{id state pullRequest{id} commit{oid}}}}"
     )
 
@@ -1311,9 +1312,9 @@ def create_pending_review_mutation(
     return _receipt_mutation(
         "addPullRequestReview",
         document,
-        {"pullRequestId": pull_request_id, "headSha": head_sha},
+        {"pullRequestId": pull_request_id, "headSha": head_sha, "body": body},
         ("pullRequestId",),
-        (),
+        ("body",),
         "addPullRequestReview",
         required,
     )
@@ -1405,7 +1406,6 @@ def pipeline_thread_snapshot_page_query(
         ):
             raise ValueError("pipeline thread identity did not match the requested PR")
         connection = _page_info(node.get("comments"))
-        stale: set[str] = set()
         for comment in connection["nodes"]:
             if (
                 not isinstance(comment.get("id"), str)
@@ -1413,30 +1413,24 @@ def pipeline_thread_snapshot_page_query(
                 or not isinstance(comment.get("viewerDidAuthor"), bool)
             ):
                 raise ValueError("pipeline thread comment fields were malformed")
-            comment_id = comment["id"]
             author = comment.get("author")
             if author is not None and (
                 not isinstance(author, dict) or not isinstance(author.get("login"), str)
             ):
                 raise ValueError("pipeline thread comment author was malformed")
-            # A comment whose owning review was deleted carries a null
-            # pullRequestReview binding. Drop it rather than poisoning the
-            # whole snapshot readback; it cannot carry resolution evidence.
             review = comment.get("pullRequestReview")
-            commit = review.get("commit") if isinstance(review, dict) else None
-            if not isinstance(review, dict) or not isinstance(commit, dict):
-                stale.add(comment_id)
+            if review is None:
                 continue
+            if not isinstance(review, dict):
+                raise ValueError("pipeline thread comment review was malformed")
+            commit = review.get("commit")
             if (
                 not isinstance(review.get("id"), str)
                 or not isinstance(review.get("state"), str)
+                or not isinstance(commit, dict)
                 or not isinstance(commit.get("oid"), str)
             ):
-                stale.add(comment_id)
-                continue
-        if stale:
-            kept = [c for c in connection["nodes"] if c.get("id") not in stale]
-            connection["nodes"] = cast(list[dict[str, Any]], kept)
+                raise ValueError("pipeline thread comment review was malformed")
         return {
             "pullRequest": pull_request,
             "thread": node,

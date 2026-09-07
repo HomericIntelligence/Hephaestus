@@ -186,6 +186,7 @@ def test_pr_review_post_dispatches_without_inline_github_calls(
     assert isinstance(result, JobRequest)
     assert isinstance(result.job, GitHubJob)
     assert isinstance(result.job.request, ReconcilePrReviewRequest)
+    assert result.job.request.deadline_s > time.monotonic()
     assert result.job.request.reviewed_head_sha == "a" * 40
     assert result.job.request.findings.thaw() == []
     assert elapsed < 0.25
@@ -251,6 +252,11 @@ def test_pr_review_recovery_handoff_dispatches_without_inline_github_calls(
     assert isinstance(result.job, GitHubJob)
     assert isinstance(result.job.request, DeliverReplyHandoffRequest)
     assert result.job.request.handoff.thaw() == item.payload["pending_implementation_reply_handoff"]
+    assert result.job.request.deadline_s is not None
+    assert result.job.request.deadline_s > started
+    retried = stage.step(item, ctx)
+    assert isinstance(retried, JobRequest)
+    assert retried.job.request == result.job.request
     assert elapsed < 0.25
 
 
@@ -7231,6 +7237,7 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> Any:
                 self.reply_attempts += 1
                 if self.reply_attempts == 1:
@@ -7243,6 +7250,7 @@ class TestRealCommitGate:
                     "threads": threads,
                     "replies": replies,
                     "batch_nonce": batch_nonce,
+                    "recover_pending_review": recover_pending_review,
                 }
                 if progress is not None:
                     kwargs["progress"] = progress
@@ -7346,6 +7354,7 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
                 del progress
                 self.reply_attempts += 1
@@ -7355,6 +7364,7 @@ class TestRealCommitGate:
                     threads=threads,
                     replies=replies,
                     batch_nonce=batch_nonce,
+                    recover_pending_review=recover_pending_review,
                 )
 
         stage = PrReviewStage()
@@ -7420,6 +7430,7 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
                 del progress
                 self.reply_attempts += 1
@@ -7429,6 +7440,7 @@ class TestRealCommitGate:
                     threads=threads,
                     replies=replies,
                     batch_nonce=batch_nonce,
+                    recover_pending_review=recover_pending_review,
                 )
 
         stage = PrReviewStage()
@@ -7485,8 +7497,17 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, replies, batch_nonce, progress
+                del (
+                    pr_number,
+                    expected_head_sha,
+                    threads,
+                    replies,
+                    batch_nonce,
+                    progress,
+                    recover_pending_review,
+                )
                 # The reply may already be visible, but a reviewer comment
                 # raced the post-read.  This is a factual stale handoff, not
                 # a transport ambiguity that can be replayed.
@@ -7543,8 +7564,16 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, batch_nonce, progress
+                del (
+                    pr_number,
+                    expected_head_sha,
+                    threads,
+                    batch_nonce,
+                    progress,
+                    recover_pending_review,
+                )
                 self.reply_batches.append(tuple(sorted(replies)))
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=("stale-thread",),

@@ -23,10 +23,15 @@ from hephaestus.automation.scope_expansion_domain import (
     normalize_scope_expansion,
 )
 
-_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _JOURNAL_MARKER_RE = re.compile(
     r"<!-- hephaestus-implementation-reply-handoff:"
     r"pr=[1-9][0-9]*:head=[0-9a-f]{40}:batch=[0-9a-f]{32} -->"
+)
+_REMEDIATION_JOURNAL_MARKER_RE = re.compile(
+    r"<!-- hephaestus-implementation-remediation-reply-handoff:"
+    r"pr=[1-9][0-9]*:head=[0-9a-f]{40}(?:[0-9a-f]{24})?:"
+    r"batch=[0-9a-f]{32}:seq=(?:0|[1-9][0-9]*) -->"
 )
 
 
@@ -76,6 +81,17 @@ def _positive_identifier(value: int, field_name: str) -> None:
 def _full_sha(value: str, field_name: str) -> None:
     if not isinstance(value, str) or _FULL_SHA_RE.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a full lowercase commit SHA")
+
+
+def _deadline(value: float | None) -> None:
+    """Reject an invalid absolute monotonic operation deadline."""
+    if value is not None and (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError("deadline_s must be a finite positive monotonic time")
 
 
 def _json_root(value: FrozenJson, expected: type[object], field_name: str) -> object:
@@ -177,20 +193,63 @@ class RecoverReplyJournalRequest:
 
 
 @dataclass(frozen=True)
+class RecoverRemediationReplyJournalRequest:
+    """Recover one format-3 journal for exact remediation identities."""
+
+    issue_number: int
+    pr_number: int
+    repository: str
+    branch: str
+    current_remote_head: str
+    threads: FrozenJson
+    deadline_s: float
+
+    def __post_init__(self) -> None:
+        """Validate exact identities and the frozen thread snapshot."""
+        _positive_identifier(self.issue_number, "issue_number")
+        _positive_identifier(self.pr_number, "pr_number")
+        if (
+            not isinstance(self.repository, str)
+            or self.repository != self.repository.casefold()
+            or self.repository.count("/") != 1
+            or not all(self.repository.split("/"))
+        ):
+            raise ValueError("repository must be canonical lowercase OWNER/REPOSITORY")
+        if not isinstance(self.branch, str) or not self.branch:
+            raise ValueError("branch must be a non-empty string")
+        _full_sha(self.current_remote_head, "current_remote_head")
+        _json_root(self.threads, list, "threads")
+        if self.deadline_s is None:
+            raise ValueError("deadline_s is required for remediation journal recovery")
+        _deadline(self.deadline_s)
+
+
+@dataclass(frozen=True)
 class AppendReplyJournalRequest:
     """Append one replay-safe exact reply journal entry."""
 
     issue_number: int
     marker: str
     body: str
+    deadline_s: float | None = None
+    prepublication_receipt_sha256: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the replay-safe journal marker and body."""
         _positive_identifier(self.issue_number, "issue_number")
-        if not isinstance(self.marker, str) or _JOURNAL_MARKER_RE.fullmatch(self.marker) is None:
+        if not isinstance(self.marker, str) or not any(
+            pattern.fullmatch(self.marker) is not None
+            for pattern in (_JOURNAL_MARKER_RE, _REMEDIATION_JOURNAL_MARKER_RE)
+        ):
             raise ValueError("marker must be an exact implementation reply journal marker")
         if not isinstance(self.body, str) or not self.body.startswith(f"{self.marker}\n<!-- "):
             raise ValueError("body must contain the exact journal marker and payload")
+        _deadline(self.deadline_s)
+        if self.prepublication_receipt_sha256 is not None and (
+            not isinstance(self.prepublication_receipt_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", self.prepublication_receipt_sha256) is None
+        ):
+            raise ValueError("prepublication receipt digest must be lowercase SHA-256")
 
 
 @dataclass(frozen=True)
@@ -201,6 +260,7 @@ class DeliverReplyHandoffRequest:
     pr_number: int
     handoff: FrozenJson
     visibility_retries: int
+    deadline_s: float | None = None
 
     def __post_init__(self) -> None:
         """Validate identifiers, handoff shape, and retry count."""
@@ -213,6 +273,38 @@ class DeliverReplyHandoffRequest:
             or self.visibility_retries < 0
         ):
             raise ValueError("visibility_retries must be a non-negative integer")
+        _deadline(self.deadline_s)
+
+
+def bind_delivery_request(
+    pending: object,
+    *,
+    issue_number: int,
+    pr_number: int,
+    handoff: object,
+    visibility_retries: int,
+    deadline_s: float,
+) -> DeliverReplyHandoffRequest:
+    """Create or validate one immutable delivery request across retries."""
+    frozen_handoff = FrozenJson.snapshot(handoff)
+    if pending is None:
+        return DeliverReplyHandoffRequest(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            handoff=frozen_handoff,
+            visibility_retries=visibility_retries,
+            deadline_s=deadline_s,
+        )
+    if (
+        not isinstance(pending, DeliverReplyHandoffRequest)
+        or pending.issue_number != issue_number
+        or pending.pr_number != pr_number
+        or pending.handoff != frozen_handoff
+        or pending.visibility_retries != visibility_retries
+        or pending.deadline_s != deadline_s
+    ):
+        raise ValueError("pending reply delivery request identity is invalid")
+    return pending
 
 
 @dataclass(frozen=True)
@@ -227,6 +319,7 @@ class ReconcilePrReviewRequest:
     feedback: FrozenJson
     findings: FrozenJson
     review_diff: str
+    deadline_s: float
     issue_number: int | None = None
 
     def __post_init__(self) -> None:
@@ -251,6 +344,7 @@ class ReconcilePrReviewRequest:
         _json_root(self.findings, list, "findings")
         if not isinstance(self.review_diff, str):
             raise ValueError("review_diff must be a string")
+        _deadline(self.deadline_s)
         if self.issue_number is not None:
             _positive_identifier(self.issue_number, "issue_number")
 
@@ -355,6 +449,7 @@ class ReconcileScopeExpansionDependenciesRequest:
 
 type GitHubRequest = (
     RecoverReplyJournalRequest
+    | RecoverRemediationReplyJournalRequest
     | AppendReplyJournalRequest
     | DeliverReplyHandoffRequest
     | ReconcilePrReviewRequest
@@ -383,6 +478,7 @@ class GitHubJob:
             self.request,
             (
                 RecoverReplyJournalRequest,
+                RecoverRemediationReplyJournalRequest,
                 AppendReplyJournalRequest,
                 DeliverReplyHandoffRequest,
                 ReconcilePrReviewRequest,
@@ -417,6 +513,19 @@ class ReplyJournalRecovered:
 
     def __post_init__(self) -> None:
         """Validate the optional recovered handoff snapshot."""
+        if self.handoff is not None:
+            _json_root(self.handoff, dict, "handoff")
+
+
+@dataclass(frozen=True)
+class RemediationReplyJournalRecovered:
+    """Receipt for one format-3 remediation journal recovery read."""
+
+    request: RecoverRemediationReplyJournalRequest
+    handoff: FrozenJson | None
+
+    def __post_init__(self) -> None:
+        """Validate the optional recovered remediation handoff."""
         if self.handoff is not None:
             _json_root(self.handoff, dict, "handoff")
 
@@ -597,6 +706,7 @@ class ScopeExpansionDependenciesReconciled:
 
 type GitHubReceipt = (
     ReplyJournalRecovered
+    | RemediationReplyJournalRecovered
     | ReplyJournalAppended
     | ReplyHandoffAttempted
     | PrReviewReconciled
