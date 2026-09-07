@@ -451,6 +451,91 @@ def test_tampered_detached_lock_fails_before_adapter_import(tmp_path: Path) -> N
     assert imported is False
 
 
+def test_completed_helper_close_does_not_wait_for_a_shutdown_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completed cleanup must not wait for a stopped reader thread."""
+    module = _module()
+    process = module._IsolatedAdapterProcess.__new__(module._IsolatedAdapterProcess)
+    process._close_lock = threading.Lock()
+    process._condition = threading.Condition()
+    process._closed = False
+    process._close_complete = False
+    process._reader_error = None
+    process._process = SimpleNamespace(pid=123, poll=lambda: 0, stdin=None, stdout=None)
+    monkeypatch.setattr(module.os, "killpg", lambda *_args: None)
+    process.close()
+    finished = threading.Event()
+
+    def repeat_close() -> None:
+        process.close()
+        finished.set()
+
+    process._close_lock.acquire()
+    reader = threading.Thread(target=repeat_close, daemon=True)
+    try:
+        reader.start()
+        assert finished.wait(timeout=0.5), "completed cleanup waited for the shutdown lock"
+    finally:
+        process._close_lock.release()
+        reader.join(timeout=1)
+
+
+def test_concurrent_helper_close_waits_for_complete_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second caller waits until the cleanup owner closes the streams."""
+    module = _module()
+    process = module._IsolatedAdapterProcess.__new__(module._IsolatedAdapterProcess)
+    process._close_lock = threading.Lock()
+    process._condition = threading.Condition()
+    process._closed = False
+    process._close_complete = False
+    process._reader_error = None
+    entered = threading.Event()
+    release = threading.Event()
+    waiter_started = threading.Event()
+    waiter_finished = threading.Event()
+    closed_streams: list[str] = []
+
+    def poll() -> int:
+        entered.set()
+        assert release.wait(timeout=2), "cleanup was not released"
+        return 0
+
+    process._process = SimpleNamespace(
+        pid=123,
+        poll=poll,
+        stdin=SimpleNamespace(close=lambda: closed_streams.append("stdin")),
+        stdout=SimpleNamespace(close=lambda: closed_streams.append("stdout")),
+    )
+    monkeypatch.setattr(module.os, "killpg", lambda *_args: None)
+
+    def wait_for_cleanup() -> None:
+        waiter_started.set()
+        process.close()
+        waiter_finished.set()
+
+    owner = threading.Thread(target=process.close, daemon=True)
+    waiter = threading.Thread(target=wait_for_cleanup, daemon=True)
+    try:
+        owner.start()
+        assert entered.wait(timeout=1)
+        waiter.start()
+        assert waiter_started.wait(timeout=1)
+        assert not waiter_finished.wait(timeout=0.05)
+        assert closed_streams == []
+    finally:
+        release.set()
+        owner.join(timeout=1)
+        if waiter.ident is not None:
+            waiter.join(timeout=1)
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert waiter_finished.is_set()
+    assert closed_streams == ["stdin", "stdout"]
+
+
 def test_public_admission_has_no_verifier_or_importer_bypass() -> None:
     """Production callers cannot replace supply-chain or import checks."""
     parameters = inspect.signature(_module().admit_codex_adapter).parameters

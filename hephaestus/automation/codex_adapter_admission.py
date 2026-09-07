@@ -2346,6 +2346,7 @@ class _IsolatedAdapterProcess:
         self._reader_error: BaseException | None = None
         self._next_request_id = 0
         self._closed = False
+        self._close_complete = False
         self._session_nonce = secrets.token_hex(32)
         protocol_path = Path(__file__).parents[1] / "agents" / "codex_isolation.py"
         try:
@@ -2591,12 +2592,20 @@ class _IsolatedAdapterProcess:
 
     def close(self) -> None:
         """Stop the helper process and close its control pipes."""
+        # A stopped daemon can hold the lock during interpreter shutdown.
+        if self._close_complete:
+            return
+        self._close_pending()
+
+    def _close_pending(self) -> None:
+        """Wait for the cleanup owner or complete the pending cleanup."""
         with self._close_lock:
             if self._closed:
                 return
             self._closed = True
             process = getattr(self, "_process", None)
             if process is None:
+                self._close_complete = True
                 return
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -2630,6 +2639,7 @@ class _IsolatedAdapterProcess:
                         "isolated adapter process stopped"
                     )
                 self._condition.notify_all()
+            self._close_complete = True
 
     def __del__(self) -> None:
         self.close()
