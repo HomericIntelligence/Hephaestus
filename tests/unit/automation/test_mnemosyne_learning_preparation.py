@@ -214,7 +214,7 @@ def test_validator_redacts_and_bounds_secret_diagnostics(tmp_path: Path) -> None
     diagnostic = str(raised.value)
     assert secret not in diagnostic
     assert api_key not in diagnostic
-    assert "<redacted>" in diagnostic
+    assert "dependency input" in diagnostic
     assert len(diagnostic) <= 1100
 
 
@@ -464,3 +464,59 @@ def test_post_merge_source_requires_merged_closing_pr() -> None:
     assert isinstance(source, PostMergeLearningSource)
     assert source.merge_commit_sha == "c" * 40
     assert source.issue == 2754
+
+
+def test_validator_rejects_unbound_dependency_input(tmp_path: Path) -> None:
+    """An untracked lock cannot supply validator dependencies."""
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    calls: list[object] = []
+
+    def runner(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess([], 0, stdout="")
+
+    with pytest.raises(LearnDeliveryError, match="dependency input"):
+        MnemosynePluginValidator(runner=runner).validate(tmp_path)
+    assert not calls
+
+
+def test_unusable_validator_boundary_has_a_safe_category(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A boundary probe failure is distinct from a plugin validation failure."""
+    import platform
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from hephaestus.automation import mnemosyne_learning_preparation as preparation
+
+    @contextmanager
+    def prepared(_path: Path, _runner: object) -> Iterator[SimpleNamespace]:
+        yield SimpleNamespace(
+            root=tmp_path,
+            runtime=tmp_path,
+            environment=tmp_path / "environment",
+            uv=tmp_path / "uv",
+            verify=lambda _path: None,
+        )
+
+    real_is_file = Path.is_file
+    monkeypatch.setattr(preparation, "prepare_dependencies", prepared)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: str(path) == "/usr/bin/sandbox-exec" or real_is_file(path),
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 71, stderr="sandbox-exec: secret /private/path")
+
+    with pytest.raises(LearnDeliveryError) as error:
+        MnemosynePluginValidator(runner=runner).validate(tmp_path)
+    assert str(error.value) == "learning validation boundary failed"
+    assert len(calls) == 1
+    assert calls[0][-1] == "/usr/bin/true"
