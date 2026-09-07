@@ -18,7 +18,11 @@ import pytest
 
 from hephaestus.automation import codex_adapter_admission as admission
 
-pytestmark = [pytest.mark.integration, pytest.mark.artifact]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.artifact,
+    pytest.mark.codex_release_artifact,
+]
 
 _FIXTURE_ENV = "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT"
 _ARCHIVE_NAME = "codex-aarch64-unknown-linux-musl.zst"

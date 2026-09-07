@@ -249,40 +249,15 @@ jobs:
         # because the integration and artifact markers are registered in pyproject.toml.
         # uv sync installed every [project.scripts] binary, so the CLI
         # entry-point checks must never skip here (#2173).
-        # The separate artifact step supplies the locked offline fixture.
+        # The required PR build lane owns the network-free Codex release fixture.
+        # This release lane keeps the other package-artifact checks.
         run: >-
           uv run pytest tests/integration
           --require-cli
           --override-ini="addopts="
           --basetemp=build/pytest-release-integration
           -v --strict-markers
-          -m "not nightly and not artifact"
-
-      - name: Build CI image for offline artifact tests
-        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
-
-      - name: Provision Codex Sigstore fixture
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          zstd --version >/dev/null 2>&1 || {
-            echo "Host zstd is required for Codex fixture provisioning." >&2
-            exit 1
-          }
-          python scripts/provision_codex_sigstore_fixture.py \
-            --root "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4"
-
-      - name: Run offline Codex artifact tests
-        run: >
-          podman run --rm --network=none --tmpfs /tmp:rw,size=4g,mode=1777
-          -v "$PWD:/workspace:Z"
-          -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/codex-sigstore/rust-v0.153.4:ro"
-          -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro"
-          -e HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4
-          --userns=keep-id:uid=1000,gid=1000
-          hephaestus-ci:local uv run pytest tests/integration
-          --override-ini="addopts=" --basetemp=build/pytest-release-artifacts
-          -v --strict-markers -m artifact
+          -m "not nightly and not codex_release_artifact"
 
   type-check:
     runs-on: ubuntu-24.04
