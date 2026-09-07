@@ -2143,7 +2143,21 @@ Exit-code priority is:
   to retry one exact pre-work unsupported-effort rejection without the effort.
   See [ADR-0036](adr/0036-free-form-model-effort-selection.md).
 - **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](../hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
-- **Push retry** — [`_git_retry(item, "commit_push failed")`](../hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
+- **Push retry** — The ordinary writer records its local tracking head before
+  publication. After a failed push, an authenticated remote probe classifies
+  the result. A remote head equal to the local source proves publication
+  (`remote_at_source`). An unchanged remote or failed probe permits the existing
+  bounded transient retry without using the implementation budget. A first
+  confirmed remote change permits one signed rebase onto that exact remote
+  head, followed by an exact-lease push. The host checks the original edit
+  scope before rebase and the same allowed paths against the accepted remote
+  base after rebase. Later transient retries publish only the same rewritten
+  commit. A conflict or second remote change stops the item before PR creation
+  and preserves the failed writer. The source-lane receipt records controlled
+  local commits under its ownership lock, including commits whose publication
+  failed. This local ownership record does not prove remote publication.
+  Receipt uncertainty stops retry. Direct-scope reservation publication retains
+  its existing ownership pin and does not use this refresh path.
 
 - **Review-thread GO gate** — every unresolved review thread, regardless of
  severity marker, prevents a `pr_review` round from advancing. Severity

@@ -10,6 +10,7 @@ must stay off the coordinator thread), so :class:`AgentJob` carries a
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,3 +188,70 @@ class CompactJob:
     execution_request: ExecutionRequest | None = None
     session_binding: AgentSessionBinding | None = None
     descr: str = "compact_session"
+
+
+def _valid_writer_publication_facts(value: object) -> bool:
+    """Accept only closed ordinary-writer publication facts."""
+    if not isinstance(value, dict) or set(value) != {
+        "publication_state",
+        "head_sha",
+        "baseline_remote_sha",
+        "observed_remote_sha",
+        "pushed",
+        "refresh_phase",
+    }:
+        return False
+    state = value["publication_state"]
+    if not isinstance(state, str) or state not in {
+        "published",
+        "remote_at_source",
+        "remote_changed",
+        "remote_unchanged",
+        "probe_failed",
+    }:
+        return False
+    head, baseline, observed = (
+        value[key] for key in ("head_sha", "baseline_remote_sha", "observed_remote_sha")
+    )
+    for sha in (head, baseline, observed):
+        if sha is not None and (
+            not isinstance(sha, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha) is None
+        ):
+            return False
+    if (
+        head is None
+        or value["refresh_phase"] not in (None, "publish")
+        or value["pushed"] is not (state in {"published", "remote_at_source"})
+    ):
+        return False
+    if state in {"published", "remote_at_source"}:
+        return bool(observed == head)
+    if state == "remote_changed":
+        return observed is not None and observed not in (head, baseline)
+    if state == "remote_unchanged":
+        return bool(observed == baseline and observed != head)
+    return observed is None
+
+
+def _writer_publication_matches_refresh(value: object, refresh: object) -> bool:
+    """Bind closed publication facts to the exact pending refresh."""
+    if not _valid_writer_publication_facts(value) or not isinstance(value, dict):
+        return False
+    if refresh is None:
+        return value["refresh_phase"] is None
+    if not isinstance(refresh, dict) or set(refresh) != {
+        "phase",
+        "source_sha",
+        "expected_remote_sha",
+    }:
+        return False
+    for key in ("source_sha", "expected_remote_sha"):
+        sha = refresh[key]
+        if not isinstance(sha, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha) is None:
+            return False
+    return bool(
+        refresh["phase"] in ("rebase", "publish")
+        and value["refresh_phase"] == "publish"
+        and value["baseline_remote_sha"] == refresh["expected_remote_sha"]
+        and (refresh["phase"] != "publish" or value["head_sha"] == refresh["source_sha"])
+    )

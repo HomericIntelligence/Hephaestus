@@ -6599,3 +6599,168 @@ class TestFullWalks:
             Disposition.RETRY, "implementation_reply_handoff_journal_read"
         )
         assert item.payload["retry_delay_s"] == 45.0
+
+
+class TestWriterPublicationRefresh:
+    """Ordinary publication permits one exact writer refresh."""
+
+    @staticmethod
+    def receipt(state: str, *, phase: str | None = None, head: str = "b" * 40) -> dict[str, Any]:
+        """Build a complete worker publication result."""
+        return {
+            "publication_state": state,
+            "head_sha": head,
+            "baseline_remote_sha": "a" * 40,
+            "observed_remote_sha": head if state in {"published", "remote_at_source"} else "c" * 40,
+            "pushed": state in {"published", "remote_at_source"},
+            "refresh_phase": phase,
+        }
+
+    def test_first_remote_change_schedules_exact_writer_refresh(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The first confirmed change permits one exact refresh job."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.branch = "9-auto-impl"
+        item.worktree = "/tmp/wt"
+        stage.on_job_done(item, JobResult(ok=False, value=self.receipt("remote_changed")), ctx)
+        expected = {"phase": "rebase", "source_sha": "b" * 40, "expected_remote_sha": "c" * 40}
+        assert item.payload["_commit_push_refresh"] == expected
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "commit_push failed")
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.job.kwargs["writer_refresh"] == expected
+        assert ctx.github.mutation_log == []
+
+    def test_remote_at_source_clears_refresh_without_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A lost push result cannot cause another publication."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.payload["_commit_push_refresh"] = {
+            "phase": "publish",
+            "source_sha": "b" * 40,
+            "expected_remote_sha": "a" * 40,
+        }
+        receipt = self.receipt("remote_at_source", phase="publish")
+        receipt["observed_remote_sha"] = "b" * 40
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        assert "_commit_push_refresh" not in item.payload
+        assert "git_error" not in item.payload
+        assert item.payload["_worktree_cleanup_head_sha"] == "b" * 40
+
+    def test_second_remote_advance_is_terminal_before_pr_creation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A second change stops the item without another job or PR write."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.payload["_commit_push_refresh"] = {
+            "phase": "rebase",
+            "source_sha": "d" * 40,
+            "expected_remote_sha": "a" * 40,
+        }
+        stage.on_job_done(
+            item, JobResult(ok=False, value=self.receipt("remote_changed", phase="publish")), ctx
+        )
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "commit_push_remote_changed_again"
+        )
+        assert "_commit_push_refresh" not in item.payload
+        assert ctx.github.mutation_log == []
+
+    @pytest.mark.parametrize("state", ["remote_unchanged", "probe_failed"])
+    def test_refresh_transient_failure_permits_only_same_head_publication(
+        self, make_ctx: Any, make_work_item: Any, state: str
+    ) -> None:
+        """A transient failure cannot cause a second rebase."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.branch = "writer"
+        item.worktree = "/tmp/wt"
+        item.payload["_commit_push_refresh"] = {
+            "phase": "rebase",
+            "source_sha": "d" * 40,
+            "expected_remote_sha": "a" * 40,
+        }
+        receipt = self.receipt(state, phase="publish")
+        receipt["observed_remote_sha"] = "a" * 40 if state == "remote_unchanged" else None
+        stage.on_job_done(item, JobResult(ok=False, value=receipt), ctx)
+        assert item.payload["_commit_push_refresh"] == {
+            "phase": "publish",
+            "source_sha": "b" * 40,
+            "expected_remote_sha": "a" * 40,
+        }
+        item.state = "PR_CREATE"
+        retry = stage.step(item, ctx)
+        assert isinstance(retry, StageOutcome)
+        assert retry.disposition is Disposition.RETRY
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.job.kwargs["writer_refresh"]["phase"] == "publish"
+
+    @pytest.mark.parametrize("failure", ["conflict", "invalid"])
+    def test_refresh_failure_stops_before_pr_creation(
+        self, make_ctx: Any, make_work_item: Any, failure: str
+    ) -> None:
+        """A failed refresh has no publication or PR retry."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        stage.on_job_done(item, JobResult(ok=False, value={"writer_refresh_failure": failure}), ctx)
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, f"commit_push_refresh_{failure}"
+        )
+        assert ctx.github.mutation_log == []
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("publication_state", []),
+            ("head_sha", "bad"),
+            ("pushed", 1),
+            ("unexpected", True),
+            ("refresh_phase", "rebase"),
+        ],
+    )
+    def test_invalid_publication_receipt_cannot_create_pr(
+        self, make_ctx: Any, make_work_item: Any, field: str, value: Any
+    ) -> None:
+        """Malformed worker facts cannot authorize publication success."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        receipt = self.receipt("published")
+        receipt[field] = value
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "commit_push_refresh_invalid"
+        )
+        assert ctx.github.mutation_log == []
+
+    @pytest.mark.parametrize("error", ["evidence_receipt_failed", "interrupted"])
+    def test_host_failure_after_publication_cannot_create_pr(
+        self, make_ctx: Any, make_work_item: Any, error: str
+    ) -> None:
+        """Publication facts cannot replace a later host failure."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        receipt = self.receipt("published")
+        receipt["observed_remote_sha"] = receipt["head_sha"]
+        stage.on_job_done(item, JobResult(ok=False, value=receipt, error=error), ctx)
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "commit_push_refresh_invalid"
+        )
+        assert ctx.github.mutation_log == []

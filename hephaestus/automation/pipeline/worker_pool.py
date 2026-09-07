@@ -176,6 +176,8 @@ from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import source_worktree_name
 
+from .jobs import _writer_publication_matches_refresh
+
 logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
@@ -7836,6 +7838,31 @@ class WorkerPool:
                 base_dir=Path(root) / "build" / ".worktrees",
             )
             try:
+                if "expected_remote_sha" not in job.kwargs:
+                    record = recovery_stack.enter_context(
+                        manager.implementation_local_commit(issue, branch=branch, path=Path(path))
+                    )
+                    result = self._git_commit_push_inner(job, recovery_stack)
+                    receipt = result.value if isinstance(result.value, dict) else {}
+                    head = receipt.get("head_sha")
+                    classified = _writer_publication_matches_refresh(
+                        receipt, job.kwargs.get("writer_refresh")
+                    ) and result.ok is receipt.get("pushed")
+                    if not classified:
+                        if not result.ok:
+                            if "writer_refresh_failure" in receipt:
+                                return result
+                            raise SourceWorkspaceError(
+                                "implementation publication result unavailable"
+                            )
+                        if (
+                            set(receipt) != {"pushed", "head_sha"}
+                            or receipt.get("pushed") is not False
+                            or not _is_full_commit_sha(head)
+                        ):
+                            raise SourceWorkspaceError("implementation publication result invalid")
+                    record(cast(str, head))
+                    return result
                 advance = recovery_stack.enter_context(
                     manager.implementation_publication(issue, branch=branch, path=Path(path))
                 )
@@ -7910,6 +7937,8 @@ class WorkerPool:
         if recovery_bound and not branch:
             return JobResult(ok=False, error="commit publication branch is unavailable")
         worktree = Path(worktree_path)
+        if "writer_refresh" in job.kwargs:
+            return self._refresh_writer_publication(job, worktree, branch)
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         scope_check = self._verify_implementation_edit_scope(
             job,
@@ -8970,15 +8999,278 @@ class WorkerPool:
                 worktree_path,
                 **strict_push_kwargs,
             )
+        elif publication_bound:
+            git_utils.push_branch(
+                branch,
+                worktree_path,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                source_sha=source_sha,
+            )
         else:
-            push_kwargs: dict[str, Any] = {
-                "timeout": job.timeout_s,
-                "env": remote_env,
-                "remote_config": remote_config,
-                "source_sha": source_sha,
-            }
-            git_utils.push_branch(branch, worktree_path, **push_kwargs)
+            return self._publish_ordinary_writer(
+                job, branch, worktree_path, source_sha, remote_env, remote_config
+            )
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
+
+    def _publish_ordinary_writer(
+        self,
+        job: GitJob,
+        branch: str,
+        worktree_path: Path,
+        source_sha: str,
+        remote_env: dict[str, str],
+        remote_config: tuple[str, ...],
+    ) -> JobResult:
+        """Keep the tracking baseline through one ordinary publication attempt."""
+        baseline = self._writer_tracking_head(worktree_path, branch, timeout=job.timeout_s)
+        if isinstance(baseline, JobResult):
+            return baseline
+        try:
+            git_utils.push_branch(
+                branch,
+                worktree_path,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                source_sha=source_sha,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return self._writer_publication_failure(
+                job, worktree_path, branch, source_sha, baseline, refresh_phase=None
+            )
+        return self._writer_publication_receipt("published", source_sha, baseline, source_sha)
+
+    def _refresh_writer_publication(self, job: GitJob, worktree: Path, branch: str) -> JobResult:
+        """Replay one bounded local change and publish with an exact lease."""
+        refresh = job.kwargs.get("writer_refresh")
+        invalid = JobResult(
+            ok=False, value={"writer_refresh_failure": "invalid"}, error="writer refresh invalid"
+        )
+        if (
+            not isinstance(refresh, dict)
+            or set(refresh) != {"phase", "source_sha", "expected_remote_sha"}
+            or not isinstance(refresh.get("phase"), str)
+            or refresh.get("phase") not in {"rebase", "publish"}
+            or not _is_full_commit_sha(refresh.get("source_sha"))
+            or not _is_full_commit_sha(refresh.get("expected_remote_sha"))
+            or "expected_remote_sha" in job.kwargs
+            or "expected_recovery_head" in job.kwargs
+            or not branch
+        ):
+            return invalid
+        expected = refresh["expected_remote_sha"]
+        source = refresh["source_sha"]
+        try:
+            branch_check = git_utils.run(
+                ["git", "check-ref-format", "--branch", branch],
+                cwd=worktree,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            if branch_check.returncode != 0 or not git_utils.is_clean_working_tree(
+                worktree, timeout=job.timeout_s
+            ):
+                return invalid
+            if self._read_publish_head(worktree, timeout=job.timeout_s) != source:
+                return invalid
+            scope_job = (
+                job
+                if refresh["phase"] == "rebase"
+                else replace(job, kwargs={**job.kwargs, "scope_history_base_sha": expected})
+            )
+            allowed = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+            if (
+                self._verify_implementation_edit_scope(scope_job, worktree, allowed_paths=allowed)
+                is not None
+            ):
+                return invalid
+            revalidate = self._authenticated_remote_revalidator(
+                cwd=worktree, expected_repo=job.transport_repository, timeout=job.timeout_s
+            )
+            remote_env, remote_config = revalidate()
+            if refresh["phase"] == "rebase":
+                rewritten = self._rebase_publication_writer(
+                    job, worktree, branch, expected, remote_env, remote_config
+                )
+                if isinstance(rewritten, JobResult):
+                    return rewritten
+                source = rewritten
+            scope_job = replace(job, kwargs={**job.kwargs, "scope_history_base_sha": expected})
+            if (
+                self._verify_implementation_edit_scope(scope_job, worktree, allowed_paths=allowed)
+                is not None
+                or self._verify_scope_retraction(job, worktree) is not None
+                or not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s)
+            ):
+                return invalid
+            if self._read_publish_head(worktree, timeout=job.timeout_s) != source:
+                return invalid
+            try:
+                git_utils.push_head_to_branch(
+                    branch,
+                    expected,
+                    worktree,
+                    source_sha=source,
+                    timeout=job.timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                    revalidate_remote=revalidate,
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                return self._writer_publication_failure(
+                    job, worktree, branch, source, expected, refresh_phase="publish"
+                )
+            return self._writer_publication_receipt(
+                "published", source, expected, source, refresh_phase="publish"
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return invalid
+
+    def _rebase_publication_writer(
+        self,
+        job: GitJob,
+        worktree: Path,
+        branch: str,
+        expected: str,
+        remote_env: dict[str, str],
+        remote_config: tuple[str, ...],
+    ) -> str | JobResult:
+        """Create one signed replay and require its exact fetched base."""
+        signing_env = _required_git_signing_env(worktree, timeout=job.timeout_s)
+        rebased = git_utils.rebase_worktree_onto(
+            worktree,
+            base_branch=branch,
+            timeout=job.timeout_s,
+            env=signing_env,
+            fetch_env=remote_env,
+            fetch_config=remote_config,
+        )
+        if not rebased:
+            return JobResult(
+                ok=False,
+                value={"writer_refresh_failure": "conflict"},
+                error="writer refresh conflict",
+            )
+        source = self._read_publish_head(worktree, timeout=job.timeout_s)
+        if isinstance(source, JobResult):
+            return JobResult(
+                ok=False,
+                value={"writer_refresh_failure": "invalid"},
+                error="writer refresh invalid",
+            )
+        fetched = self._writer_tracking_head(worktree, branch, timeout=job.timeout_s)
+        if fetched != expected:
+            if not isinstance(fetched, str):
+                return JobResult(
+                    ok=False,
+                    value={"writer_refresh_failure": "invalid"},
+                    error="writer refresh invalid",
+                )
+            scope_job = replace(job, kwargs={**job.kwargs, "scope_history_base_sha": fetched})
+            if (
+                self._verify_implementation_edit_scope(
+                    scope_job,
+                    worktree,
+                    allowed_paths=cast(Collection[str] | None, job.kwargs.get("allowed_paths")),
+                )
+                is not None
+                or self._verify_scope_retraction(job, worktree) is not None
+                or not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s)
+                or self._read_publish_head(worktree, timeout=job.timeout_s) != source
+            ):
+                return JobResult(
+                    ok=False,
+                    value={"writer_refresh_failure": "invalid"},
+                    error="writer refresh invalid",
+                )
+            return self._writer_publication_receipt(
+                "remote_changed", source, expected, fetched, refresh_phase="publish"
+            )
+        return source
+
+    @staticmethod
+    def _writer_tracking_head(
+        worktree: Path, branch: str, *, timeout: int
+    ) -> str | JobResult | None:
+        """Read the local tracking baseline without a fetch."""
+        try:
+            result = git_utils.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+                cwd=worktree,
+                check=False,
+                capture_output=True,
+                timeout=timeout,
+                env=_controlled_git_env(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return JobResult(ok=False, error="writer tracking baseline unavailable")
+        if result.returncode == 1:
+            return None
+        head = str(result.stdout or "").strip()
+        if result.returncode != 0 or not _is_full_commit_sha(head):
+            return JobResult(ok=False, error="writer tracking baseline unavailable")
+        return head
+
+    @staticmethod
+    def _writer_publication_receipt(
+        state: str,
+        head: str,
+        baseline: str | None,
+        observed: str | None,
+        *,
+        refresh_phase: str | None = None,
+    ) -> JobResult:
+        """Return closed Git facts without diagnostic text."""
+        published = state in {"published", "remote_at_source"}
+        return JobResult(
+            ok=published,
+            error=None if published else "writer publication unavailable",
+            value={
+                "publication_state": state,
+                "head_sha": head,
+                "baseline_remote_sha": baseline,
+                "observed_remote_sha": observed,
+                "pushed": published,
+                "refresh_phase": refresh_phase,
+            },
+        )
+
+    def _writer_publication_failure(
+        self,
+        job: GitJob,
+        worktree: Path,
+        branch: str,
+        head: str,
+        baseline: str | None,
+        *,
+        refresh_phase: str | None,
+    ) -> JobResult:
+        """Classify a failed push from an authoritative remote read."""
+        try:
+            observed = self._read_remote_branch_head(
+                worktree,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            observed = JobResult(ok=False)
+        if isinstance(observed, JobResult):
+            state, remote_head = "probe_failed", None
+        else:
+            remote_head = observed
+            state = (
+                "remote_at_source"
+                if observed == head
+                else ("remote_unchanged" if observed == baseline else "remote_changed")
+            )
+        return self._writer_publication_receipt(
+            state, head, baseline, remote_head, refresh_phase=refresh_phase
+        )
 
     @staticmethod
     def _read_publish_head(
