@@ -316,7 +316,11 @@ def test_run_agent_dispatches_athena_skill_request(
             return AthenaSkillResult(kind="advise", context="selected", receipt={"ok": True})
 
     monkeypatch.setattr(agent_stage, "MnemosyneSkillHost", lambda: Host())
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "pi")
+
+    def reject_provider_resolution(*args: object, **kwargs: object) -> str:
+        raise AssertionError("Host-owned work must not validate a provider")
+
+    monkeypatch.setattr(agent_stage, "resolve_agent", reject_provider_resolution)
 
     args = _args(tmp_path, agent="pi")
     args.athena_skill = "advise"
@@ -378,7 +382,11 @@ def test_run_agent_forwards_closed_learn_delivery_file(
         encoding="utf-8",
     )
     monkeypatch.setattr(agent_stage, "MnemosyneSkillHost", lambda: Host())
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "pi")
+
+    def reject_provider_resolution(*args: object, **kwargs: object) -> str:
+        raise AssertionError("Host-owned work must not validate a provider")
+
+    monkeypatch.setattr(agent_stage, "resolve_agent", reject_provider_resolution)
 
     args = _args(tmp_path, agent="pi")
     args.athena_skill = "learn"

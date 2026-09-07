@@ -262,17 +262,6 @@ def run_agent(args: argparse.Namespace) -> int:
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    agent = resolve_agent(
-        args.agent,
-        cwd=repo_root,
-        disable_pi_automation=args.disable_pi_automation,
-        auth_status_timeout=args.auth_status_timeout,
-        pi_isolation_adapter=getattr(args, "pi_isolation_adapter", None),
-        pi_dir=getattr(args, "pi_dir", None),
-        model_references=(args.model,),
-    )
-    args.agent = agent
-
     if args.athena_skill:
         payload: dict[str, object] = {"context": prompt}
         delivery_file = getattr(args, "athena_delivery_file", None)
@@ -288,7 +277,7 @@ def run_agent(args: argparse.Namespace) -> int:
             kind=args.athena_skill,
             repo=repo_root.name,
             issue=args.stage,
-            agent=agent,
+            agent=args.agent or "",
             model=args.model,
             cwd=repo_root,
             timeout_s=args.timeout,
@@ -298,6 +287,17 @@ def run_agent(args: argparse.Namespace) -> int:
         write_secure(output_file, json.dumps(result.__dict__, indent=2, sort_keys=True) + "\n")
         write_log(log_file, result.context or result.error or "")
         return 0 if result.ok else 1
+
+    agent = resolve_agent(
+        args.agent,
+        cwd=repo_root,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=getattr(args, "pi_isolation_adapter", None),
+        pi_dir=getattr(args, "pi_dir", None),
+        model_references=(args.model,),
+    )
+    args.agent = agent
 
     if agent == "claude":
         return run_claude(args, prompt, repo_root, output_file, log_file)
@@ -319,12 +319,13 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
-    validate_agent_flags(parser, args)
-    if args.agent is not None:
-        try:
-            args.model = normalize_provider_model_reference(args.agent, args.model)
-        except ValueError as exc:
-            parser.error(str(exc))
+    if not args.athena_skill:
+        validate_agent_flags(parser, args)
+        if args.agent is not None:
+            try:
+                args.model = normalize_provider_model_reference(args.agent, args.model)
+            except ValueError as exc:
+                parser.error(str(exc))
     validate_input_files(parser, args)
 
     install_sigtstp_only()
