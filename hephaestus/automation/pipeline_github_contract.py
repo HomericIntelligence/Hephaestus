@@ -12,8 +12,6 @@ if TYPE_CHECKING:
     from hephaestus.automation.arming_state import ArmingStateStore
 
     class _PipelineGitHubHost(Protocol):
-        """State and cross-collaborator methods supplied by ``PipelineGitHub``."""
-
         org: str
         repo: str | None
         dry_run: bool
@@ -37,7 +35,7 @@ if TYPE_CHECKING:
         def _graphql[T](
             self,
             spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
-            **fields: int | str,
+            **fields: int | str | float | None,
         ) -> T:
             pass
 

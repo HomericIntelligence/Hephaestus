@@ -1413,7 +1413,8 @@ def test_required_queue_reconciles_an_existing_exact_head_entry(
 
     assert result.queued is True
     assert result.body == {"merged": False, "queue_entry_id": "MQE_node"}
-    assert readback_mock.call_args.kwargs == {"number": 7}
+    assert readback_mock.call_args.kwargs["number"] == 7
+    assert 0.0 < readback_mock.call_args.kwargs["timeout"] <= 2.0
 
 
 def test_required_queue_reconciles_bare_unprocessable_envelope(

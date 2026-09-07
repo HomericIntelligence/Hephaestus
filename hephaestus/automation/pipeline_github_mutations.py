@@ -35,15 +35,30 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         pr_number: int,
         pull_request_id: str,
         reviewed_sha: str,
+        *,
+        deadline_s: float | None,
+        cancellation: Event | None,
     ) -> ConditionalMergeResult | None:
         """Read back a successful queue result for the exact open PR head."""
+        if cancellation is not None and cancellation.is_set():
+            return None
+        timeout = float(self._gh_timeout)
+        if deadline_s is not None:
+            timeout = min(timeout, deadline_s - time.monotonic())
+            if timeout <= 0:
+                return None
         owner, name = self._owner_name()
         try:
             pull_request = self._graphql(
                 github_api.pull_request_queue_entry_query(owner, name, pr_number),
+                timeout=timeout,
                 number=pr_number,
             )
         except (GraphQLResponseError, RuntimeError, OSError, subprocess.SubprocessError):
+            return None
+        if cancellation is not None and cancellation.is_set():
+            return None
+        if deadline_s is not None and time.monotonic() >= deadline_s:
             return None
         entry = pull_request.get("mergeQueueEntry")
         if (
@@ -65,6 +80,9 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         pull_request_id: str | None,
         reviewed_sha: str,
         timeout: float,
+        *,
+        deadline_s: float | None,
+        cancellation: Event | None,
     ) -> ConditionalMergeResult:
         """Request one exact-head queue admission without internal replay."""
         if not isinstance(pull_request_id, str) or not pull_request_id:
@@ -77,7 +95,13 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         except GraphQLMutationOutcomeUnknownError as exc:
             logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
             if _is_already_queued_error(exc):
-                reconciled = self._existing_queue_result(pr_number, pull_request_id, reviewed_sha)
+                reconciled = self._existing_queue_result(
+                    pr_number,
+                    pull_request_id,
+                    reviewed_sha,
+                    deadline_s=deadline_s,
+                    cancellation=cancellation,
+                )
                 if reconciled is not None:
                     return reconciled
             return ConditionalMergeResult(status=None, body=None, malformed=True)
@@ -129,7 +153,14 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
             if timeout <= 0:
                 return ConditionalMergeResult(status=None, body=None, transport_error=True)
         if policy.merge_queue_required:
-            return self._enqueue_pr_if_head(pr_number, pull_request_id, reviewed_sha, timeout)
+            return self._enqueue_pr_if_head(
+                pr_number,
+                pull_request_id,
+                reviewed_sha,
+                timeout,
+                deadline_s=deadline_s,
+                cancellation=cancellation,
+            )
         try:
             result = gh_call(
                 [

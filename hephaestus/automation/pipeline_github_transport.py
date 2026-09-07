@@ -277,29 +277,36 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         login = user.get("login") if isinstance(user, dict) else ""
         return bool(login) and str(login).lower() == self._viewer_login().lower()
 
-    def _graphql(
+    def _graphql[T](
         self,
         spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
-        **fields: int | str,
+        **fields: int | str | float | None,
     ) -> T:
         """Run a typed operation with repository identity owned by this adapter."""
+        timeout_value = fields.pop("timeout", None)
+        if timeout_value is not None and not isinstance(timeout_value, (int, float)):
+            raise TypeError("GraphQL timeout must be numeric")
+        timeout = float(timeout_value) if timeout_value is not None else None
+        graphql_fields = cast(dict[str, int | str], fields)
 
         def _run_internal_graphql(
             argv: list[str], **kwargs: Any
         ) -> subprocess.CompletedProcess[str]:
             """Pass the capability marker consumed only by the guarded façade."""
-            return gh_call(argv, _graphql_internal=True, **kwargs)
+            if timeout is None:
+                return gh_call(argv, _graphql_internal=True, **kwargs)
+            return gh_call(argv, _graphql_internal=True, timeout=timeout, **kwargs)
 
         if isinstance(spec, GraphQLMutationSpec):
-            if fields:
+            if graphql_fields:
                 raise ValueError("mutation variables are owned by the typed spec")
             return run_graphql(spec, call=_run_internal_graphql)
         owner, name = self._owner_name()
-        if "owner" in fields or "name" in fields:
+        if "owner" in graphql_fields or "name" in graphql_fields:
             raise ValueError("repository identity is owned by PipelineGitHub")
         return run_graphql(
             spec,
-            {"owner": owner, "name": name, **fields},
+            {"owner": owner, "name": name, **graphql_fields},
             call=_run_internal_graphql,
         )
 
