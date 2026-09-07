@@ -75,7 +75,7 @@ def test_build_artifact_step_uses_provisioned_fixture_without_network() -> None:
     validation = _workflow_step(
         "_required.yml",
         "build",
-        "Validate reproducible artifacts and package lifecycle",
+        "Validate offline Codex artifacts",
     )
 
     assert "scripts/provision_codex_sigstore_fixture.py" in provision
@@ -94,6 +94,16 @@ def test_build_artifact_step_uses_provisioned_fixture_without_network() -> None:
         "build/test-fixtures/codex-sigstore/rust-v0.153.4:"
         "/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro" in validation
     )
+
+    assert "-m codex_release_artifact" in validation
+    assert "--basetemp=build/pytest-codex-artifacts" in validation
+    generic = _workflow_step(
+        "_required.yml", "build", "Validate reproducible artifacts and package lifecycle"
+    )
+    assert '-m "artifact and not codex_release_artifact"' in generic
+    assert "--network=none" not in generic
+    assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT" not in generic
+    assert "--basetemp=build/pytest-artifacts" in generic
 
 
 def test_schema_step_builds_workflow_file_array_inside_container(tmp_path: Path) -> None:

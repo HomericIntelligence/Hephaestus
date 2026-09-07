@@ -3667,8 +3667,10 @@ def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], b
     non_applicable = _CODEX_NON_APPLICABLE_TOOLS.get(execution.operation, frozenset())
     allowed_tools = tuple(sorted(declared_tools - non_applicable))
     capabilities = {_CODEX_TOOL_CAPABILITIES.get(value, "") for value in allowed_tools}
+    rebase_tools = ("Edit", "Glob", "Grep", "Read", "Write")
+    rebase_grant = execution.operation is AgentOperation.IMPLEMENT and allowed_tools == rebase_tools
     if (
-        allowed_tools != expected_tools
+        (allowed_tools != expected_tools and not rebase_grant)
         or "" in capabilities
         or not capabilities <= operation_policy.builtins
     ):

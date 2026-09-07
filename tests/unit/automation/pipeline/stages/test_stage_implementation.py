@@ -1168,6 +1168,11 @@ class TestGate:
         assert isinstance(request.job, AgentJob)
         assert request.job.prompt_kwargs["rebase_conflict"] is True
         assert request.job.allowed_tools == "Read,Write,Edit,Glob,Grep"
+        assert _codex_implementation_grants(request.job) == (
+            "workspace-write",
+            ("Edit", "Glob", "Grep", "Read", "Write"),
+            True,
+        )
         assert request.on_done_state == "REBASE_CONTINUE_WAIT"
         prompt = request.job.prompt_builder(**request.job.prompt_kwargs)
         assert "Rebase Conflict Resolution Required" in prompt

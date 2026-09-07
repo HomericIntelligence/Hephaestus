@@ -2308,10 +2308,14 @@ def _validate_codex_session_authority(
         raise CodexIsolationError("codex_adapter_request_mismatch") from None
     lifecycle, session_id, operation, allowed_tools = _codex_session_authority(request)
     expected_tools = _CODEX_OPERATION_TOOLS.get(execution_request.operation)
+    rebase_tools = ("Edit", "Glob", "Grep", "Read", "Write")
+    rebase_grant = (
+        execution_request.operation is AgentOperation.IMPLEMENT and allowed_tools == rebase_tools
+    )
     if (
         lifecycle != execution_request.lifecycle.value
         or operation != execution_request.operation.value
-        or allowed_tools != expected_tools
+        or (allowed_tools != expected_tools and not rebase_grant)
     ):
         raise CodexIsolationError("codex_adapter_request_mismatch")
     operation_config = f"hephaestus_automation.operation={json.dumps(operation)}"

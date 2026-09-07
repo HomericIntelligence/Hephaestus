@@ -88,6 +88,63 @@ class TestParsePlannedFiles:
         assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
 
 
+class TestPublicationScopeFiles:
+    """Read complete file declarations from the accepted plan."""
+
+    @pytest.mark.parametrize("heading", ["Files to Modify", "Files to Create", "File Changes"])
+    def test_complete_safe_paths(self, heading: str) -> None:
+        paths = {
+            "src/main.py",
+            ".github/workflows/test.yml",
+            ".pre-commit-config.yaml",
+            "justfile",
+            "docs/My Guide",
+            "bin/run",
+        }
+        body = f"## {heading}\n" + "\n".join(f"- `{path}`" for path in paths)
+        assert parse_publication_scope_files(body) == paths
+
+    @pytest.mark.parametrize(
+        "path", ["../outside", "/absolute", "./local", "a/../b", "bad\\path", "bad\x00path", ""]
+    )
+    def test_invalid_declaration_rejects_complete_manifest(self, path: str) -> None:
+        body = f"## Files to Modify\n- `src/main.py`\n- `{path}`\n"
+        assert parse_publication_scope_files(body) == set()
+
+    def test_file_subheading_ignores_prose_and_other_sections(self) -> None:
+        body = (
+            "## Files to Modify\n### `src/main.py`\n"
+            "Replace the call at `src/main.py:142` with `os.replace`.\n"
+            "## Verification\n### Files to Modify\n- `unrelated/file.py`\n"
+        )
+        assert parse_publication_scope_files(body) == {"src/main.py"}
+
+    @pytest.mark.parametrize("fence", ["```", "~~~~"])
+    def test_fenced_examples_do_not_declare_files(self, fence: str) -> None:
+        body = (
+            f"{fence}markdown\n## Files to Modify\n- `example/file.py`\n{fence}\n"
+            "## Files to Modify\n- `src/main.py`\n"
+            f"{fence}\n- `other/example.py`\n{fence}\n"
+        )
+        assert parse_publication_scope_files(body) == {"src/main.py"}
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "|`.github/workflows/test.yml`|Update.|",
+            "-\t`.github/workflows/test.yml`",
+            "1.\t`.github/workflows/test.yml`",
+        ],
+    )
+    def test_markdown_declaration_spacing(self, entry: str) -> None:
+        body = f"## Files to Modify\n- `src/main.py`\n{entry}\n"
+        assert parse_publication_scope_files(body) == {"src/main.py", ".github/workflows/test.yml"}
+
+    def test_heading_suffix_does_not_grant_scope(self) -> None:
+        body = "## Files to Modify Examples\n- `example/file.py`\n"
+        assert parse_publication_scope_files(body) == set()
+
+
 class TestCoordinatorCapOwnership:
     """Traceability guard for the deferred per-repo cap."""
 

@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hephaestus.automation.pipeline.jobs import GitJob
-from hephaestus.automation.pipeline.stages import JobRequest
+from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import (
     _capture_codex_publication_scope,
     _codex_publication_kwargs,
@@ -83,3 +85,46 @@ def test_coordinator_claims_do_not_authorize_publication(
     assert prepared.job.kwargs["scope_history_base_sha"] == "b" * 40
     assert prepared.job.kwargs["scope_retraction_paths"] == ("docs/unrelated.md",)
     assert prepared.job.kwargs["scope_retraction_base_sha"] == "c" * 40
+
+
+@pytest.mark.parametrize("invalid_path", ["../outside.py", "/absolute/file.py"])
+def test_invalid_plan_path_rejects_the_complete_publication_scope(
+    make_ctx: Callable[..., Any], make_work_item: Callable[..., Any], invalid_path: str
+) -> None:
+    """A valid path cannot hide an invalid path in the same manifest."""
+    ctx = make_ctx(
+        config_overrides={
+            "agent": "codex",
+            "codex_isolation_adapter": "test-adapter",
+            "codex_isolation_deployment_lock": Path("/deployment/lock.json"),
+            "codex_isolation_deployment_lock_sha256": "a" * 64,
+        }
+    )
+    item = make_work_item()
+    plan = f"## Files to Modify\n- `hephaestus/example.py`\n- `{invalid_path}`\n"
+    with patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)):
+        outcome = _capture_codex_publication_scope(item, ctx)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.note == "codex_publication_scope_claims_invalid"
+    assert "_codex_publication_scope" not in item.payload
+
+
+def test_publication_scope_preserves_hidden_and_extensionless_paths(
+    make_ctx: Callable[..., Any], make_work_item: Callable[..., Any]
+) -> None:
+    """Keep complete repository paths from the approved plan."""
+    ctx = make_ctx(
+        config_overrides={
+            "agent": "codex",
+            "codex_isolation_adapter": "test-adapter",
+            "codex_isolation_deployment_lock": Path("/deployment/lock.json"),
+            "codex_isolation_deployment_lock_sha256": "a" * 64,
+        }
+    )
+    item = make_work_item()
+    plan = "## Files to Modify\n- `.github/workflows/ci.yml`\n- `justfile`\n"
+    with patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)):
+        assert _capture_codex_publication_scope(item, ctx) is None
+    scope = _codex_publication_kwargs(item, ctx, "b" * 40)
+    assert isinstance(scope, dict)
+    assert scope["allowed_paths"] == (".github/workflows/ci.yml", "justfile")

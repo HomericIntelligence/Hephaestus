@@ -216,15 +216,16 @@ assumes a POSIX-like development environment. Specifically:
   `GIT_WORK_TREE`, etc.) are scrubbed and author/committer identity is forced
   via `_git_test_env()` so the tests do not depend on the contributor's
   `~/.gitconfig`.
-- **`python3` and `zstd`** on `PATH` — used by
-  `bash scripts/run_ci_local.sh build` to provision and extract the fixed Codex
-  artifact before the network-free artifact test starts.
 
 These cases are tagged with the `requires_posix` pytest marker and are skipped
 automatically on `sys.platform == "win32"`. They run under macOS, Linux, and
 WSL with no extra setup beyond `uv sync`. Windows contributors using Git
 Bash / MSYS2 will execute them; pure-Windows-Python runs will skip them.
 Tracking: #742.
+
+The command `bash scripts/run_ci_local.sh build` also requires `python3` and
+`zstd` on `PATH`. It uses these tools to provision and extract the fixed Codex
+artifact before the network-free artifact test starts.
 
 ## Documentation
 

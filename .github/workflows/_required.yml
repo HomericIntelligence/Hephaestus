@@ -1045,6 +1045,16 @@ jobs:
 
       - name: Validate reproducible artifacts and package lifecycle
         run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777
+          -v "$PWD:/workspace:Z"
+          -e UV_NO_SYNC=1 -e PYTHONPATH=/workspace
+          --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run pytest tests/integration
+          --override-ini="addopts=" --basetemp=build/pytest-artifacts
+          -v --strict-markers -m "artifact and not codex_release_artifact"
+
+      - name: Validate offline Codex artifacts
+        run: >
           podman run --rm --network=none --tmpfs /tmp:rw,size=4g,mode=1777
           -v "$PWD:/workspace:Z"
           -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/codex-sigstore/rust-v0.153.4:ro"
@@ -1053,8 +1063,8 @@ jobs:
           -e UV_NO_SYNC=1 -e PYTHONPATH=/workspace
           --userns=keep-id:uid=1000,gid=1000
           hephaestus-ci:local uv run pytest tests/integration
-          --override-ini="addopts=" --basetemp=build/pytest-artifacts
-          -v --strict-markers -m artifact
+          --override-ini="addopts=" --basetemp=build/pytest-codex-artifacts
+          -v --strict-markers -m codex_release_artifact
 
   security-dependency-scan:
     name: security/dependency-scan

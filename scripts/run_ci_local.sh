@@ -557,10 +557,15 @@ run_build() {
     fi
     python3 "${PROJECT_ROOT}/scripts/provision_codex_sigstore_fixture.py" \
         --root "${PROJECT_ROOT}/build/test-fixtures/codex-sigstore/rust-v0.153.4" || return 1
-    run_in_container_with_codex_fixture uv run pytest tests/integration \
+    run_in_container env UV_NO_SYNC=1 PYTHONPATH=/workspace \
+        uv run pytest tests/integration \
         --override-ini="addopts=" \
         --basetemp=build/pytest-artifacts \
-        -v --strict-markers -m artifact
+        -v --strict-markers -m "artifact and not codex_release_artifact" || return 1
+    run_in_container_with_codex_fixture uv run pytest tests/integration \
+        --override-ini="addopts=" \
+        --basetemp=build/pytest-codex-artifacts \
+        -v --strict-markers -m codex_release_artifact
 }
 
 run_audit() {

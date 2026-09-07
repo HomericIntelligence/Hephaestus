@@ -47,7 +47,7 @@ def test_required_build_job_runs_artifact_suite() -> None:
         "Validate reproducible artifacts and package lifecycle",
     )
 
-    assert "-m artifact" in build_run
+    assert '-m "artifact and not codex_release_artifact"' in build_run
     assert "--basetemp=build/pytest-artifacts" in build_run
     assert "build" in workflow["jobs"]["required-checks-gate"]["needs"]
 

@@ -36,6 +36,7 @@ from hephaestus.automation.github_api import (
     prefetch_issue_states,
 )
 from hephaestus.automation.models import IssueInfo
+from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
@@ -62,7 +63,6 @@ LOG = logging.getLogger(__name__)
 # are intentionally NOT captured — overlap goes undetected and both plans dispatch
 # concurrently, falling back to pre-#1623 behavior (acceptable tradeoff for regex tightness).
 _PLAN_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)`")
-_PLAN_TOP_LEVEL_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9_]+)`")
 _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IGNORECASE)
 
 # A source path only conflicts with work in the same repository.  The
@@ -102,23 +102,46 @@ def _parse_planned_files(plan_body: str) -> set[str]:
 
 
 def parse_publication_scope_files(plan_body: str) -> set[str]:
-    """Return every repo-relative file in the plan's exact file sections.
+    """Return the complete file declarations from exact plan file sections.
 
-    Publication also controls top-level files. The overlap scheduler keeps its
-    older slash-only parser because bare dotted tokens can cause false overlap,
-    but a publication guard must prefer a closed false negative over that
-    scheduling tradeoff.
+    Read backticked paths at the start of list entries, table rows, and file
+    subheadings. Ignore prose references and fenced examples. Return an empty
+    set if a declared path is invalid. Keep this parser separate from the
+    file-overlap parser because publication requires complete paths.
     """
-    files = _parse_planned_files(plan_body)
+    files: set[str] = set()
     in_section = False
-    for line in plan_body.splitlines():
-        if _PLAN_FILE_SECTION_RE.match(line):
-            in_section = True
+    fence = ""
+    for line in plan_body.split("\n"):
+        stripped = line.strip()
+        fence_match = re.match(r"^(`{3,}|~{3,})", stripped)
+        if fence:
+            if stripped.startswith(fence) and not stripped[len(fence) :].strip(fence[0]):
+                fence = ""
             continue
-        if line.startswith("## "):
-            in_section = False
-        if in_section:
-            files.update(_PLAN_TOP_LEVEL_FILE_RE.findall(line))
+        if fence_match:
+            fence = fence_match[1]
+            continue
+        if re.match(r"^#{1,2}(?:[ \t]|$)", line):
+            in_section = bool(
+                re.fullmatch(
+                    r"##[ \t]+(?:Files to (?:Modify|Create)|File Changes)[ \t]*",
+                    line,
+                    re.IGNORECASE,
+                )
+            )
+            continue
+        if not in_section:
+            continue
+        declaration = re.sub(
+            r"^(?:(?:[-*+]|[0-9]+[.)]|#{3,6})[ \t]+|\|[ \t]*)", "", stripped
+        ).lstrip()
+        if not declaration.startswith("`"):
+            continue
+        token = re.match(r"`([^`]*)`", declaration)
+        if token is None or not is_safe_scope_retraction_path(token[1]):
+            return set()
+        files.add(token[1])
     return files
 
 

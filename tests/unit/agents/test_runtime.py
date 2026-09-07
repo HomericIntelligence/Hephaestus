@@ -296,6 +296,48 @@ def test_public_session_apis_do_not_accept_adapter_or_frozen_request() -> None:
         assert "codex_isolation_request" not in parameters
 
 
+@pytest.mark.parametrize(
+    ("operation", "tools", "accepted"),
+    [
+        (AgentOperation.IMPLEMENT, ["Edit", "Glob", "Grep", "Read", "Write"], True),
+        (AgentOperation.IMPLEMENT, ["Glob", "Grep", "Read", "Write"], False),
+        (AgentOperation.IMPLEMENT, ["Edit", "Glob", "Grep", "Read", "Unknown", "Write"], False),
+        (AgentOperation.TEST_FIX, ["Edit", "Glob", "Grep", "Read", "Write"], False),
+    ],
+)
+def test_codex_rebase_tool_grant_is_closed(
+    tmp_path: Path, operation: AgentOperation, tools: list[str], accepted: bool
+) -> None:
+    """Accept the exact rebase grant without a shell tool."""
+    request = _codex_implementation_request(tmp_path)
+    request.session = json.dumps(
+        {
+            "allowed_tools": tools,
+            "lifecycle": "start_new",
+            "operation": operation.value,
+            "session_id": None,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    request.command = (
+        "codex",
+        "exec",
+        "-c",
+        f"hephaestus_automation.operation={json.dumps(operation.value)}",
+        "-c",
+        "hephaestus_automation.allowed_tools=" + json.dumps(tools, separators=(",", ":")),
+        "--json",
+        "-",
+    )
+    execution = ExecutionRequest(AgentRole.IMPLEMENTER, operation, SessionLifecycle.START_NEW)
+    if accepted:
+        assert agent_runtime._validate_codex_session_authority(request, execution) is None
+    else:
+        with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+            agent_runtime._validate_codex_session_authority(request, execution)
+
+
 def test_codex_v1_session_field_binds_exact_lifecycle_and_resume_id(tmp_path: Path) -> None:
     """The existing V1 session field binds all host operation authority."""
     request = _codex_implementation_request(tmp_path)

@@ -841,6 +841,31 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         os.fstat(staged_descriptor)
 
 
+@pytest.mark.parametrize(
+    ("operation", "allowed_tools"),
+    [
+        (AgentOperation.IMPLEMENT, "Read,Write,Glob,Grep"),
+        (AgentOperation.IMPLEMENT, "Read,Write,Edit,Glob,Grep,Unknown"),
+        (AgentOperation.TEST_FIX, "Read,Write,Edit,Glob,Grep"),
+    ],
+)
+def test_codex_rebase_grant_rejects_other_tool_sets(
+    tmp_path: Path, operation: AgentOperation, allowed_tools: str
+) -> None:
+    """The rebase grant does not permit other tool sets."""
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        sandbox="workspace-write",
+        allowed_tools=allowed_tools,
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER, operation, SessionLifecycle.START_NEW
+        ),
+    )
+    with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+        _codex_implementation_grants(job)
+
+
 def test_codex_implementation_inspect_rejects_a_write_tool(tmp_path: Path) -> None:
     """A read-only operation cannot widen its tool grant."""
     job = _agent_job(

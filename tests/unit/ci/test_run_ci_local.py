@@ -465,7 +465,8 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         "uv build --wheel",
         "build/cli-venv/bin/pytest",
         "uv run pytest tests/integration --override-ini=addopts= "
-        "--basetemp=build/pytest-artifacts -v --strict-markers -m artifact",
+        "--basetemp=build/pytest-artifacts -v --strict-markers "
+        "-m artifact\\ and\\ not\\ codex_release_artifact",
         "uv run pip-audit",
         "uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium",
         "uv run zizmor --no-online-audits --min-severity medium .github/workflows/",
@@ -572,7 +573,8 @@ def test_build_matches_required_artifact_lane(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert (
         "uv run pytest tests/integration --override-ini=addopts= "
-        "--basetemp=build/pytest-artifacts -v --strict-markers -m artifact"
+        "--basetemp=build/pytest-artifacts -v --strict-markers "
+        "-m artifact\\ and\\ not\\ codex_release_artifact"
     ) in log
     assert "scripts/provision_codex_sigstore_fixture.py" in log
     assert "--network=none" in log
@@ -587,6 +589,24 @@ def test_build_matches_required_artifact_lane(tmp_path: Path) -> None:
         "/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro" in log
     )
     assert "python -m build --no-isolation" not in log
+    runs = [line for line in log.splitlines() if "uv run pytest tests/integration" in line]
+    assert len(runs) == 2
+    assert "--network=none" not in runs[0]
+    assert "-m artifact\\ and\\ not\\ codex_release_artifact" in runs[0]
+    assert "--network=none" in runs[1]
+    assert "-m codex_release_artifact" in runs[1]
+    assert "--basetemp=build/pytest-codex-artifacts" in runs[1]
+
+
+@pytest.mark.parametrize("failing_lane", ["pytest-artifacts", "pytest-codex-artifacts"])
+def test_build_propagates_each_artifact_failure(tmp_path: Path, failing_lane: str) -> None:
+    """Either failed artifact run must fail the build subset."""
+    result, log = _run_runner(tmp_path, "build", failing_command=failing_lane)
+    assert result.returncode != 0
+    if failing_lane == "pytest-artifacts":
+        assert "--basetemp=build/pytest-codex-artifacts" not in log
+    else:
+        assert "--basetemp=build/pytest-artifacts" in log
 
 
 def test_build_fails_before_provisioning_when_host_zstd_is_unavailable(tmp_path: Path) -> None:
