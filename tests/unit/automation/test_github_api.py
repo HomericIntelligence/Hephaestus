@@ -3359,6 +3359,39 @@ class TestUpsertAndDeleteComment:
         mock_gh_call.assert_not_called()
         mock_delete.assert_not_called()
 
+    def test_recovery_create_confirms_owned_exact_body_and_database_id(self) -> None:
+        """A recovery create returns only its actor-owned exact-body readback ID."""
+        body = _recovery_body()
+        created = {"databaseId": 73, "body": body, "viewerDidAuthor": True}
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                side_effect=[[], [created]],
+            ) as mock_fetch,
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+            patch("hephaestus.automation.github_api.gh_issue_delete_comment") as mock_delete,
+        ):
+            result = gh_issue_upsert_comment(
+                5,
+                RECOVERY_PROVENANCE_PREFIX,
+                body,
+                repo=("o", "r"),
+            )
+
+        assert result == 73
+        assert [entry.args for entry in mock_fetch.call_args_list] == [
+            (5, ("o", "r")),
+            (5, ("o", "r")),
+        ]
+        mock_create.assert_called_once_with(5, body, repo=("o", "r"))
+        mock_gh_call.assert_not_called()
+        mock_delete.assert_not_called()
+
     @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
     def test_recovery_update_rejects_post_write_identity_conflicts(self, conflict: str) -> None:
         """A recovery update conflict stops without cleanup after one PATCH."""

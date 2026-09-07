@@ -4281,6 +4281,30 @@ class TestMutatorMapping:
         patch_comment.assert_not_called()
         delete_comment.assert_not_called()
 
+    def test_recovery_create_confirms_owned_exact_body_and_database_id(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A recovery create requires one actor-owned exact-body readback with an ID."""
+        body = _recovery_body()
+        created = {"body": body, "databaseId": 73, "viewerDidAuthor": True}
+        fetch = MagicMock(side_effect=[[], [created]])
+        post = MagicMock()
+        patch_comment = MagicMock()
+        delete_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
+
+        adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        assert fetch.call_args_list == [call(5), call(5)]
+        post.assert_called_once_with(5, body)
+        patch_comment.assert_not_called()
+        delete_comment.assert_not_called()
+
     @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
     def test_recovery_update_rejects_post_write_identity_conflicts(
         self,
