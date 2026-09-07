@@ -277,8 +277,10 @@ Skip Extended Thinking for:
 
 ### Automatic Skill Selection
 
-Before beginning any substantive task, invoke `/athena:skill-advisor` to determine if a structured
-skill applies. Use `Skill(skill: "athena:skill-advisor", args: "<task description>")`.
+Before a substantive task, use `athena:skill-advisor` if it is available.
+If it is unavailable, select the applicable skill from the installed skill
+catalog and continue the task. A missing routing skill does not block work.
+Keep all applicable task, skill, and repository requirements.
 
 If you are a myrmidon-swarm subagent with a specific task prompt, skip this and follow your prompt directly.
 
@@ -292,7 +294,7 @@ repository-local source of truth for which skill plugins are enabled.
 
 | Skill | Arguments | When to Use |
 |-------|-----------|-------------|
-| `athena:skill-advisor` | `<task description>` | Before any task — routes to the correct skill |
+| `athena:skill-advisor` | `<task description>` | Route to a skill when available; otherwise use the installed catalog |
 | `athena:advise` | `<task description>` | Before starting work — search Mnemosyne for prior learnings |
 | `athena:learn` | — | After completing work — capture session learnings in Mnemosyne |
 | `athena:myrmidon-swarm` | `<task description>` | Complex multi-step tasks requiring parallel agent coordination |
@@ -764,8 +766,9 @@ gates:
 - `/athena:myrmidon-swarm`: If host policy or task scope requires approval,
   present the plan and ask for approval. Start safe work that is in scope only
   after you obtain all required approvals.
-- `/athena:skill-advisor` — invoked at the start of any substantive task
-  with `allowed-tools: []`, so it can route but never act autonomously.
+- `athena:skill-advisor` — use when available to select an applicable skill.
+  If it is unavailable, use the installed catalog. Routing does not grant
+  permission for other actions.
 - `/athena:finish-branch` and `/athena:code-review` — explicit confirm
   steps before tagging or force-pushing.
 

@@ -73,6 +73,19 @@ def test_implementation_prompt_round_trips_host_inputs() -> None:
     assert "/tmp/wt" in rendered
 
 
+def test_implementation_prompt_does_not_activate_the_review_skill() -> None:
+    """The writer prompt must not activate a skill owned by the later reviewer."""
+    rendered = prompts.get_implementation_prompt(
+        issue_number=42,
+        issue_title="Fix the cache",
+        issue_body="Keep cache entries separate for each repository.",
+        branch_name="42-cache",
+        worktree_path="/tmp/wt",
+    )
+    trusted_text = _FENCE_RE.sub("", rendered)
+    assert "$athena:pr-review" not in trusted_text
+
+
 def test_pr_review_prompt_example_is_accepted_by_review_parser() -> None:
     """The implementation-loop JSON example satisfies its production parser."""
     rendered = prompts.get_impl_loop_review_prompt(

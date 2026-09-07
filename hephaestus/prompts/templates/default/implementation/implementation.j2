@@ -94,8 +94,8 @@ After you return, the orchestrator will:
 3. Create or reuse the pull request for this branch.
 4. Ensure the PR body contains the exact policy line `Closes #{{ issue_number }}`.
 5. Do not enable auto-merge yourself. The queue's `pr_review` stage applies
-   the loop-owned `state:implementation-go` label after its `$athena:pr-review`
-   review (or inline fallback).
+   the loop-owned `state:implementation-go` label after its review.
+   The orchestrator owns that later review; finish the implementation first.
 
 Missing `Closes #N` or signed-commit policy is enforced outside the automation
 loop. Only the queue's `pr_review` stage may publish implementation approval.

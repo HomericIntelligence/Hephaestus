@@ -7872,31 +7872,62 @@ class WorkerPool:
                             raise SourceWorkspaceError("implementation publication result invalid")
                     record(cast(str, head))
                     return result
-                advance = recovery_stack.enter_context(
-                    manager.implementation_publication(issue, branch=branch, path=Path(path))
+                record = recovery_stack.enter_context(
+                    manager.implementation_local_commit(issue, branch=branch, path=Path(path))
                 )
+                initial_head = self._read_publish_head(Path(path), timeout=job.timeout_s)
+                if not isinstance(initial_head, str):
+                    raise SourceWorkspaceError("implementation publication head is unavailable")
                 result = self._git_commit_push_inner(job, recovery_stack)
                 if not result.ok:
                     return result
-                head = result.value.get("head_sha") if isinstance(result.value, dict) else None
-                if not isinstance(head, str):
-                    raise SourceWorkspaceError("implementation publication head is unavailable")
-                remote_head = self._read_remote_branch_head(
-                    Path(path),
-                    remote="origin",
-                    branch=branch,
-                    expected_repo=job.transport_repository,
-                    timeout=job.timeout_s,
+                head = self._verify_direct_publication_head(
+                    job, result, worktree=Path(path), branch=branch, initial_head=initial_head
                 )
-                if not isinstance(remote_head, str):
-                    raise SourceWorkspaceError("implementation publication remote is unavailable")
-                advance(head, remote_head)
+                record(head)
                 return result
             except (SourceWorkspaceError, OSError, subprocess.SubprocessError):
                 return JobResult(
                     ok=False,
                     error="source_workspace_ownership_unavailable: publication binding invalid",
                 )
+
+    def _verify_direct_publication_head(
+        self,
+        job: GitJob,
+        result: JobResult,
+        *,
+        worktree: Path,
+        branch: str,
+        initial_head: str,
+    ) -> str:
+        """Verify the direct result before the local receipt can change."""
+        receipt = result.value if isinstance(result.value, dict) else {}
+        head = receipt.get("head_sha")
+        if not isinstance(head, str) or not _is_full_commit_sha(head):
+            raise SourceWorkspaceError("implementation publication head is unavailable")
+        if receipt.get("pushed") is False:
+            if (
+                set(receipt) != {"pushed", "head_sha"}
+                or head != job.kwargs["expected_remote_sha"]
+                or head != initial_head
+            ):
+                raise SourceWorkspaceError("implementation publication result invalid")
+            # The unused remote reservation is absent after cleanup.
+            # The caller must still verify the unchanged local receipt.
+            return head
+        if receipt.get("pushed") is not True:
+            raise SourceWorkspaceError("implementation publication result invalid")
+        remote_head = self._read_remote_branch_head(
+            worktree,
+            remote="origin",
+            branch=branch,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        if remote_head != head:
+            raise SourceWorkspaceError("implementation publication head changed")
+        return head
 
     def _git_commit_push_inner(  # noqa: C901
         self,

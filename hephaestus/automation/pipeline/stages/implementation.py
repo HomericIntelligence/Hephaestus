@@ -46,9 +46,8 @@ binding contract):
   (``git_error``) instead of retrying a broken remote forever. The counter
   resets on any successful git job.
 - Owned labels: none — PR creation is the journal entry (doc section 4).
-  The only label this stage ever writes is ``state:skip`` on the legacy
-  "no commits vs base" runtime error (re-housed from the legacy phase
-  runner's runtime-error handler), non-fatally.
+  A no-commit result reports incomplete work with the agent summary.
+  It does not apply ``state:skip`` or prove that the issue is complete.
 - PR_CREATE [M]: ``ctx.github.create_pr`` (idempotent ensure semantics)
   with a ``prompts/pr_review.py get_pr_description`` body [durable]. PR
   review owns implementation labels; this stage does not create merge eligibility.
@@ -125,7 +124,6 @@ from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
-    STATE_SKIP,
     is_implementation_go,
     is_plan_go,
     is_skipped,
@@ -193,7 +191,6 @@ from .base import (
     source_workspace_binding,
     stage_model,
     stage_timeout,
-    write_skip_label,
 )
 from .repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
@@ -2867,7 +2864,7 @@ class ImplementationStage(Stage):
 
     @staticmethod
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
-        """Record commit+push success, no-commit skip, or git failure."""
+        """Record publication success, a no-commit result, or Git failure."""
         result = _consume_writer_publication(item, result)
         if _COMMIT_PUSH_TERMINAL in item.payload:
             return
@@ -2901,13 +2898,13 @@ class ImplementationStage(Stage):
                     item.payload["_post_remediation_review_head_sha"] = receipt_head
             ImplementationStage._post_remediation_replies_after_push(item, result)
             # A successful worker result ends the consecutive-git-failure
-            # streak even when no commit was produced; PR_CREATE handles skip.
+            # streak even when no commit was produced; PR_CREATE reports it.
             item.payload.pop("git_error_retries", None)
             return
         error_text = (result.error or "").lower()
         if "no commits" in error_text:
-            # Legacy _handle_runtime_error (:348): "no commits between
-            # base and branch" maps to state:skip, not a hard failure.
+            # Retain the legacy transport result as a no-commit outcome.
+            # PR_CREATE reports incomplete work with the agent summary.
             item.payload["no_commits"] = True
             return
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
@@ -3747,28 +3744,20 @@ class ImplementationStage(Stage):
             return Continue(next_state=REPLY_HANDOFF_WAIT)
 
         if item.payload.get("no_commits"):
-            # An item can retain a PR after an interrupted or re-entered
-            # implementation attempt.  Do not add an issue-level skip label
-            # if that live PR is now externally armed (or if its state cannot
-            # be proved complete and unarmed): the label would otherwise
-            # mutate workflow state owned by another actor.
+            # Preserve the external ownership gate for retained PRs. An empty
+            # implementation does not prove that the issue is complete.
             if item.pr is not None:
                 external_arm = self._external_arm_gate(item.pr, ctx)
                 if external_arm is not None:
                     return external_arm
             item.payload.pop("no_commits", None)
-            logger.warning(
-                "implementation:%d: no commits vs base; applying %s", item.issue, STATE_SKIP
+            summary = str(item.payload.get("implement_summary") or "").strip()
+            diagnostic = (
+                redact_diagnostic_text(summary)[:2000] if summary else "no agent summary returned"
             )
-            write_skip_label(
-                item.issue,
-                ctx,
-                "the implementation session ended with no commits versus the "
-                "base branch — there is nothing to open a PR from. Re-scope "
-                "the issue or implement manually, then remove this label to "
-                "re-enter the loop.",
-            )
-            return StageOutcome(Disposition.SKIP, "no commits vs base")
+            note = f"implementation_no_changes: {diagnostic}"
+            logger.warning("implementation:%d: %s", item.issue, note)
+            return StageOutcome(Disposition.FINISH_FAIL, note)
         if item.payload.pop("remediation_publish_permanent", False):
             item.payload.pop("git_error", None)
             return StageOutcome(Disposition.FINISH_FAIL, "remediation_publication_failed")

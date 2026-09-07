@@ -635,7 +635,7 @@ absolute operator state:
 | `state:plan-blocked` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — automated implementation eligibility |
-| `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
+| `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 
 Every **stage-issued** `state:skip` write uses the label as its durable
 authority and emits the reason to structured run logs. It does not add an
@@ -1009,6 +1009,18 @@ Architectural contract:
 Implementation converts an approved plan into a published pull request. It may
 adopt an existing pull request, but it cannot approve its own work or authorize
 a merge.
+
+An ordinary implementation with no commits is incomplete work. It returns
+`implementation_no_changes` with a bounded, redacted agent summary. If the
+agent supplied no summary, the result states that explicitly. A normal process
+exit or a claim that work is already complete does not prove implementation.
+This result does not apply `state:skip`. Existing PR remediation can still
+complete its validated reply-only path.
+
+For an unchanged direct writer, the host releases the unused remote branch
+reservation once. It verifies the local worktree and ownership receipt without
+requiring the deleted remote ref. A real publication still requires matching
+local and remote heads. See issue #3068.
 
 #### Boundary diagram
 

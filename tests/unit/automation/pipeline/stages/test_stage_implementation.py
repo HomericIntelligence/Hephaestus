@@ -5903,26 +5903,72 @@ class TestCommitPushAndPrCreate:
         assert result.disposition == Disposition.ADVANCE
         assert github.mutation_log == []
 
-    def test_no_commits_applies_skip_durably_before_skip(
-        self, make_ctx: Any, make_work_item: Any
+    @pytest.mark.parametrize(
+        "summary",
+        ["Blocked: athena:skill-advisor is unavailable", "Already implemented"],
+    )
+    def test_no_commits_fails_with_agent_explanation_without_skip(
+        self, make_ctx: Any, make_work_item: Any, summary: str
     ) -> None:
-        """No-PR legacy no-commit handling still maps to a durable skip."""
+        """An agent explanation cannot authorize an issue-level skip."""
         stage = ImplementationStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
-
+        item = make_work_item(issue=9, state="IMPLEMENT_WAIT")
+        stage.on_job_done(item, JobResult(ok=True, value=summary), ctx)
+        item.state = "COMMIT_PUSH_WAIT"
         stage.on_job_done(
             item, JobResult(ok=False, error="RuntimeError: no commits between main and head"), ctx
         )
         item.state = "PR_CREATE"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL, f"implementation_no_changes: {summary}"
+        )
+        assert github.mutation_log == []
+
+    @pytest.mark.parametrize("summary", [None, "", "  "])
+    def test_no_commits_reports_missing_agent_summary(
+        self, make_ctx: Any, make_work_item: Any, summary: str | None
+    ) -> None:
+        """A successful process without output is an incomplete implementation."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, state="IMPLEMENT_WAIT")
+        stage.on_job_done(item, JobResult(ok=True, value=summary), ctx)
+        item.state = "PR_CREATE"
+        item.payload["no_commits"] = True
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_no_changes: no agent summary returned"
+        )
+        assert github.mutation_log == []
+
+    def test_no_commits_bounds_and_redacts_agent_summary(
+        self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Terminal diagnostics must not publish credentials or unbounded output."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        secret = "ghp_" + "a" * 36
+        item = make_work_item(
+            issue=9,
+            state="PR_CREATE",
+            payload={"no_commits": True, "implement_summary": secret + " x" * 3000},
+        )
+
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.SKIP
-        assert github.mutation_log == [
-            ("gh_issue_add_labels", (9, (STATE_SKIP,))),
-        ]
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert result.note.startswith("implementation_no_changes: <redacted>")
+        assert len(result.note) <= len("implementation_no_changes: ") + 2000
+        assert secret not in result.note
+        assert secret not in caplog.text
+        assert result.note in caplog.text
 
     def test_no_commits_with_externally_armed_pr_blocks_without_skip_label(
         self, make_ctx: Any, make_work_item: Any
@@ -5958,36 +6004,19 @@ class TestCommitPushAndPrCreate:
         assert item.payload["no_commits"] is True
         assert github.mutation_log == []
 
-    def test_no_commits_with_confirmed_unarmed_pr_applies_skip_label(
+    def test_no_commits_with_confirmed_unarmed_pr_fails_without_skip_label(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A complete, unarmed retained PR still permits the no-commit skip."""
+        """A retained unarmed PR does not make an empty implementation complete."""
         stage = ImplementationStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=9, pr=1001, state="PR_CREATE", payload={"no_commits": True})
 
-        assert stage.step(item, ctx) == StageOutcome(Disposition.SKIP, "no commits vs base")
-        assert github.mutation_log == [
-            ("gh_issue_add_labels", (9, (STATE_SKIP,))),
-        ]
-
-    def test_skip_label_write_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A failing state:skip write never turns the SKIP into a crash."""
-
-        class AddFailsGitHub(FakeStageGitHub):
-            def add_labels(self, issue_number: int, labels: list[str]) -> None:
-                raise RuntimeError("gh add failed")
-
-        stage = ImplementationStage()
-        ctx = make_ctx(github=AddFailsGitHub())
-        item = make_work_item(issue=9, state="PR_CREATE")
-        item.payload["no_commits"] = True
-
-        result = stage.step(item, ctx)  # must not raise
-
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.SKIP
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_no_changes: no agent summary returned"
+        )
+        assert github.mutation_log == []
 
     def test_push_failure_retries_without_pr(self, make_ctx: Any, make_work_item: Any) -> None:
         """A non-"no commits" push failure RETRYs with no PR created."""
