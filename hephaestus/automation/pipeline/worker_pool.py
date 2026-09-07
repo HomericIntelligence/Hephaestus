@@ -27,7 +27,7 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -1979,7 +1979,7 @@ def _codex_implementation_command(
     selection = resolve_codex_model_selection(model)
     if selection.model:
         command.extend(("--model", selection.model))
-    if selection.reasoning_effort:
+    if selection.reasoning_effort not in {"", "default"}:
         command.extend(("-c", f"model_reasoning_effort={json.dumps(selection.reasoning_effort)}"))
     if session_id:
         command.extend(
@@ -1997,8 +1997,8 @@ def _codex_implementation_command(
                 str(worktree),
                 "--sandbox",
                 sandbox,
-                "--ask-for-approval",
-                "never",
+                "-c",
+                'approval_policy="never"',
             )
         )
     command.extend(
@@ -2067,6 +2067,18 @@ def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], b
     return sandbox, allowed_tools, workspace_write
 
 
+def _reject_codex_terminal_cleanup_tombstone(profiles: Path) -> None:
+    """Reject a session store while terminal cleanup is incomplete."""
+    terminal_cleanup = profiles.with_name(profiles.name + ".terminal-cleanup")
+    try:
+        terminal_cleanup.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+    raise CodexIsolationError("codex_adapter_inventory_uncertain")
+
+
 def _codex_private_profile(job: AgentJob, build_root: Path) -> Path:
     """Return one durable profile that is bound to the issue and cycle."""
     logical_session = job.session_key or job.session_agent
@@ -2075,18 +2087,64 @@ def _codex_private_profile(job: AgentJob, build_root: Path) -> Path:
     identity = canonical_sha256(
         (job.repo, int(job.issue), logical_session, str(job.cwd.resolve(strict=True)), job.model)
     )
-    profiles = build_root / Path(DEFAULT_STATE_DIR).name / "codex-sessions"
+    worktree = job.cwd.resolve(strict=True)
+    profiles = worktree.parent / f".{worktree.name}-codex-sessions"
+    _reject_codex_terminal_cleanup_tombstone(profiles)
+    descriptor = -1
     try:
-        profiles.mkdir(mode=0o700, parents=True, exist_ok=True)
-        profiles.chmod(0o700)
+        with suppress(FileExistsError):
+            profiles.mkdir(mode=0o700)
+        lexical = profiles.lstat()
+        descriptor = os.open(
+            profiles,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(lexical.st_mode)
+            or lexical.st_uid != os.geteuid()
+            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise OSError("invalid Codex profile root")
+        os.fchmod(descriptor, 0o700)
         canonical_profiles = profiles.resolve(strict=True)
+        if canonical_profiles != profiles.absolute():
+            raise OSError("Codex profile root is not canonical")
     except OSError:
         raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
-    if not canonical_profiles.is_relative_to(build_root):
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if canonical_profiles.is_relative_to(worktree) or not build_root.is_relative_to(worktree):
         raise CodexIsolationError("codex_adapter_protocol_mismatch")
     profile = canonical_profiles / identity
     if profile.is_symlink():
         raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    receipt_paths = (profile / ".active.json", profile / ".quarantine.json")
+    if any(path.exists() or path.is_symlink() for path in receipt_paths):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    try:
+        with suppress(FileExistsError):
+            profile.mkdir(mode=0o700)
+        profile_status = profile.lstat()
+        if (
+            not stat.S_ISDIR(profile_status.st_mode)
+            or profile_status.st_uid != os.geteuid()
+            or stat.S_IMODE(profile_status.st_mode) != 0o700
+        ):
+            raise OSError("invalid Codex durable store")
+        runs = profile / ".runs"
+        with suppress(FileExistsError):
+            runs.mkdir(mode=0o700)
+        runs_status = runs.lstat()
+        if (
+            not stat.S_ISDIR(runs_status.st_mode)
+            or runs_status.st_uid != os.geteuid()
+            or stat.S_IMODE(runs_status.st_mode) != 0o700
+        ):
+            raise OSError("invalid Codex run store")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
     return profile
 
 
@@ -2185,11 +2243,13 @@ def _codex_implementation_request(
     sandbox, allowed_tools, workspace_write = _codex_implementation_grants(job)
     if executable.digest != lock.extracted_elf_sha256:
         raise CodexIsolationError("codex_adapter_request_mismatch")
+    run_nonce = new_run_nonce()
+    ephemeral_profile = private_profile / ".runs" / run_nonce / "profile"
     fixed_git_environment = dict(git_receipt.fixed_environment)
     environment = tuple(
         sorted(
             build_codex_implementation_child_env(
-                codex_home=private_profile,
+                codex_home=ephemeral_profile,
                 fixed_git_environment=fixed_git_environment,
             ).items()
         )
@@ -2223,8 +2283,16 @@ def _codex_implementation_request(
         operation=execution.operation,
         allowed_tools=allowed_tools,
     )
-    read_only_mounts = {*git_receipt.read_only_paths, str(executable.path)}
-    read_write_mounts = {str(private_profile)}
+    profile_read_only, profile_read_write = agent_runtime._codex_profile_policy_paths(
+        ephemeral_profile,
+        run_nonce,
+    )
+    read_only_mounts = {
+        *git_receipt.read_only_paths,
+        str(executable.path),
+        *profile_read_only,
+    }
+    read_write_mounts = set(profile_read_write)
     if workspace_write:
         read_write_mounts.update(git_receipt.read_write_paths)
     else:
@@ -2256,7 +2324,7 @@ def _codex_implementation_request(
     )
     return CodexIsolationRequestV1(
         schema_version=1,
-        run_nonce=new_run_nonce(),
+        run_nonce=run_nonce,
         entry_point_name=lock.entry_point_name,
         adapter_api_version=lock.adapter_api_version,
         package_version=lock.adapter_version,
@@ -2278,7 +2346,7 @@ def _codex_implementation_request(
         prompt=prompt,
         prompt_digest=canonical_sha256(prompt),
         worktree_path=str(worktree),
-        private_profile_path=str(private_profile),
+        private_profile_path=str(ephemeral_profile),
         policy=policy,
         policy_digest=canonical_sha256(policy),
         git_receipt=git_receipt,
@@ -2802,11 +2870,15 @@ class WorkerPool:
                                 execution_request = job.execution_request
                                 if execution_request is None:
                                     raise CodexIsolationError("codex_adapter_request_mismatch")
+                                terminal_reaper = getattr(adapter, "_close", None)
+                                if not callable(terminal_reaper):
+                                    raise CodexIsolationError("codex_adapter_protocol_mismatch")
                                 return agent_runtime._run_admitted_codex_implementation_session(
                                     adapter=adapter,
                                     request=request,
                                     execution_request=execution_request,
                                     executable_descriptor=executable.descriptor,
+                                    terminal_reaper=cast(Callable[[], None], terminal_reaper),
                                 )
                             finally:
                                 try:

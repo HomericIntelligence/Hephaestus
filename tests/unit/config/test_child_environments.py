@@ -163,6 +163,7 @@ def test_codex_implementation_environment_uses_only_receipt_git_values(
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
     }
 
     environment = child_environments.build_codex_implementation_child_env(
@@ -203,6 +204,7 @@ def test_codex_implementation_environment_replaces_ambient_private_paths(
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
     }
 
     environment = child_environments.build_codex_implementation_child_env(
@@ -229,4 +231,26 @@ def test_codex_implementation_environment_rejects_incomplete_git_receipt(
         child_environments.build_codex_implementation_child_env(
             codex_home=tmp_path / "private-codex",
             fixed_git_environment={"GIT_DIR": str(tmp_path / "git-dir")},
+        )
+
+
+def test_codex_implementation_environment_rejects_enabled_replace_objects(
+    platform_env: dict[str, str], tmp_path: Path
+) -> None:
+    """The child environment rejects enabled Git replacement objects."""
+    fixed = {
+        "GIT_DIR": str(tmp_path / "git-dir"),
+        "GIT_WORK_TREE": str(tmp_path / "worktree"),
+        "GIT_INDEX_FILE": str(tmp_path / "index"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "0",
+    }
+
+    with pytest.raises(ValueError, match="invalid value"):
+        child_environments.build_codex_implementation_child_env(
+            codex_home=tmp_path / "private-codex",
+            fixed_git_environment=fixed,
         )

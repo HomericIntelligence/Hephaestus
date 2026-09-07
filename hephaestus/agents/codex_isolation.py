@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -21,6 +22,9 @@ CODEX_RELEASE = "rust-v0.153.4"
 CODEX_VERSION_OUTPUT = "codex-cli 0.153.4"
 CODEX_LINUX_TARGET = "aarch64-unknown-linux-musl"
 CODEX_LINUX_ASSET = "codex-aarch64-unknown-linux-musl.zst"
+_CODEX_LINUX_EXECUTABLE_SIZE = 222_567_456
+_CODEX_LINUX_EXECUTABLE_SHA256 = "4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6"
+_EXECUTABLE_COPY_CHUNK_SIZE = 1024 * 1024
 
 STABLE_ERROR_CODES = frozenset(
     {
@@ -286,6 +290,19 @@ class CodexGitReceiptV1:
         ):
             _require_absolute_path(getattr(self, name), name)
         _require_string_pairs(self.fixed_environment, "fixed_environment")
+        fixed = dict(self.fixed_environment)
+        expected = {
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_DIR": self.git_dir,
+            "GIT_INDEX_FILE": self.index,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_WORK_TREE": self.canonical_worktree,
+        }
+        if fixed != expected:
+            raise ValueError("fixed_environment must contain the exact Git isolation map")
         _require_path_tuple(self.protected_paths, "protected_paths")
         _require_path_tuple(self.read_only_paths, "read_only_paths")
         _require_path_tuple(self.read_write_paths, "read_write_paths")
@@ -387,6 +404,27 @@ class CodexIsolationRequestV1:
             raise TypeError("git_receipt must be CodexGitReceiptV1")
         if canonical_sha256(self.git_receipt) != self.git_receipt_digest:
             raise ValueError("git_receipt_digest does not match git_receipt")
+        environment = dict(self.environment)
+        if any(
+            environment.get(name) != value for name, value in self.git_receipt.fixed_environment
+        ):
+            raise ValueError("environment does not match git_receipt fixed_environment")
+        if not (
+            self.worktree_path == self.worktree_identity == self.git_receipt.canonical_worktree
+        ):
+            raise ValueError("worktree paths do not match the Git receipt")
+        if set(self.policy.protected_overlay_mounts) != set(self.git_receipt.protected_paths):
+            raise ValueError("protected mounts do not match the Git receipt")
+        if not set(self.git_receipt.read_only_paths).issubset(self.policy.read_only_mounts):
+            raise ValueError("read-only mounts do not contain the Git receipt paths")
+        policy_paths = set(self.policy.read_only_mounts) | set(self.policy.read_write_mounts)
+        if not set(self.git_receipt.read_write_paths).issubset(policy_paths):
+            raise ValueError("policy mounts do not contain the Git receipt writable paths")
+        if any(
+            path not in self.git_receipt.read_write_paths and path != self.private_profile_path
+            for path in self.policy.read_write_mounts
+        ):
+            raise ValueError("writable mounts exceed the Git receipt and private profile")
         _require_string(self.repository, "repository")
         if not _is_exact_int(self.issue) or self.issue <= 0:
             raise TypeError("issue must be a positive integer")
@@ -679,14 +717,37 @@ class StagedLinuxExecutable:
     file_identity: FileIdentity
 
 
-def _read_descriptor(descriptor: int) -> bytes:
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    chunks: list[bytes] = []
+def _stream_descriptor(
+    source_descriptor: int,
+    *,
+    expected_size: int,
+    destination_descriptor: int | None = None,
+) -> str:
+    os.lseek(source_descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    size = 0
     while True:
-        chunk = os.read(descriptor, 1024 * 1024)
+        remaining = expected_size - size
+        chunk = os.read(
+            source_descriptor,
+            min(_EXECUTABLE_COPY_CHUNK_SIZE, remaining + 1),
+        )
         if not chunk:
-            return b"".join(chunks)
-        chunks.append(chunk)
+            break
+        size += len(chunk)
+        if size > expected_size:
+            _fail("codex_adapter_protocol_mismatch")
+        digest.update(chunk)
+        if destination_descriptor is not None:
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                if written <= 0:
+                    _fail("codex_adapter_protocol_mismatch")
+                view = view[written:]
+    if size != expected_size:
+        _fail("codex_adapter_protocol_mismatch")
+    return digest.hexdigest()
 
 
 def _validate_linux_elf(data: bytes) -> None:
@@ -707,8 +768,91 @@ def _identity(status: os.stat_result) -> FileIdentity:
     )
 
 
-def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExecutable:
-    """Copy a locked AArch64 Linux ELF through held descriptors."""
+def _open_staging_directory(root: Path, root_status: os.stat_result) -> int:
+    descriptor = os.open(
+        root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        if _identity(os.fstat(descriptor)) != _identity(root_status):
+            _fail("codex_adapter_protocol_mismatch")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_locked_source(source: Path, expected_size: int) -> tuple[int, os.stat_result]:
+    path_status = source.lstat()
+    if not stat.S_ISREG(path_status.st_mode):
+        _fail("codex_adapter_protocol_mismatch")
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        descriptor_status = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_status.st_mode)
+            or _identity(descriptor_status) != _identity(path_status)
+            or descriptor_status.st_size != expected_size
+        ):
+            _fail("codex_adapter_protocol_mismatch")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, descriptor_status
+
+
+def _remove_staged_destination(created: bool, directory_descriptor: int, name: str) -> None:
+    if created and directory_descriptor >= 0:
+        with contextlib.suppress(OSError):
+            os.unlink(name, dir_fd=directory_descriptor)
+
+
+def _staged_copy_matches(
+    *,
+    expected_digest: str,
+    actual_digest: str,
+    written_status: os.stat_result,
+    verified_status: os.stat_result,
+    path_status: os.stat_result,
+    root_status: os.stat_result,
+    held_root_status: os.stat_result,
+    current_root_status: os.stat_result,
+) -> bool:
+    return (
+        actual_digest == expected_digest
+        and _identity(verified_status) == _identity(written_status)
+        and _identity(path_status) == _identity(verified_status)
+        and _identity(current_root_status) == _identity(held_root_status)
+        and (
+            current_root_status.st_dev,
+            current_root_status.st_ino,
+            current_root_status.st_mode,
+            current_root_status.st_uid,
+        )
+        == (
+            root_status.st_dev,
+            root_status.st_ino,
+            root_status.st_mode,
+            root_status.st_uid,
+        )
+    )
+
+
+def _stage_linux_executable(
+    source_path: Path,
+    job_root: Path,
+    *,
+    expected_size: int = _CODEX_LINUX_EXECUTABLE_SIZE,
+    expected_digest: str = _CODEX_LINUX_EXECUTABLE_SHA256,
+) -> StagedLinuxExecutable:
+    """Copy the exact locked AArch64 Linux ELF through held descriptors."""
+    if (
+        not _is_exact_int(expected_size)
+        or expected_size < 64
+        or type(expected_digest) is not str
+        or _DIGEST_RE.fullmatch(expected_digest) is None
+    ):
+        _fail("codex_adapter_protocol_mismatch")
     source = Path(source_path)
     root = Path(job_root)
     root_status = root.lstat()
@@ -722,47 +866,82 @@ def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExec
     destination_descriptor = -1
     directory_descriptor = -1
     verify_descriptor = -1
+    destination_created = False
     destination = root / "codex-aarch64-unknown-linux-musl"
     try:
-        source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-        source_status = os.fstat(source_descriptor)
-        if not stat.S_ISREG(source_status.st_mode):
-            _fail("codex_adapter_protocol_mismatch")
-        source_bytes = _read_descriptor(source_descriptor)
-        _validate_linux_elf(source_bytes)
-        source_digest = hashlib.sha256(source_bytes).hexdigest()
+        directory_descriptor = _open_staging_directory(root, root_status)
+        source_descriptor, source_status = _open_locked_source(source, expected_size)
+        _validate_linux_elf(os.pread(source_descriptor, 64, 0))
         destination_descriptor = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            destination.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
             0o500,
+            dir_fd=directory_descriptor,
         )
-        offset = 0
-        while offset < len(source_bytes):
-            offset += os.write(destination_descriptor, source_bytes[offset:])
+        destination_created = True
+        source_digest = _stream_descriptor(
+            source_descriptor,
+            expected_size=expected_size,
+            destination_descriptor=destination_descriptor,
+        )
+        if source_digest != expected_digest:
+            _fail("codex_adapter_protocol_mismatch")
+        current_source_status = source.lstat()
+        if _identity(current_source_status) != _identity(source_status):
+            _fail("codex_adapter_protocol_mismatch")
         os.fchmod(destination_descriptor, 0o500)
         os.fsync(destination_descriptor)
-        directory_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         os.fsync(directory_descriptor)
-        verify_descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
-        destination_bytes = _read_descriptor(verify_descriptor)
+        written_status = os.fstat(destination_descriptor)
+        verify_descriptor = os.open(
+            destination.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory_descriptor,
+        )
         verified_status = os.fstat(verify_descriptor)
-        if hashlib.sha256(destination_bytes).hexdigest() != source_digest:
+        destination_digest = _stream_descriptor(
+            verify_descriptor,
+            expected_size=expected_size,
+        )
+        current_destination_status = os.stat(
+            destination.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        held_root_status = os.fstat(directory_descriptor)
+        current_root_status = root.lstat()
+        if not _staged_copy_matches(
+            expected_digest=expected_digest,
+            actual_digest=destination_digest,
+            written_status=written_status,
+            verified_status=verified_status,
+            path_status=current_destination_status,
+            root_status=root_status,
+            held_root_status=held_root_status,
+            current_root_status=current_root_status,
+        ):
             _fail("codex_adapter_protocol_mismatch")
         staged = StagedLinuxExecutable(
             destination,
             verify_descriptor,
-            source_digest,
+            expected_digest,
             _identity(verified_status),
         )
         verify_descriptor = -1
         return staged
     except CodexIsolationError:
-        if destination.exists():
-            destination.unlink()
+        _remove_staged_destination(
+            destination_created,
+            directory_descriptor,
+            destination.name,
+        )
         raise
     except OSError:
-        if destination.exists():
-            destination.unlink()
+        _remove_staged_destination(
+            destination_created,
+            directory_descriptor,
+            destination.name,
+        )
         _fail("codex_adapter_protocol_mismatch")
     finally:
         for descriptor in (
@@ -773,6 +952,16 @@ def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExec
         ):
             if descriptor >= 0:
                 os.close(descriptor)
+
+
+def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExecutable:
+    """Stage only the reviewed Codex release executable identity."""
+    return _stage_linux_executable(
+        source_path,
+        job_root,
+        expected_size=_CODEX_LINUX_EXECUTABLE_SIZE,
+        expected_digest=_CODEX_LINUX_EXECUTABLE_SHA256,
+    )
 
 
 def close_staged_linux_executable(staged: StagedLinuxExecutable) -> None:

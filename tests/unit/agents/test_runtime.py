@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import inspect
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -379,8 +381,26 @@ def _codex_implementation_request(tmp_path: Path) -> Any:
     executable.write_bytes(b"trusted executable")
     executable.chmod(0o500)
     executable_status = executable.stat()
+    run_nonce = "a" * 64
+    store = (tmp_path / "codex-sessions" / ("b" * 64)).resolve()
+    runs = store / ".runs"
+    runs.mkdir(parents=True, mode=0o700)
+    runs.chmod(0o700)
+    store.chmod(0o700)
+    profile = runs / run_nonce / "profile"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(exist_ok=True)
+    profile_read_only, profile_read_write = agent_runtime._codex_profile_policy_paths(
+        profile,
+        run_nonce,
+    )
     return SimpleNamespace(
-        private_profile_path=str((tmp_path / "private-codex-home").resolve()),
+        repository="HomericIntelligence/Hephaestus",
+        issue=3019,
+        private_profile_path=str(profile),
+        worktree_path=str(worktree),
+        run_nonce=run_nonce,
+        session_identity_digest="b" * 64,
         session=(
             '{"allowed_tools":["Bash","Edit","Glob","Grep","Read","Write"],'
             '"lifecycle":"start_new","operation":"implement","session_id":null}'
@@ -407,6 +427,8 @@ def _codex_implementation_request(tmp_path: Path) -> Any:
         ),
         monotonic_deadline=time.monotonic() + 60,
         policy=SimpleNamespace(
+            read_only_mounts=profile_read_only,
+            read_write_mounts=profile_read_write,
             term_grace_seconds=0.1,
             kill_grace_seconds=0.1,
             pipe_close_grace_seconds=0.1,
@@ -421,6 +443,7 @@ def _run_codex_implementation_session(
     request: Any,
     auth_source: Path | None = None,
     execution_request: ExecutionRequest | None = None,
+    terminal_reaper: Callable[[], None] | None = None,
 ) -> Any:
     """Call the private automation boundary with controlled host authority."""
     return agent_runtime._run_admitted_codex_implementation_session(
@@ -434,6 +457,7 @@ def _run_codex_implementation_session(
         ),
         executable_descriptor=getattr(request, "executable_descriptor", -1),
         auth_source=auth_source,
+        terminal_reaper=terminal_reaper,
     )
 
 
@@ -448,6 +472,7 @@ def _patch_codex_profile_source(
     def populate(current_request: Any) -> Path:
         assert current_request is request
         profile = Path(current_request.private_profile_path)
+        profile.parent.mkdir(mode=0o700)
         profile.mkdir(mode=0o700)
         package = profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
         package.mkdir(parents=True)
@@ -458,6 +483,36 @@ def _patch_codex_profile_source(
         agent_runtime,
         "_populate_codex_implementation_profile",
         populate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_protected_profile_snapshot",
+        lambda *_args: (),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_validate_codex_profile_inventory",
+        lambda *_args: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_validate_codex_preserved_state",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_capture_codex_preserved_state",
+        lambda *_args: {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_export_codex_rollout",
+        lambda *_args: None,
         raising=False,
     )
     monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_args: None, raising=False)
@@ -474,6 +529,577 @@ def _patch_codex_profile_source(
             lambda *_args: None,
             raising=False,
         )
+
+
+def _sealed_codex_profile(request: Any) -> tuple[Path, Any]:
+    """Create one small sealed profile and return its protected snapshot."""
+    profile = Path(request.private_profile_path)
+    athena = profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
+    athena.mkdir(parents=True)
+    (athena / "package.json").write_text('{"version":"0.5.1"}', encoding="utf-8")
+    (profile / "config.toml").write_text("sealed configuration\n", encoding="utf-8")
+    for relative in (
+        "home",
+        "tmp",
+        "appdata",
+        "localappdata",
+        "xdg/config",
+        "xdg/cache",
+        "xdg/data",
+        "sessions",
+    ):
+        state = profile / relative
+        state.mkdir(parents=True, exist_ok=True)
+        state.chmod(0o700)
+    (profile / "xdg").chmod(0o700)
+    (athena / "package.json").chmod(0o400)
+    (profile / "config.toml").chmod(0o400)
+    for directory in (
+        athena,
+        athena.parent,
+        athena.parent.parent,
+        athena.parent.parent.parent,
+        athena.parent.parent.parent.parent,
+    ):
+        directory.chmod(0o500)
+    profile.chmod(0o700)
+    return profile, agent_runtime._codex_protected_profile_snapshot(profile)
+
+
+@pytest.mark.parametrize("retention", ["copy", "scalar", "hard-link", "rename"])
+def test_codex_preserved_state_rejects_each_authentication_retention_form(
+    tmp_path: Path,
+    retention: str,
+) -> None:
+    """Retained state cannot keep full, scalar, linked, or renamed authentication."""
+    request = _codex_implementation_request(tmp_path)
+    profile, protected = _sealed_codex_profile(request)
+    auth_path = agent_runtime._codex_authentication_path(profile, request.run_nonce)
+    authentication = '{"access_token":"test-secret-value"}\n'
+    bridge = agent_runtime._create_codex_authentication_bridge(auth_path, authentication)
+    retained = profile / "sessions" / "retained"
+    if retention == "copy":
+        retained.write_text(authentication, encoding="utf-8")
+    elif retention == "scalar":
+        retained.write_text("test-secret-value", encoding="utf-8")
+    elif retention == "hard-link":
+        os.link(auth_path, retained)
+    else:
+        auth_path.rename(retained)
+    if auth_path.exists():
+        agent_runtime._remove_codex_authentication(auth_path, bridge)
+    else:
+        os.close(bridge.auth_descriptor)
+        os.close(bridge.run_descriptor)
+        os.close(bridge.root_descriptor)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=bridge.auth_identity,
+            authentication=authentication,
+        )
+
+    assert not profile.exists()
+
+
+def test_codex_preserved_state_rejects_athena_mutation_and_special_file(tmp_path: Path) -> None:
+    """Changed Athena bytes or an uncertain state object invalidates the profile."""
+    request = _codex_implementation_request(tmp_path)
+    profile, protected = _sealed_codex_profile(request)
+    athena_file = profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1/package.json"
+    athena_file.chmod(0o600)
+    athena_file.write_text("changed", encoding="utf-8")
+    authentication = '{"access_token":"test-secret-value"}\n'
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication=authentication,
+        )
+    assert not profile.exists()
+
+
+@pytest.mark.parametrize("uncertainty", ["symlink", "special", "count"])
+def test_codex_preserved_state_rejects_scan_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    uncertainty: str,
+) -> None:
+    """A link or count-limit uncertainty invalidates the durable profile."""
+    request = _codex_implementation_request(tmp_path)
+    profile, protected = _sealed_codex_profile(request)
+    state = profile / "sessions" / "uncertain"
+    if uncertainty == "symlink":
+        state.symlink_to("outside")
+    elif uncertainty == "special":
+        os.mkfifo(state)
+    else:
+        state.write_text("clean", encoding="utf-8")
+        monkeypatch.setattr(agent_runtime, "CODEX_PRESERVED_STATE_MAX_FILES", 0)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication='{"access_token":"test-secret-value"}\n',
+        )
+
+    assert not profile.exists()
+
+
+def test_codex_preserved_state_accepts_clean_resume_state(tmp_path: Path) -> None:
+    """Clean provider session state survives the complete post-run proof."""
+    request = _codex_implementation_request(tmp_path)
+    profile, protected = _sealed_codex_profile(request)
+    (Path(request.worktree_path) / "metadata.json").write_text(
+        '{"auth_mode":"chatgpt","updated_at":"2026-09-07"}\n',
+        encoding="utf-8",
+    )
+    (Path(request.worktree_path) / "metadata-link").symlink_to("metadata.json")
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    (profile / "sessions" / "provider.jsonl").write_text("clean state\n", encoding="utf-8")
+
+    agent_runtime._validate_codex_preserved_state(
+        request,
+        protected_snapshot=protected,
+        authentication_identity=(1, 2, 0, 0, 0, 0),
+        authentication='{"access_token":"test-secret-value"}\n',
+        baseline=baseline,
+    )
+
+    assert (profile / "sessions" / "provider.jsonl").read_text(encoding="utf-8") == "clean state\n"
+
+
+def test_codex_delta_scan_does_not_read_unchanged_sparse_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The pre-auth baseline avoids a full read of unchanged worktree data."""
+    request = _codex_implementation_request(tmp_path)
+    _profile, protected = _sealed_codex_profile(request)
+    sparse = Path(request.worktree_path) / "large-existing-object"
+    with sparse.open("wb") as stream:
+        stream.truncate(1460 * 1024 * 1024)
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    original_pread = os.pread
+    sparse_reads = 0
+
+    def observe(descriptor: int, size: int, offset: int) -> bytes:
+        nonlocal sparse_reads
+        if os.fstat(descriptor).st_ino == sparse.stat().st_ino:
+            sparse_reads += 1
+        return original_pread(descriptor, size, offset)
+
+    monkeypatch.setattr(os, "pread", observe)
+    agent_runtime._validate_codex_preserved_state(
+        request,
+        protected_snapshot=protected,
+        authentication_identity=(1, 2, 0, 0, 0, 0),
+        authentication='{"access_token":"test-secret-value"}\n',
+        baseline=baseline,
+    )
+
+    assert sparse_reads == 0
+
+
+def test_codex_delta_scan_reads_and_removes_changed_credential_copy(tmp_path: Path) -> None:
+    """The terminal delta scan reads and removes one changed credential copy."""
+    request = _codex_implementation_request(tmp_path)
+    _profile, protected = _sealed_codex_profile(request)
+    changed = Path(request.worktree_path) / "changed.txt"
+    changed.write_text("clean", encoding="utf-8")
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    changed.write_text("test-secret-value", encoding="utf-8")
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication='{"access_token":"test-secret-value"}\n',
+            baseline=baseline,
+        )
+
+    assert not changed.exists()
+    assert Path(request.worktree_path).is_dir()
+
+
+def test_codex_worktree_scrub_precedes_a_protected_profile_rejection(tmp_path: Path) -> None:
+    """A profile mismatch cannot leave a later worktree credential copy."""
+    request = _codex_implementation_request(tmp_path)
+    profile, protected = _sealed_codex_profile(request)
+    leaked = Path(request.worktree_path) / "z-secret"
+    leaked.write_text("clean", encoding="utf-8")
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    config = profile / "config.toml"
+    config.chmod(0o600)
+    config.write_text("changed configuration\n", encoding="utf-8")
+    leaked.write_text("test-secret-value", encoding="utf-8")
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication='{"access_token":"test-secret-value"}\n',
+            baseline=baseline,
+        )
+
+    assert not leaked.exists()
+
+
+def _set_test_xattr(
+    path: Path,
+    name: bytes,
+    value: bytes,
+    *,
+    follow_symlinks: bool = True,
+) -> None:
+    """Set one test extended attribute through the platform C interface."""
+    library = ctypes.CDLL(None, use_errno=True)
+    set_xattr = library.setxattr
+    buffer = ctypes.create_string_buffer(value)
+    if sys.platform == "darwin":
+        options = 0 if follow_symlinks else 0x0001
+        result = set_xattr(os.fsencode(path), name, buffer, len(value), 0, options)
+    else:
+        selected = set_xattr if follow_symlinks else library.lsetxattr
+        result = selected(os.fsencode(path), name, buffer, len(value), 0)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+@pytest.mark.parametrize("credential_location", ["name", "value"])
+def test_codex_delta_scan_removes_a_credential_in_a_changed_xattr(
+    tmp_path: Path,
+    credential_location: str,
+) -> None:
+    """A changed extended attribute cannot retain an authentication value."""
+    request = _codex_implementation_request(tmp_path)
+    _profile, protected = _sealed_codex_profile(request)
+    changed = Path(request.worktree_path) / "changed.txt"
+    changed.write_text("clean", encoding="utf-8")
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    try:
+        name = (
+            b"user.test-secret-value" if credential_location == "name" else b"user.hephaestus-test"
+        )
+        value = b"test-secret-value" if credential_location == "value" else b"metadata"
+        _set_test_xattr(changed, name, value)
+    except OSError as exc:
+        if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+            pytest.skip("the test file system does not support extended attributes")
+        raise
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication='{"access_token":"test-secret-value"}\n',
+            baseline=baseline,
+        )
+
+    assert not changed.exists()
+
+
+@pytest.mark.parametrize("credential_location", ["name", "value"])
+def test_codex_delta_scan_rejects_a_credential_in_a_worktree_root_xattr(
+    tmp_path: Path,
+    credential_location: str,
+) -> None:
+    """Authentication data in worktree-root metadata invalidates the run."""
+    request = _codex_implementation_request(tmp_path)
+    _profile, protected = _sealed_codex_profile(request)
+    worktree = Path(request.worktree_path)
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    name = b"user.test-secret-value" if credential_location == "name" else b"user.hephaestus-test"
+    value = b"test-secret-value" if credential_location == "value" else b"metadata"
+    try:
+        _set_test_xattr(worktree, name, value)
+    except OSError as exc:
+        if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+            pytest.skip("the test file system does not support extended attributes")
+        raise
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication='{"access_token":"test-secret-value"}\n',
+            baseline=baseline,
+        )
+
+    descriptor = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert b"test-secret-value" not in agent_runtime._codex_descriptor_xattrs(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_codex_delta_scan_accepts_a_clean_changed_xattr(tmp_path: Path) -> None:
+    """A bounded changed extended attribute can contain non-secret metadata."""
+    request = _codex_implementation_request(tmp_path)
+    _profile, protected = _sealed_codex_profile(request)
+    changed = Path(request.worktree_path) / "changed.txt"
+    changed.write_text("clean", encoding="utf-8")
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    try:
+        _set_test_xattr(changed, b"user.hephaestus-test", b"ordinary-metadata")
+    except OSError as exc:
+        if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+            pytest.skip("the test file system does not support extended attributes")
+        raise
+
+    agent_runtime._validate_codex_preserved_state(
+        request,
+        protected_snapshot=protected,
+        authentication_identity=(1, 2, 0, 0, 0, 0),
+        authentication='{"access_token":"test-secret-value"}\n',
+        baseline=baseline,
+    )
+
+    assert changed.is_file()
+
+
+def test_codex_delta_scan_rejects_a_changed_symlink_before_xattr_retention(
+    tmp_path: Path,
+) -> None:
+    """An xattr-only symlink change cannot retain authentication data."""
+    request = _codex_implementation_request(tmp_path)
+    _profile, protected = _sealed_codex_profile(request)
+    target = Path(request.worktree_path) / "target.txt"
+    target.write_text("clean", encoding="utf-8")
+    changed = Path(request.worktree_path) / "changed-link"
+    changed.symlink_to(target.name)
+    baseline = agent_runtime._capture_codex_preserved_state(request)
+    initial = changed.lstat()
+    try:
+        _set_test_xattr(
+            changed,
+            b"user.hephaestus-test",
+            b"test-secret-value",
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM}:
+            pytest.skip("the test file system does not support symlink attributes")
+        raise
+    changed_status = changed.lstat()
+    assert os.readlink(changed) == target.name
+    assert (changed_status.st_dev, changed_status.st_ino, changed_status.st_mode) == (
+        initial.st_dev,
+        initial.st_ino,
+        initial.st_mode,
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication='{"access_token":"test-secret-value"}\n',
+            baseline=baseline,
+        )
+
+    assert not changed.exists()
+    assert not changed.is_symlink()
+
+
+@pytest.mark.parametrize("race", ["list", "value"])
+def test_codex_xattr_size_race_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    """A changed attribute list or value size invalidates the scan."""
+
+    def list_xattrs(
+        _fd: int,
+        buffer: ctypes.Array[Any] | None,
+        _size: int,
+        *_extra: int,
+    ) -> int:
+        if buffer is None:
+            return 5
+        ctypes.memmove(buffer, b"name\0", 5)
+        return 4 if race == "list" else 5
+
+    def get_xattr(
+        _fd: int,
+        _name: bytes,
+        buffer: ctypes.Array[Any] | None,
+        _size: int,
+        *_extra: int,
+    ) -> int:
+        if buffer is None:
+            return 4
+        ctypes.memmove(buffer, b"data", 4)
+        return 3
+
+    library = SimpleNamespace(flistxattr=list_xattrs, fgetxattr=get_xattr)
+    monkeypatch.setattr(ctypes, "CDLL", lambda *_args, **_kwargs: library)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._codex_descriptor_xattrs(1)
+
+
+@pytest.mark.parametrize("oversize", ["list", "value"])
+def test_codex_xattr_local_size_bound_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    oversize: str,
+) -> None:
+    """One attribute list or value cannot exceed the local 64 KiB bound."""
+
+    def list_xattrs(
+        _fd: int,
+        buffer: ctypes.Array[Any] | None,
+        _size: int,
+        *_extra: int,
+    ) -> int:
+        if oversize == "list":
+            return 64 * 1024 + 1
+        if buffer is None:
+            return 5
+        ctypes.memmove(buffer, b"name\0", 5)
+        return 5
+
+    def get_xattr(
+        _fd: int,
+        _name: bytes,
+        _buffer: object,
+        _size: int,
+        *_extra: int,
+    ) -> int:
+        return 64 * 1024 + 1
+
+    library = SimpleNamespace(flistxattr=list_xattrs, fgetxattr=get_xattr)
+    monkeypatch.setattr(ctypes, "CDLL", lambda *_args, **_kwargs: library)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._codex_descriptor_xattrs(1)
+
+
+def test_codex_xattr_bytes_use_the_aggregate_state_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Many small attributes cannot exceed the total retained-state bound."""
+    request = _codex_implementation_request(tmp_path)
+    _sealed_codex_profile(request)
+    monkeypatch.setattr(agent_runtime, "CODEX_PRESERVED_STATE_MAX_BYTES", 8)
+    monkeypatch.setattr(agent_runtime, "_codex_descriptor_xattrs", lambda _fd: b"12345")
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._capture_codex_preserved_state(request)
+
+
+def test_codex_directory_inventory_consumes_only_one_entry_past_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A high-fanout directory cannot be materialized before its bound."""
+
+    class CountingEntries:
+        consumed = 0
+
+        def __enter__(self) -> CountingEntries:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def __iter__(self) -> CountingEntries:
+            return self
+
+        def __next__(self) -> object:
+            self.consumed += 1
+            return SimpleNamespace(name=f"entry-{self.consumed}")
+
+    entries = CountingEntries()
+    monkeypatch.setattr(agent_runtime, "CODEX_PRESERVED_STATE_MAX_FILES", 3)
+    monkeypatch.setattr(os, "scandir", lambda _fd: entries)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._bounded_codex_directory_entries(
+            1,
+            agent_runtime._CodexStateScanBudget(),
+        )
+
+    assert entries.consumed == 4
+
+
+def test_codex_authentication_cleanup_removes_renamed_per_run_entry(tmp_path: Path) -> None:
+    """Cleanup removes a renamed credential and rejects the uncertain run."""
+    request = _codex_implementation_request(tmp_path)
+    profile = Path(request.private_profile_path)
+    profile.parent.mkdir(mode=0o700)
+    auth_path = agent_runtime._codex_authentication_path(profile, request.run_nonce)
+    bridge = agent_runtime._create_codex_authentication_bridge(
+        auth_path,
+        '{"access_token":"test-secret-value"}\n',
+    )
+    os.rename(
+        auth_path.name,
+        "renamed.json",
+        src_dir_fd=bridge.run_descriptor,
+        dst_dir_fd=bridge.run_descriptor,
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._remove_codex_authentication(auth_path, bridge)
+
+    assert not auth_path.parent.exists()
+
+
+def test_codex_preserved_state_removes_worktree_authentication_copy(tmp_path: Path) -> None:
+    """A worktree credential copy is removed before the request is rejected."""
+    request = _codex_implementation_request(tmp_path)
+    profile, protected = _sealed_codex_profile(request)
+    leaked = Path(request.worktree_path) / "generated.txt"
+    leaked.write_text("prefix test-secret-value suffix", encoding="utf-8")
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_preserved_state(
+            request,
+            protected_snapshot=protected,
+            authentication_identity=(1, 2, 0, 0, 0, 0),
+            authentication='{"access_token":"test-secret-value"}\n',
+        )
+
+    assert not leaked.exists()
+    assert not profile.exists()
+
+
+@pytest.mark.parametrize("ancestor", ["profile-parent", "auth-parent"])
+def test_codex_profile_policy_rejects_writable_protected_ancestor(
+    tmp_path: Path,
+    ancestor: str,
+) -> None:
+    """A writable ancestor cannot cover a protected profile or authentication path."""
+    request = _codex_implementation_request(tmp_path)
+    profile = Path(request.private_profile_path)
+    auth = agent_runtime._codex_authentication_path(profile, request.run_nonce)
+    writable = profile.parent if ancestor == "profile-parent" else auth.parent
+    request.policy.read_write_mounts = (*request.policy.read_write_mounts, str(writable))
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+        agent_runtime._validate_codex_profile_policy(request)
+
+
+def test_codex_profile_policy_does_not_confuse_a_sibling_prefix(tmp_path: Path) -> None:
+    """A sibling name prefix is not a path ancestor."""
+    request = _codex_implementation_request(tmp_path)
+    profile = Path(request.private_profile_path)
+    sibling = profile.with_name(profile.name + "-other")
+    request.policy.read_write_mounts = (*request.policy.read_write_mounts, str(sibling))
+
+    assert agent_runtime._validate_codex_profile_policy(request).name == "auth.json"
 
 
 @pytest.mark.parametrize(
@@ -495,8 +1121,15 @@ def test_codex_implementation_unlinks_auth_for_every_base_exception(
     auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
     auth_source.chmod(0o600)
     adapter = _CodexImplementationAdapter(failure)
-    _patch_codex_profile_source(monkeypatch, request)
+
+    def populate(_request: object) -> Path:
+        return _sealed_codex_profile(request)[0]
+
+    monkeypatch.setattr(agent_runtime, "_populate_codex_implementation_profile", populate)
+    monkeypatch.setattr(agent_runtime, "_verify_codex_implementation_executable", lambda *_: None)
+    monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_: None)
     monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "_validate_codex_result_window", lambda *_: None)
 
     with pytest.raises(
         CodexIsolationError,
@@ -510,6 +1143,46 @@ def test_codex_implementation_unlinks_auth_for_every_base_exception(
 
     assert len(adapter.auth_paths) == 1
     assert not adapter.auth_paths[0].exists()
+    assert not adapter.auth_paths[0].parent.exists()
+
+
+def test_codex_implementation_destroys_guest_before_authentication_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Terminal guest cleanup completes before authentication is removed."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    events: list[str] = []
+
+    class OrderedAdapter(_CodexImplementationAdapter):
+        def destroy(self, prepared: object) -> None:
+            assert prepared is self.prepared
+            assert self.auth_paths[0].exists()
+            events.append("destroy")
+
+    adapter = OrderedAdapter(
+        SimpleNamespace(output='{"type":"thread.started","thread_id":"provider-3019"}\n')
+    )
+    _patch_codex_profile_source(monkeypatch, request)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    real_remove = agent_runtime._remove_codex_authentication
+
+    def remove(auth_path: Path, bridge: Any) -> None:
+        events.append("remove-auth")
+        real_remove(auth_path, bridge)
+
+    monkeypatch.setattr(agent_runtime, "_remove_codex_authentication", remove)
+
+    _run_codex_implementation_session(
+        adapter=cast(CodexIsolationAdapterV1, adapter),
+        request=request,
+        auth_source=auth_source,
+    )
+
+    assert events == ["destroy", "remove-auth"]
 
 
 def test_codex_failed_state_contains_no_authentication_copy(
@@ -575,6 +1248,108 @@ def test_codex_authentication_creation_interruption_removes_partial_bridge(
         )
 
     assert not (Path(request.private_profile_path) / "auth.json").exists()
+    profile = Path(request.private_profile_path)
+    assert not profile.parent.exists()
+    assert not (profile.parent / ".transient-auth").exists()
+    assert not agent_runtime._codex_active_receipt_path(profile).exists()
+
+
+def test_codex_auth_cleanup_failure_still_scrubs_worktree_and_auth_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A terminal auth-cleanup error cannot bypass independent state cleanup."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    leaked = Path(request.worktree_path) / "z-secret"
+
+    class RetainingAdapter(_CodexImplementationAdapter):
+        def invoke(self, prepared: object, auth_path: str) -> object:
+            result = super().invoke(prepared, auth_path)
+            leaked.write_text("test-secret", encoding="utf-8")
+            return result
+
+    adapter = RetainingAdapter(
+        SimpleNamespace(output='{"type":"thread.started","thread_id":"provider-3019"}\n')
+    )
+
+    def populate(_request: object) -> Path:
+        return _sealed_codex_profile(request)[0]
+
+    monkeypatch.setattr(agent_runtime, "_populate_codex_implementation_profile", populate)
+    monkeypatch.setattr(agent_runtime, "_verify_codex_implementation_executable", lambda *_: None)
+    monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_: None)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_: None)
+    monkeypatch.setattr(agent_runtime, "_validate_codex_result_window", lambda *_: None)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_remove_codex_authentication",
+        lambda *_: (_ for _ in ()).throw(CodexIsolationError("codex_adapter_result_invalid")),
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        _run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+    profile = Path(request.private_profile_path)
+    assert not leaked.exists()
+    assert not profile.exists()
+    assert not (profile.parent / ".transient-auth").exists()
+    assert agent_runtime._codex_active_receipt_path(profile).with_name(".quarantine.json").is_file()
+
+
+def test_codex_scan_limit_creates_terminal_cleanup_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bounded scan failure prevents reuse and authorizes terminal cleanup."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    first = Path(request.worktree_path) / "a-clean"
+    later = Path(request.worktree_path) / "z-secret"
+    first.write_text("before", encoding="utf-8")
+    later.write_text("before", encoding="utf-8")
+
+    class ScanLimitAdapter(_CodexImplementationAdapter):
+        def invoke(self, prepared: object, auth_path: str) -> object:
+            result = super().invoke(prepared, auth_path)
+            first.write_text("changed", encoding="utf-8")
+            later.write_text("test-secret", encoding="utf-8")
+            monkeypatch.setattr(agent_runtime, "CODEX_PRESERVED_STATE_MAX_FILES", 1)
+            return result
+
+    adapter = ScanLimitAdapter(
+        SimpleNamespace(output='{"type":"thread.started","thread_id":"provider-3019"}\n')
+    )
+
+    def populate(_request: object) -> Path:
+        return _sealed_codex_profile(request)[0]
+
+    monkeypatch.setattr(agent_runtime, "_populate_codex_implementation_profile", populate)
+    monkeypatch.setattr(agent_runtime, "_verify_codex_implementation_executable", lambda *_: None)
+    monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_: None)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "_validate_codex_result_window", lambda *_: None)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        _run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+    store = agent_runtime._codex_profile_store(Path(request.private_profile_path))
+    assert not (store / ".active.json").exists()
+    quarantine = json.loads((store / ".quarantine.json").read_text(encoding="utf-8"))
+    assert quarantine["status"] == "terminal-state-invalid"
+    assert quarantine["worktree_path"] == request.worktree_path
 
 
 def test_codex_result_rejects_authentication_values(
@@ -598,6 +1373,42 @@ def test_codex_result_rejects_authentication_values(
         )
 
     assert not (Path(request.private_profile_path) / "auth.json").exists()
+
+
+def test_codex_authentication_output_allows_noncredential_metadata(tmp_path: Path) -> None:
+    """Normal authentication metadata text is not a secret-match pattern."""
+    authentication = (
+        '{"auth_mode":"chatgpt","updated_at":"2026-09-07","access_token":"test-secret"}\n'
+    )
+    auth_path = tmp_path / ".transient-auth" / ("a" * 64) / "auth.json"
+
+    agent_runtime._validate_codex_authentication_output(
+        "provider=chatgpt updated=2026-09-07",
+        authentication,
+        auth_path,
+    )
+
+
+@pytest.mark.parametrize("leak", ["secret", "path", "root"])
+def test_codex_authentication_output_rejects_secret_or_private_path(
+    tmp_path: Path,
+    leak: str,
+) -> None:
+    """Provider output cannot retain a credential or its private path."""
+    authentication = '{"auth_mode":"chatgpt","access_token":"test-secret"}\n'
+    auth_path = tmp_path / ".transient-auth" / ("a" * 64) / "auth.json"
+    output = {
+        "secret": "test-secret",
+        "path": str(auth_path),
+        "root": str(auth_path.parent),
+    }[leak]
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._validate_codex_authentication_output(
+            output,
+            authentication,
+            auth_path,
+        )
 
 
 def test_codex_implementation_returns_emitted_provider_session_id(
@@ -708,6 +1519,8 @@ def test_codex_timeout_has_one_destroy_owner(
     request = _codex_implementation_request(tmp_path)
     request.monotonic_deadline = time.monotonic() + 0.02
     request.policy = SimpleNamespace(
+        read_only_mounts=request.policy.read_only_mounts,
+        read_write_mounts=request.policy.read_write_mounts,
         term_grace_seconds=0.01,
         kill_grace_seconds=0.01,
         pipe_close_grace_seconds=0.01,
@@ -745,6 +1558,210 @@ def test_codex_timeout_has_one_destroy_owner(
         release.set()
 
     assert destroy_calls == [adapter.prepared]
+    profile = Path(request.private_profile_path)
+    assert profile.is_dir()
+    assert agent_runtime._codex_active_receipt_path(profile).is_file()
+
+
+def test_codex_dup_failure_still_unlinks_auth_before_uncertain_return(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A backup-descriptor failure cannot skip normal authentication removal."""
+    request = _codex_implementation_request(tmp_path)
+    request.monotonic_deadline = time.monotonic() + 0.02
+    request.policy = SimpleNamespace(
+        read_only_mounts=request.policy.read_only_mounts,
+        read_write_mounts=request.policy.read_write_mounts,
+        term_grace_seconds=0.01,
+        kill_grace_seconds=0.01,
+        pipe_close_grace_seconds=0.01,
+        inventory_quiescence_seconds=0.005,
+    )
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    release = threading.Event()
+
+    class UncertainAdapter(_CodexImplementationAdapter):
+        def invoke(self, prepared: object, auth_path: str) -> object:
+            super().invoke(prepared, auth_path)
+            release.wait(timeout=1)
+            return SimpleNamespace(output="stopped")
+
+        def destroy(self, _prepared: object) -> None:
+            release.wait(timeout=1)
+
+    adapter = UncertainAdapter(SimpleNamespace(output="stopped"))
+    adapter.prepared.preparation_deadline = request.monotonic_deadline
+    _patch_codex_profile_source(monkeypatch, request)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        os,
+        "dup",
+        lambda _descriptor: (_ for _ in ()).throw(OSError("dup failed")),
+    )
+
+    try:
+        with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+            _run_codex_implementation_session(
+                adapter=cast(CodexIsolationAdapterV1, adapter),
+                request=request,
+                auth_source=auth_source,
+            )
+    finally:
+        release.set()
+
+    profile = Path(request.private_profile_path)
+    assert not agent_runtime._codex_authentication_path(profile, request.run_nonce).exists()
+    assert agent_runtime._codex_active_receipt_path(profile).is_file()
+
+
+def test_codex_helper_reaper_does_not_claim_guest_terminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Broker exit cannot authorize guest state reuse or publication."""
+    request = _codex_implementation_request(tmp_path)
+    request.monotonic_deadline = time.monotonic() + 0.02
+    request.policy = SimpleNamespace(
+        read_only_mounts=request.policy.read_only_mounts,
+        read_write_mounts=request.policy.read_write_mounts,
+        term_grace_seconds=0.01,
+        kill_grace_seconds=0.01,
+        pipe_close_grace_seconds=0.01,
+        inventory_quiescence_seconds=0.005,
+    )
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    release = threading.Event()
+    invoke_finished = threading.Event()
+    destroy_finished = threading.Event()
+    late_copy = Path(request.worktree_path) / "late-secret.txt"
+
+    class UncertainAdapter(_CodexImplementationAdapter):
+        def invoke(self, prepared: object, auth_path: str) -> object:
+            super().invoke(prepared, auth_path)
+            authentication = Path(auth_path).read_text(encoding="utf-8")
+            release.wait(timeout=1)
+            late_copy.write_text(authentication, encoding="utf-8")
+            invoke_finished.set()
+            return SimpleNamespace(output="stopped")
+
+        def destroy(self, _prepared: object) -> None:
+            release.wait(timeout=1)
+            destroy_finished.set()
+
+    adapter = UncertainAdapter(SimpleNamespace(output="stopped"))
+    adapter.prepared.preparation_deadline = request.monotonic_deadline
+    _patch_codex_profile_source(monkeypatch, request)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+
+    def reap_helper() -> None:
+        release.set()
+        assert invoke_finished.wait(timeout=1)
+        assert destroy_finished.wait(timeout=1)
+
+    monkeypatch.setattr(
+        agent_runtime,
+        "_validate_codex_preserved_state",
+        lambda *_args, **_kwargs: pytest.fail("broker exit is not guest terminal proof"),
+    )
+
+    try:
+        with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+            _run_codex_implementation_session(
+                adapter=cast(CodexIsolationAdapterV1, adapter),
+                request=request,
+                auth_source=auth_source,
+                terminal_reaper=reap_helper,
+            )
+    finally:
+        release.set()
+
+    profile = Path(request.private_profile_path)
+    assert profile.is_dir()
+    assert late_copy.is_file()
+    assert agent_runtime._codex_active_receipt_path(profile).is_file()
+    assert not agent_runtime._codex_authentication_path(profile, request.run_nonce).exists()
+
+
+def test_codex_pre_auth_snapshot_failure_removes_the_ephemeral_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pre-auth profile failure removes the fresh run and active receipt."""
+    request = _codex_implementation_request(tmp_path)
+    adapter = _CodexImplementationAdapter(SimpleNamespace(output="unused"))
+    _patch_codex_profile_source(monkeypatch, request)
+
+    def reject_snapshot(_profile: Path) -> object:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+
+    monkeypatch.setattr(agent_runtime, "_codex_protected_profile_snapshot", reject_snapshot)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        _run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=tmp_path / "unused-auth.json",
+        )
+
+    profile = Path(request.private_profile_path)
+    assert not profile.exists()
+    assert not profile.parent.exists()
+    assert not agent_runtime._codex_active_receipt_path(profile).exists()
+
+
+def test_codex_profile_copy_failure_removes_the_partial_ephemeral_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A package-copy failure removes all state from its fresh run."""
+    request = _codex_implementation_request(tmp_path)
+    source_home = tmp_path / "source-home"
+    source_home.mkdir()
+    files = (
+        (
+            Path(".codex-marketplace-install.json"),
+            0o400,
+            json.dumps(
+                {
+                    "source": agent_runtime.CODEX_ATHENA_MARKETPLACE_SOURCE,
+                    "revision": agent_runtime.CODEX_ATHENA_MARKETPLACE_REF,
+                }
+            ).encode(),
+        ),
+        (
+            Path("package.json"),
+            0o400,
+            json.dumps({"version": agent_runtime.CODEX_ATHENA_VERSION}).encode(),
+        ),
+    )
+    calls = 0
+
+    def snapshot(_root: Path) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return files
+        raise CodexIsolationError("codex_adapter_initialization_failed")
+
+    monkeypatch.setattr(agent_runtime, "_codex_child_env", lambda: {"CODEX_HOME": str(source_home)})
+    monkeypatch.setattr(agent_runtime, "_codex_athena_snapshot", snapshot)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_athena_snapshot_digest",
+        lambda _files: agent_runtime.CODEX_ATHENA_ARTIFACT_SHA256,
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_initialization_failed"):
+        agent_runtime._populate_codex_implementation_profile(request)
+
+    profile = Path(request.private_profile_path)
+    assert not profile.exists()
+    assert not profile.parent.exists()
 
 
 def test_codex_late_prepare_is_destroyed_with_typed_terminal_receipt(
@@ -810,6 +1827,8 @@ def test_codex_late_mismatched_prepare_is_destroyed_once_before_rejection(
     request = _codex_implementation_request(tmp_path)
     request.monotonic_deadline = time.monotonic() + 0.02
     request.policy = SimpleNamespace(
+        read_only_mounts=request.policy.read_only_mounts,
+        read_write_mounts=request.policy.read_write_mounts,
         term_grace_seconds=0.01,
         kill_grace_seconds=0.01,
         pipe_close_grace_seconds=0.01,
@@ -871,6 +1890,8 @@ def test_codex_late_unencodable_prepare_uses_one_bounded_cleanup_owner(
     request = _codex_implementation_request(tmp_path)
     request.monotonic_deadline = time.monotonic() + 0.02
     request.policy = SimpleNamespace(
+        read_only_mounts=request.policy.read_only_mounts,
+        read_write_mounts=request.policy.read_write_mounts,
         term_grace_seconds=0.01,
         kill_grace_seconds=0.01,
         pipe_close_grace_seconds=0.01,
@@ -1062,7 +2083,7 @@ def test_codex_authentication_replacement_fails_cleanup_closed(
     _patch_codex_profile_source(monkeypatch, request)
     monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
         _run_codex_implementation_session(
             adapter=cast(CodexIsolationAdapterV1, adapter),
             request=request,
@@ -1070,6 +2091,11 @@ def test_codex_authentication_replacement_fails_cleanup_closed(
         )
 
     assert not adapter.auth_paths[0].exists()
+    assert (
+        agent_runtime._codex_active_receipt_path(Path(request.private_profile_path))
+        .with_name(".quarantine.json")
+        .is_file()
+    )
 
 
 def test_codex_prepare_failure_creates_no_profile_or_authentication(
@@ -1103,6 +2129,77 @@ def test_codex_prepare_failure_creates_no_profile_or_authentication(
         )
 
     assert not Path(request.private_profile_path).exists()
+
+
+def test_codex_quarantine_blocks_prepare_and_new_run_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale quarantine receipt blocks all later adapter preparation."""
+    request = _codex_implementation_request(tmp_path)
+    profile = Path(request.private_profile_path)
+    quarantine = agent_runtime._codex_profile_store(profile) / ".quarantine.json"
+    quarantine.write_bytes(b"malformed quarantine")
+    quarantine.chmod(0o400)
+    adapter = _CodexImplementationAdapter(SimpleNamespace(output="unused"))
+    prepare_calls = 0
+
+    def prepare(_request: object) -> object:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return adapter.prepared
+
+    monkeypatch.setattr(adapter, "prepare", prepare)
+    monkeypatch.setattr(agent_runtime, "_verify_codex_implementation_executable", lambda *_: None)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        _run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=tmp_path / "unused-auth.json",
+        )
+
+    assert prepare_calls == 0
+    assert quarantine.read_bytes() == b"malformed quarantine"
+    assert not agent_runtime._codex_active_receipt_path(profile).exists()
+    assert not profile.exists()
+
+
+def test_codex_quarantine_race_cannot_coexist_with_a_new_active_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A quarantine that appears during receipt creation cancels the new run."""
+    request = _codex_implementation_request(tmp_path)
+    profile = Path(request.private_profile_path)
+    quarantine = agent_runtime._codex_profile_store(profile) / ".quarantine.json"
+    real_stat = os.stat
+    observations = 0
+
+    def insert_quarantine(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes] | int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> os.stat_result:
+        nonlocal observations
+        if path != ".quarantine.json":
+            return real_stat(path, *args, **kwargs)
+        observations += 1
+        if observations == 1:
+            raise FileNotFoundError
+        if observations == 2:
+            quarantine.write_bytes(b"concurrent quarantine")
+            quarantine.chmod(0o400)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", insert_quarantine)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        agent_runtime._create_codex_active_receipt(request)
+
+    assert observations == 2
+    assert quarantine.is_file()
+    assert not agent_runtime._codex_active_receipt_path(profile).exists()
 
 
 def test_codex_expired_prepare_is_destroyed_before_profile_or_invoke(
@@ -1299,17 +2396,42 @@ def test_codex_implementation_profile_admits_only_validated_athena(
     copied = profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
     assert (copied / "skill.md").read_text(encoding="utf-8") == "validated Athena\n"
     assert not (profile / "auth.json").exists()
-    assert not (profile / "sessions").exists()
+    assert not any((profile / "sessions").iterdir())
     assert not (profile / "logs").exists()
     assert not (profile / "trust.db").exists()
     assert not (profile / "plugins" / "other").exists()
     config = (profile / "config.toml").read_text(encoding="utf-8")
     assert "operation" not in config
     assert "allowed_tools" not in config
+    assert stat.S_IMODE((profile / "config.toml").stat().st_mode) == 0o400
+    assert stat.S_IMODE(copied.stat().st_mode) == 0o500
+    assert all(stat.S_IMODE(path.stat().st_mode) in {0o400, 0o500} for path in copied.rglob("*"))
 
-    generated_session = profile / "sessions" / "provider-session-3019.jsonl"
-    generated_session.parent.mkdir()
-    generated_session.write_text("private generated state", encoding="utf-8")
+    session_id = "provider-session-3019"
+    generated_session = profile / "sessions" / "2026" / "09" / "07"
+    generated_session.mkdir(parents=True)
+    generated_rollout = generated_session / f"rollout-test-{session_id}.jsonl"
+    generated_rollout.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"cwd": request.worktree_path, "id": session_id},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_rollout.chmod(0o600)
+    agent_runtime._export_codex_rollout(
+        profile,
+        session_id,
+        Path(request.worktree_path),
+    )
+    agent_runtime._discard_codex_ephemeral_profile(profile)
+    store = agent_runtime._codex_profile_store(profile)
+    resume_nonce = "c" * 64
+    request.run_nonce = resume_nonce
+    request.private_profile_path = str(store / ".runs" / resume_nonce / "profile")
     request.session = (
         '{"allowed_tools":["Bash","Edit","Glob","Grep","Read","Write"],'
         '"lifecycle":"resume_required","operation":"implement",'
@@ -1317,10 +2439,25 @@ def test_codex_implementation_profile_admits_only_validated_athena(
     )
 
     resumed_profile = agent_runtime._populate_codex_implementation_profile(request)
-
-    assert resumed_profile == profile
-    assert generated_session.read_text(encoding="utf-8") == "private generated state"
-    assert not (profile / "auth.json").exists()
+    agent_runtime._import_codex_rollout(
+        resumed_profile,
+        session_id,
+        Path(request.worktree_path),
+    )
+    imported = list((resumed_profile / "sessions").rglob("*.jsonl"))
+    assert len(imported) == 1
+    assert json.loads(imported[0].read_text(encoding="utf-8"))["payload"]["id"] == session_id
+    assert not (resumed_profile / "auth.json").exists()
+    with imported[0].open("a", encoding="utf-8") as rollout:
+        rollout.write('{"type":"event","payload":"resumed"}\n')
+    agent_runtime._export_codex_rollout(
+        resumed_profile,
+        session_id,
+        Path(request.worktree_path),
+    )
+    durable = list((store / "sessions").rglob("*.jsonl"))
+    assert len(durable) == 1
+    assert durable[0].read_text(encoding="utf-8").endswith('{"type":"event","payload":"resumed"}\n')
 
     for operation, allowed_tools in (
         (AgentOperation.TEST_FIX, ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]),
@@ -1361,18 +2498,55 @@ def test_codex_implementation_profile_admits_only_validated_athena(
             agent_runtime._validate_codex_session_authority(request, execution)
             == "provider-session-3019"
         )
-        resumed_profile = agent_runtime._populate_codex_implementation_profile(request)
+        resumed_config = (resumed_profile / "config.toml").read_text(encoding="utf-8")
+        assert "operation" not in resumed_config
+        assert "allowed_tools" not in resumed_config
 
-        assert resumed_profile == profile
-        assert generated_session.read_text(encoding="utf-8") == "private generated state"
-        assert (profile / "config.toml").read_text(encoding="utf-8") == config
-
-    (profile / "auth.json").symlink_to(profile / "missing-auth-source")
+    auth_path = agent_runtime._codex_authentication_path(resumed_profile, request.run_nonce)
+    auth_path.parent.mkdir(mode=0o700, parents=True)
+    auth_path.symlink_to(resumed_profile / "missing-auth-source")
     with pytest.raises(
         CodexIsolationError,
-        match="codex_adapter_initialization_failed",
+        match="codex_adapter_result_invalid",
     ):
-        agent_runtime._populate_codex_implementation_profile(request)
+        agent_runtime._create_codex_authentication_bridge(auth_path, '{"token":"x"}')
+
+
+def test_codex_rollout_export_rejects_a_symlinked_store_ancestor(tmp_path: Path) -> None:
+    """A durable rollout cannot escape through a replaced date directory."""
+    identity = tmp_path / "identity"
+    profile = identity / ".runs" / ("b" * 64) / "profile"
+    source = profile / "sessions" / "2026" / "09" / "07"
+    source.mkdir(parents=True, mode=0o700)
+    session_id = "provider-session-3019"
+    rollout = source / f"rollout-test-{session_id}.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"cwd": str(tmp_path / "worktree"), "id": session_id},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rollout.chmod(0o600)
+    durable = identity / "sessions"
+    durable.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (durable / "2026").symlink_to(outside, target_is_directory=True)
+    outside_mode = stat.S_IMODE(outside.stat().st_mode)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime._export_codex_rollout(
+            profile,
+            session_id,
+            tmp_path / "worktree",
+        )
+
+    assert list(outside.iterdir()) == []
+    assert stat.S_IMODE(outside.stat().st_mode) == outside_mode
 
 
 @pytest.mark.parametrize("entry_point", ["session", "text"])

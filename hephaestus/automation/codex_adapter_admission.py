@@ -8,13 +8,19 @@ import contextlib
 import csv
 import hashlib
 import json
+import math
 import os
 import platform
 import re
+import secrets
+import select
+import signal
 import stat
+import struct
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping
 from configparser import ConfigParser
 from dataclasses import dataclass, fields, is_dataclass
@@ -39,6 +45,11 @@ _VIRTUALIZATION_FRAMEWORK = Path("/System/Library/Frameworks/Virtualization.fram
 _ENTRY_POINT_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?\Z")
 _PYTHON_NAME_RE = re.compile(r"[A-Za-z_]\w*\Z")
 _WHEEL_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.]*\Z")
+_ISOLATED_ADAPTER_STARTUP_SECONDS = 5.0
+_ISOLATED_ADAPTER_CONTROL_SECONDS = 5.0
+_ISOLATED_ADAPTER_CONTROL_FRAME_BYTES = 128 * 1024
+_ISOLATED_ADAPTER_MAX_FRAME_BYTES = 128 * 1024 * 1024
+_ISOLATED_ADAPTER_FRAME_OVERHEAD_BYTES = 256 * 1024
 
 
 class CodexAdapterAdmissionError(RuntimeError):
@@ -251,6 +262,70 @@ def _canonical_json(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
         "utf-8"
     )
+
+
+def _json_string_size(value: str) -> int:
+    """Return an upper bound for one JSON string without encoding it."""
+    size = 2
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"}:
+            size += 2
+        elif codepoint < 0x20 or 0x7F <= codepoint <= 0xFFFF:
+            size += 6
+        elif codepoint > 0xFFFF:
+            size += 12
+        else:
+            size += 1
+    return size
+
+
+def _require_json_frame_size(value: object, limit: int) -> None:
+    """Reject a JSON value that can exceed one frame before serialization."""
+    remaining = limit
+
+    def consume(size: int) -> None:
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise CodexAdapterAdmissionError("isolated adapter request is too large")
+
+    def visit(item: object) -> None:
+        if isinstance(item, Mapping):
+            consume(2 + max(0, len(item) - 1))
+            for key, nested in item.items():
+                if not isinstance(key, str):
+                    raise CodexAdapterAdmissionError("isolated adapter request is invalid")
+                consume(_json_string_size(key) + 1)
+                visit(nested)
+        elif isinstance(item, (list, tuple)):
+            consume(2 + max(0, len(item) - 1))
+            for nested in item:
+                visit(nested)
+        elif isinstance(item, str):
+            consume(_json_string_size(item))
+        elif type(item) is int:
+            consume(2 + (item.bit_length() * 30103) // 100000)
+        elif item is None or type(item) in {bool, float}:
+            consume(32)
+        else:
+            raise CodexAdapterAdmissionError("isolated adapter request is invalid")
+
+    visit(value)
+
+
+def _bounded_json_frame(value: object, limit: int) -> bytes:
+    """Serialize one JSON frame only after a conservative size check."""
+    _require_json_frame_size(value, limit)
+    frame = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if not frame or len(frame) > limit:
+        raise CodexAdapterAdmissionError("isolated adapter request is too large")
+    return frame
+
+
+def _base64_size(size: int) -> int:
+    """Return the encoded size without creating base64 data."""
+    return 4 * ((size + 2) // 3)
 
 
 def _is_digest(value: object) -> bool:
@@ -711,9 +786,269 @@ def _validate_import_closure(tree: _VerifiedInstalledTree, module_name: str) -> 
                 )
 
 
+_ISOLATED_ADAPTER_BROKER = r"""
+import ctypes
+import json
+import math
+import os
+import secrets
+import select
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+
+def require_linux_nondumpable():
+    if not sys.platform.startswith("linux"):
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot disable process inspection")
+    if libc.prctl(3, 0, 0, 0, 0) != 0:
+        raise RuntimeError("process inspection protection is not active")
+
+
+class FrameReader:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+        self.buffer = bytearray()
+
+    def _read_exact(self, size, deadline):
+        while len(self.buffer) < size:
+            timeout = None
+            if deadline is not None:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    raise TimeoutError("control frame deadline expired")
+            readable, _, _ = select.select([self.descriptor], [], [], timeout)
+            if not readable:
+                raise TimeoutError("control frame deadline expired")
+            chunk = os.read(self.descriptor, min(65536, size - len(self.buffer)))
+            if not chunk:
+                raise EOFError("control channel closed")
+            self.buffer.extend(chunk)
+
+        value = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return value
+
+    def read(self, limit, deadline=None):
+        size = struct.unpack(">I", self._read_exact(4, deadline))[0]
+        if size == 0 or size > limit:
+            raise ValueError("control frame is too large")
+        return self._read_exact(size, deadline)
+
+
+def encode(value):
+    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def write_raw_frame(stream, frame, limit):
+    if not frame or len(frame) > limit:
+        raise ValueError("control frame is too large")
+    stream.write(struct.pack(">I", len(frame)) + frame)
+    stream.flush()
+
+
+def write_frame(stream, value, limit):
+    write_raw_frame(stream, encode(value), limit)
+
+
+host_reader = FrameReader(0)
+payload = json.loads(host_reader.read(128 * 1024 * 1024))
+worker_source = payload.pop("worker_source")
+startup_seconds = payload.pop("startup_seconds")
+control_limit = payload.pop("control_frame_bytes")
+maximum_limit = payload.pop("maximum_frame_bytes")
+session_nonce = payload.pop("session_nonce")
+startup_deadline = time.monotonic() + startup_seconds
+startup_nonce = secrets.token_hex(32)
+payload["startup_nonce"] = startup_nonce
+require_linux_nondumpable()
+read_descriptor, write_descriptor = os.pipe()
+os.set_inheritable(read_descriptor, False)
+os.set_inheritable(write_descriptor, False)
+worker = subprocess.Popen(
+    [sys.executable, "-I", "-S", "-c", worker_source, str(write_descriptor)],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    close_fds=True,
+    pass_fds=(write_descriptor,),
+    cwd="/",
+    env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+)
+os.close(write_descriptor)
+worker_reader = FrameReader(read_descriptor)
+worker_write_lock = threading.Lock()
+host_write_lock = threading.Lock()
+pending_lock = threading.Lock()
+pending = {}
+active_host_ids = set()
+used_host_ids = set()
+stopped = threading.Event()
+pending_changed = threading.Event()
+
+
+def stop():
+    if stopped.is_set():
+        return
+    stopped.set()
+    if worker.poll() is None:
+        worker.terminate()
+        try:
+            worker.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            worker.kill()
+            worker.wait(timeout=0.5)
+
+
+def write_host(value, limit, host_id=None):
+    frame = encode(value)
+    header = {"session_nonce": session_nonce, "size": len(frame)}
+    if host_id is not None:
+        header["id"] = host_id
+    with host_write_lock:
+        write_frame(sys.stdout.buffer, header, control_limit)
+        write_raw_frame(sys.stdout.buffer, frame, limit)
+
+
+def write_worker(value):
+    stream = worker.stdin
+    if stream is None:
+        raise BrokenPipeError("worker control channel is absent")
+    with worker_write_lock:
+        write_frame(stream, value, maximum_limit)
+
+
+try:
+    write_worker(payload)
+    ready_header = json.loads(worker_reader.read(
+        control_limit,
+        startup_deadline,
+    ))
+    if (
+        not isinstance(ready_header, dict)
+        or set(ready_header) != {"nonce", "size"}
+        or ready_header.get("nonce") != startup_nonce
+        or type(ready_header.get("size")) is not int
+        or not 0 < ready_header["size"] <= control_limit
+    ):
+        raise ValueError("worker readiness header is invalid")
+    ready_frame = worker_reader.read(
+        ready_header["size"],
+        startup_deadline,
+    )
+    if len(ready_frame) != ready_header["size"]:
+        raise ValueError("worker readiness size is invalid")
+    ready = json.loads(ready_frame)
+    if ready != {"kind": "ready", "ok": True}:
+        raise ValueError("worker readiness is invalid")
+    write_host({"kind": "ready", "ok": True}, control_limit)
+except BaseException:
+    stop()
+    raise SystemExit(70)
+
+
+def read_worker():
+    try:
+        while not stopped.is_set():
+            header = json.loads(worker_reader.read(control_limit))
+            if not isinstance(header, dict) or set(header) != {"nonce", "size"}:
+                raise ValueError("worker reply header is invalid")
+            nonce = header["nonce"]
+            frame_size = header["size"]
+            if not isinstance(nonce, str) or type(frame_size) is not int:
+                raise ValueError("worker reply nonce is invalid")
+            with pending_lock:
+                retained = pending.get(nonce)
+                if retained is None:
+                    raise ValueError("worker reply nonce is unexpected")
+                host_id, expected_limit, deadline = retained
+            if not 0 < frame_size <= expected_limit:
+                raise ValueError("worker reply is too large")
+            frame = worker_reader.read(frame_size, deadline)
+            if len(frame) != frame_size:
+                raise ValueError("worker reply size is invalid")
+            reply = json.loads(frame)
+            if not isinstance(reply, dict):
+                raise ValueError("worker reply is invalid")
+            with pending_lock:
+                if pending.pop(nonce, None) != retained:
+                    raise ValueError("worker reply nonce is duplicated")
+                active_host_ids.remove(host_id)
+                pending_changed.set()
+            write_host(reply, expected_limit, host_id)
+    except BaseException:
+        stop()
+        os._exit(70)
+
+
+threading.Thread(target=read_worker, daemon=True).start()
+
+
+def enforce_deadlines():
+    while not stopped.is_set():
+        with pending_lock:
+            deadlines = [retained[2] for retained in pending.values()]
+        if deadlines:
+            remaining = min(deadlines) - time.monotonic()
+            if remaining <= 0:
+                stop()
+                os._exit(70)
+            pending_changed.wait(min(remaining, 0.05))
+        else:
+            pending_changed.wait(0.05)
+        pending_changed.clear()
+
+
+threading.Thread(target=enforce_deadlines, daemon=True).start()
+
+try:
+    while True:
+        require_linux_nondumpable()
+        try:
+            request = json.loads(host_reader.read(maximum_limit))
+        except EOFError:
+            break
+        host_id = request.pop("id")
+        frame_limit = request.pop("max_frame_bytes")
+        deadline = request.pop("deadline")
+        request_session_nonce = request.pop("session_nonce")
+        if (
+            type(host_id) is not int
+            or type(frame_limit) is not int
+            or type(deadline) not in {float, int}
+            or not math.isfinite(deadline)
+            or deadline <= time.monotonic()
+        ):
+            raise ValueError("host request is invalid")
+        if request_session_nonce != session_nonce:
+            raise ValueError("host session nonce is invalid")
+        if not 0 < frame_limit <= maximum_limit:
+            raise ValueError("host frame limit is invalid")
+        nonce = secrets.token_hex(32)
+        with pending_lock:
+            if host_id in used_host_ids or nonce in pending:
+                raise ValueError("host request id is duplicated")
+            active_host_ids.add(host_id)
+            used_host_ids.add(host_id)
+            pending[nonce] = (host_id, frame_limit, deadline)
+            pending_changed.set()
+        request["nonce"] = nonce
+        request["reply_frame_limit"] = frame_limit
+        write_worker(request)
+finally:
+    stop()
+"""
+
+
 _ISOLATED_ADAPTER_HELPER = r"""
 import base64
 import builtins
+import ctypes
 import dataclasses
 import importlib
 import importlib.abc
@@ -722,33 +1057,146 @@ import importlib.util
 import json
 import os
 import signal
+import stat
+import subprocess
+import struct
 import sys
 import sysconfig
 import threading
 import types
 
 
+def require_linux_nondumpable():
+    if not sys.platform.startswith("linux"):
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot disable process inspection")
+    if libc.prctl(3, 0, 0, 0, 0) != 0:
+        raise RuntimeError("process inspection protection is not active")
+
+
+control_descriptor = int(sys.argv[1])
+require_linux_nondumpable()
+os.set_inheritable(control_descriptor, False)
+control_stream = os.fdopen(control_descriptor, "wb", buffering=0, closefd=False)
+sys.argv[:] = [sys.argv[0]]
 output_lock = threading.Lock()
 
 
-def send(value, request_id=None):
+def json_string_size(value):
+    size = 2
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"}:
+            size += 2
+        elif codepoint < 0x20 or 0x7F <= codepoint <= 0xFFFF:
+            size += 6
+        elif codepoint > 0xFFFF:
+            size += 12
+        else:
+            size += 1
+    return size
+
+
+def utf8_size(value):
+    size = 0
+    for character in value:
+        codepoint = ord(character)
+        if codepoint <= 0x7F:
+            size += 1
+        elif codepoint <= 0x7FF:
+            size += 2
+        elif codepoint <= 0xFFFF:
+            size += 3
+        else:
+            size += 4
+    return size
+
+
+def require_json_size(value, limit):
+    remaining = limit
+
+    def consume(size):
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise ValueError("worker reply is too large")
+
+    def visit(item):
+        if isinstance(item, dict):
+            consume(2 + max(0, len(item) - 1))
+            for key, nested in item.items():
+                if not isinstance(key, str):
+                    raise TypeError("worker reply is invalid")
+                consume(json_string_size(key) + 1)
+                visit(nested)
+        elif isinstance(item, (list, tuple)):
+            consume(2 + max(0, len(item) - 1))
+            for nested in item:
+                visit(nested)
+        elif isinstance(item, str):
+            consume(json_string_size(item))
+        elif item is None or type(item) in {bool, int, float}:
+            consume(len(json.dumps(item, separators=(",", ":"))))
+        else:
+            raise TypeError("worker reply is invalid")
+
+    visit(value)
+
+
+def send(value, nonce, limit):
     reply = dict(value)
-    if request_id is not None:
-        reply["id"] = request_id
+    require_json_size(reply, limit)
+    frame = json.dumps(reply, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    header = json.dumps(
+        {"nonce": nonce, "size": len(frame)},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
     with output_lock:
-        sys.stdout.write(json.dumps(reply, separators=(",", ":"), sort_keys=True) + "\n")
-        sys.stdout.flush()
+        control_stream.write(struct.pack(">I", len(header)) + header)
+        control_stream.write(struct.pack(">I", len(frame)) + frame)
 
 
-def fail(exc, request_id=None):
+def fail(exc, nonce, limit):
     code = getattr(exc, "code", None)
     send(
         {"ok": False, "code": code if isinstance(code, str) else None},
-        request_id,
+        nonce,
+        limit,
     )
 
 
-def encode(value):
+def read_exact(stream, size):
+    value = bytearray()
+    while len(value) < size:
+        chunk = stream.read(size - len(value))
+        if not chunk:
+            raise EOFError("worker control channel closed")
+        value.extend(chunk)
+    return bytes(value)
+
+
+def read_frame(stream, limit):
+    size = struct.unpack(">I", read_exact(stream, 4))[0]
+    if size == 0 or size > limit:
+        raise ValueError("worker request frame is too large")
+    return read_exact(stream, size)
+
+
+class EncodeBudget:
+    def __init__(self, limit):
+        self.remaining = limit
+
+    def consume(self, size):
+        self.remaining -= size
+        if self.remaining < 0:
+            raise ValueError("worker reply is too large")
+
+
+def encode(value, budget):
+    budget.consume(64)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         value_type = type(value)
         if value_type.__module__ != "hephaestus.agents.codex_isolation":
@@ -757,17 +1205,22 @@ def encode(value):
             "type": "dataclass",
             "name": value_type.__name__,
             "fields": {
-                field.name: encode(getattr(value, field.name))
+                field.name: encode(getattr(value, field.name), budget)
                 for field in dataclasses.fields(value)
             },
         }
     if isinstance(value, tuple):
-        return {"type": "tuple", "items": [encode(item) for item in value]}
+        return {"type": "tuple", "items": [encode(item, budget) for item in value]}
     if isinstance(value, list):
-        return {"type": "list", "items": [encode(item) for item in value]}
+        return {"type": "list", "items": [encode(item, budget) for item in value]}
     if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-        return {"type": "dict", "items": {key: encode(item) for key, item in value.items()}}
+        return {
+            "type": "dict",
+            "items": {key: encode(item, budget) for key, item in value.items()},
+        }
     if value is None or type(value) in {bool, int, float, str}:
+        if isinstance(value, str):
+            budget.consume(json_string_size(value))
         return {"type": "scalar", "value": value}
     raise TypeError("adapter returned an unsupported value")
 
@@ -1098,6 +1551,211 @@ def call_callback_api(target, args, kwargs):
     return target(*positional, **named)
 
 
+protected_descriptors = {0, control_descriptor}
+descriptor_first_argument = {
+    os.close,
+    os.dup,
+    os.fchmod,
+    os.fdopen,
+    os.fstat,
+    os.fsync,
+    os.lseek,
+    os.pread,
+    os.read,
+    os.write,
+}
+path_api_targets = {
+    os.chmod,
+    os.lstat,
+    os.makedirs,
+    os.mkdir,
+    os.open,
+    os.readlink,
+    os.remove,
+    os.replace,
+    os.rmdir,
+    os.stat,
+    os.unlink,
+}
+
+
+def require_unprotected_descriptor(value):
+    if type(value) is int and value in protected_descriptors:
+        raise PermissionError("adapter control descriptor is protected")
+
+
+def require_unprotected_path(value, *, dir_fd=None):
+    try:
+        path = os.fspath(value)
+    except TypeError:
+        return
+    if not isinstance(path, (bytes, str)):
+        return
+    if isinstance(path, bytes):
+        path = os.fsdecode(path)
+    if not os.path.isabs(path):
+        if dir_fd is not None:
+            require_unprotected_descriptor(dir_fd)
+            path = os.path.join(os.path.realpath(f"/dev/fd/{dir_fd}"), path)
+        else:
+            path = os.path.abspath(path)
+    normalized = os.path.normpath(path)
+    components = normalized.split(os.sep)
+    if (
+        normalized in {"/dev/stdin", "/proc/self/fd/0"}
+        or normalized == "/dev/fd"
+        or normalized.startswith("/dev/fd/")
+        or (
+            len(components) >= 4
+            and components[1] == "proc"
+            and components[3] == "fd"
+        )
+        or (
+            len(components) >= 6
+            and components[1] == "proc"
+            and components[3] == "task"
+            and components[5] == "fd"
+        )
+    ):
+        raise PermissionError("adapter descriptor path is protected")
+    canonical = os.path.realpath(normalized)
+    if canonical != normalized:
+        canonical_components = canonical.split(os.sep)
+        if (
+            canonical in {"/dev/stdin", "/proc/self/fd/0"}
+            or canonical == "/dev/fd"
+            or canonical.startswith("/dev/fd/")
+            or (
+                len(canonical_components) >= 4
+                and canonical_components[1] == "proc"
+                and canonical_components[3] == "fd"
+            )
+            or (
+                len(canonical_components) >= 6
+                and canonical_components[1] == "proc"
+                and canonical_components[3] == "task"
+                and canonical_components[5] == "fd"
+            )
+        ):
+            raise PermissionError("adapter descriptor path is protected")
+
+
+def descriptor_identity(descriptor):
+    metadata = os.fstat(descriptor)
+    return metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode)
+
+
+def require_distinct_descriptor(descriptor):
+    identity = descriptor_identity(descriptor)
+    for protected in protected_descriptors:
+        try:
+            protected_identity = descriptor_identity(protected)
+        except OSError:
+            continue
+        if identity == protected_identity:
+            raise PermissionError("adapter control descriptor is protected")
+
+
+def call_descriptor_api(target, args, kwargs):
+    positional = list(args)
+    named = dict(kwargs)
+    if target in descriptor_first_argument:
+        if positional:
+            require_unprotected_descriptor(positional[0])
+        elif "fd" in named:
+            require_unprotected_descriptor(named["fd"])
+    elif target is os.dup2:
+        for index in range(min(2, len(positional))):
+            require_unprotected_descriptor(positional[index])
+        for name in ("fd", "fd2"):
+            if name in named:
+                require_unprotected_descriptor(named[name])
+    return target(*positional, **named)
+
+
+def call_path_api(target, args, kwargs):
+    bound_value = getattr(target, "__self__", None)
+    if bound_value is not None:
+        require_unprotected_path(bound_value)
+    for index, value in enumerate(args):
+        if index == 0 and target in {os.chmod, os.stat}:
+            require_unprotected_descriptor(value)
+        require_unprotected_path(value)
+    for name, value in kwargs.items():
+        if name in {"dir_fd", "src_dir_fd", "dst_dir_fd"}:
+            require_unprotected_descriptor(value)
+            continue
+        require_unprotected_path(value)
+    return target(*args, **kwargs)
+
+
+def call_open(args, kwargs):
+    positional = list(args)
+    named = dict(kwargs)
+    path = positional[0] if positional else named.get("path")
+    require_unprotected_path(path, dir_fd=named.get("dir_fd"))
+    if len(positional) > 1:
+        positional[1] |= os.O_NOFOLLOW
+    else:
+        named["flags"] = named.get("flags", 0) | os.O_NOFOLLOW
+    descriptor = os.open(*positional, **named)
+    try:
+        require_distinct_descriptor(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def call_fork():
+    child = os.fork()
+    if child == 0:
+        for descriptor in protected_descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    return child
+
+
+def call_process_group_api(target, args, kwargs):
+    if target is os.setsid:
+        raise PermissionError("adapter process-group escape is not permitted")
+    pid = args[0] if args else kwargs.get("pid")
+    pgid = args[1] if len(args) > 1 else kwargs.get("pgid")
+    if pid in {0, os.getpid()} or pgid != os.getpgrp():
+        raise PermissionError("adapter process-group escape is not permitted")
+    return target(*unwrap_value(args), **unwrap_value(kwargs))
+
+
+def call_subprocess_api(target, args, kwargs):
+    if len(args) > 1:
+        raise TypeError("adapter subprocess positional controls are not permitted")
+    named = dict(kwargs)
+    for name in ("stdin", "stdout", "stderr"):
+        require_unprotected_descriptor(named.get(name))
+    if named.get("preexec_fn") is not None:
+        raise PermissionError("adapter subprocess pre-exec is not permitted")
+    if named.get("start_new_session") not in {None, False}:
+        raise PermissionError("adapter subprocess session escape is not permitted")
+    if named.get("process_group") is not None:
+        raise PermissionError("adapter subprocess group escape is not permitted")
+    if named.get("close_fds") is False:
+        raise PermissionError("adapter subprocess descriptors must close")
+    if target is subprocess.Popen and named.get("stdin") is None:
+        named["stdin"] = subprocess.DEVNULL
+    if target is subprocess.run and "input" not in named and named.get("stdin") is None:
+        named["stdin"] = subprocess.DEVNULL
+    for name in ("stdout", "stderr"):
+        if named.get(name) is None:
+            named[name] = subprocess.DEVNULL
+    named["close_fds"] = True
+    pass_fds = tuple(named.get("pass_fds", ()))
+    if pass_fds:
+        raise PermissionError("adapter subprocess descriptor inheritance is not permitted")
+    return target(*args, **named)
+
+
 class CapabilityObject:
     __slots__ = ("_capability_id",)
 
@@ -1120,6 +1778,23 @@ class CapabilityObject:
         target = object.__getattribute__(self, "_target")()
         if target in {threading.Thread, threading.Timer, signal.signal}:
             return close_value(call_callback_api(target, args, kwargs))
+        if target in descriptor_first_argument or target is os.dup2:
+            return close_value(call_descriptor_api(target, args, kwargs))
+        if target is os.open:
+            return close_value(call_open(args, kwargs))
+        if target in path_api_targets:
+            return close_value(call_path_api(target, args, kwargs))
+        if target is os.fork:
+            return close_value(call_fork())
+        if target in {os.setpgid, os.setsid}:
+            return close_value(call_process_group_api(target, args, kwargs))
+        if target in {os.kill, os.killpg}:
+            return close_value(target(*unwrap_value(args), **unwrap_value(kwargs)))
+        if target in {subprocess.Popen, subprocess.run}:
+            return close_value(call_subprocess_api(target, args, kwargs))
+        target_module = getattr(target, "__module__", "")
+        if target_module in {"pathlib", "shutil"}:
+            return close_value(call_path_api(target, args, kwargs))
         return close_value(
             target(*close_callback_payload(args), **close_callback_payload(kwargs))
         )
@@ -1249,7 +1924,8 @@ def decode(value, protocol):
 
 
 try:
-    payload = json.loads(sys.stdin.readline())
+    payload = json.loads(read_frame(sys.stdin.buffer, 128 * 1024 * 1024))
+    startup_nonce = payload.pop("startup_nonce")
     adapter_root = payload["module"].split(".", 1)[0]
     sources = {}
     for relative, encoded in payload["files"].items():
@@ -1363,9 +2039,8 @@ try:
     factory = getattr(selected_module, payload["factory"])
     if not callable(factory):
         raise TypeError("adapter factory is invalid")
-    send({"ok": True, "kind": "ready"})
-except BaseException as exc:
-    fail(exc)
+    send({"ok": True, "kind": "ready"}, startup_nonce, 128 * 1024)
+except BaseException:
     raise SystemExit(1)
 
 adapter = None
@@ -1403,10 +2078,18 @@ def take_prepared(cleanup_handle):
 
 def handle(request):
     global adapter
-    request_id = request.get("id")
+    nonce = request.get("nonce")
+    reply_limit = request.get("reply_frame_limit")
     try:
-        if type(request_id) is not int:
-            raise TypeError("adapter request id is invalid")
+        require_linux_nondumpable()
+        if (
+            type(nonce) is not str
+            or len(nonce) != 64
+            or any(character not in "0123456789abcdef" for character in nonce)
+        ):
+            raise TypeError("adapter request nonce is invalid")
+        if type(reply_limit) is not int or not 0 < reply_limit <= 128 * 1024 * 1024:
+            raise TypeError("adapter reply limit is invalid")
         operation = request["operation"]
         if operation == "factory":
             adapter = factory()
@@ -1427,19 +2110,25 @@ def handle(request):
                             )
                         },
                     },
-                    request_id,
+                    nonce,
+                    reply_limit,
                 )
             else:
                 send(
-                    {"ok": True, "kind": "value", "value": encode(adapter)},
-                    request_id,
+                    {
+                        "ok": True,
+                        "kind": "value",
+                        "value": encode(adapter, EncodeBudget(reply_limit)),
+                    },
+                    nonce,
+                    reply_limit,
                 )
         elif operation == "prepare" and adapter is not None:
             arguments = [decode(item, protocol) for item in request["arguments"]]
             result = adapter.prepare(*arguments)
             cleanup_handle = store_prepared(result)
             try:
-                encoded = encode(result)
+                encoded = encode(result, EncodeBudget(reply_limit))
             except BaseException as exc:
                 code = getattr(exc, "code", None)
                 send(
@@ -1448,7 +2137,8 @@ def handle(request):
                         "code": code if isinstance(code, str) else None,
                         "cleanup_handle": cleanup_handle,
                     },
-                    request_id,
+                    nonce,
+                    reply_limit,
                 )
             else:
                 send(
@@ -1458,29 +2148,59 @@ def handle(request):
                         "cleanup_handle": cleanup_handle,
                         "value": encoded,
                     },
-                    request_id,
+                    nonce,
+                    reply_limit,
                 )
         elif operation == "invoke_prepared" and adapter is not None:
+            max_output_bytes = request.get("max_output_bytes")
+            if type(max_output_bytes) is not int or max_output_bytes <= 0:
+                raise TypeError("adapter output policy is invalid")
             prepared = read_prepared(request["cleanup_handle"])
             arguments = [decode(item, protocol) for item in request["arguments"]]
             result = adapter.invoke(prepared, *arguments)
-            send({"ok": True, "kind": "value", "value": encode(result)}, request_id)
+            output = getattr(result, "output", result if isinstance(result, str) else None)
+            if isinstance(output, str) and utf8_size(output) > max_output_bytes:
+                send(
+                    {"ok": False, "code": None, "error": "output_limit"},
+                    nonce,
+                    reply_limit,
+                )
+                return
+            send(
+                {
+                    "ok": True,
+                    "kind": "value",
+                    "value": encode(result, EncodeBudget(reply_limit)),
+                },
+                nonce,
+                reply_limit,
+            )
         elif operation == "destroy_prepared" and adapter is not None:
             prepared = take_prepared(request["cleanup_handle"])
             result = adapter.destroy(prepared)
-            send({"ok": True, "kind": "value", "value": encode(result)}, request_id)
+            send(
+                {
+                    "ok": True,
+                    "kind": "value",
+                    "value": encode(result, EncodeBudget(reply_limit)),
+                },
+                nonce,
+                reply_limit,
+            )
         else:
             raise TypeError("adapter operation is invalid")
     except BaseException as exc:
-        fail(exc, request_id)
+        if isinstance(nonce, str):
+            fail(exc, nonce, reply_limit if type(reply_limit) is int else 128 * 1024)
 
 
-for line in sys.stdin:
+while True:
     try:
-        request = json.loads(line)
-    except BaseException as exc:
-        fail(exc)
-        continue
+        request = json.loads(read_frame(sys.stdin.buffer, 128 * 1024 * 1024))
+    except EOFError:
+        break
+    except BaseException:
+        raise SystemExit(70)
     threading.Thread(target=handle, args=(request,), daemon=True).start()
 """
 
@@ -1554,6 +2274,57 @@ def _decode_adapter_value(value: object) -> object:
     raise CodexAdapterAdmissionError("isolated adapter result is invalid")
 
 
+class _BoundedFrameReader:
+    """Read length-prefixed frames without an unbounded allocation."""
+
+    def __init__(self, descriptor: int) -> None:
+        self._descriptor = descriptor
+        self._buffer = bytearray()
+
+    def _read_exact(self, size: int, *, deadline: float | None) -> bytes:
+        """Read an exact bounded byte count before one deadline."""
+        while len(self._buffer) < size:
+            timeout = None
+            if deadline is not None:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    raise CodexAdapterAdmissionError("isolated adapter deadline expired")
+            try:
+                readable, _, _ = select.select([self._descriptor], [], [], timeout)
+            except (OSError, ValueError) as exc:
+                raise CodexAdapterAdmissionError("isolated adapter process failed") from exc
+            if not readable:
+                raise CodexAdapterAdmissionError("isolated adapter deadline expired")
+            try:
+                chunk = os.read(self._descriptor, min(65536, size - len(self._buffer)))
+            except OSError as exc:
+                raise CodexAdapterAdmissionError("isolated adapter process failed") from exc
+            if not chunk:
+                raise CodexAdapterAdmissionError("isolated adapter process stopped")
+            self._buffer.extend(chunk)
+        value = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return value
+
+    def read(self, limit: int, *, deadline: float | None = None) -> bytes:
+        """Read one frame before its size limit and absolute deadline."""
+        header = self._read_exact(4, deadline=deadline)
+        size = struct.unpack(">I", header)[0]
+        if size == 0 or size > limit:
+            raise CodexAdapterAdmissionError("isolated adapter frame is too large")
+        return self._read_exact(size, deadline=deadline)
+
+
+def _invocation_frame_limit(max_output_bytes: int) -> int:
+    """Return the bounded encoded-frame limit for one output policy."""
+    if type(max_output_bytes) is not int or max_output_bytes <= 0:
+        raise CodexAdapterAdmissionError("isolated adapter output policy is invalid")
+    required = _ISOLATED_ADAPTER_FRAME_OVERHEAD_BYTES + (6 * max_output_bytes)
+    if required > _ISOLATED_ADAPTER_MAX_FRAME_BYTES:
+        raise CodexAdapterAdmissionError("isolated adapter output policy is too large")
+    return required
+
+
 class _IsolatedAdapterProcess:
     """Run one verified adapter instance in an isolated Python process."""
 
@@ -1567,38 +2338,81 @@ class _IsolatedAdapterProcess:
         self._close_lock = threading.Lock()
         self._condition = threading.Condition()
         self._responses: dict[int, dict[str, object]] = {}
+        self._pending: dict[int, int] = {}
+        self._used_request_ids: set[int] = set()
         self._reader_error: BaseException | None = None
         self._next_request_id = 0
         self._closed = False
+        self._session_nonce = secrets.token_hex(32)
         protocol_path = Path(__file__).parents[1] / "agents" / "codex_isolation.py"
         try:
             protocol_source = protocol_path.read_bytes()
         except OSError as exc:
             raise CodexAdapterAdmissionError("host adapter protocol is unavailable") from exc
+        bootstrap_upper_bound = (
+            1024 * 1024
+            + _json_string_size(_ISOLATED_ADAPTER_HELPER)
+            + _base64_size(len(protocol_source))
+            + sum(
+                _json_string_size(path) + _base64_size(len(value))
+                for path, value in installed_tree.files.items()
+            )
+        )
+        if bootstrap_upper_bound > _ISOLATED_ADAPTER_MAX_FRAME_BYTES:
+            raise CodexAdapterAdmissionError("isolated adapter bootstrap is too large")
         payload = {
             "module": module_name,
             "factory": factory_name,
+            "worker_source": _ISOLATED_ADAPTER_HELPER,
+            "startup_seconds": _ISOLATED_ADAPTER_STARTUP_SECONDS,
+            "control_frame_bytes": _ISOLATED_ADAPTER_CONTROL_FRAME_BYTES,
+            "maximum_frame_bytes": _ISOLATED_ADAPTER_MAX_FRAME_BYTES,
+            "session_nonce": self._session_nonce,
             "files": {
                 path: base64.b64encode(value).decode("ascii")
                 for path, value in installed_tree.files.items()
             },
             "protocol_source": base64.b64encode(protocol_source).decode("ascii"),
         }
+        startup_deadline = time.monotonic() + _ISOLATED_ADAPTER_STARTUP_SECONDS
         try:
             self._process = subprocess.Popen(
-                [sys.executable, "-I", "-S", "-c", _ISOLATED_ADAPTER_HELPER],
+                [sys.executable, "-I", "-S", "-c", _ISOLATED_ADAPTER_BROKER],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
                 cwd="/",
                 close_fds=True,
+                start_new_session=True,
                 env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
             )
-            self._write(payload)
-            ready = self._read()
-            if ready.get("kind") != "ready":
+            stdout = self._process.stdout
+            stdin = self._process.stdin
+            if stdin is None or stdout is None:
+                raise CodexAdapterAdmissionError("isolated adapter process is unavailable")
+            os.set_blocking(stdin.fileno(), False)
+            self._frame_reader = _BoundedFrameReader(stdout.fileno())
+            self._write(payload, deadline=startup_deadline)
+            ready_header = self._read_json_frame(
+                _ISOLATED_ADAPTER_CONTROL_FRAME_BYTES,
+                deadline=startup_deadline,
+            )
+            if (
+                ready_header.get("session_nonce") != self._session_nonce
+                or set(ready_header) != {"session_nonce", "size"}
+                or type(ready_header.get("size")) is not int
+                or not 0 < cast(int, ready_header["size"]) <= _ISOLATED_ADAPTER_CONTROL_FRAME_BYTES
+            ):
+                raise CodexAdapterAdmissionError("installed adapter readiness is invalid")
+            ready = self._read_json_frame(
+                cast(int, ready_header["size"]),
+                deadline=startup_deadline,
+                exact_size=cast(int, ready_header["size"]),
+            )
+            if ready != {
+                "kind": "ready",
+                "ok": True,
+            }:
                 raise CodexAdapterAdmissionError("installed adapter import failed")
             self._reader = threading.Thread(
                 target=self._read_replies,
@@ -1610,81 +2424,147 @@ class _IsolatedAdapterProcess:
             self.close()
             raise
 
-    def _write(self, value: object) -> None:
+    def _write(self, value: object, *, deadline: float) -> None:
         stream = self._process.stdin
         if stream is None or self._closed:
             raise CodexAdapterAdmissionError("isolated adapter process is unavailable")
+        frame = _bounded_json_frame(value, _ISOLATED_ADAPTER_MAX_FRAME_BYTES)
         try:
             with self._write_lock:
-                stream.write(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
-                stream.flush()
+                for value_part in (struct.pack(">I", len(frame)), frame):
+                    view = memoryview(value_part)
+                    while view:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise CodexAdapterAdmissionError("isolated adapter deadline expired")
+                        _, writable, _ = select.select([], [stream.fileno()], [], remaining)
+                        if not writable:
+                            raise CodexAdapterAdmissionError("isolated adapter deadline expired")
+                        try:
+                            written = os.write(stream.fileno(), view)
+                        except BlockingIOError:
+                            continue
+                        view = view[written:]
         except (BrokenPipeError, OSError, ValueError) as exc:
             raise CodexAdapterAdmissionError("isolated adapter process failed") from exc
 
-    def _read(self) -> dict[str, object]:
-        stream = self._process.stdout
-        if stream is None:
-            raise CodexAdapterAdmissionError("isolated adapter process is unavailable")
+    def _read_json_frame(
+        self,
+        limit: int,
+        *,
+        deadline: float | None = None,
+        exact_size: int | None = None,
+    ) -> dict[str, object]:
+        """Read and parse one bounded JSON frame."""
         try:
-            line = stream.readline()
-            reply = json.loads(line)
-        except (OSError, json.JSONDecodeError) as exc:
+            frame = self._frame_reader.read(limit, deadline=deadline)
+            if exact_size is not None and len(frame) != exact_size:
+                raise CodexAdapterAdmissionError("isolated adapter frame size is invalid")
+            reply = json.loads(frame)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CodexAdapterAdmissionError("isolated adapter process failed") from exc
-        if not isinstance(reply, dict) or reply.get("ok") is not True:
-            code = reply.get("code") if isinstance(reply, dict) else None
-            if isinstance(code, str):
-                from hephaestus.agents.codex_isolation import CodexIsolationError
-
-                try:
-                    raise CodexIsolationError(code)
-                except ValueError:
-                    pass
-            raise CodexAdapterAdmissionError("isolated adapter operation failed")
+        if not isinstance(reply, dict):
+            raise CodexAdapterAdmissionError("isolated adapter process failed")
         return cast(dict[str, object], reply)
 
     def _read_replies(self) -> None:
         """Route concurrent helper replies to their host request."""
-        stream = self._process.stdout
         try:
-            if stream is None:
-                raise CodexAdapterAdmissionError("isolated adapter process is unavailable")
-            for line in stream:
-                reply = json.loads(line)
-                if not isinstance(reply, dict) or type(reply.get("id")) is not int:
+            while True:
+                header = self._read_json_frame(_ISOLATED_ADAPTER_CONTROL_FRAME_BYTES)
+                if (
+                    type(header.get("id")) is not int
+                    or header.get("session_nonce") != self._session_nonce
+                    or type(header.get("size")) is not int
+                    or set(header) != {"id", "session_nonce", "size"}
+                ):
                     raise CodexAdapterAdmissionError("isolated adapter process failed")
                 with self._condition:
-                    self._responses[cast(int, reply["id"])] = cast(dict[str, object], reply)
+                    request_id = cast(int, header["id"])
+                    expected_limit = self._pending.pop(request_id, None)
+                    if expected_limit is None or request_id in self._responses:
+                        raise CodexAdapterAdmissionError("isolated adapter reply is unexpected")
+                frame_size = cast(int, header["size"])
+                if not 0 < frame_size <= expected_limit:
+                    raise CodexAdapterAdmissionError("isolated adapter frame is too large")
+                reply = self._read_json_frame(frame_size, exact_size=frame_size)
+                with self._condition:
+                    self._responses[request_id] = reply
                     self._condition.notify_all()
-            raise CodexAdapterAdmissionError("isolated adapter process stopped")
         except BaseException as exc:
+            self.close()
             with self._condition:
                 self._reader_error = exc
                 self._condition.notify_all()
 
-    def request(
+    def request(  # noqa: C901 - keep one state transition under one lock
         self,
         operation: str,
         *arguments: object,
         cleanup_handle: str | None = None,
+        deadline: float | None = None,
+        max_frame_bytes: int = _ISOLATED_ADAPTER_CONTROL_FRAME_BYTES,
+        max_output_bytes: int | None = None,
     ) -> dict[str, object]:
         """Run one factory or adapter operation."""
+        absolute_deadline = (
+            time.monotonic() + _ISOLATED_ADAPTER_CONTROL_SECONDS if deadline is None else deadline
+        )
+        if type(absolute_deadline) not in {float, int} or not math.isfinite(absolute_deadline):
+            self.close()
+            raise CodexAdapterAdmissionError("isolated adapter deadline is invalid")
         with self._condition:
             request_id = self._next_request_id
             self._next_request_id += 1
+            if request_id in self._used_request_ids:
+                raise CodexAdapterAdmissionError("isolated adapter request is duplicated")
+            self._used_request_ids.add(request_id)
+            self._pending[request_id] = max_frame_bytes
         payload: dict[str, object] = {
+            "deadline": absolute_deadline,
             "id": request_id,
             "operation": operation,
             "arguments": [_encode_adapter_value(argument) for argument in arguments],
+            "max_frame_bytes": max_frame_bytes,
+            "session_nonce": self._session_nonce,
         }
         if cleanup_handle is not None:
             payload["cleanup_handle"] = cleanup_handle
-        self._write(payload)
+        if max_output_bytes is not None:
+            payload["max_output_bytes"] = max_output_bytes
+        try:
+            self._write(payload, deadline=absolute_deadline)
+        except BaseException:
+            with self._condition:
+                self._pending.pop(request_id, None)
+            self.close()
+            raise
+        expired = False
+        reply: dict[str, object] | None = None
         with self._condition:
             while request_id not in self._responses and self._reader_error is None:
-                self._condition.wait()
+                remaining = absolute_deadline - time.monotonic()
+                if remaining <= 0:
+                    expired = True
+                    self._pending.pop(request_id, None)
+                    break
+                self._condition.wait(timeout=remaining)
             if request_id not in self._responses:
-                raise CodexAdapterAdmissionError("isolated adapter process failed") from None
-            reply = self._responses.pop(request_id)
+                failure = self._reader_error
+                if time.monotonic() >= absolute_deadline:
+                    expired = True
+            else:
+                failure = None
+                reply = self._responses.pop(request_id)
+        if expired:
+            self.close()
+            raise CodexAdapterAdmissionError("isolated adapter deadline expired") from None
+        if failure is not None:
+            self.close()
+            raise CodexAdapterAdmissionError("isolated adapter process failed") from failure
+        if reply is None:
+            self.close()
+            raise CodexAdapterAdmissionError("isolated adapter process failed")
         if (
             operation == "prepare"
             and isinstance(reply, dict)
@@ -1692,6 +2572,9 @@ class _IsolatedAdapterProcess:
         ):
             return reply
         if not isinstance(reply, dict) or reply.get("ok") is not True:
+            if reply.get("error") == "output_limit":
+                self.close()
+                raise CodexAdapterAdmissionError("isolated adapter output exceeds policy")
             code = reply.get("code") if isinstance(reply, dict) else None
             if isinstance(code, str):
                 from hephaestus.agents.codex_isolation import CodexIsolationError
@@ -1712,13 +2595,28 @@ class _IsolatedAdapterProcess:
             process = getattr(self, "_process", None)
             if process is None:
                 return
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except PermissionError:
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+            except ProcessLookupError:
+                pass
             if process.poll() is None:
-                process.terminate()
                 try:
                     process.wait(timeout=1.0)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except PermissionError:
+                        with contextlib.suppress(ProcessLookupError):
+                            process.kill()
+                    except ProcessLookupError:
+                        pass
                     process.wait(timeout=1.0)
+            else:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(process.pid, signal.SIGKILL)
             for stream in (process.stdin, process.stdout):
                 if stream is not None:
                     with contextlib.suppress(OSError, ValueError):
@@ -1750,9 +2648,14 @@ class _IsolatedAdapter:
         self.adapter_version = adapter_version
         self.installed_tree_sha256 = installed_tree_sha256
         self._prepared_lock = threading.Lock()
-        self._prepared_handles: dict[int, tuple[object, str]] = {}
+        self._prepared_handles: dict[int, tuple[object, str, int, float]] = {}
 
-    def _claim_prepared_handle(self, prepared: object, *, remove: bool) -> str:
+    def _claim_prepared_handle(
+        self,
+        prepared: object,
+        *,
+        remove: bool,
+    ) -> tuple[str, int, float]:
         """Get one helper-owned prepared handle from its host value."""
         with self._prepared_lock:
             retained = self._prepared_handles.get(id(prepared))
@@ -1760,7 +2663,7 @@ class _IsolatedAdapter:
                 raise CodexAdapterAdmissionError("isolated adapter result is invalid")
             if remove:
                 self._prepared_handles.pop(id(prepared))
-            return retained[1]
+            return retained[1], retained[2], retained[3]
 
     def _destroy_handle(self, cleanup_handle: str) -> None:
         """Destroy the raw prepared value behind one helper handle."""
@@ -1775,7 +2678,13 @@ class _IsolatedAdapter:
 
     def prepare(self, request: object) -> object:
         """Prepare one isolated adapter request."""
-        reply = self._process.request("prepare", request)
+        policy = getattr(request, "policy", None)
+        max_output_bytes = getattr(policy, "max_output_bytes", 4096)
+        _invocation_frame_limit(max_output_bytes)
+        request_deadline = getattr(request, "monotonic_deadline", None)
+        if not isinstance(request_deadline, (int, float)):
+            request_deadline = time.monotonic() + _ISOLATED_ADAPTER_CONTROL_SECONDS
+        reply = self._process.request("prepare", request, deadline=float(request_deadline))
         cleanup_handle = reply.get("cleanup_handle")
         if type(cleanup_handle) is not str:
             raise CodexAdapterAdmissionError("isolated adapter result is invalid")
@@ -1788,23 +2697,39 @@ class _IsolatedAdapter:
         except BaseException as exc:
             raise _CodexPrepareCleanupError(lambda: self._destroy_handle(cleanup_handle)) from exc
         with self._prepared_lock:
-            self._prepared_handles[id(prepared)] = (prepared, cleanup_handle)
+            self._prepared_handles[id(prepared)] = (
+                prepared,
+                cleanup_handle,
+                max_output_bytes,
+                float(request_deadline),
+            )
         return prepared
 
     def invoke(self, prepared: object, auth_path: str) -> object:
         """Invoke one prepared isolated adapter request."""
-        cleanup_handle = self._claim_prepared_handle(prepared, remove=False)
-        return _decode_adapter_value(
+        cleanup_handle, max_output_bytes, request_deadline = self._claim_prepared_handle(
+            prepared,
+            remove=False,
+        )
+        result = _decode_adapter_value(
             self._process.request(
                 "invoke_prepared",
                 auth_path,
                 cleanup_handle=cleanup_handle,
+                deadline=request_deadline,
+                max_frame_bytes=_invocation_frame_limit(max_output_bytes),
+                max_output_bytes=max_output_bytes,
             ).get("value")
         )
+        output = getattr(result, "output", result if isinstance(result, str) else None)
+        if isinstance(output, str) and len(output.encode("utf-8")) > max_output_bytes:
+            self._process.close()
+            raise CodexAdapterAdmissionError("isolated adapter output exceeds policy")
+        return result
 
     def destroy(self, prepared: object) -> None:
         """Destroy one prepared isolated adapter request."""
-        cleanup_handle = self._claim_prepared_handle(prepared, remove=True)
+        cleanup_handle, _, _ = self._claim_prepared_handle(prepared, remove=True)
         self._destroy_handle(cleanup_handle)
 
     def _close(self) -> None:

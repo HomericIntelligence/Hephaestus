@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import importlib
 import importlib.util
 import inspect
 import json
+import math
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -249,6 +252,182 @@ def _admit(module: Any, lock: Path, digest: str, *, importer: Any = None):
     )
 
 
+def _capture_exception(outcome: list[BaseException], call: Any) -> None:
+    """Capture one background-call failure for a bounded wait test."""
+    try:
+        call()
+    except BaseException as exc:
+        outcome.append(exc)
+
+
+def _fake_broker_source(mode: str) -> str:
+    """Make a broker that sends one selected invalid host protocol sequence."""
+    return f"""\
+import json
+import struct
+import sys
+import time
+
+def read_exact(size):
+    value = bytearray()
+    while len(value) < size:
+        chunk = sys.stdin.buffer.read(size - len(value))
+        if not chunk:
+            raise EOFError
+        value.extend(chunk)
+    return bytes(value)
+
+def read_frame():
+    size = struct.unpack(">I", read_exact(4))[0]
+    return json.loads(read_exact(size))
+
+def send(header, value):
+    for item in (header, value):
+        frame = json.dumps(item, separators=(",", ":")).encode()
+        sys.stdout.buffer.write(struct.pack(">I", len(frame)) + frame)
+    sys.stdout.buffer.flush()
+
+mode = {mode!r}
+initial = read_frame()
+session_nonce = initial["session_nonce"]
+ready = {{"kind": "ready", "ok": True}}
+ready_frame = json.dumps(ready, separators=(",", ":")).encode()
+ready_session = "0" * 64 if mode == "wrong_session" else session_nonce
+send({{"session_nonce": ready_session, "size": len(ready_frame)}}, ready)
+if mode == "idle_unexpected":
+    reply = {{"ok": False, "code": None}}
+    reply_frame = json.dumps(reply, separators=(",", ":")).encode()
+    send({{"id": 0, "session_nonce": session_nonce, "size": len(reply_frame)}}, reply)
+elif mode != "wrong_session":
+    request = read_frame()
+    reply = {{
+        "ok": True,
+        "kind": "adapter",
+        "identity": {{
+            "adapter_distribution": "example-adapter",
+            "adapter_version": "1.0.0",
+            "installed_tree_sha256": "a" * 64,
+        }},
+    }}
+    reply_frame = json.dumps(reply, separators=(",", ":")).encode()
+    reply_id = request["id"] + (1 if mode == "unexpected_id" else 0)
+    header = {{
+        "id": reply_id,
+        "session_nonce": "0" * 64 if mode == "wrong_reply_session" else session_nonce,
+        "size": len(reply_frame),
+    }}
+    send(header, reply)
+    if mode == "duplicate_id":
+        send(header, reply)
+time.sleep(1)
+"""
+
+
+def _isolation_request(
+    tmp_path: Path,
+    *,
+    max_output_bytes: int,
+    deadline_seconds: float = 2.0,
+) -> object:
+    """Make one valid version-1 request with a small output policy."""
+    protocol = importlib.import_module("hephaestus.agents.codex_isolation")
+    worktree = str((tmp_path / "worktree").resolve())
+    git_dir = str((tmp_path / "git-dir").resolve())
+    common_dir = str((tmp_path / "common-dir").resolve())
+    index = str((tmp_path / "index").resolve())
+    repository_config = str((tmp_path / "config").resolve())
+    worktree_config = str((tmp_path / "config.worktree").resolve())
+    fixed_environment = (
+        ("GIT_ATTR_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_DIR", git_dir),
+        ("GIT_INDEX_FILE", index),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
+        ("GIT_OPTIONAL_LOCKS", "0"),
+        ("GIT_WORK_TREE", worktree),
+    )
+    receipt = protocol.CodexGitReceiptV1(
+        schema_version=1,
+        canonical_worktree=worktree,
+        git_dir=git_dir,
+        common_dir=common_dir,
+        index=index,
+        repository_config=repository_config,
+        worktree_config=worktree_config,
+        fixed_environment=fixed_environment,
+        protected_paths=(str((tmp_path / "worktree" / ".git").resolve()),),
+        read_only_paths=(git_dir,),
+        read_write_paths=(worktree,),
+        identities=(("git_dir", (1, 2, 0o40700, 1000, 0, 10)),),
+        digests=(("index", "2" * 64),),
+    )
+    policy = protocol.CodexExecutionPolicyV1(
+        schema_version=1,
+        read_only_mounts=(str((tmp_path / "readonly").resolve()), git_dir),
+        read_write_mounts=(worktree,),
+        protected_overlay_mounts=(str((tmp_path / "worktree" / ".git").resolve()),),
+        provider_relay="vsock://2:443",
+        command_network="deny",
+        max_output_bytes=max_output_bytes,
+        term_grace_seconds=1.0,
+        kill_grace_seconds=1.0,
+        pipe_close_grace_seconds=1.0,
+        inventory_quiescence_seconds=0.25,
+        total_deadline=2.0,
+    )
+    command = ("codex", "exec", "bound prompt")
+    environment = tuple(
+        sorted((*fixed_environment, ("CODEX_HOME", str((tmp_path / "profile").resolve()))))
+    )
+    identity = (
+        "HomericIntelligence/Hephaestus",
+        3019,
+        "implementer",
+        worktree,
+        "gpt-5.6-sol",
+        "session-3019",
+    )
+    return protocol.CodexIsolationRequestV1(
+        schema_version=1,
+        run_nonce="a" * 64,
+        entry_point_name="production-v1",
+        adapter_api_version=1,
+        package_version="1.0.0",
+        deployment_lock_digest="b" * 64,
+        wheel_digest="c" * 64,
+        installed_tree_digest="d" * 64,
+        command=command,
+        command_digest=protocol.canonical_sha256(command),
+        executable_platform="linux",
+        executable_target=protocol.CODEX_LINUX_TARGET,
+        executable_release=protocol.CODEX_RELEASE,
+        executable_asset_name=protocol.CODEX_LINUX_ASSET,
+        executable_path=str((tmp_path / "codex").resolve()),
+        executable_digest="e" * 64,
+        executable_file_identity=(1, 2, 0o100500, 1000, 64, 10),
+        guest_image_digest="f" * 64,
+        environment=environment,
+        environment_digest=protocol.canonical_sha256(environment),
+        prompt="Bound issue prompt",
+        prompt_digest=protocol.canonical_sha256("Bound issue prompt"),
+        worktree_path=worktree,
+        private_profile_path=str((tmp_path / "profile").resolve()),
+        policy=policy,
+        policy_digest=protocol.canonical_sha256(policy),
+        git_receipt=receipt,
+        git_receipt_digest=protocol.canonical_sha256(receipt),
+        repository=identity[0],
+        issue=identity[1],
+        role=identity[2],
+        worktree_identity=identity[3],
+        model=identity[4],
+        session=identity[5],
+        session_identity_digest=protocol.canonical_sha256(identity),
+        monotonic_deadline=time.monotonic() + deadline_seconds,
+    )
+
+
 def test_tampered_detached_lock_fails_before_adapter_import(tmp_path: Path) -> None:
     """A changed lock fails before external adapter code can load."""
     lock, digest, _ = _deployment(tmp_path)
@@ -464,6 +643,842 @@ def test_default_importer_loads_only_from_verified_installed_tree(
     admitted = _admit(module, lock, digest, importer=module._default_importer)
 
     assert admitted.factory() == "locked"
+
+
+@pytest.mark.parametrize(
+    "spoof",
+    ["print", "write", "fd_scan", "path_aliases", "fork_child", "subprocess_child"],
+)
+def test_adapter_stdout_cannot_spoof_the_private_control_channel(
+    tmp_path: Path,
+    spoof: str,
+) -> None:
+    """Adapter stdout cannot create an authoritative helper reply."""
+    module = _module()
+    forged = '{"id":0,"kind":"value","ok":true,"value":{"type":"scalar","value":"spoofed"}}\\n'
+    if spoof == "print":
+        action = f"print({forged.rstrip()!r})"
+        imports = ""
+    elif spoof == "write":
+        action = f"os.write(1, {forged.encode()!r})"
+        imports = "import os\n"
+    elif spoof == "fd_scan":
+        action = (
+            "for descriptor in range(0, 64):\n"
+            "        try:\n"
+            f"            os.write(descriptor, {forged.encode()!r})\n"
+            "        except OSError:\n"
+            "            pass"
+        )
+        imports = "import os\n"
+    elif spoof == "path_aliases":
+        action = (
+            "for descriptor in range(0, 64):\n"
+            "        for alias in (f'/dev/fd/{descriptor}', "
+            "f'/proc/self/fd/{descriptor}', f'/proc/{os.getpid()}/fd/{descriptor}', "
+            "f'/proc/{os.getpid()}/task/{os.getpid()}/fd/{descriptor}'):\n"
+            "            try:\n"
+            "                candidate = os.open(alias, os.O_WRONLY)\n"
+            f"                os.write(candidate, {forged.encode()!r})\n"
+            "                os.close(candidate)\n"
+            "            except OSError:\n"
+            "                pass"
+        )
+        imports = "import os\n"
+    elif spoof == "fork_child":
+        action = (
+            "child = os.fork()\n"
+            "if child == 0:\n"
+            "    for descriptor in range(0, 64):\n"
+            "        try:\n"
+            f"            os.write(descriptor, {forged.encode()!r})\n"
+            "        except OSError:\n"
+            "            pass\n"
+            "    os.kill(os.getpid(), signal.SIGKILL)\n"
+            "os.waitpid(child, 0)"
+        )
+        imports = "import os\nimport signal\n"
+    else:
+        child_source = (
+            "import os\n"
+            "payload = " + repr(forged.encode()) + "\n"
+            "for descriptor in range(64):\n"
+            "    try: os.write(descriptor, payload)\n"
+            "    except OSError: pass\n"
+        )
+        action = f"subprocess.run([{sys.executable!r}, '-c', {child_source!r}], check=False)"
+        imports = "import subprocess\n"
+    indented = "\n".join(f"    {line}" for line in action.splitlines())
+    source = imports + "def factory():\n" + indented + "\n    return 'locked'\n"
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    assert factory() == "locked"
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        "None",
+        "stdin=0",
+        "stdout=0",
+        "stderr=0",
+        "pass_fds=(1,)",
+        "preexec_fn=lambda: None",
+        "start_new_session=True",
+        "process_group=0",
+        "close_fds=False",
+    ],
+)
+def test_adapter_subprocess_controls_cannot_inherit_worker_channels(
+    tmp_path: Path,
+    control: str,
+) -> None:
+    """Adapter subprocess controls cannot select or inherit a worker channel."""
+    module = _module()
+    if control == "None":
+        call = "subprocess.Popen(['/bin/true'], None)"
+    else:
+        call = f"subprocess.Popen(['/bin/true'], {control})"
+    source = f"import subprocess\ndef factory():\n    {call}\n    return 'unsafe'\n"
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    with pytest.raises(module.CodexAdapterAdmissionError):
+        factory()
+
+
+def test_host_rejects_a_readiness_nonce_from_another_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readiness frame from a different host session is not authoritative."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_BROKER", _fake_broker_source("wrong_session"))
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+
+    with pytest.raises(module.CodexAdapterAdmissionError):
+        module._default_importer(tree, "example_adapter", "factory")
+
+
+@pytest.mark.parametrize("mode", ["wrong_reply_session", "unexpected_id", "duplicate_id"])
+def test_host_rejects_unexpected_or_duplicate_broker_reply_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """A broker reply must match one pending host request exactly once."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_BROKER", _fake_broker_source(mode))
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    if mode != "duplicate_id":
+        with pytest.raises(module.CodexAdapterAdmissionError):
+            factory()
+    else:
+        adapter = factory()
+        time.sleep(0.05)
+        with pytest.raises(module.CodexAdapterAdmissionError):
+            adapter._process.request("destroy_prepared", cleanup_handle="missing")
+
+
+def test_idle_unexpected_reply_terminates_the_broker_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected idle reply closes the complete broker process group."""
+    module = _module()
+    monkeypatch.setattr(
+        module,
+        "_ISOLATED_ADAPTER_BROKER",
+        _fake_broker_source("idle_unexpected"),
+    )
+    killpg = module.os.killpg
+    signals: list[int] = []
+
+    def record_killpg(process_group: int, signal_number: int) -> None:
+        signals.append(signal_number)
+        killpg(process_group, signal_number)
+
+    monkeypatch.setattr(module.os, "killpg", record_killpg)
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+    deadline = time.monotonic() + 0.5
+
+    while module.signal.SIGTERM not in signals and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert module.signal.SIGTERM in signals
+    factory._close()
+
+
+def test_host_never_reuses_an_outgoing_request_id(tmp_path: Path) -> None:
+    """The host rejects a local request ID that it used before."""
+    module = _module()
+    source = (
+        b"class Adapter:\n"
+        b"    adapter_distribution = 'example-adapter'\n"
+        b"    adapter_version = '1.0.0'\n"
+        b"    installed_tree_sha256 = 'a' * 64\n"
+        b"    def prepare(self, request): return request\n"
+        b"    def invoke(self, prepared, auth_path): return prepared\n"
+        b"    def destroy(self, prepared): return None\n"
+        b"def factory(): return Adapter()\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source},
+    )
+    adapter = module._default_importer(tree, "example_adapter", "factory")()
+    adapter._process._next_request_id = 0
+
+    with pytest.raises(module.CodexAdapterAdmissionError, match="duplicated"):
+        adapter._process.request("destroy_prepared", cleanup_handle="missing")
+
+
+def test_adapter_thread_cannot_race_future_worker_control_frames(tmp_path: Path) -> None:
+    """An adapter thread cannot write to the worker channel between requests."""
+    module = _module()
+    source = (
+        b"import os\n"
+        b"import threading\n"
+        b"import time\n"
+        b"def race():\n"
+        b"    for _attempt in range(100):\n"
+        b"        for descriptor in range(64):\n"
+        b"            try: os.write(descriptor, b'\\x00\\x00\\x00\\x01x')\n"
+        b"            except OSError: pass\n"
+        b"        time.sleep(0.001)\n"
+        b"class Adapter:\n"
+        b"    adapter_distribution = 'example-adapter'\n"
+        b"    adapter_version = '1.0.0'\n"
+        b"    installed_tree_sha256 = 'a' * 64\n"
+        b"    def prepare(self, request): return request\n"
+        b"    def invoke(self, prepared, auth_path): return prepared\n"
+        b"    def destroy(self, prepared): return None\n"
+        b"def factory():\n"
+        b"    threading.Thread(target=race, daemon=True).start()\n"
+        b"    return Adapter()\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source},
+    )
+    adapter = module._default_importer(tree, "example_adapter", "factory")()
+    request = _isolation_request(tmp_path, max_output_bytes=32)
+
+    prepared = adapter.prepare(request)
+
+    assert prepared == request
+    assert adapter.destroy(prepared) is None
+
+
+def test_adapter_cannot_open_symlink_aliases_to_worker_descriptors(tmp_path: Path) -> None:
+    """A symlink alias cannot expose either worker control pipe."""
+    module = _module()
+    aliases = tmp_path / "aliases"
+    aliases.mkdir()
+    for descriptor in range(64):
+        (aliases / str(descriptor)).symlink_to(f"/dev/fd/{descriptor}")
+    source = (
+        "import os\n"
+        "def factory():\n"
+        "    for descriptor in range(64):\n"
+        f"        alias = os.fspath({str(aliases)!r}) + '/' + str(descriptor)\n"
+        "        for flags in (os.O_RDONLY, os.O_WRONLY):\n"
+        "            try:\n"
+        "                opened = os.open(alias, flags | os.O_CLOEXEC)\n"
+        "                if flags == os.O_RDONLY: os.read(opened, 4096)\n"
+        "                else: os.write(opened, b'\\x00\\x00\\x00\\x01x')\n"
+        "                os.close(opened)\n"
+        "            except OSError:\n"
+        "                pass\n"
+        "    return 'locked'\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    assert factory() == "locked"
+
+
+def test_os_open_flags_are_not_treated_as_descriptors(tmp_path: Path) -> None:
+    """A normal zero-valued O_RDONLY flag remains compatible."""
+    module = _module()
+    value = tmp_path / "value.txt"
+    value.write_text("locked", encoding="utf-8")
+    source = (
+        "import os\n"
+        "def factory():\n"
+        f"    descriptor = os.open({str(value)!r}, os.O_RDONLY | os.O_CLOEXEC)\n"
+        "    try: return os.read(descriptor, 32).decode()\n"
+        "    finally: os.close(descriptor)\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    assert factory() == "locked"
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [
+        "os.setsid()",
+        "os.setpgid(0, 0)",
+        "os.setpgid(os.getpid(), os.getpid())",
+    ],
+)
+def test_direct_adapter_process_group_controls_are_rejected(
+    tmp_path: Path,
+    escape: str,
+) -> None:
+    """Reject a direct mutation of the helper process group."""
+    module = _module()
+    source = (
+        "import os\n"
+        "def factory():\n"
+        "    try:\n"
+        f"        {escape}\n"
+        "    except PermissionError:\n"
+        "        return 'locked'\n"
+        "    return 'escaped'\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    assert factory() == "locked"
+
+
+@pytest.mark.parametrize("control", ["start_new_session=True", "process_group=0"])
+def test_subprocess_session_controls_fail_before_child_launch(
+    tmp_path: Path,
+    control: str,
+) -> None:
+    """A subprocess session control fails before it creates a child."""
+    module = _module()
+    marker = tmp_path / "escaped-child.pid"
+    child_source = "import time; time.sleep(30)"
+    source = (
+        "import os\n"
+        "import subprocess\n"
+        "def factory():\n"
+        f"    child = subprocess.Popen([{sys.executable!r}, '-c', {child_source!r}], "
+        f"{control})\n"
+        f"    descriptor = os.open({str(marker)!r}, "
+        "os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)\n"
+        "    os.write(descriptor, str(child.pid).encode())\n"
+        "    os.close(descriptor)\n"
+        "    return None\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    try:
+        with pytest.raises(module.CodexAdapterAdmissionError):
+            factory()
+    finally:
+        escaped = marker.exists()
+        if escaped:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(marker.read_text(encoding="utf-8")), module.signal.SIGKILL)
+
+    assert not escaped
+
+
+def test_isolated_adapter_import_has_an_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked module import terminates before the startup deadline."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_STARTUP_SECONDS", 0.05, raising=False)
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"while True: pass\n"},
+    )
+    outcome: list[BaseException] = []
+
+    worker = threading.Thread(
+        target=lambda: _capture_exception(
+            outcome,
+            lambda: module._default_importer(tree, "example_adapter", "factory"),
+        ),
+        daemon=True,
+    )
+    started = time.monotonic()
+    worker.start()
+    worker.join(timeout=0.5)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], module.CodexAdapterAdmissionError)
+    assert time.monotonic() - started < 0.5
+
+
+def test_startup_write_has_the_same_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broker that does not read bootstrap data cannot block the host pipe."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_STARTUP_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_BROKER", "while True: pass\n")
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"#" * (1024 * 1024)},
+    )
+    started = time.monotonic()
+
+    with pytest.raises(module.CodexAdapterAdmissionError):
+        module._default_importer(tree, "example_adapter", "factory")
+
+    assert time.monotonic() - started < 0.5
+
+
+def test_expired_request_write_terminates_the_broker_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired request write closes the group after ID registration."""
+    module = _module()
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+    process = factory._process
+    killpg = module.os.killpg
+    signals: list[int] = []
+
+    def record_killpg(process_group: int, signal_number: int) -> None:
+        signals.append(signal_number)
+        killpg(process_group, signal_number)
+
+    monkeypatch.setattr(module.os, "killpg", record_killpg)
+
+    with pytest.raises(module.CodexAdapterAdmissionError, match="deadline"):
+        process.request("factory", deadline=time.monotonic() - 1.0)
+
+    assert module.signal.SIGTERM in signals
+
+
+def test_partial_request_write_terminates_the_broker_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial request frame closes the group before another request."""
+    module = _module()
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+    process = factory._process
+    assert process._process.stdin is not None
+    control_descriptor = process._process.stdin.fileno()
+    write = module.os.write
+    killpg = module.os.killpg
+    writes = 0
+    signals: list[int] = []
+
+    def partial_write(descriptor: int, value: Any) -> int:
+        nonlocal writes
+        if descriptor != control_descriptor:
+            return write(descriptor, value)
+        writes += 1
+        if writes == 1:
+            return 1
+        raise OSError("partial frame")
+
+    def record_killpg(process_group: int, signal_number: int) -> None:
+        signals.append(signal_number)
+        killpg(process_group, signal_number)
+
+    monkeypatch.setattr(module.os, "write", partial_write)
+    monkeypatch.setattr(module.os, "killpg", record_killpg)
+
+    with pytest.raises(module.CodexAdapterAdmissionError, match="process failed"):
+        process.request("factory")
+
+    assert writes == 2
+    assert module.signal.SIGTERM in signals
+
+
+def test_bootstrap_bound_precedes_base64_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized bootstrap fails before any file is base64 encoded."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_MAX_FRAME_BYTES", 1, raising=False)
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+
+    def reject_base64(_value: bytes) -> bytes:
+        raise AssertionError("base64 allocation ran")
+
+    monkeypatch.setattr(module.base64, "b64encode", reject_base64)
+
+    with pytest.raises(module.CodexAdapterAdmissionError, match="bootstrap"):
+        module._IsolatedAdapterProcess(tree, "example_adapter", "factory")
+
+
+def test_outbound_json_bound_precedes_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized outbound frame fails before JSON serialization."""
+    module = _module()
+
+    def reject_json(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("JSON serialization ran")
+
+    monkeypatch.setattr(module.json, "dumps", reject_json)
+
+    with pytest.raises(module.CodexAdapterAdmissionError, match="request"):
+        module._bounded_json_frame({"value": "x" * 1024}, 32)
+
+
+def test_startup_timeout_terminates_the_broker_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A startup timeout sends termination to the complete broker group."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_STARTUP_SECONDS", 0.05, raising=False)
+    killpg = module.os.killpg
+    signals: list[int] = []
+
+    def record_killpg(process_group: int, signal_number: int) -> None:
+        signals.append(signal_number)
+        killpg(process_group, signal_number)
+
+    monkeypatch.setattr(module.os, "killpg", record_killpg)
+    source = b"while True: pass\n"
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source},
+    )
+
+    with pytest.raises(module.CodexAdapterAdmissionError):
+        module._default_importer(tree, "example_adapter", "factory")
+
+    assert module.signal.SIGTERM in signals
+
+
+def test_isolated_adapter_factory_has_an_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked factory terminates before the control deadline."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_CONTROL_SECONDS", 0.05, raising=False)
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": (b"def factory():\n    while True: pass\n")},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+    outcome: list[BaseException] = []
+    worker = threading.Thread(
+        target=lambda: _capture_exception(outcome, factory),
+        daemon=True,
+    )
+    started = time.monotonic()
+    worker.start()
+    worker.join(timeout=0.5)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], module.CodexAdapterAdmissionError)
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize("operation", ["prepare", "invoke", "destroy"])
+def test_each_isolated_adapter_request_has_an_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Each adapter operation terminates the process after its one deadline."""
+    module = _module()
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_CONTROL_SECONDS", 0.05, raising=False)
+    prepare = "        while True: pass" if operation == "prepare" else "        return request"
+    invoke = "        while True: pass" if operation == "invoke" else "        return prepared"
+    destroy = "        while True: pass" if operation == "destroy" else "        return None"
+    source = (
+        "class Adapter:\n"
+        "    adapter_distribution = 'example-adapter'\n"
+        "    adapter_version = '1.0.0'\n"
+        "    installed_tree_sha256 = 'a' * 64\n"
+        f"    def prepare(self, request):\n{prepare}\n"
+        f"    def invoke(self, prepared, auth_path):\n{invoke}\n"
+        f"    def destroy(self, prepared):\n{destroy}\n"
+        "def factory(): return Adapter()\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+    adapter = module._default_importer(tree, "example_adapter", "factory")()
+    request = _isolation_request(tmp_path, max_output_bytes=32, deadline_seconds=0.15)
+    started = time.monotonic()
+
+    with pytest.raises(module.CodexAdapterAdmissionError, match="deadline"):
+        if operation == "prepare":
+            adapter.prepare(request)
+        else:
+            prepared = adapter.prepare(request)
+            if operation == "invoke":
+                adapter.invoke(prepared, "/private/auth.json")
+            else:
+                adapter.destroy(prepared)
+
+    assert time.monotonic() - started < 0.6
+
+
+def test_isolated_adapter_rejects_an_oversized_readiness_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admission rejects readiness data above the fixed control limit."""
+    module = _module()
+    helper = (
+        "import os, struct, sys\n"
+        "descriptor = int(sys.argv[1])\n"
+        "frame = b'x' * 200000\n"
+        "os.write(descriptor, struct.pack('>I', len(frame)) + frame)\n"
+    )
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_HELPER", helper)
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return 'locked'\n"},
+    )
+
+    with pytest.raises(module.CodexAdapterAdmissionError):
+        module._default_importer(tree, "example_adapter", "factory")
+
+
+def test_broker_rejects_extra_worker_readiness_header_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broker accepts only the exact worker readiness header schema."""
+    module = _module()
+    helper = r"""
+import json
+import os
+import struct
+import sys
+
+def read_exact(size):
+    value = bytearray()
+    while len(value) < size:
+        value.extend(os.read(0, size - len(value)))
+    return bytes(value)
+
+size = struct.unpack(">I", read_exact(4))[0]
+payload = json.loads(read_exact(size))
+descriptor = int(sys.argv[1])
+ready = json.dumps({"kind": "ready", "ok": True}, separators=(",", ":")).encode()
+header = json.dumps(
+    {"nonce": payload["startup_nonce"], "size": len(ready), "extra": True},
+    separators=(",", ":"),
+).encode()
+os.write(descriptor, struct.pack(">I", len(header)) + header)
+os.write(descriptor, struct.pack(">I", len(ready)) + ready)
+"""
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_HELPER", helper)
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+
+    with pytest.raises(module.CodexAdapterAdmissionError):
+        module._default_importer(tree, "example_adapter", "factory")
+
+
+@pytest.mark.parametrize("deadline", [math.nan, math.inf, -math.inf])
+def test_broker_rejects_a_non_finite_request_deadline(deadline: float) -> None:
+    """The broker rejects a non-finite deadline without host validation."""
+    module = _module()
+    worker_source = r"""
+import json
+import os
+import struct
+import sys
+import time
+
+def read_exact(size):
+    value = bytearray()
+    while len(value) < size:
+        value.extend(os.read(0, size - len(value)))
+    return bytes(value)
+
+size = struct.unpack(">I", read_exact(4))[0]
+payload = json.loads(read_exact(size))
+descriptor = int(sys.argv[1])
+ready = json.dumps({"kind": "ready", "ok": True}, separators=(",", ":")).encode()
+header = json.dumps(
+    {"nonce": payload["startup_nonce"], "size": len(ready)},
+    separators=(",", ":"),
+).encode()
+os.write(descriptor, struct.pack(">I", len(header)) + header)
+os.write(descriptor, struct.pack(">I", len(ready)) + ready)
+while True:
+    time.sleep(1)
+"""
+    session_nonce = "1" * 64
+    initial = {
+        "worker_source": worker_source,
+        "startup_seconds": 1.0,
+        "control_frame_bytes": 128 * 1024,
+        "maximum_frame_bytes": 128 * 1024 * 1024,
+        "session_nonce": session_nonce,
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-S", "-c", module._ISOLATED_ADAPTER_BROKER],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    stdin = process.stdin
+
+    def write_frame(value: object) -> None:
+        frame = json.dumps(value, separators=(",", ":")).encode()
+        stdin.write(struct.pack(">I", len(frame)) + frame)
+        stdin.flush()
+
+    try:
+        write_frame(initial)
+        reader = module._BoundedFrameReader(process.stdout.fileno())
+        ready_header = json.loads(reader.read(128 * 1024, deadline=time.monotonic() + 1.0))
+        reader.read(ready_header["size"], deadline=time.monotonic() + 1.0)
+        write_frame(
+            {
+                "id": 0,
+                "operation": "factory",
+                "arguments": [],
+                "max_frame_bytes": 128 * 1024,
+                "deadline": deadline,
+                "session_nonce": session_nonce,
+            }
+        )
+
+        assert process.wait(timeout=1.0) != 0
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, module.signal.SIGKILL)
+            process.wait(timeout=1.0)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or os.geteuid() == 0,
+    reason="Linux non-root /proc permissions are required",
+)
+def test_linux_control_processes_disable_proc_fd_reopening(tmp_path: Path) -> None:
+    """A same-UID process cannot reopen broker or worker control descriptors."""
+    module = _module()
+    worker_pid_path = tmp_path / "worker.pid"
+    reopened_path = tmp_path / "reopened"
+    source = (
+        "import os\n"
+        f"descriptor = os.open({str(worker_pid_path)!r}, "
+        "os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)\n"
+        "os.write(descriptor, str(os.getpid()).encode())\n"
+        "os.close(descriptor)\n"
+        "def factory(): return None\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+    factory = module._default_importer(tree, "example_adapter", "factory")
+    worker_pid = int(worker_pid_path.read_text(encoding="utf-8"))
+    broker_pid = factory._process._process.pid
+    probe = (
+        "import os, sys\n"
+        "marker = sys.argv[1]\n"
+        "for pid in sys.argv[2:]:\n"
+        "    try:\n"
+        "        descriptor = os.open(f'/proc/{pid}/fd/0', os.O_RDONLY | os.O_NONBLOCK)\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    os.close(descriptor)\n"
+        "    open(marker, 'wb').close()\n"
+    )
+
+    try:
+        subprocess.run(
+            [sys.executable, "-c", probe, str(reopened_path), str(broker_pid), str(worker_pid)],
+            check=True,
+        )
+    finally:
+        factory._close()
+
+    assert not reopened_path.exists()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux procfs is required")
+def test_linux_pathlib_cannot_open_a_task_fd_alias(tmp_path: Path) -> None:
+    """Pathlib cannot follow a current-task alias to worker stdin."""
+    module = _module()
+    source = (
+        "import os\n"
+        "import pathlib\n"
+        "def factory():\n"
+        "    alias = pathlib.Path("
+        "f'/proc/{os.getpid()}/task/{os.getpid()}/fd/0')\n"
+        "    try:\n"
+        "        opened = alias.open('rb')\n"
+        "    except PermissionError:\n"
+        "        return 'locked'\n"
+        "    opened.close()\n"
+        "    return 'exposed'\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source.encode()},
+    )
+
+    factory = module._default_importer(tree, "example_adapter", "factory")
+
+    assert factory() == "locked"
 
 
 def test_production_import_uses_held_verified_module_bytes(
@@ -843,10 +1858,15 @@ def test_callback_capability_does_not_receive_a_raw_exported_class(
     ambient = tmp_path / "ambient.txt"
     ambient.write_text("ambient data", encoding="utf-8")
     marker = tmp_path / f"{phase}-{callback_surface}-callback-escape"
+    callback_ran = tmp_path / f"{phase}-{callback_surface}-callback-ran"
     prefix = (
+        "import os\n"
         "import pathlib\n"
         "import threading\n"
         "def capture(path_type):\n"
+        f"    descriptor = os.open({str(callback_ran)!r}, "
+        "os.O_WRONLY | os.O_CREAT, 0o600)\n"
+        "    os.close(descriptor)\n"
         "    class AmbientPath(path_type): pass\n"
         f"    AmbientPath({str(marker)!r}).write_text("
         f"AmbientPath({str(ambient)!r}).read_text())\n"
@@ -885,23 +1905,30 @@ def test_callback_capability_does_not_receive_a_raw_exported_class(
     except module.CodexAdapterAdmissionError:
         pass
 
+    assert callback_ran.exists()
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("phase", ["import", "factory", "method"])
 def test_signal_callback_receives_a_closed_frame(
     tmp_path: Path,
-    phase: str,
 ) -> None:
-    """A signal callback cannot receive an unwrapped helper frame."""
+    """A main-thread signal callback receives one closed frame."""
     module = _module()
-    marker = tmp_path / f"{phase}-signal-callback-escape"
+    marker = tmp_path / "signal-callback-escape"
+    callback_ran = tmp_path / "signal-callback-ran"
     prefix = (
         "import os\n"
         "import signal\n"
         "def capture(_signum, frame):\n"
+        f"    descriptor = os.open({str(callback_ran)!r}, "
+        "os.O_WRONLY | os.O_CREAT, 0o600)\n"
+        "    os.close(descriptor)\n"
         "    while frame is not None:\n"
-        "        if 'capability_targets' in frame.f_globals:\n"
+        "        try:\n"
+        "            frame_globals = frame.f_globals\n"
+        "        except AttributeError:\n"
+        "            return\n"
+        "        if 'capability_targets' in frame_globals:\n"
         f"            descriptor = os.open({str(marker)!r}, "
         "os.O_WRONLY | os.O_CREAT, 0o600)\n"
         "            os.close(descriptor)\n"
@@ -910,36 +1937,16 @@ def test_signal_callback_receives_a_closed_frame(
         "signal.signal(signal.SIGTERM, capture)\n"
     )
     action = "os.kill(os.getpid(), signal.SIGTERM)"
-    if phase == "import":
-        source = prefix + f"{action}\ndef factory(): return None\n"
-    elif phase == "factory":
-        source = prefix + f"def factory():\n    {action}\n    return None\n"
-    else:
-        source = (
-            prefix
-            + "class Adapter:\n"
-            + "    adapter_distribution = 'example-adapter'\n"
-            + "    adapter_version = '1.0.0'\n"
-            + "    installed_tree_sha256 = 'a' * 64\n"
-            + f"    def prepare(self, request):\n        {action}\n        return request\n"
-            + "    def invoke(self, prepared, auth_path): return prepared\n"
-            + "    def destroy(self, prepared): return None\n"
-            + "def factory(): return Adapter()\n"
-        )
+    source = prefix + f"{action}\ndef factory(): return None\n"
     tree = module._VerifiedInstalledTree(
         root=tmp_path,
         files={"example_adapter/__init__.py": source.encode()},
     )
 
-    try:
-        factory = module._default_importer(tree, "example_adapter", "factory")
-        if phase == "factory":
-            factory()
-        elif phase == "method":
-            factory().prepare(None)
-    except module.CodexAdapterAdmissionError:
-        pass
+    factory = module._default_importer(tree, "example_adapter", "factory")
 
+    assert factory() is None
+    assert callback_ran.exists()
     assert not marker.exists()
 
 
@@ -1064,6 +2071,59 @@ def test_isolated_adapter_preserves_version_1_protocol_values(tmp_path: Path) ->
     assert adapter.destroy(prepared) is None
 
 
+def test_isolated_adapter_rejects_output_just_above_the_request_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invocation frame cannot retain output above its request policy."""
+    module = _module()
+    source = (
+        b"from hephaestus.agents.codex_isolation import CodexIsolationResultV1\n"
+        b"class Adapter:\n"
+        b"    adapter_distribution = 'example-adapter'\n"
+        b"    adapter_version = '1.0.0'\n"
+        b"    installed_tree_sha256 = 'a' * 64\n"
+        b"    def prepare(self, request): return request\n"
+        b"    def invoke(self, prepared, auth_path):\n"
+        b"        del auth_path\n"
+        b"        return CodexIsolationResultV1(\n"
+        b"            schema_version=1, adapter_identity='production-v1',\n"
+        b"            adapter_version='1.0.0', request_nonce='a' * 64,\n"
+        b"            request_digest='1' * 64, guest_boot_nonce='2' * 64,\n"
+        b"            prepared_record_digest='3' * 64, exit_status=0,\n"
+        b"            output='x' * (prepared.policy.max_output_bytes + 1),\n"
+        b"            error_code=None, term_sent=False, term_timestamp=0.0,\n"
+        b"            kill_sent=False, kill_timestamp=0.0, pipes_closed=True,\n"
+        b"            pipe_close_timestamp=0.0, inventories=(),\n"
+        b"            policy_digest='4' * 64, executable_digest='5' * 64,\n"
+        b"            git_receipt_digest='6' * 64, session_identity_digest='7' * 64,\n"
+        b"        )\n"
+        b"    def destroy(self, prepared): return None\n"
+        b"def factory(): return Adapter()\n"
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": source},
+    )
+    adapter = module._default_importer(tree, "example_adapter", "factory")()
+    request = _isolation_request(tmp_path, max_output_bytes=32)
+    prepared = adapter.prepare(request)
+    decoded = False
+    decode = module._decode_adapter_value
+
+    def record_decode(value: object) -> object:
+        nonlocal decoded
+        decoded = True
+        return decode(value)
+
+    monkeypatch.setattr(module, "_decode_adapter_value", record_decode)
+
+    with pytest.raises(module.CodexAdapterAdmissionError, match="output"):
+        adapter.invoke(prepared, "/private/auth.json")
+
+    assert not decoded
+
+
 def test_isolated_adapter_retains_unencodable_prepare_for_one_opaque_cleanup(
     tmp_path: Path,
 ) -> None:
@@ -1132,10 +2192,10 @@ def test_late_unencodable_isolated_prepare_has_one_host_cleanup_control(
     controls: list[str] = []
     write = adapter._process._write
 
-    def capture_control(payload: object) -> None:
+    def capture_control(payload: object, *, deadline: float) -> None:
         if isinstance(payload, dict) and isinstance(payload.get("operation"), str):
             controls.append(payload["operation"])
-        write(payload)
+        write(payload, deadline=deadline)
 
     adapter._process._write = capture_control
     request = SimpleNamespace(

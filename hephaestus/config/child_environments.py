@@ -82,6 +82,7 @@ _CODEX_IMPLEMENTATION_GIT_NAMES = frozenset(
         "GIT_CONFIG_NOSYSTEM",
         "GIT_DIR",
         "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
         "GIT_OPTIONAL_LOCKS",
         "GIT_WORK_TREE",
     }
@@ -98,6 +99,8 @@ def build_codex_implementation_child_env(
         spec = APPROVED_ENV_BY_NAME[name]
         if not validate_environment_value(spec, value):
             raise ValueError("fixed Git environment contains an invalid value")
+    if fixed_git_environment["GIT_NO_REPLACE_OBJECTS"] != "1":
+        raise ValueError("fixed Git environment contains an invalid value")
     env = build_codex_child_env(codex_home=codex_home)
     private = Path(env["CODEX_HOME"])
     env.update(

@@ -61,6 +61,7 @@ from .repo import (
 logger = logging.getLogger(__name__)
 
 _RESERVATION_RELEASE_RETRY_CAP = 2
+_WORKTREE_CLEANUP_RETRY_CAP = 2
 
 
 class FinishedStage(Stage):
@@ -183,10 +184,11 @@ class FinishedStage(Stage):
     @staticmethod
     def _record_cleanup_terminal(item: WorkItem, ctx: StageContext) -> None:
         """Close durable cleanup obligations after the sink reaches DONE."""
-        if item.post_processing is None:
+        if item.post_processing is None or item.payload.get("_learning_cleanup_recorded", False):
             return
-        succeeded = bool(item.payload.pop("_learning_cleanup_succeeded", True))
-        error = str(item.payload.pop("_learning_cleanup_error", ""))
+        succeeded = bool(item.payload.get("_learning_cleanup_succeeded", True))
+        error = str(item.payload.get("_learning_cleanup_error", ""))
+        recorded = True
         for key in item.post_processing.intent_keys:
             try:
                 ctx.learning_journal.finish_cleanup(
@@ -201,6 +203,11 @@ class FinishedStage(Stage):
                     key,
                     exc,
                 )
+                recorded = False
+        if recorded:
+            item.payload["_learning_cleanup_recorded"] = True
+            item.payload.pop("_learning_cleanup_succeeded", None)
+            item.payload.pop("_learning_cleanup_error", None)
 
     def _cleanup(  # noqa: C901 - cleanup validates independent durable receipts
         self, item: WorkItem, ctx: StageContext
@@ -259,6 +266,10 @@ class FinishedStage(Stage):
 
         if not item.worktree:
             return Continue(next_state="DONE")
+        if item.payload.get("_worktree_cleanup_complete", False) or item.payload.get(
+            "_worktree_cleanup_exhausted", False
+        ):
+            return Continue(next_state="DONE")
 
         passed = bool(item.result and item.result.passed)
         local_cleanup = item.payload.get(DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY)
@@ -298,6 +309,16 @@ class FinishedStage(Stage):
             logger.info("[dry-run] would remove worktree %s", item.worktree)
             return Continue(next_state="DONE")
 
+        attempts = int(item.payload.get("_worktree_cleanup_attempts", 0))
+        if attempts >= _WORKTREE_CLEANUP_RETRY_CAP:
+            self._finish_failed_worktree_cleanup(
+                item,
+                str(item.payload.get("_learning_cleanup_error") or "cleanup failed"),
+            )
+            self._record_cleanup_terminal(item, ctx)
+            return Continue(next_state="DONE")
+        item.payload["_worktree_cleanup_inflight"] = True
+
         kwargs: dict[str, object] = {
             "worktree_path": item.worktree,
             "repo_root": str(ctx.paths.repo_root),
@@ -325,7 +346,65 @@ class FinishedStage(Stage):
             kwargs=kwargs,
             descr=f"remove worktree {item.worktree}",
         )
-        return JobRequest(job=job, on_done_state="DONE")
+        return JobRequest(job=job, on_done_state="CLEANUP")
+
+    def _finish_failed_worktree_cleanup(self, item: WorkItem, error: str) -> None:
+        """Record separate cleanup evidence and preserve its checkout."""
+        item.payload["_worktree_cleanup_exhausted"] = True
+        item.payload["_learning_cleanup_succeeded"] = False
+        item.payload["_learning_cleanup_error"] = error
+        entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+        if entry not in self._preserved:
+            self._preserved.append(entry)
+
+    def _handle_worktree_cleanup_completion(
+        self,
+        item: WorkItem,
+        result: JobResult,
+        ctx: StageContext,
+    ) -> bool:
+        """Handle one worktree cleanup attempt if the marker owns it."""
+        if not item.payload.pop("_worktree_cleanup_inflight", False):
+            return False
+        if result.ok:
+            item.payload["_worktree_cleanup_complete"] = True
+            item.payload.pop("_direct_scope_noop_cleanup_inflight", None)
+            if isinstance(result.value, dict) and result.value.get("local_branch_deleted") is False:
+                logger.warning(
+                    "finished:%s: local direct-scope branch changed and was not deleted",
+                    item.issue or item.repo,
+                )
+            return True
+        if isinstance(result.value, dict) and result.value.get("cleanup_progress") is True:
+            batches = int(item.payload.get("_worktree_cleanup_progress_batches", 0)) + 1
+            item.payload["_worktree_cleanup_progress_batches"] = batches
+            logger.info(
+                "finished:%s: bounded worktree cleanup made progress in batch %d",
+                item.issue or item.repo,
+                batches,
+            )
+            return True
+        attempts = int(item.payload.get("_worktree_cleanup_attempts", 0)) + 1
+        item.payload["_worktree_cleanup_attempts"] = attempts
+        if attempts >= _WORKTREE_CLEANUP_RETRY_CAP:
+            self._finish_failed_worktree_cleanup(
+                item,
+                result.error or "cleanup failed",
+            )
+            self._record_cleanup_terminal(item, ctx)
+            logger.warning(
+                "finished:%s: worktree cleanup failed after %d attempts: %s",
+                item.issue or item.repo,
+                attempts,
+                result.error,
+            )
+        else:
+            logger.warning(
+                "finished:%s: worktree cleanup failed; retrying: %s",
+                item.issue or item.repo,
+                result.error,
+            )
+        return True
 
     def _preserve_pending_learning_worktree(self, item: WorkItem) -> StageOutcome:
         """Eject a writer checkout until all learning work is terminal."""
@@ -385,7 +464,7 @@ class FinishedStage(Stage):
         return paths
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
-        """Log cleanup failures (never fatal — the result is already recorded).
+        """Handle one cleanup result and record a capped terminal failure.
 
         Args:
             item: The work item.
@@ -414,6 +493,8 @@ class FinishedStage(Stage):
                     item.issue or item.repo,
                     result.error,
                 )
+            return
+        if self._handle_worktree_cleanup_completion(item, result, ctx):
             return
         if not result.ok:
             item.payload["_learning_cleanup_succeeded"] = False

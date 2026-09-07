@@ -70,11 +70,37 @@ def test_receipt_binds_git_pointer_directories_index_and_configs(tmp_path: Path)
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_DIR": receipt.git_dir,
             "GIT_INDEX_FILE": receipt.index,
+            "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_WORK_TREE": receipt.canonical_worktree,
         }
         boundary.verify_before_launch()
         boundary.verify_after_return()
+
+
+def test_receipt_environment_disables_existing_git_replacement_refs(tmp_path: Path) -> None:
+    """The fixed child environment ignores an existing replacement object."""
+    worktree = _linked_worktree(tmp_path)
+    base = _git(worktree, "rev-parse", "HEAD")
+    (worktree / "tracked.txt").write_text("replacement\n", encoding="utf-8")
+    _git(worktree, "commit", "-am", "test: create replacement commit")
+    replacement = _git(worktree, "rev-parse", "HEAD")
+    _git(worktree, "replace", base, replacement)
+    assert _git(worktree, "show", f"{base}:tracked.txt") == "replacement"
+    module = _boundary_module()
+
+    with module.capture_codex_worktree_boundary(worktree) as boundary:
+        environment = {**os.environ, **dict(boundary.receipt.fixed_environment)}
+        result = subprocess.run(
+            ["git", "show", f"{base}:tracked.txt"],
+            cwd=worktree,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    assert result.stdout == "base\n"
 
 
 @pytest.mark.parametrize(

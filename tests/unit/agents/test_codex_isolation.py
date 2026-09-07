@@ -35,6 +35,7 @@ def _git_receipt(tmp_path: Path) -> Any:
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_DIR", git_dir),
         ("GIT_INDEX_FILE", index),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
         ("GIT_OPTIONAL_LOCKS", "0"),
         ("GIT_WORK_TREE", worktree),
     )
@@ -57,12 +58,39 @@ def _git_receipt(tmp_path: Path) -> Any:
     )
 
 
+@pytest.mark.parametrize("replacement", [None, "0"])
+def test_git_receipt_requires_exact_no_replace_contract(
+    tmp_path: Path,
+    replacement: str | None,
+) -> None:
+    """The public receipt rejects a missing or disabled replacement guard."""
+    receipt = _git_receipt(tmp_path)
+    fixed = dict(receipt.fixed_environment)
+    if replacement is None:
+        fixed.pop("GIT_NO_REPLACE_OBJECTS")
+    else:
+        fixed["GIT_NO_REPLACE_OBJECTS"] = replacement
+
+    with pytest.raises(ValueError, match="exact Git isolation map"):
+        dataclasses.replace(receipt, fixed_environment=tuple(sorted(fixed.items())))
+
+
 def _policy(tmp_path: Path) -> Any:
     iso = _module()
     worktree = str((tmp_path / "worktree").resolve())
     return iso.CodexExecutionPolicyV1(
         schema_version=1,
-        read_only_mounts=(str((tmp_path / "readonly").resolve()),),
+        read_only_mounts=tuple(
+            str((tmp_path / relative).resolve())
+            for relative in (
+                "readonly",
+                "git-dir",
+                "common-dir",
+                "index",
+                "config",
+                "config.worktree",
+            )
+        ),
         read_write_mounts=(worktree,),
         protected_overlay_mounts=(str((tmp_path / "worktree" / ".git").resolve()),),
         provider_relay="vsock://2:443",
@@ -81,9 +109,13 @@ def _request(tmp_path: Path, **changes: Any) -> Any:
     policy = _policy(tmp_path)
     receipt = _git_receipt(tmp_path)
     command = ("codex", "exec", "--json", "bound prompt")
-    environment = (
-        ("CODEX_HOME", str((tmp_path / "profile").resolve())),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    environment = tuple(
+        sorted(
+            (
+                ("CODEX_HOME", str((tmp_path / "profile").resolve())),
+                *receipt.fixed_environment,
+            )
+        )
     )
     identity = (
         "HomericIntelligence/Hephaestus",
@@ -133,6 +165,68 @@ def _request(tmp_path: Path, **changes: Any) -> Any:
     }
     values.update(changes)
     return iso.CodexIsolationRequestV1(**values)
+
+
+def test_request_binds_git_receipt_paths_and_environment(tmp_path: Path) -> None:
+    """A re-digested request cannot diverge from its exact Git receipt."""
+    request = _request(tmp_path)
+    changed_environment = tuple(
+        (name, "0" if name == "GIT_NO_REPLACE_OBJECTS" else value)
+        for name, value in request.environment
+    )
+    with pytest.raises(ValueError, match="environment does not match"):
+        dataclasses.replace(
+            request,
+            environment=changed_environment,
+            environment_digest=_digest(changed_environment),
+        )
+
+    other_worktree = str((tmp_path / "other-worktree").resolve())
+    changed_receipt = dataclasses.replace(
+        request.git_receipt,
+        canonical_worktree=other_worktree,
+        fixed_environment=tuple(
+            sorted(
+                (
+                    name,
+                    other_worktree if name == "GIT_WORK_TREE" else value,
+                )
+                for name, value in request.git_receipt.fixed_environment
+            )
+        ),
+    )
+    changed_environment_map = dict(request.environment)
+    changed_environment_map["GIT_WORK_TREE"] = other_worktree
+    changed_environment = tuple(sorted(changed_environment_map.items()))
+    with pytest.raises(ValueError, match="worktree paths"):
+        dataclasses.replace(
+            request,
+            environment=changed_environment,
+            environment_digest=_digest(changed_environment),
+            git_receipt=changed_receipt,
+            git_receipt_digest=_digest(changed_receipt),
+        )
+
+
+def test_request_allows_read_only_git_capability_downgrade(tmp_path: Path) -> None:
+    """The request can reduce the worktree grant to read-only access."""
+    request = _request(tmp_path)
+    worktree = request.git_receipt.canonical_worktree
+    profile = request.private_profile_path
+    policy = dataclasses.replace(
+        request.policy,
+        read_only_mounts=(*request.policy.read_only_mounts, worktree),
+        read_write_mounts=(profile,),
+    )
+
+    downgraded = dataclasses.replace(
+        request,
+        policy=policy,
+        policy_digest=_digest(policy),
+    )
+
+    assert worktree in downgraded.policy.read_only_mounts
+    assert worktree not in downgraded.policy.read_write_mounts
 
 
 def _prepared(request: Any, **changes: Any) -> Any:
@@ -457,12 +551,64 @@ def test_result_v1_rejects_cleanup_deadline_overrun(
 
 
 def test_executable_staging_runs_only_descriptor_bound_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    """Staging copies bytes from the held source descriptor."""
+    """Staging streams bytes through held source and destination descriptors."""
     iso = _module()
     source = tmp_path / "source-codex"
     original = _linux_elf(b"original")
+    source.write_bytes(original)
+    source.chmod(0o500)
+    job_root = tmp_path / "job"
+    job_root.mkdir(mode=0o700)
+    read = patch.object(iso.os, "read", wraps=iso.os.read)
+    opened = patch.object(iso.os, "open", wraps=iso.os.open)
+
+    with read as read_call, opened as open_call:
+        staged = iso._stage_linux_executable(
+            source,
+            job_root,
+            expected_size=len(original),
+            expected_digest=_digest(original),
+        )
+
+    assert staged.path.read_bytes() == original
+    assert staged.digest == _digest(original)
+    assert stat.S_IMODE(staged.path.stat().st_mode) == 0o500
+    assert read_call.call_count == 4
+    assert all(call.args[1] <= len(original) + 1 for call in read_call.call_args_list)
+    assert all(call.args[1] & os.O_CLOEXEC for call in open_call.call_args_list)
+    iso.close_staged_linux_executable(staged)
+
+
+def test_public_executable_staging_uses_only_the_reviewed_release_identity(tmp_path: Path) -> None:
+    """The public staging boundary does not accept caller-selected identity values."""
+    iso = _module()
+    source = tmp_path / "source-codex"
+    job_root = tmp_path / "job"
+    expected = object()
+
+    with patch.object(iso, "_stage_linux_executable", return_value=expected) as stage:
+        actual = iso.stage_linux_executable(source, job_root)
+
+    assert actual is expected
+    stage.assert_called_once_with(
+        source,
+        job_root,
+        expected_size=222_567_456,
+        expected_digest="4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6",
+    )
+    with pytest.raises(TypeError):
+        iso.stage_linux_executable(source, job_root, expected_size=64)
+
+
+def test_executable_staging_rejects_a_source_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging rejects a source path that changes after descriptor open."""
+    iso = _module()
+    source = tmp_path / "source-codex"
+    original = _linux_elf(b"trusted")
     replacement = _linux_elf(b"replacement")
     source.write_bytes(original)
     source.chmod(0o500)
@@ -473,32 +619,67 @@ def test_executable_staging_runs_only_descriptor_bound_bytes(
     def replacing_open(path: os.PathLike[str] | str, flags: int, *args: Any, **kwargs: Any) -> int:
         descriptor = original_open(path, flags, *args, **kwargs)
         if Path(path) == source:
-            moved = tmp_path / "opened-source"
-            source.rename(moved)
+            source.rename(tmp_path / "opened-source")
             source.write_bytes(replacement)
             source.chmod(0o500)
         return descriptor
 
     monkeypatch.setattr(iso.os, "open", replacing_open)
-    staged = iso.stage_linux_executable(source, job_root)
 
-    assert staged.path.read_bytes() == original
-    assert staged.digest == _digest(original)
-    assert stat.S_IMODE(staged.path.stat().st_mode) == 0o500
-    assert source.read_bytes() == replacement
-    iso.close_staged_linux_executable(staged)
+    with pytest.raises(iso.CodexIsolationError) as error:
+        iso._stage_linux_executable(
+            source,
+            job_root,
+            expected_size=len(original),
+            expected_digest=_digest(original),
+        )
+
+    assert error.value.code == "codex_adapter_protocol_mismatch"
+    assert not tuple(job_root.iterdir())
+
+
+def test_executable_staging_rejects_maximum_plus_one_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging rejects a source that is one byte larger than its locked size."""
+    iso = _module()
+    expected = _linux_elf(b"locked")
+    source = tmp_path / "source-codex"
+    source.write_bytes(expected + b"x")
+    source.chmod(0o500)
+    job_root = tmp_path / "job"
+    job_root.mkdir(mode=0o700)
+    read = patch.object(iso.os, "read", wraps=iso.os.read)
+
+    with read as read_call, pytest.raises(iso.CodexIsolationError) as error:
+        iso._stage_linux_executable(
+            source,
+            job_root,
+            expected_size=len(expected),
+            expected_digest=_digest(expected),
+        )
+
+    assert error.value.code == "codex_adapter_protocol_mismatch"
+    read_call.assert_not_called()
+    assert not tuple(job_root.iterdir())
 
 
 def test_staged_executable_descriptor_survives_path_swap(tmp_path: Path) -> None:
     """The held descriptor stays bound when the staged path is replaced."""
     iso = _module()
     source = tmp_path / "source-codex"
-    source.write_bytes(_linux_elf(b"trusted"))
+    trusted = _linux_elf(b"trusted")
+    source.write_bytes(trusted)
     source.chmod(0o500)
     job_root = tmp_path / "job"
     job_root.mkdir(mode=0o700)
 
-    staged = iso.stage_linux_executable(source, job_root)
+    staged = iso._stage_linux_executable(
+        source,
+        job_root,
+        expected_size=len(trusted),
+        expected_digest=_digest(trusted),
+    )
     original = os.fstat(staged.descriptor)
     staged.path.unlink()
     staged.path.write_bytes(_linux_elf(b"replacement"))
@@ -507,6 +688,28 @@ def test_staged_executable_descriptor_survives_path_swap(tmp_path: Path) -> None
     assert os.fstat(staged.descriptor).st_ino == original.st_ino
     assert _digest(os.pread(staged.descriptor, original.st_size, 0)) == staged.digest
     iso.close_staged_linux_executable(staged)
+
+
+def test_executable_staging_rejects_a_locked_digest_mismatch(tmp_path: Path) -> None:
+    """Staging rejects source bytes that do not match the locked digest."""
+    iso = _module()
+    source = tmp_path / "source-codex"
+    payload = _linux_elf(b"untrusted")
+    source.write_bytes(payload)
+    source.chmod(0o500)
+    job_root = tmp_path / "job"
+    job_root.mkdir(mode=0o700)
+
+    with pytest.raises(iso.CodexIsolationError) as error:
+        iso._stage_linux_executable(
+            source,
+            job_root,
+            expected_size=len(payload),
+            expected_digest="0" * 64,
+        )
+
+    assert error.value.code == "codex_adapter_protocol_mismatch"
+    assert not tuple(job_root.iterdir())
 
 
 def test_darwin_codex_artifact_is_rejected_for_linux_guest(tmp_path: Path) -> None:
@@ -519,7 +722,12 @@ def test_darwin_codex_artifact_is_rejected_for_linux_guest(tmp_path: Path) -> No
     job_root.mkdir(mode=0o700)
 
     with pytest.raises(iso.CodexIsolationError) as error:
-        iso.stage_linux_executable(source, job_root)
+        iso._stage_linux_executable(
+            source,
+            job_root,
+            expected_size=source.stat().st_size,
+            expected_digest=_digest(source.read_bytes()),
+        )
 
     assert error.value.code == "codex_adapter_protocol_mismatch"
     assert not tuple(job_root.iterdir())

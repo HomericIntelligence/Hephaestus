@@ -344,7 +344,10 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     _child(
         "GIT_NO_REPLACE_OBJECTS",
         "Disable Git object replacement",
-        "hephaestus.config.child_environments.build_git_child_env",
+        (
+            "hephaestus.config.child_environments.build_git_child_env",
+            "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        ),
         "literal-1",
     ),
     _child(

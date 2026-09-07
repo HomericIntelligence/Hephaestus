@@ -3342,6 +3342,25 @@ class TestImplementBudget:
         assert retry.job.descr == "implement"
         assert item.attempts["implement"] == 1
 
+    def test_codex_inventory_uncertainty_finishes_without_reusing_the_worktree(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A quarantined Codex worktree cannot enter another implementation turn."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="codex_adapter_inventory_uncertain"),
+            ctx,
+        )
+        item.state = "TEST_WAIT"
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "codex_isolation_quarantined")
+        assert item.attempts["implement"] == 1
+
     def test_invalid_remediation_mapping_stops_before_tests_or_publication(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

@@ -326,6 +326,7 @@ def capture_codex_worktree_boundary(worktree: Path) -> CodexWorktreeBoundary:
                     "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_DIR": str(git_dir),
                     "GIT_INDEX_FILE": str(index),
+                    "GIT_NO_REPLACE_OBJECTS": "1",
                     "GIT_OPTIONAL_LOCKS": "0",
                     "GIT_WORK_TREE": str(canonical_worktree),
                 }.items()

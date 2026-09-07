@@ -1597,6 +1597,8 @@ class ImplementationStage(Stage):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
         if item.payload.pop("implement_error", None):
+            if item.payload.pop("codex_isolation_quarantined", None):
+                return StageOutcome(Disposition.FINISH_FAIL, "codex_isolation_quarantined")
             if item.payload.get("implementation_remediation"):
                 if item.payload.get("remediation_reply_inspection_required"):
                     return Continue(next_state=WORKTREE_WAIT)
@@ -2341,6 +2343,8 @@ class ImplementationStage(Stage):
         if not result.ok:
             logger.warning("implementation:%s: implement job failed: %s", item.issue, result.error)
             item.payload["implement_error"] = True
+            if result.error == "codex_adapter_inventory_uncertain":
+                item.payload["codex_isolation_quarantined"] = True
             if item.payload.get("implementation_remediation"):
                 item.payload["remediation_reply_inspection_required"] = True
                 item.payload["remediation_failure_diagnostic"] = redact_diagnostic_text(

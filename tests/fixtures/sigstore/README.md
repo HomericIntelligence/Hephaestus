@@ -24,3 +24,14 @@ entries API. The fixture also retains the production trusted root, the exact
 Rekor key, the signed checkpoint, and the inclusion proof. The test denies
 network access before it calls production admission. It changes each retained
 object and confirms that admission fails before adapter import.
+
+The following table binds each retained Codex evidence object to its origin,
+immutable revision or log identity, and upstream project license.
+
+| Object | Origin | Revision or log identity | License |
+| --- | --- | --- | --- |
+| `codex-aarch64-unknown-linux-musl.sigstore.b64` | `https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-aarch64-unknown-linux-musl.sigstore` | Codex commit `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`, asset `545043543` | `Apache-2.0` |
+| `codex-production-trusted-root.json` | `https://tuf-repo-cdn.sigstore.dev/trusted_root.json` | sigstore-python v4.5.0 commit `181074f4dc11b7e85ef44556e25248ef14fcb554` | `Apache-2.0` |
+| `codex-rekor.pub` | Rekor key from `https://tuf-repo-cdn.sigstore.dev/trusted_root.json` | sigstore-python v4.5.0 commit `181074f4dc11b7e85ef44556e25248ef14fcb554`; log ID `c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d` | `Apache-2.0` |
+| `codex-rekor.checkpoint` | `https://rekor.sigstore.dev/api/v1/log/entries?logIndex=2717156140` | log index `2717156140`; tree size `2624064470` | `Apache-2.0` |
+| `codex-rekor.proof` | `https://rekor.sigstore.dev/api/v1/log/entries?logIndex=2717156140` | log index `2717156140`; tree size `2624064470` | `Apache-2.0` |

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import json
 import os
+import resource
 import secrets
 import shutil
 import stat
@@ -30,6 +32,7 @@ RETAINED_SOURCE_ROOT = REPOSITORY_ROOT / "tests" / "fixtures" / "sigstore"
 _ROOT_SUFFIX = ("build", "test-fixtures", "codex-sigstore", "rust-v0.153.4")
 _CHUNK_SIZE = 1024 * 1024
 _TIMEOUT_SECONDS = 60
+_METADATA_MAX_BYTES = 64 * 1024
 
 
 class ProvisionError(RuntimeError):
@@ -363,6 +366,20 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
     return parsed.scheme.lower(), parsed.hostname, port
 
 
+def _validated_https_url(url: str) -> urllib.parse.SplitResult:
+    """Validate one initial or redirected release URL."""
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ProvisionError("asset URL is invalid")
+    return parsed
+
+
 class _PublicAssetRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Remove credentials when a public asset request changes origin."""
 
@@ -376,6 +393,7 @@ class _PublicAssetRedirectHandler(urllib.request.HTTPRedirectHandler):
         new_url: str,
     ) -> urllib.request.Request | None:
         """Build one redirect request without cross-origin credentials."""
+        _validated_https_url(new_url)
         redirected = super().redirect_request(
             request,
             file_pointer,
@@ -394,15 +412,7 @@ _PUBLIC_ASSET_OPENER = urllib.request.build_opener(_PublicAssetRedirectHandler()
 
 
 def _request(url: str, *, accept: str, authenticate: bool) -> urllib.request.Request:
-    parsed = urllib.parse.urlsplit(url)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.fragment
-    ):
-        raise ProvisionError("asset URL is invalid")
+    parsed = _validated_https_url(url)
     headers = {"Accept": accept, "User-Agent": "hephaestus-codex-fixture-provisioner"}
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if authenticate and parsed.hostname == "api.github.com" and token:
@@ -421,7 +431,10 @@ def _asset_metadata(asset: Mapping[str, Any]) -> None:
             ),
             timeout=_TIMEOUT_SECONDS,
         ) as response:
-            document = json.loads(response.read())
+            payload = response.read(_METADATA_MAX_BYTES + 1)
+            if len(payload) > _METADATA_MAX_BYTES:
+                raise ProvisionError("asset metadata exceeds its size limit")
+            document = json.loads(payload)
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise ProvisionError("asset metadata cannot be read") from exc
     expected = {
@@ -503,7 +516,8 @@ def _extract_elf(
     destination = str(record["sha256"])
     if _validate_file_at(cache, destination, record, label="cached extracted ELF"):
         return destination
-    if shutil.which("zstd") is None:
+    zstd = shutil.which("zstd")
+    if zstd is None:
         raise ProvisionError("zstd is required to extract the Codex fixture")
     temporary = _temporary_name()
     archive_descriptor = -1
@@ -516,11 +530,17 @@ def _extract_elf(
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
         )
         result = subprocess.run(
-            ["zstd", "--decompress", "--stdout"],
+            [zstd, "--decompress", "--stdout"],
             stdin=archive_descriptor,
             stdout=target_descriptor,
-            stderr=subprocess.PIPE,
-            text=True,
+            stderr=subprocess.DEVNULL,
+            env={"LANG": "C", "LC_ALL": "C"},
+            timeout=_TIMEOUT_SECONDS,
+            preexec_fn=functools.partial(
+                resource.setrlimit,
+                resource.RLIMIT_FSIZE,
+                (int(record["size"]), int(record["size"])),
+            ),
             check=False,
         )
         if result.returncode != 0:
@@ -539,7 +559,7 @@ def _extract_elf(
         return destination
     except ProvisionError:
         raise
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise ProvisionError("Codex archive extraction failed") from exc
     finally:
         if archive_descriptor >= 0:

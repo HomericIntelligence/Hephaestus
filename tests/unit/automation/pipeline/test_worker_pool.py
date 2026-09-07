@@ -9,6 +9,7 @@ import os
 import queue
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -63,6 +64,7 @@ from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
+    _codex_implementation_command,
     _codex_implementation_grants,
     _codex_private_profile,
     _confirmed_pytest_failure,
@@ -542,6 +544,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_DIR": str(git_dir),
                 "GIT_INDEX_FILE": str(index),
+                "GIT_NO_REPLACE_OBJECTS": "1",
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_WORK_TREE": str(worktree),
             }.items()
@@ -691,6 +694,21 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         assert str(worktree) not in frozen.policy.read_write_mounts
     else:
         assert str(worktree) in frozen.policy.read_write_mounts
+    profile = Path(frozen.private_profile_path)
+    auth_path = profile.parent / ".transient-auth" / frozen.run_nonce / "auth.json"
+    assert profile.name == "profile"
+    assert profile.parent.name == frozen.run_nonce
+    assert profile.parent.parent.name == ".runs"
+    assert str(profile) in frozen.policy.read_write_mounts
+    assert {
+        str(profile / "config.toml"),
+        str(profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1"),
+        str(auth_path),
+    }.issubset(frozen.policy.read_only_mounts)
+    assert not any(
+        str(profile / name) in frozen.policy.read_write_mounts
+        for name in ("home", "tmp", "appdata", "localappdata", "xdg", "sessions")
+    )
     admission.validate_adapter_identity.assert_called_once_with(
         distribution="adapter-dist",
         version="1.0",
@@ -776,7 +794,103 @@ def test_codex_private_profile_is_bound_to_the_issue_cycle(tmp_path: Path) -> No
     assert _codex_private_profile(first, build_root) == profile
     assert _codex_private_profile(other_cycle, build_root) != profile
     assert _codex_private_profile(other_issue, build_root) != profile
-    assert profile.parent.parent == build_root / Path(DEFAULT_STATE_DIR).name
+    assert profile.parent.parent == tmp_path.parent
+    assert not profile.is_relative_to(tmp_path)
+
+
+def test_codex_private_profile_rejects_symlinked_profile_container(tmp_path: Path) -> None:
+    """A pre-created profile-container link cannot redirect durable state."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    profiles = worktree.parent / f".{worktree.name}-codex-sessions"
+    profiles.symlink_to(outside, target_is_directory=True)
+    job = _agent_job(issue=123, session_key="cycle-one", cwd=worktree)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_protocol_mismatch"):
+        _codex_private_profile(job, worktree)
+
+    assert stat.S_IMODE(outside.stat().st_mode) != 0o700
+
+
+@pytest.mark.parametrize("receipt_name", [".active.json", ".quarantine.json"])
+def test_codex_private_profile_rejects_an_active_or_quarantine_receipt(
+    tmp_path: Path,
+    receipt_name: str,
+) -> None:
+    """An unfinished isolated run blocks all reuse of its durable store."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    job = _agent_job(issue=123, session_key="cycle-one", cwd=worktree)
+    profile = _codex_private_profile(job, worktree)
+    receipt = profile / receipt_name
+    receipt.write_text('{"status":"active"}', encoding="utf-8")
+    receipt.chmod(0o400)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        _codex_private_profile(job, worktree)
+
+
+def test_codex_private_profile_rejects_a_terminal_cleanup_tombstone(
+    tmp_path: Path,
+) -> None:
+    """A failed terminal cleanup blocks a new canonical session root."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    job = _agent_job(issue=123, session_key="cycle-one", cwd=worktree)
+    profile = _codex_private_profile(job, worktree)
+    canonical_root = profile.parent
+    (profile / ".quarantine.json").write_text(
+        '{"status":"terminal-state-invalid"}',
+        encoding="utf-8",
+    )
+    (profile / ".quarantine.json").chmod(0o400)
+    tombstone = canonical_root.with_name(canonical_root.name + ".terminal-cleanup")
+    canonical_root.rename(tombstone)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        _codex_private_profile(job, worktree)
+
+    assert tombstone.is_dir()
+    assert not canonical_root.exists()
+
+
+@pytest.mark.parametrize("session_id", [None, "provider-session-3019"])
+def test_codex_implementation_command_uses_supported_approval_config(
+    tmp_path: Path,
+    session_id: str | None,
+) -> None:
+    """New and resumed commands use the exact Codex 0.153.4 approval syntax."""
+    command = _codex_implementation_command(
+        executable=tmp_path / "codex",
+        worktree=tmp_path,
+        model="",
+        session_id=session_id,
+        sandbox="workspace-write",
+        operation=AgentOperation.IMPLEMENT,
+        allowed_tools=("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    )
+
+    assert "--ask-for-approval" not in command
+    assert command[
+        command.index('approval_policy="never"') - 1 : command.index('approval_policy="never"') + 1
+    ] == ("-c", 'approval_policy="never"')
+
+
+def test_codex_implementation_command_omits_default_reasoning_config(tmp_path: Path) -> None:
+    """The default effort preserves the selected model's built-in behavior."""
+    command = _codex_implementation_command(
+        executable=tmp_path / "codex",
+        worktree=tmp_path,
+        model="gpt-5.6-sol:default",
+        session_id=None,
+        sandbox="workspace-write",
+        operation=AgentOperation.IMPLEMENT,
+        allowed_tools=("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    )
+
+    assert not any(value.startswith("model_reasoning_effort=") for value in command)
 
 
 def test_shutdown_can_reap_without_marking_interrupted(

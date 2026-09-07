@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import importlib.util
 import json
@@ -9,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -186,6 +188,47 @@ def test_tracked_manifest_binds_the_official_release_objects() -> None:
     }
 
 
+def test_retained_evidence_has_complete_origin_revision_and_license() -> None:
+    """Each retained Codex evidence family has exact provenance and a license."""
+    readme = (MANIFEST.parent / "README.md").read_text(encoding="utf-8")
+    rows: dict[str, tuple[str, str, str]] = {}
+    for line in readme.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[0].startswith("`"):
+            rows[cells[0].strip("`")] = (cells[1], cells[2], cells[3])
+
+    expected = {
+        "codex-aarch64-unknown-linux-musl.sigstore.b64": (
+            "github.com/openai/codex/releases",
+            "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+            "Apache-2.0",
+        ),
+        "codex-production-trusted-root.json": (
+            "tuf-repo-cdn.sigstore.dev/trusted_root.json",
+            "181074f4dc11b7e85ef44556e25248ef14fcb554",
+            "Apache-2.0",
+        ),
+        "codex-rekor.pub": (
+            "tuf-repo-cdn.sigstore.dev/trusted_root.json",
+            "181074f4dc11b7e85ef44556e25248ef14fcb554",
+            "Apache-2.0",
+        ),
+        "codex-rekor.checkpoint": (
+            "rekor.sigstore.dev/api/v1/log/entries",
+            "2717156140",
+            "Apache-2.0",
+        ),
+        "codex-rekor.proof": (
+            "rekor.sigstore.dev/api/v1/log/entries",
+            "2717156140",
+            "Apache-2.0",
+        ),
+    }
+    assert rows.keys() >= expected.keys()
+    for name, values in expected.items():
+        assert all(value in actual for value, actual in zip(values, rows[name], strict=True))
+
+
 def test_production_sources_do_not_read_the_test_fixture_environment() -> None:
     """Production code cannot select the test-only external fixture root."""
     fixture_environment = "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT"
@@ -240,6 +283,16 @@ def test_provision_fetches_validates_extracts_and_caches_every_object(
 
     def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert command == ["zstd", "--decompress", "--stdout"]
+        assert kwargs["env"] == {"LANG": "C", "LC_ALL": "C"}
+        assert kwargs["timeout"] == 60
+        assert kwargs["stderr"] is subprocess.DEVNULL
+        limit = kwargs["preexec_fn"]
+        assert isinstance(limit, functools.partial)
+        assert limit.func is module.resource.setrlimit
+        assert limit.args == (
+            module.resource.RLIMIT_FSIZE,
+            (len(fetched["elf"]), len(fetched["elf"])),
+        )
         os.write(cast(int, kwargs["stdout"]), fetched["elf"])
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -418,6 +471,7 @@ def test_metadata_cross_origin_redirect_does_not_forward_token(
             headers={"Authorization": "Bearer metadata-secret"},
         ),
     )
+    monkeypatch.setattr(module, "_validated_https_url", urllib.parse.urlsplit)
     try:
         module._asset_metadata(
             {
@@ -438,6 +492,67 @@ def test_metadata_cross_origin_redirect_does_not_forward_token(
         destination.server_close()
 
     assert received_authorization == [None]
+
+
+def test_metadata_response_stops_at_the_fixed_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata overflow stops before JSON parsing or another stream read."""
+    module = _load()
+
+    class StreamingResponse(_Response):
+        def __init__(self) -> None:
+            super().__init__(b"")
+            self.read_sizes: list[int] = []
+
+        def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            return b"x" * size
+
+    response = StreamingResponse()
+    monkeypatch.setattr(
+        module,
+        "_PUBLIC_ASSET_OPENER",
+        SimpleNamespace(open=lambda *_args, **_kwargs: response),
+    )
+
+    with pytest.raises(module.ProvisionError, match="metadata exceeds"):
+        module._asset_metadata(
+            {
+                "api_url": "https://api.github.com/asset",
+                "id": 1,
+                "name": "asset",
+                "size": 1,
+                "sha256": "0" * 64,
+                "download_url": "https://github.com/asset",
+            }
+        )
+
+    assert response.read_sizes == [64 * 1024 + 1]
+
+
+@pytest.mark.parametrize(
+    "redirect_url",
+    [
+        "http://release-assets.githubusercontent.com/codex.zst",
+        "https://user@release-assets.githubusercontent.com/codex.zst",
+        "https://release-assets.githubusercontent.com/codex.zst#fragment",
+    ],
+)
+def test_redirect_target_must_pass_the_complete_https_policy(redirect_url: str) -> None:
+    """A redirect cannot weaken the validated release URL policy."""
+    module = _load()
+    source = module.urllib.request.Request("https://api.github.com/asset")
+
+    with pytest.raises(module.ProvisionError, match="URL"):
+        module._PublicAssetRedirectHandler().redirect_request(
+            source,
+            None,
+            302,
+            "Found",
+            {},
+            redirect_url,
+        )
 
 
 @pytest.mark.parametrize("url", ["http://github.test/asset", "file:///private/asset"])
@@ -575,6 +690,70 @@ def test_extracted_elf_mismatch_is_rejected(
         module.provision(root)
 
     assert not (root / "codex-aarch64-unknown-linux-musl").exists()
+
+
+def test_zstd_timeout_is_bounded_and_leaves_no_extracted_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled decompressor stops within the fixed provisioning deadline."""
+    module = _load()
+    _, fetched, _ = _write_test_manifest(tmp_path, module)
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 60
+        raise subprocess.TimeoutExpired(command, 60)
+
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "zstd")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    root = tmp_path / "build" / "test-fixtures" / "codex-sigstore" / "rust-v0.153.4"
+
+    archive_source = tmp_path / "archive.zst"
+    archive_source.write_bytes(fetched["archive"])
+    archive_record = {
+        "size": len(fetched["archive"]),
+        "sha256": _digest(fetched["archive"]),
+    }
+    elf_record = {"size": len(fetched["elf"]), "sha256": _digest(fetched["elf"])}
+    with module._prepare_root(root) as (_root_directory, cache):
+        archive = module._install_cache_file(
+            archive_source,
+            cache,
+            archive_record,
+            label="archive",
+        )
+        with pytest.raises(module.ProvisionError, match="archive extraction"):
+            module._extract_elf(archive, cache, elf_record)
+
+    assert not (root / "codex-aarch64-unknown-linux-musl").exists()
+
+
+def test_zstd_size_limit_rejects_one_byte_extracted_overflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The child file-size limit stops an ELF at maximum plus one byte."""
+    module = _load()
+    _write_test_manifest(tmp_path, module)
+    zstd = tmp_path / "zstd-overflow"
+    zstd.write_text("#!/bin/sh\nprintf '123456'\n", encoding="utf-8")
+    zstd.chmod(0o700)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: str(zstd))
+    root = tmp_path / "build" / "test-fixtures" / "codex-sigstore" / "rust-v0.153.4"
+    archive_source = tmp_path / "archive.zst"
+    archive_source.write_bytes(b"archive")
+    archive_record = {"size": 7, "sha256": _digest(b"archive")}
+    elf_record = {"size": 5, "sha256": _digest(b"12345")}
+
+    with module._prepare_root(root) as (_root_directory, cache):
+        archive = module._install_cache_file(
+            archive_source,
+            cache,
+            archive_record,
+            label="archive",
+        )
+        with pytest.raises(module.ProvisionError, match="archive extraction"):
+            module._extract_elf(archive, cache, elf_record)
+        assert not (root / ".cache" / "sha256" / cast(str, elf_record["sha256"])).exists()
 
 
 @pytest.mark.parametrize("link_target", ["root", "destination", "cache"])
