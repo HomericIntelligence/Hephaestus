@@ -90,6 +90,27 @@ def test_issue_implementer_state_dir_literal_is_centralized() -> None:
 class TestLogFilePath:
     """Tests for standard per-issue automation log paths."""
 
+    @pytest.mark.parametrize(
+        ("prefix", "iteration", "expected"),
+        [
+            ("learn", None, "learn-42.log"),
+            ("review", 3, "review-42-r3.log"),
+            ("pr-review-analysis", None, "pr-review-analysis-42.log"),
+        ],
+    )
+    def test_loop_destination_keeps_agent_and_issue_evidence_paths(
+        self,
+        tmp_path: Path,
+        prefix: str,
+        iteration: int | None,
+        expected: str,
+    ) -> None:
+        """Keep evidence paths separate from the loop destination."""
+        loop_destination = tmp_path / "loop.log"
+        result = log_file_path(tmp_path, prefix, 42, iteration=iteration)
+        assert result == tmp_path / expected
+        assert result != loop_destination
+
     def test_without_iteration(self, tmp_path: Path) -> None:
         assert log_file_path(tmp_path, "learn", 42) == tmp_path / "learn-42.log"
 

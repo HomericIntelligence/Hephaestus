@@ -59,6 +59,7 @@ def test_cli_logging_helpers_delegate_to_shared_helper(
 
     setup.assert_called_once_with(
         level=expected_level,
+        log_file=None,
         format_string=AUTOMATION_LOG_FORMAT,
         datefmt=LOG_DATEFMT,
         primary_stream="stderr",
@@ -151,3 +152,16 @@ def test_affected_cli_mains_forward_logging_arguments(module_name: str) -> None:
             module.main()
 
     configure.assert_called_once_with(verbose=True, log_format="json")
+
+
+def test_loop_logging_forwards_all_options() -> None:
+    """Forward the file, format, and level options to the CLI helper."""
+    module = import_module("hephaestus.automation.loop_runner")
+    with patch.object(module, "configure_cli_logging") as configure:
+        module._setup_logging(True, "json", quiet=True, log_file="loop.log")
+    configure.assert_called_once_with(
+        verbose=True,
+        log_format="json",
+        quiet=True,
+        log_file="loop.log",
+    )

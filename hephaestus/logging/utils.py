@@ -204,6 +204,16 @@ def get_logger(
     return ContextLogger(logger, context)
 
 
+def _remove_console_handlers(logger: logging.Logger) -> None:
+    """Remove and close console handlers. Keep file handlers."""
+    for handler in logger.handlers[:]:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(
+            handler, logging.FileHandler
+        ):
+            logger.removeHandler(handler)
+            handler.close()
+
+
 def setup_logging(
     level: int = logging.INFO,
     log_file: str | None = None,
@@ -211,7 +221,7 @@ def setup_logging(
     log_to_stderr: bool = False,
     json_format: bool = False,
     datefmt: str | None = None,
-    primary_stream: Literal["stdout", "stderr"] = "stdout",
+    primary_stream: Literal["stdout", "stderr"] | None = "stdout",
 ) -> None:
     """Set up global logging and apply default dependency log levels.
 
@@ -226,11 +236,15 @@ def setup_logging(
         log_to_stderr: Whether to also log to stderr
         json_format: If True, use structured JSON output instead of plain text
         datefmt: Optional date format for text log records
-        primary_stream: Console stream for the primary root handler
+        primary_stream: Console stream, or None for file-only output
 
     """
-    if primary_stream not in {"stdout", "stderr"}:
-        raise ValueError("primary_stream must be 'stdout' or 'stderr'")
+    if primary_stream not in {"stdout", "stderr", None}:
+        raise ValueError("primary_stream must be 'stdout', 'stderr', or None")
+    if primary_stream is None and not log_file:
+        raise ValueError("File-only logging requires log_file")
+    if primary_stream is None and log_to_stderr:
+        raise ValueError("File-only logging requires log_file and no stderr output")
 
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
@@ -245,12 +259,33 @@ def setup_logging(
         formatter = logging.Formatter(format_string, datefmt=datefmt)
 
     primary_target = sys.stderr if primary_stream == "stderr" else sys.stdout
-    stream_targets = [primary_target]
+    stream_targets = [primary_target] if primary_stream is not None else []
     if log_to_stderr and sys.stderr not in stream_targets:
         stream_targets.append(sys.stderr)
 
     # Lock protects the check-then-add TOCTOU race on the root logger's handler list
     with _handler_setup_lock:
+        # Deduplicate FileHandler by resolved path
+        if log_file:
+            abs_log_file = os.path.abspath(log_file)
+            existing_file = next(
+                (
+                    h
+                    for h in root_logger.handlers
+                    if isinstance(h, logging.FileHandler) and h.baseFilename == abs_log_file
+                ),
+                None,
+            )
+            if existing_file is not None:
+                existing_file.setFormatter(formatter)
+            else:
+                file_handler = logging.FileHandler(log_file)
+                file_handler.setFormatter(formatter)
+                root_logger.addHandler(file_handler)
+
+        if primary_stream is None:
+            _remove_console_handlers(root_logger)
+
         # Deduplicate console StreamHandlers by stream identity.
         for stream in stream_targets:
             has_stream = any(
@@ -263,15 +298,3 @@ def setup_logging(
                 stream_handler = logging.StreamHandler(stream)
                 stream_handler.setFormatter(formatter)
                 root_logger.addHandler(stream_handler)
-
-        # Deduplicate FileHandler by resolved path
-        if log_file:
-            abs_log_file = os.path.abspath(log_file)
-            has_file = any(
-                isinstance(h, logging.FileHandler) and h.baseFilename == abs_log_file
-                for h in root_logger.handlers
-            )
-            if not has_file:
-                file_handler = logging.FileHandler(log_file)
-                file_handler.setFormatter(formatter)
-                root_logger.addHandler(file_handler)
