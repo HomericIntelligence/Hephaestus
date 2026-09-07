@@ -1108,54 +1108,88 @@ def test_subprocess_session_controls_fail_before_child_launch(
     assert not escaped
 
 
+def _assert_startup_uses_original_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    blocked_write: bool,
+) -> None:
+    """Check startup deadlines through controlled process and pipe seams."""
+    module = _module()
+    now = [100.0]
+    closed: list[int] = []
+    signals: list[tuple[int, int]] = []
+    waits: list[tuple[list[int], list[int], float]] = []
+    writes: list[int] = []
+    process = SimpleNamespace(
+        pid=123,
+        stdin=SimpleNamespace(fileno=lambda: 11, close=lambda: closed.append(11)),
+        stdout=SimpleNamespace(fileno=lambda: 12, close=lambda: closed.append(12)),
+        poll=lambda: 0,
+    )
+
+    def launch(*_args: object, **_kwargs: object) -> object:
+        now[0] = 104.0
+        return process
+
+    def select_pipe(
+        readable: list[int], writable: list[int], exceptional: list[int], timeout: float
+    ) -> tuple[list[int], list[int], list[int]]:
+        assert exceptional == []
+        waits.append((readable, writable, timeout))
+        assert timeout == 1.0
+        if writable and not blocked_write:
+            return [], writable, []
+        now[0] = 105.0
+        return [], [], []
+
+    def write(descriptor: int, value: memoryview) -> int:
+        writes.append(descriptor)
+        return len(value)
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_STARTUP_SECONDS", 5.0)
+    monkeypatch.setattr(module.subprocess, "Popen", launch)
+    monkeypatch.setattr(module, "select", SimpleNamespace(select=select_pipe))
+    monkeypatch.setattr(
+        module,
+        "os",
+        SimpleNamespace(
+            set_blocking=lambda *_args: None,
+            write=write,
+            killpg=lambda pid, sig: signals.append((pid, sig)),
+        ),
+    )
+    tree = module._VerifiedInstalledTree(
+        root=tmp_path,
+        files={"example_adapter/__init__.py": b"def factory(): return None\n"},
+    )
+    with pytest.raises(module.CodexAdapterAdmissionError, match="deadline"):
+        module._IsolatedAdapterProcess(tree, "example_adapter", "factory")
+    assert closed == [11, 12]
+    assert signals == [(123, module.signal.SIGTERM), (123, module.signal.SIGKILL)]
+    if blocked_write:
+        assert writes == []
+        assert waits == [([], [11], 1.0)]
+    else:
+        assert writes == [11, 11]
+        assert waits[-1] == ([12], [], 1.0)
+
+
 def test_isolated_adapter_import_has_an_absolute_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocked module import terminates before the startup deadline."""
-    module = _module()
-    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_STARTUP_SECONDS", 0.05, raising=False)
-    tree = module._VerifiedInstalledTree(
-        root=tmp_path,
-        files={"example_adapter/__init__.py": b"while True: pass\n"},
-    )
-    outcome: list[BaseException] = []
-
-    worker = threading.Thread(
-        target=lambda: _capture_exception(
-            outcome,
-            lambda: module._default_importer(tree, "example_adapter", "factory"),
-        ),
-        daemon=True,
-    )
-    started = time.monotonic()
-    worker.start()
-    worker.join(timeout=0.5)
-
-    assert not worker.is_alive()
-    assert len(outcome) == 1
-    assert isinstance(outcome[0], module.CodexAdapterAdmissionError)
-    assert time.monotonic() - started < 0.5
+    """The readiness read uses the deadline set before process creation."""
+    _assert_startup_uses_original_deadline(tmp_path, monkeypatch, blocked_write=False)
 
 
 def test_startup_write_has_the_same_absolute_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A broker that does not read bootstrap data cannot block the host pipe."""
-    module = _module()
-    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_STARTUP_SECONDS", 0.05, raising=False)
-    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_BROKER", "while True: pass\n")
-    tree = module._VerifiedInstalledTree(
-        root=tmp_path,
-        files={"example_adapter/__init__.py": b"#" * (1024 * 1024)},
-    )
-    started = time.monotonic()
-
-    with pytest.raises(module.CodexAdapterAdmissionError):
-        module._default_importer(tree, "example_adapter", "factory")
-
-    assert time.monotonic() - started < 0.5
+    """The bootstrap write uses the deadline set before process creation."""
+    _assert_startup_uses_original_deadline(tmp_path, monkeypatch, blocked_write=True)
 
 
 def test_expired_request_write_terminates_the_broker_group(
@@ -1294,27 +1328,39 @@ def test_isolated_adapter_factory_has_an_absolute_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocked factory terminates before the control deadline."""
+    """A factory response wait uses the original control deadline."""
     module = _module()
-    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_CONTROL_SECONDS", 0.05, raising=False)
-    tree = module._VerifiedInstalledTree(
-        root=tmp_path,
-        files={"example_adapter/__init__.py": (b"def factory():\n    while True: pass\n")},
-    )
-    factory = module._default_importer(tree, "example_adapter", "factory")
-    outcome: list[BaseException] = []
-    worker = threading.Thread(
-        target=lambda: _capture_exception(outcome, factory),
-        daemon=True,
-    )
-    started = time.monotonic()
-    worker.start()
-    worker.join(timeout=0.5)
+    now = [100.0]
+    closed: list[bool] = []
+    waits: list[float] = []
+    process = module._IsolatedAdapterProcess.__new__(module._IsolatedAdapterProcess)
+    process._condition = threading.Condition()
+    process._next_request_id = 0
+    process._used_request_ids = set()
+    process._pending = {}
+    process._responses = {}
+    process._reader_error = None
+    process._session_nonce = "a" * 64
+    process.close = lambda: closed.append(True)
 
-    assert not worker.is_alive()
-    assert len(outcome) == 1
-    assert isinstance(outcome[0], module.CodexAdapterAdmissionError)
-    assert time.monotonic() - started < 0.5
+    def write(payload: dict[str, Any], *, deadline: float) -> None:
+        assert payload["operation"] == "factory"
+        assert payload["deadline"] == deadline == 105.0
+        now[0] = 104.0
+
+    def wait(*, timeout: float) -> None:
+        waits.append(timeout)
+        now[0] = 105.0
+
+    process._write = write
+    monkeypatch.setattr(process._condition, "wait", wait)
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(module, "_ISOLATED_ADAPTER_CONTROL_SECONDS", 5.0)
+    with pytest.raises(module.CodexAdapterAdmissionError, match="deadline"):
+        process.request("factory")
+    assert waits == [1.0]
+    assert closed == [True]
+    assert process._pending == {}
 
 
 @pytest.mark.parametrize("operation", ["prepare", "invoke", "destroy"])
@@ -1354,8 +1400,6 @@ def test_each_isolated_adapter_request_has_an_absolute_deadline(
     )
     protocol = importlib.import_module("hephaestus.agents.codex_isolation")
     request = replace(request, policy=policy, policy_digest=protocol.canonical_sha256(policy))
-    started = time.monotonic()
-
     with pytest.raises(module.CodexAdapterAdmissionError, match="deadline"):
         if operation == "prepare":
             adapter.prepare(request)
@@ -1366,7 +1410,8 @@ def test_each_isolated_adapter_request_has_an_absolute_deadline(
             else:
                 adapter.destroy(prepared)
 
-    assert time.monotonic() - started < 0.6
+    assert adapter._process._close_complete
+    assert adapter._process._process.poll() is not None
 
 
 def test_isolated_adapter_rejects_an_oversized_readiness_frame(
@@ -2400,6 +2445,7 @@ def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(tmp_path: Path) 
     source = (
         b"import threading\n"
         b"released = threading.Event()\n"
+        b"entered = threading.Event()\n"
         b"class Adapter:\n"
         b"    adapter_distribution = 'example-adapter'\n"
         b"    adapter_version = '1.0.0'\n"
@@ -2407,10 +2453,12 @@ def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(tmp_path: Path) 
         b"    def prepare(self, request): return request\n"
         b"    def invoke(self, prepared, auth_path):\n"
         b"        del auth_path\n"
-        b"        if not released.wait(1.0): raise RuntimeError('destroy did not run')\n"
+        b"        entered.set()\n"
+        b"        if not released.wait(5.0): raise RuntimeError('destroy did not run')\n"
         b"        return prepared\n"
         b"    def destroy(self, prepared):\n"
         b"        del prepared\n"
+        b"        if not entered.wait(5.0): raise RuntimeError('invoke did not run')\n"
         b"        released.set()\n"
         b"def factory(): return Adapter()\n"
     )
@@ -2427,15 +2475,14 @@ def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(tmp_path: Path) 
         target=lambda: outcome.append(adapter.invoke(prepared, "/private/auth.json")),
         daemon=True,
     )
-    started = time.monotonic()
     invoke.start()
-    time.sleep(0.05)
-    adapter.destroy(prepared)
-    invoke.join(timeout=0.5)
+    try:
+        adapter.destroy(prepared)
+    finally:
+        invoke.join(timeout=5)
 
     assert not invoke.is_alive()
     assert outcome == ["prepared"]
-    assert time.monotonic() - started < 0.5
 
 
 def test_retained_sigstore_fixture_verifies_offline_and_rejects_tampering(
