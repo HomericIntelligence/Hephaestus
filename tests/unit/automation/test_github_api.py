@@ -55,7 +55,7 @@ from hephaestus.io import utils as io_utils
 
 
 def _recovery_body(version: int = 3) -> str:
-    """Return a valid versioned recovery body for API tests."""
+    """Return a correct versioned recovery body for API tests."""
     if version < 3:
         body = render_recovered_requirements("source", "recovered", "b" * 64)
         return body.replace(":v=2:", f":v={version}:", 1) if version == 1 else body
@@ -68,30 +68,28 @@ def _recovery_body(version: int = 3) -> str:
     )
 
 
+def _recovery_comment(
+    body: object,
+    *,
+    comment_id: object = 2,
+    login: str = "hephaestus-bot",
+) -> dict[str, Any]:
+    """Return production-shaped REST metadata for one recovery comment."""
+    return {"id": comment_id, "body": body, "user": {"login": login}}
+
+
 def _recovery_conflict(body: str, kind: str) -> list[dict[str, Any]]:
     """Build one post-write recovery identity conflict."""
     if kind == "foreign":
-        return [{"databaseId": 2, "body": body, "viewerDidAuthor": False}]
+        return [_recovery_comment(body, login="another-user")]
     if kind == "malformed":
-        return [
-            {
-                "databaseId": 2,
-                "body": body.replace(":v=3:", ":v=9:", 1),
-                "viewerDidAuthor": True,
-            }
-        ]
+        return [_recovery_comment(body.replace(":v=3:", ":v=9:", 1))]
     if kind == "repeated":
         marker = body.split("\n", 1)[0]
-        return [
-            {
-                "databaseId": 2,
-                "body": f"{body}\n\n{marker}\n\nrepeated",
-                "viewerDidAuthor": True,
-            }
-        ]
+        return [_recovery_comment(f"{body}\n\n{marker}\n\nrepeated")]
     return [
-        {"databaseId": 2, "body": body, "viewerDidAuthor": True},
-        {"databaseId": 3, "body": body, "viewerDidAuthor": True},
+        _recovery_comment(body),
+        _recovery_comment(body, comment_id=3),
     ]
 
 
@@ -3362,7 +3360,7 @@ class TestUpsertAndDeleteComment:
     def test_recovery_create_confirms_owned_exact_body_and_database_id(self) -> None:
         """A recovery create returns only its actor-owned exact-body readback ID."""
         body = _recovery_body()
-        created = {"databaseId": 73, "body": body, "viewerDidAuthor": True}
+        created = _recovery_comment(body, comment_id=73)
         with (
             patch(
                 "hephaestus.automation.github_api.gh_current_login",
@@ -3395,7 +3393,7 @@ class TestUpsertAndDeleteComment:
     @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
     def test_recovery_update_rejects_post_write_identity_conflicts(self, conflict: str) -> None:
         """A recovery update conflict stops without cleanup after one PATCH."""
-        old = {"databaseId": 1, "body": _recovery_body(version=2), "viewerDidAuthor": True}
+        old = _recovery_comment(_recovery_body(version=2), comment_id=1)
         body = _recovery_body()
         with (
             patch(
@@ -3427,8 +3425,8 @@ class TestUpsertAndDeleteComment:
         mock_delete.assert_not_called()
 
     def test_recovery_update_preserves_comment_id_across_version_migration(self) -> None:
-        """A valid v1 recovery comment updates in place to the current v3 body."""
-        old = {"databaseId": 17, "body": _recovery_body(version=1), "viewerDidAuthor": True}
+        """A correct v1 recovery comment updates in place to the v3 body."""
+        old = _recovery_comment(_recovery_body(version=1), comment_id=17)
         body = _recovery_body()
         with (
             patch(
@@ -3452,6 +3450,56 @@ class TestUpsertAndDeleteComment:
         assert result == 17
         mock_create.assert_not_called()
         mock_gh_call.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "comment",
+        [
+            _recovery_comment(None),
+            _recovery_comment(_recovery_body(), comment_id="not-an-integer"),
+            _recovery_comment(_recovery_body(), comment_id=True),
+            _recovery_comment(_recovery_body(), comment_id=1.5),
+            _recovery_comment(_recovery_body(), comment_id=0),
+            _recovery_comment(_recovery_body(), comment_id=-1),
+            {"id": 2, "body": _recovery_body(), "user": {}},
+        ],
+        ids=[
+            "body",
+            "database-id-text",
+            "database-id-bool",
+            "database-id-fraction",
+            "database-id-zero",
+            "database-id-negative",
+            "author",
+        ],
+    )
+    def test_recovery_upsert_rejects_malformed_rest_metadata_before_mutation(
+        self,
+        comment: dict[str, Any],
+    ) -> None:
+        """A REST journal with missing data cannot authorize a recovery mutation."""
+        body = _recovery_body()
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                return_value=[comment],
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+        ):
+            with pytest.raises(RuntimeError, match=r"comment|journal|database|author|body"):
+                gh_issue_upsert_comment(
+                    5,
+                    RECOVERY_PROVENANCE_PREFIX,
+                    body,
+                    repo=("o", "r"),
+                )
+
+        mock_create.assert_not_called()
+        mock_gh_call.assert_not_called()
 
     def test_upsert_rejects_older_duplicates_without_deleting_them(self) -> None:
         """More than one matching canonical comment requires manual recovery."""

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .remediation_recovery import RemediationReplyResult, RemediationReviewInput
 
 from ._review_utils import parse_json_block
+from .reply_limits import MAX_ADDRESS_REPLY_CHARS
 
 _ADDRESS_PARSE_DEFAULT: dict[str, Any] = {"addressed": [], "replies": {}}
-MAX_ADDRESS_REPLY_CHARS = 4_000
 
 
 def _parse_addressed_block(text: str) -> dict[str, Any]:
@@ -58,3 +61,33 @@ def parse_addressed_replies(
             return None
         normalized[thread_id] = reply.strip()
     return normalized
+
+
+def parse_remediation_reply_result(
+    address_result: Any,
+    review_input: RemediationReviewInput,
+) -> RemediationReplyResult | None:
+    """Bind one exhaustive recovery reply map to its exact review input."""
+    from .remediation_recovery import RemediationReplyResult, RemediationReviewInput
+
+    if (
+        not isinstance(review_input, RemediationReviewInput)
+        or not isinstance(address_result, dict)
+        or set(address_result) != {"review_input_sha256", "replies"}
+        or address_result.get("review_input_sha256") != review_input.review_input_sha256
+    ):
+        return None
+    replies = address_result.get("replies")
+    if not isinstance(replies, dict) or not all(
+        isinstance(thread_id, str) and isinstance(reply, str)
+        for thread_id, reply in replies.items()
+    ):
+        return None
+    try:
+        return RemediationReplyResult.create(
+            review_input_sha256=review_input.review_input_sha256,
+            replies=replies,
+            thread_snapshot_json=review_input.thread_snapshot_json,
+        )
+    except (TypeError, ValueError):
+        return None

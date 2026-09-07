@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -11,13 +12,20 @@ import subprocess
 import threading
 import time
 from collections import deque
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
@@ -26,7 +34,10 @@ from hephaestus.automation.pipeline.github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
     GitHubJob,
+    ImplementationReplyProgress,
+    RecoverRemediationReplyJournalRequest,
     RecoverReplyJournalRequest,
+    RemediationReplyJournalRecovered,
     ReplyHandoffAttempted,
     ReplyJournalAppended,
     ReplyJournalRecovered,
@@ -40,8 +51,11 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
+    implementation_remediation_reply_handoff,
+    implementation_remediation_reply_handoff_journal_entry,
     implementation_reply_handoff,
     implementation_reply_handoff_journal_entry,
+    journaled_implementation_remediation_reply_handoff,
     journaled_implementation_reply_handoff,
 )
 from hephaestus.automation.pipeline.routing import Disposition
@@ -63,6 +77,13 @@ from hephaestus.automation.pipeline.stages.implementation import (
 )
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
+from hephaestus.automation.remediation_recovery import (
+    RemediationRecoveryReceipt,
+    RemediationReplyResult,
+    RemediationReviewInput,
+    encode_remediation_review_input,
+)
+from hephaestus.automation.session_naming import AGENT_IMPLEMENTER
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_NEEDS_PLAN,
@@ -95,7 +116,13 @@ def _committed_runner_fixture(tmp_path: Path, source: str) -> tuple[Path, str]:
     install_helpers.write_text("#!/bin/bash\n", encoding="utf-8")
     install_helpers.chmod(0o644)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "core.filemode", "false"], cwd=repo, check=True)
     subprocess.run(["git", "add", "scripts"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "update-index", "--chmod=+x", "scripts/run_ci_local.sh"],
+        cwd=repo,
+        check=True,
+    )
     subprocess.run(
         [
             "git",
@@ -219,16 +246,54 @@ def _drive_github_jobs(
     max_steps: int = 10,
 ) -> Any:
     """Execute typed GitHub jobs only after a stage has dispatched them."""
+    receipt: object
     for _ in range(max_steps):
         result = stage.step(item, ctx)
         if isinstance(result, Continue):
             item.state = result.next_state
             continue
+        if (
+            isinstance(result, JobRequest)
+            and isinstance(result.job, GitJob)
+            and result.job.op == "verify_remediation_journal"
+        ):
+            handoff = item.payload["remediation_journal_handoff_unverified"]
+            assert isinstance(handoff, dict)
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=True,
+                    value={
+                        "verified": True,
+                        "review_input_sha256": handoff["review_input_sha256"],
+                        "head_sha": handoff["head_sha"],
+                    },
+                ),
+                ctx,
+            )
+            item.state = result.on_done_state
+            continue
         if not isinstance(result, JobRequest) or not isinstance(result.job, GitHubJob):
             return result
         request = result.job.request
         try:
-            if isinstance(request, RecoverReplyJournalRequest):
+            if isinstance(request, RecoverRemediationReplyJournalRequest):
+                threads = request.threads.thaw()
+                assert isinstance(threads, list)
+                handoff = journaled_implementation_remediation_reply_handoff(
+                    ctx.github.issue_comments(request.pr_number),
+                    repository=request.repository,
+                    issue_number=request.issue_number,
+                    pr_number=request.pr_number,
+                    branch=request.branch,
+                    current_remote_head=request.current_remote_head,
+                    threads=threads,
+                )
+                receipt = RemediationReplyJournalRecovered(
+                    request=request,
+                    handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
+                )
+            elif isinstance(request, RecoverReplyJournalRequest):
                 threads = request.threads.thaw()
                 assert isinstance(threads, list)
                 handoff = journaled_implementation_reply_handoff(
@@ -236,7 +301,7 @@ def _drive_github_jobs(
                     pr_number=request.pr_number,
                     threads=threads,
                 )
-                receipt: object = ReplyJournalRecovered(
+                receipt = ReplyJournalRecovered(
                     request=request,
                     handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
                 )
@@ -258,6 +323,97 @@ def _drive_github_jobs(
         stage.on_job_done(item, job_result, ctx)
         item.state = result.on_done_state
     raise AssertionError("typed GitHub stage driver did not terminate")
+
+
+def _remediation_commit_receipt(
+    item: Any,
+    *,
+    head_sha: str = "b" * 40,
+    parent_sha: str = "a" * 40,
+) -> dict[str, object]:
+    """Build the exact worker-owned format-3 artifacts for a pushed test commit."""
+    snapshots = item.payload["remediation_thread_snapshots"]
+    replies = item.payload["remediation_output"]["replies"]
+    item.branch = item.branch or "fix/remediation"
+    item.worktree = item.worktree or "/tmp/repo/worktree"
+    diff = "diff --git a/a.py b/a.py\n"
+    review_input = RemediationReviewInput(
+        format_version=3,
+        repository="test-org/test-repo",
+        issue_number=item.issue,
+        pr_number=item.pr,
+        repo_root="/tmp/repo",
+        worktree_path=item.worktree,
+        branch=item.branch,
+        reviewed_parent_sha=parent_sha,
+        candidate_tree_sha="c" * 40,
+        recovery_commit_sha=head_sha,
+        changed_paths=("a.py",),
+        committed_diff_sha256=hashlib.sha256(diff.encode()).hexdigest(),
+        committed_diff=diff,
+        failure_diagnostic="",
+        thread_snapshot_sha256=RemediationReviewInput.thread_snapshot_digest(snapshots),
+        thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(snapshots),
+    )
+    reply_result = RemediationReplyResult.create(
+        review_input_sha256=review_input.review_input_sha256,
+        replies=replies,
+        thread_snapshot_json=review_input.thread_snapshot_json,
+    )
+    handoff = implementation_remediation_reply_handoff(
+        review_input,
+        reply_result,
+        "d" * 32,
+    )
+    assert handoff is not None
+    journal = implementation_remediation_reply_handoff_journal_entry(item.pr, handoff)
+    assert journal is not None
+    return {
+        "pushed": True,
+        "head_sha": head_sha,
+        "remediation_handoff": handoff,
+        "remediation_journal": {"marker": journal[0], "body": journal[1]},
+    }
+
+
+def _prepared_recovery_receipt(
+    item: Any,
+    *,
+    diff: str = "+guard\n",
+) -> RemediationRecoveryReceipt:
+    """Build one exact prepared-commit receipt for stage tests."""
+    snapshots = item.payload["remediation_thread_snapshots"]
+    review_input = RemediationReviewInput(
+        format_version=3,
+        repository="test-org/test-repo",
+        issue_number=item.issue,
+        pr_number=item.pr,
+        repo_root="/tmp/repo",
+        worktree_path=item.worktree,
+        branch=item.branch,
+        reviewed_parent_sha="a" * 40,
+        candidate_tree_sha="c" * 40,
+        recovery_commit_sha="b" * 40,
+        changed_paths=("module.py",),
+        committed_diff_sha256=hashlib.sha256(diff.encode()).hexdigest(),
+        committed_diff=diff,
+        failure_diagnostic="file_change failed",
+        thread_snapshot_sha256=RemediationReviewInput.thread_snapshot_digest(snapshots),
+        thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(snapshots),
+    )
+    journal_input_encoding, journal_input_data = encode_remediation_review_input(
+        review_input.canonical_bytes
+    )
+    return RemediationRecoveryReceipt(
+        review_input_bytes=review_input.canonical_bytes.decode(),
+        review_input_sha256=review_input.review_input_sha256,
+        journal_input_encoding=journal_input_encoding,
+        journal_input_data=journal_input_data,
+        expected_remote_sha="a" * 40,
+        content_snapshot=tuple(sorted(_DIRTY_CONTENT_SNAPSHOT.items())),
+        add_paths=("module.py",),
+        update_paths=(),
+    )
 
 
 class TestComposedPromptBuilders:
@@ -1821,6 +1977,66 @@ class TestWorktreeAndAdvise:
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
+    def test_precommit_intent_recovery_reuses_inspection_and_batch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An intent-only restart returns to test and the same prepare phase."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["implementation_remediation"] = True
+        status = " M tracked.txt\n"
+        diff = "diff --git a/tracked.txt b/tracked.txt\n+prepared\n"
+        snapshot = {
+            "index_sha256": "1" * 64,
+            "worktree_sha256": "2" * 64,
+            "untracked_sha256": "3" * 64,
+        }
+        inspection = {
+            "outcome": "dirty",
+            "branch": item.branch,
+            "worktree_path": "/tmp/repo/build/.worktrees/auto-1-impl",
+            "head_sha": "a" * 40,
+            "status": status,
+            "diff": diff,
+            "status_sha256": hashlib.sha256(status.encode()).hexdigest(),
+            "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
+            "candidate_tree_sha": "b" * 40,
+            "content_snapshot": snapshot,
+            "changed_file_count": 1,
+            "candidate_add_paths": ["tracked.txt"],
+            "candidate_update_paths": [],
+        }
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": inspection["worktree_path"],
+                    "impl_source_revision": inspection["head_sha"],
+                    "branch": item.branch,
+                    "head_sha": inspection["head_sha"],
+                    "dirty": True,
+                    "status": status,
+                    "diff": diff,
+                    "content_snapshot": snapshot,
+                    "incomplete_remediation_inspection": inspection,
+                    "remediation_batch_nonce": "4" * 32,
+                },
+            ),
+            ctx,
+        )
+
+        item.state = "DIRTY_DECISION_WAIT"
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="TEST_WAIT")
+        assert item.payload["remediation_writer_inspection"] == inspection
+        assert item.payload["remediation_batch_nonce"] == "4" * 32
+        assert "remediation_recovery_receipt" not in item.payload
+
     def test_failed_remediation_inspects_the_current_writer_without_restore_marker(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1909,10 +2125,10 @@ class TestWorktreeAndAdvise:
         assert rebase.job.kwargs["sync_to_expected_remote_head"] is True
         assert rebase.job.kwargs["pr_number"] == 1001
 
-    def test_dirty_remediation_inspection_routes_to_read_only_reply_recovery(
+    def test_dirty_remediation_inspection_routes_to_tests_before_preparation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A dirty failed-remediation writer gets one mapping-only recovery turn."""
+        """A dirty failed-remediation writer runs tests before commit preparation."""
         stage = ImplementationStage()
         item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
         item.branch = "1-auto-impl"
@@ -1920,6 +2136,8 @@ class TestWorktreeAndAdvise:
         item.payload.update(
             {
                 "implementation_remediation": True,
+                "issue_title": "Repair publication",
+                "issue_body": "Keep workers local.",
                 "_impl_source_revision": "a" * 40,
                 "remediation_writer_inspection_inflight": True,
             }
@@ -1935,18 +2153,19 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+change\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
                     "changed_file_count": 1,
-                    "worktree_path": "/tmp/implementation-writer",
+                    "worktree_path": item.worktree,
                 },
             ),
             make_ctx(),
         )
 
-        assert stage.step(item, make_ctx()) == Continue(
-            next_state="REMEDIATION_REPLY_RECOVERY_WAIT"
-        )
+        assert stage.step(item, make_ctx()) == Continue(next_state="TEST_WAIT")
 
     def test_clean_remediation_inspection_finishes_without_writable_retry(
         self, make_ctx: Any, make_work_item: Any
@@ -1973,7 +2192,7 @@ class TestWorktreeAndAdvise:
                     "head_sha": "a" * 40,
                     "status": "",
                     "diff": "",
-                    "worktree_path": "/tmp/implementation-writer",
+                    "worktree_path": item.worktree,
                 },
             ),
             make_ctx(),
@@ -2057,8 +2276,9 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+change\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
                     "changed_file_count": 1,
                     "worktree_path": item.worktree,
                 },
@@ -2071,16 +2291,52 @@ class TestWorktreeAndAdvise:
             "implementation_reply_failed",
         )
 
-    def test_dirty_inspection_uses_one_read_only_validated_reply_job(
+    def test_remediation_inspection_rejects_text_digest_mismatch(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A dirty writer can continue only after one valid read-only mapping."""
-        stage = ImplementationStage()
+        """A mapping prompt cannot use text outside its receipt digest."""
         item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
         item.worktree = "/tmp/implementation-writer"
         item.payload.update(
             {
                 "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
+                "remediation_thread_snapshots": [{"id": "thread-1"}],
+                "remediation_failure_diagnostic": "file_change failed",
+                "remediation_writer_inspection": {
+                    "outcome": "dirty",
+                    "branch": "1-auto-impl",
+                    "head_sha": "a" * 40,
+                    "status": " M module.py\n",
+                    "diff": "+changed after digest\n",
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+original\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
+                    "changed_file_count": 1,
+                    "worktree_path": "/tmp/implementation-writer",
+                },
+            }
+        )
+
+        assert ImplementationStage().step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_failed",
+        )
+
+    def test_dirty_inspection_uses_one_receipt_only_validated_reply_job(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A dirty writer can continue only after one valid read-only mapping."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/repo/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "issue_title": "Repair publication",
+                "issue_body": "Keep workers local.",
                 "_impl_source_revision": "a" * 40,
                 "remediation_thread_snapshots": [
                     {
@@ -2088,10 +2344,11 @@ class TestWorktreeAndAdvise:
                         "path": "module.py",
                         "line": 1,
                         "body": "Fix the guard.",
-                        "comments": [],
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "Fix it."}],
                     }
                 ],
                 "remediation_failure_diagnostic": "file_change failed",
+                "remediation_batch_nonce": "0" * 32,
                 "remediation_writer_inspection": {
                     "outcome": "dirty",
                     "branch": "1-auto-impl",
@@ -2099,30 +2356,59 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+guard\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+guard\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
                     "changed_file_count": 1,
-                    "worktree_path": "/tmp/implementation-writer",
+                    "worktree_path": item.worktree,
                 },
             }
         )
+        receipt = _prepared_recovery_receipt(item)
+        item.payload["remediation_recovery_receipt"] = receipt.as_dict()
+        item.session_ids[AGENT_IMPLEMENTER] = "writer-session"
+        item.session_bindings[AGENT_IMPLEMENTER] = cast(Any, object())
 
-        request = stage.step(item, make_ctx())
+        ctx = make_ctx(
+            config_overrides={
+                "projects_dir": tmp_path,
+                "agent": "codex",
+                "implementer_agent": "claude",
+                "model": "Shared:max",
+            }
+        )
+        request = stage.step(item, ctx)
 
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, AgentJob)
         assert request.job.descr == "recover_remediation_reply"
-        assert request.job.allowed_tools == "Read,Glob,Grep"
+        assert request.job.agent == "claude"
+        assert request.job.model == "Shared:max"
+        assert request.job.allowed_tools == ""
         assert request.job.sandbox == "read-only"
-        assert request.job.prompt_kwargs["inspection_status"]["status_sha256"] == "4" * 64
-        assert request.job.prompt_kwargs["inspection_status"]["diff_sha256"] == "5" * 64
+        assert request.job.cwd != Path(item.worktree)
+        assert request.job.cwd.is_dir()
+        assert list(request.job.cwd.iterdir()) == []
+        assert request.job.resume_session_id is None
+        assert request.job.resume_binding is None
+        assert request.job.execution_request == ExecutionRequest(
+            AgentRole.IMPLEMENTER,
+            AgentOperation.REMEDIATION_REPLY,
+            SessionLifecycle.ONE_SHOT,
+        )
+        assert request.job.prompt_kwargs == {
+            "review_input": receipt.review_input_bytes.encode(),
+            "review_input_sha256": receipt.review_input_sha256,
+        }
 
         stage.on_job_done(
             item,
             JobResult(
                 ok=True,
                 value={
-                    "addressed": ["thread-1"],
+                    "review_input_sha256": receipt.review_input_sha256,
                     "replies": {"thread-1": "Added the guard."},
                 },
             ),
@@ -2130,15 +2416,33 @@ class TestWorktreeAndAdvise:
         )
 
         assert item.attempts["remediation_reply"] == 1
-        assert stage.step(item, make_ctx()) == Continue(next_state="TEST_WAIT")
+        assert stage.step(item, make_ctx()) == Continue(next_state="REMEDIATION_PUBLISH_WAIT")
 
-        item.state = "COMMIT_PUSH_WAIT"
+        item.state = "REMEDIATION_PUBLISH_WAIT"
         publish = stage.step(item, make_ctx())
         assert isinstance(publish, JobRequest)
         assert isinstance(publish.job, GitJob)
-        assert publish.job.op == "commit_push"
-        assert publish.job.kwargs["expected_recovery_head"] == "a" * 40
-        assert publish.job.kwargs["expected_recovery_content_snapshot"] == (_DIRTY_CONTENT_SNAPSHOT)
+        assert publish.job.op == "publish_remediation_recovery"
+        assert publish.job.deadline_s is not None
+        first_publication_deadline = publish.job.deadline_s
+        assert publish.job.kwargs["recovery_receipt"] == receipt.as_dict()
+        reply_result = publish.job.kwargs["reply_result"]
+        assert isinstance(reply_result, dict)
+        assert reply_result["review_input_sha256"] == receipt.review_input_sha256
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="recovery commit publication failed",
+                value={"failure_kind": "transport", "recovery_commit_sha": "b" * 40},
+            ),
+            make_ctx(),
+        )
+        retried_publish = stage.step(item, make_ctx())
+        assert isinstance(retried_publish, JobRequest)
+        assert isinstance(retried_publish.job, GitJob)
+        assert retried_publish.job.deadline_s == first_publication_deadline
 
     def test_successful_inspection_resets_the_consecutive_git_failure_count(
         self, make_ctx: Any, make_work_item: Any
@@ -2168,17 +2472,18 @@ class TestWorktreeAndAdvise:
                     "status": " M module.py\n",
                     "diff": "+change\n",
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-                    "status_sha256": "4" * 64,
-                    "diff_sha256": "5" * 64,
+                    "status_sha256": hashlib.sha256(b" M module.py\n").hexdigest(),
+                    "diff_sha256": hashlib.sha256(b"+change\n").hexdigest(),
+                    "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
                     "changed_file_count": 1,
                     "worktree_path": item.worktree,
                 },
             ),
             make_ctx(),
         )
-        assert stage.step(item, make_ctx()) == Continue(
-            next_state="REMEDIATION_REPLY_RECOVERY_WAIT"
-        )
+        assert stage.step(item, make_ctx()) == Continue(next_state="TEST_WAIT")
         assert "git_error_retries" not in item.payload
 
         retry = stage._git_retry(item, "later git failure")
@@ -3121,6 +3426,8 @@ class TestImplementBudget:
         item.payload.update(
             {
                 "implementation_remediation": True,
+                "issue_title": "Repair publication",
+                "issue_body": "Keep workers local.",
                 "reviewed_pr_base_sha": "a" * 40,
                 "remediation_threads": [
                     {
@@ -3142,6 +3449,22 @@ class TestImplementBudget:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.prompt_kwargs["scope_retraction_paths"] == ("out-of-scope.py",)
+        item.payload.update(
+            {
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "comments": [
+                            {"id": "comment-1", "author": "reviewer", "body": "Remove it."}
+                        ],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Removed."},
+                },
+            }
+        )
         item.state = "COMMIT_PUSH_WAIT"
         push = stage.step(item, ctx)
         assert isinstance(push, JobRequest)
@@ -3443,6 +3766,7 @@ class TestTestsAndFix:
         github = FakeStageGitHub(labels=["state:plan-go"])
         ctx = make_ctx(org="HomericIntelligence", github=github)
         item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.payload.update({"issue_title": "Repair tests", "issue_body": ""})
         item.worktree = str(repo)
         item.payload["_impl_source_revision"] = trusted_revision
         stage = ImplementationStage()
@@ -3684,7 +4008,7 @@ class TestTestsAndFix:
     def test_hephaestus_existing_pr_remediation_does_not_repeat_full_local_gate(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Automatic full local checks are confined to initial PR publication."""
+        """An ordinary existing PR does not repeat the full local gate."""
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(
@@ -3699,6 +4023,38 @@ class TestTestsAndFix:
 
         assert isinstance(result, Continue)
         assert result.next_state == "COMMIT_PUSH_WAIT"
+
+    def test_failed_remediation_test_blocks_prepare_and_publish(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed recovery test cannot advance to commit preparation or push."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            repo="Hephaestus",
+            state="TEST_WAIT",
+        )
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "implementation_remediation": True,
+                "remediation_writer_inspection": {"candidate_tree_sha": "c" * 40},
+                "_impl_source_revision": "a" * 40,
+            }
+        )
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, BuildTestJob)
+        assert request.on_done_state == "COMMIT_PUSH_WAIT"
+
+        stage.on_job_done(item, JobResult(ok=False, error="tests failed"), ctx)
+        item.state = "COMMIT_PUSH_WAIT"
+
+        assert stage.step(item, ctx) == Continue(next_state="TESTFIX_WAIT")
+        assert "remediation_recovery_receipt" not in item.payload
 
     def test_tests_disabled_skip_to_commit_push(self, make_ctx: Any, make_work_item: Any) -> None:
         """run_pre_pr_tests=False (the default) skips the test leg."""
@@ -4156,6 +4512,7 @@ class TestTestsAndFix:
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        item.payload.update({"issue_title": "Repair tests", "issue_body": ""})
 
         first_gate = stage.step(item, ctx)
         assert isinstance(first_gate, JobRequest)
@@ -4348,7 +4705,7 @@ class TestCommitPushAndPrCreate:
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            JobResult(ok=True, value=_remediation_commit_receipt(item)),
             ctx,
         )
 
@@ -4358,6 +4715,52 @@ class TestCommitPushAndPrCreate:
         )
         assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in github.mutation_log
         assert "implementation_remediation" not in item.payload
+
+    @pytest.mark.parametrize(
+        ("handoff_result", "expected"),
+        [
+            (
+                "blocked",
+                StageOutcome(Disposition.ADVANCE, "implementation_reply_handoff_blocked"),
+            ),
+            (
+                "stale",
+                StageOutcome(
+                    Disposition.ADVANCE,
+                    "PR #1001 ready for fresh review after stale reply handoff",
+                ),
+            ),
+            (
+                "completed",
+                StageOutcome(Disposition.ADVANCE, "PR #1001 ready for review"),
+            ),
+        ],
+    )
+    def test_terminal_reply_handoff_clears_the_writer_inspection(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        handoff_result: str,
+        expected: StageOutcome,
+    ) -> None:
+        """A later remediation cycle cannot inherit the prior writer identity."""
+        item = make_work_item(issue=1, pr=1001, state="PR_CREATE")
+        item.payload.update(
+            {
+                implementation_module._REPLY_HANDOFF_RESULT: handoff_result,
+                "implementation_remediation": True,
+                "remediation_output": {"addressed": [], "replies": {}},
+                "remediation_writer_inspection": {
+                    "head_sha": "a" * 40,
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                },
+                "remediation_recovery_commit_sha": "b" * 40,
+            }
+        )
+
+        assert ImplementationStage().step(item, make_ctx()) == expected
+        assert "remediation_writer_inspection" not in item.payload
+        assert "remediation_recovery_commit_sha" not in item.payload
 
     def test_remediation_reply_handoff_waits_for_github_head_visibility(
         self, make_ctx: Any, make_work_item: Any
@@ -4404,7 +4807,7 @@ class TestCommitPushAndPrCreate:
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            JobResult(ok=True, value=_remediation_commit_receipt(item)),
             ctx,
         )
 
@@ -4479,7 +4882,7 @@ class TestCommitPushAndPrCreate:
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            JobResult(ok=True, value=_remediation_commit_receipt(item)),
             ctx,
         )
         item.state = "PR_CREATE"
@@ -4533,6 +4936,7 @@ class TestCommitPushAndPrCreate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
                 del progress
                 if self._reply_results:
@@ -4543,6 +4947,7 @@ class TestCommitPushAndPrCreate:
                     threads=threads,
                     replies=replies,
                     batch_nonce=batch_nonce,
+                    recover_pending_review=recover_pending_review,
                 )
 
         stage = ImplementationStage()
@@ -4571,7 +4976,7 @@ class TestCommitPushAndPrCreate:
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            JobResult(ok=True, value=_remediation_commit_receipt(item)),
             ctx,
         )
         item.state = "PR_CREATE"
@@ -4593,7 +4998,7 @@ class TestCommitPushAndPrCreate:
     def test_remediation_reply_handoff_reconstructs_after_restart_without_new_commit(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A recovered armed handoff blocks when read-only proof is unavailable."""
+        """A recovered initial journal safely delivers its exact reply once."""
 
         class TransientReadGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -4617,6 +5022,8 @@ class TestCommitPushAndPrCreate:
         github = TransientReadGitHub()
         ctx = make_ctx(github=github)
         publisher = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        publisher.branch = "fix/restart"
+        publisher.worktree = "/tmp/repo/worktree"
         publisher.payload.update(
             {
                 "implementation_remediation": True,
@@ -4645,9 +5052,53 @@ class TestCommitPushAndPrCreate:
 
         # The original writer records its exact, already-validated response
         # before the process is interrupted after its push.
+        diff = "diff --git a/a.py b/a.py\n"
+        review_input = RemediationReviewInput(
+            format_version=3,
+            repository="test-org/test-repo",
+            issue_number=1,
+            pr_number=1001,
+            repo_root="/tmp/repo",
+            worktree_path="/tmp/repo/worktree",
+            branch="fix/restart",
+            reviewed_parent_sha="a" * 40,
+            candidate_tree_sha="c" * 40,
+            recovery_commit_sha="b" * 40,
+            changed_paths=("a.py",),
+            committed_diff_sha256=hashlib.sha256(diff.encode()).hexdigest(),
+            committed_diff=diff,
+            failure_diagnostic="",
+            thread_snapshot_sha256=RemediationReviewInput.thread_snapshot_digest(
+                publisher.payload["remediation_thread_snapshots"]
+            ),
+            thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(
+                publisher.payload["remediation_thread_snapshots"]
+            ),
+        )
+        reply_result = RemediationReplyResult.create(
+            review_input_sha256=review_input.review_input_sha256,
+            replies={"thread-1": "[Response] Verified the already-pushed guard."},
+            thread_snapshot_json=review_input.thread_snapshot_json,
+        )
+        handoff = implementation_remediation_reply_handoff(
+            review_input,
+            reply_result,
+            "d" * 32,
+        )
+        assert handoff is not None
+        journal = implementation_remediation_reply_handoff_journal_entry(1001, handoff)
+        assert journal is not None
         stage.on_job_done(
             publisher,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            JobResult(
+                ok=True,
+                value={
+                    "pushed": True,
+                    "head_sha": "b" * 40,
+                    "remediation_handoff": handoff,
+                    "remediation_journal": {"marker": journal[0], "body": journal[1]},
+                },
+            ),
             ctx,
         )
         publisher.state = "PR_CREATE"
@@ -4657,15 +5108,13 @@ class TestCommitPushAndPrCreate:
         )
 
         resumed = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
-        # The normal restarted read sees the writer's new head and may see a
-        # relocated diff anchor.  These mutable fields must not invalidate an
-        # otherwise identical source-review conversation.
+        resumed.branch = "fix/restart"
+        resumed.payload["_impl_source_revision"] = "b" * 40
+        # The restarted read sees the writer's new head but the exact source
+        # review thread and its anchor stay unchanged.
         post_push_snapshots = [
             {
                 **publisher.payload["remediation_thread_snapshots"][0],
-                "path": "renamed.py",
-                "line": 97,
-                "body": "fix it at its new location",
                 "pr_state": {
                     "state": "OPEN",
                     "headRefOid": "b" * 40,
@@ -4682,14 +5131,16 @@ class TestCommitPushAndPrCreate:
         )
 
         assert _drive_github_jobs(stage, resumed, ctx) == StageOutcome(
-            Disposition.ADVANCE, "implementation_reply_handoff_blocked"
+            Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert (
             github.mutation_log.count(("post_implementation_thread_replies", (1001, ("thread-1",))))
-            == 0
+            == 1
         )
 
         stale = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        stale.branch = "fix/restart"
+        stale.payload["_impl_source_revision"] = "c" * 40
         changed_head_snapshots = [
             {
                 **post_push_snapshots[0],
@@ -4707,12 +5158,178 @@ class TestCommitPushAndPrCreate:
                 "remediation_thread_snapshots": changed_head_snapshots,
             }
         )
+        github._states.append({"state": "OPEN", "headRefOid": "c" * 40, "autoMergeRequest": None})
 
         stale_result = _drive_github_jobs(stage, stale, ctx)
 
         assert isinstance(stale_result, JobRequest)
         assert stale_result.job.descr == "address_review"
         assert "pending_implementation_reply_handoff" not in stale.payload
+
+    def test_partial_reply_progress_is_journaled_before_restart_replay(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A new coordinator resumes only from a linked progress journal."""
+
+        class PartialReplyGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_state={
+                        "state": "OPEN",
+                        "headRefOid": "b" * 40,
+                        "autoMergeRequest": None,
+                    }
+                )
+                self.calls = 0
+                self.progress: ImplementationReplyProgress | None = None
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+                batch_nonce: str,
+                progress: ImplementationReplyProgress | None = None,
+                recover_pending_review: bool = False,
+            ) -> ImplementationThreadReplyResult:
+                del expected_head_sha, threads, batch_nonce, recover_pending_review
+                self.calls += 1
+                self._log(
+                    "post_implementation_thread_replies",
+                    pr_number,
+                    tuple(sorted(replies)),
+                )
+                if self.calls == 1:
+                    assert self.progress is not None
+                    return ImplementationThreadReplyResult(
+                        replied_thread_ids=("thread-1",),
+                        receipts=self.progress.receipts,
+                        retryable_thread_ids=("thread-2",),
+                        progress=self.progress,
+                        retryable=True,
+                    )
+                assert progress == self.progress
+                assert self.progress is not None
+                return ImplementationThreadReplyResult(
+                    replied_thread_ids=("thread-1", "thread-2"),
+                    receipts=(*self.progress.receipts, {"id": "thread-2"}),
+                )
+
+        stage = ImplementationStage()
+        github = PartialReplyGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        snapshots = [
+            {
+                "id": thread_id,
+                "isResolved": False,
+                "path": f"{thread_id}.py",
+                "line": 3,
+                "side": "RIGHT",
+                "comments": [
+                    {"id": f"comment-{thread_id}", "author": "reviewer", "body": "fix it"}
+                ],
+            }
+            for thread_id in ("thread-1", "thread-2")
+        ]
+        replies = {
+            "thread-1": "[Response] Fixed the first guard.",
+            "thread-2": "[Response] Fixed the second guard.",
+        }
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": snapshots,
+                "remediation_output": {
+                    "addressed": list(replies),
+                    "replies": replies,
+                },
+            }
+        )
+        receipt = _remediation_commit_receipt(item)
+        handoff = receipt["remediation_handoff"]
+        assert isinstance(handoff, dict)
+        nonce = str(handoff["batch_nonce"])
+        response = replies["thread-1"].removeprefix("[Response] ")
+        marker_seed = ":".join(
+            (
+                "test-org/test-repo",
+                "1001",
+                "thread-1",
+                "b" * 40,
+                response,
+                nonce,
+            )
+        )
+        reply_marker = hashlib.sha256(marker_seed.encode()).hexdigest()[:24]
+        reply_body = (
+            f"[Response] {response}\n\n"
+            f"<!-- hephaestus-implementation-reply:{reply_marker} -->\n"
+            f"<!-- hephaestus-implementation-batch:{nonce} -->"
+        )
+        live_first = deepcopy(snapshots[0])
+        live_first_comments = cast(list[dict[str, Any]], live_first["comments"])
+        live_first_comments.append(
+            {"id": "implementation-comment-1", "author": "hephaestus", "body": reply_body}
+        )
+        progress_receipt = {
+            **live_first,
+            "implementation_reply_id": "implementation-comment-1",
+            "implementation_reply_body": reply_body,
+            "implementation_head_sha": "b" * 40,
+        }
+        github.progress = ImplementationReplyProgress(
+            phase="post_replies",
+            pull_request_id="PR_node",
+            pending_review_id="PRR_pending",
+            replied_thread_ids=("thread-1",),
+            receipts=(progress_receipt,),
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        item.state = "PR_CREATE"
+        assert _drive_github_jobs(stage, item, ctx, max_steps=20) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_retry"
+        )
+        assert len(github.comments[1001]) == 2
+
+        resumed = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        resumed.branch = item.branch
+        current_pr_state = {
+            "state": "OPEN",
+            "headRefOid": "b" * 40,
+            "autoMergeRequest": None,
+        }
+        resumed_snapshots = [
+            {**live_first, "pr_state": current_pr_state},
+            {**snapshots[1], "pr_state": current_pr_state},
+        ]
+        resumed.payload.update(
+            {
+                "_impl_source_revision": "b" * 40,
+                "implementation_remediation": True,
+                "remediation_threads": resumed_snapshots,
+                "remediation_thread_snapshots": resumed_snapshots,
+            }
+        )
+        recovered = journaled_implementation_remediation_reply_handoff(
+            github.issue_comments(1001),
+            repository="test-org/test-repo",
+            issue_number=1,
+            pr_number=1001,
+            branch=str(item.branch),
+            current_remote_head="b" * 40,
+            threads=resumed_snapshots,
+        )
+        assert recovered is not None
+        assert recovered["progress"] == github.progress.as_dict()
+
+        assert _drive_github_jobs(stage, resumed, ctx, max_steps=20) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert github.calls == 2
 
     def test_remediation_reply_handoff_retries_a_transient_journal_write_without_a_new_commit(
         self, make_ctx: Any, make_work_item: Any
@@ -4762,7 +5379,7 @@ class TestCommitPushAndPrCreate:
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            JobResult(ok=True, value=_remediation_commit_receipt(item)),
             ctx,
         )
 
@@ -4855,6 +5472,12 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "issue_title": "Keep commit metadata closed",
+                "issue_body": "Do not fetch issue data from a Git worker.",
+            }
+        )
 
         result = stage.step(item, ctx)
 
@@ -4863,6 +5486,9 @@ class TestCommitPushAndPrCreate:
         assert result.job.op == "commit_push"
         assert result.job.kwargs == {
             "issue_number": 1,
+            "issue_title": "Keep commit metadata closed",
+            "issue_body": "Do not fetch issue data from a Git worker.",
+            "repo_root": "/tmp/repo",
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
@@ -4870,6 +5496,21 @@ class TestCommitPushAndPrCreate:
             "git_message_timeout": 1200,
         }
         assert result.on_done_state == "PR_CREATE"
+
+    def test_commit_push_rejects_missing_issue_metadata(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A Git worker job cannot fetch issue metadata after enqueue."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.payload.pop("issue_title")
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_issue_metadata_invalid",
+        )
 
     def test_commit_push_includes_configured_pi_dir(
         self, make_ctx: Any, make_work_item: Any
@@ -4887,15 +5528,18 @@ class TestCommitPushAndPrCreate:
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["pi_dir"] == "/tmp/operator-pi"
 
-    def test_commit_push_uses_configured_codex_implementer_model(
-        self, make_ctx: Any, make_work_item: Any
+    @pytest.mark.parametrize("role_model", ["", "Literal:medium"])
+    def test_commit_push_uses_implementation_tool_and_model(
+        self, make_ctx: Any, make_work_item: Any, role_model: str
     ) -> None:
-        """Commit-message generation inherits the CLI-selected Codex tier and effort."""
+        """Commit messages use the role tool and inherit the global model."""
         stage = ImplementationStage()
         ctx = make_ctx(
             config_overrides={
                 "agent": "codex",
-                "implementer_model": "sol:medium",
+                "model": "Global:max",
+                "implementer_agent": "opencode",
+                "implementer_model": role_model,
             }
         )
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
@@ -4906,7 +5550,8 @@ class TestCommitPushAndPrCreate:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
-        assert result.job.kwargs["agent_model"] == "sol:medium"
+        assert result.job.kwargs["agent"] == "opencode"
+        assert result.job.kwargs["agent_model"] == (role_model or "Global:max")
 
     def test_commit_push_carries_the_sealed_implementation_base(
         self, make_ctx: Any, make_work_item: Any
@@ -5241,6 +5886,152 @@ class TestCommitPushAndPrCreate:
         assert retry_job.job.op == "commit_push"
         assert github.mutation_log == []
 
+    def test_recovery_push_failure_pins_the_exact_commit_for_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A retry can publish only the child returned by the failed push."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=9, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.branch = "9-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
+                "remediation_writer_inspection": {
+                    "head_sha": "a" * 40,
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "candidate_tree_sha": "c" * 40,
+                    "candidate_add_paths": ["module.py"],
+                    "candidate_update_paths": [],
+                    "diff": "diff --git a/module.py b/module.py\n",
+                    "diff_sha256": hashlib.sha256(
+                        b"diff --git a/module.py b/module.py\n"
+                    ).hexdigest(),
+                },
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "Fix it."}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed."},
+                },
+            }
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="recovery commit publication failed",
+                value={"recovery_commit_sha": "b" * 40},
+            ),
+            make_ctx(),
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.RETRY,
+            "commit_push failed",
+        )
+        retry_job = stage.step(item, make_ctx())
+
+        assert retry_job == Continue(next_state="REMEDIATION_PREPARE_WAIT")
+        item.state = retry_job.next_state
+        retry_job = stage.step(
+            item,
+            make_ctx(
+                config_overrides={
+                    "agent": "codex",
+                    "implementer_agent": "opencode",
+                    "model": "Shared:max",
+                }
+            ),
+        )
+        assert isinstance(retry_job, JobRequest)
+        assert isinstance(retry_job.job, GitJob)
+        assert retry_job.job.op == "prepare_remediation_recovery"
+        assert retry_job.job.kwargs["agent"] == "opencode"
+        assert retry_job.job.kwargs["agent_model"] == "Shared:max"
+        assert retry_job.job.deadline_s is not None
+        first_prepare_deadline = retry_job.job.deadline_s
+        assert retry_job.job.kwargs["repo_root"] == "/tmp/repo"
+        assert retry_job.job.kwargs["expected_recovery_commit_sha"] == "b" * 40
+        assert retry_job.job.kwargs["expected_recovery_add_paths"] == ("module.py",)
+        assert retry_job.job.kwargs["expected_recovery_update_paths"] == ()
+        assert (
+            retry_job.job.kwargs["expected_recovery_diff_sha256"]
+            == hashlib.sha256(b"diff --git a/module.py b/module.py\n").hexdigest()
+        )
+        item.state = retry_job.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="transient preparation failure"),
+            make_ctx(),
+        )
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.RETRY,
+            "remediation preparation failed",
+        )
+        second_prepare = stage.step(item, make_ctx())
+        assert isinstance(second_prepare, JobRequest)
+        assert isinstance(second_prepare.job, GitJob)
+        assert second_prepare.job.deadline_s == first_prepare_deadline
+
+    def test_transient_prepared_publication_retries_with_the_same_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A classified transport failure retains the prepared authority."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=9, pr=1001, state="REMEDIATION_PUBLISH_WAIT")
+        receipt = {"sealed": "receipt"}
+        item.payload["remediation_recovery_receipt"] = receipt
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="recovery commit publication failed",
+                value={"failure_kind": "transport", "recovery_commit_sha": "b" * 40},
+            ),
+            make_ctx(),
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.RETRY,
+            "commit_push failed",
+        )
+        assert item.state == "REMEDIATION_PUBLISH_WAIT"
+        assert item.payload["remediation_recovery_receipt"] is receipt
+
+    def test_permanent_prepared_publication_failure_does_not_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Lease drift stops without consuming a transient publication retry."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=9, pr=1001, state="REMEDIATION_PUBLISH_WAIT")
+        item.payload["remediation_recovery_receipt"] = {"sealed": "receipt"}
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="recovery commit publication failed",
+                value={"failure_kind": "lease_drift", "recovery_commit_sha": "b" * 40},
+            ),
+            make_ctx(),
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "remediation_publication_failed",
+        )
+        assert item.attempts.get("git_error", 0) == 0
+
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""
         stage = ImplementationStage()
@@ -5280,6 +6071,7 @@ class TestFullWalks:
         )
         item = make_work_item(issue=5, state="ENTER")
         item.payload["issue_title"] = "Add the widget"
+        item.payload["issue_body"] = ""
 
         pool = FakeWorkerPool()
         pool.script(
@@ -5315,6 +6107,7 @@ class TestFullWalks:
             config_overrides={"no_advise": True, "run_pre_pr_tests": True},
         )
         item = make_work_item(issue=6, state="ENTER")
+        item.payload.update({"issue_title": "Repair tests", "issue_body": ""})
 
         pool = FakeWorkerPool()
         pool.script(
@@ -5355,6 +6148,7 @@ class TestFullWalks:
             },
         )
         item = make_work_item(issue=7, repo="Hephaestus", state="ENTER")
+        item.payload.update({"issue_title": "Repair publication", "issue_body": ""})
         pool = FakeWorkerPool()
         pool.script(
             JobResult(ok=True, value={"path": "/tmp/wt7", "dirty": False}),
@@ -5479,12 +6273,16 @@ class TestFullWalks:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitHubJob)
-        assert result.job.request == AppendReplyJournalRequest(
-            issue_number=7,
-            marker=marker,
-            body=body,
-        )
+        assert isinstance(result.job.request, AppendReplyJournalRequest)
+        assert result.job.request.issue_number == 7
+        assert result.job.request.marker == marker
+        assert result.job.request.body == body
+        assert result.job.request.deadline_s is not None
+        assert result.job.request.deadline_s > started
         assert elapsed < 0.25
+        retried = stage.step(item, ctx)
+        assert isinstance(retried, JobRequest)
+        assert retried.job.request == result.job.request
 
         stage.on_job_done(
             item,
@@ -5497,6 +6295,86 @@ class TestFullWalks:
         item.state = result.on_done_state
         assert stage.step(item, ctx) == Continue(next_state="REPLY_HANDOFF_WAIT")
 
+    def test_reply_delivery_retry_keeps_one_operation_deadline(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Visibility retries cannot renew the reply-delivery time budget."""
+        handoff = implementation_reply_handoff(
+            "a" * 40,
+            [{"id": "thread-1", "comments": [{"id": "comment-1", "body": "Fix."}]}],
+            {"thread-1": "[Response] Fixed."},
+            "b" * 32,
+        )
+        assert handoff is not None
+        item = make_work_item(issue=3, pr=7, state="REPLY_HANDOFF_WAIT")
+        item.payload["pending_implementation_reply_handoff"] = handoff
+        stage = ImplementationStage()
+        ctx = make_ctx()
+
+        first = stage.step(item, ctx)
+        assert isinstance(first, JobRequest)
+        assert isinstance(first.job, GitHubJob)
+        assert isinstance(first.job.request, DeliverReplyHandoffRequest)
+        deadline = first.job.request.deadline_s
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ReplyHandoffAttempted(
+                    request=first.job.request,
+                    status="visibility_wait",
+                    remaining_handoff=FrozenJson.snapshot(handoff),
+                    visibility_retries=1,
+                    retry_delay_s=1.0,
+                ),
+            ),
+            ctx,
+        )
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY,
+            "implementation_reply_handoff_visibility_wait",
+        )
+        second = stage.step(item, ctx)
+        assert isinstance(second, JobRequest)
+        assert isinstance(second.job, GitHubJob)
+        assert isinstance(second.job.request, DeliverReplyHandoffRequest)
+        assert second.job.request.deadline_s == deadline
+
+    def test_failed_reply_delivery_does_not_poison_the_fresh_review_request(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A terminal delivery failure clears its closed request before review advance."""
+        handoff = implementation_reply_handoff(
+            "a" * 40,
+            [{"id": "thread-1", "comments": [{"id": "comment-1", "body": "Fix."}]}],
+            {"thread-1": "[Response] Fixed."},
+            "b" * 32,
+        )
+        assert handoff is not None
+        item = make_work_item(issue=3, pr=7, state="REPLY_HANDOFF_WAIT")
+        item.payload.update(
+            {
+                "pending_implementation_reply_handoff": handoff,
+                "implementation_remediation": True,
+            }
+        )
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitHubJob)
+
+        stage.on_job_done(item, JobResult(ok=False, error="worker failed"), ctx)
+
+        assert "_pending_github_request" not in item.payload
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE,
+            "implementation_reply_handoff_blocked",
+        )
+        assert "_pending_github_request" not in item.payload
+
     def test_reply_journal_recovery_has_bounded_delayed_retries(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -5504,9 +6382,11 @@ class TestFullWalks:
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REPLY_JOURNAL_RECOVERY_WAIT")
+        item.branch = "fix/recovery"
         item.payload.update(
             {
                 "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
                 "remediation_threads": [{"id": "thread-1", "body": "fix it"}],
                 "remediation_thread_snapshots": [
                     {
@@ -5569,9 +6449,11 @@ class TestFullWalks:
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REPLY_JOURNAL_RECOVERY_WAIT")
+        item.branch = "fix/recovery"
         item.payload.update(
             {
                 "implementation_remediation": True,
+                "_impl_source_revision": "a" * 40,
                 "remediation_threads": [{"id": "thread-1", "body": "fix it"}],
                 "remediation_thread_snapshots": [{"id": "thread-1", "comments": []}],
             }

@@ -9,6 +9,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.prompts.pr_review import (
     build_bounded_pr_review_analysis_prompt,
     build_bounded_review_validation_prompt,
@@ -18,7 +19,6 @@ from hephaestus.automation.source_worktree import SourceWorkspaceError
 from ..coordinator_sessions import agent_session_lifecycle, writer_session_key
 from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
-    DeliverReplyHandoffRequest,
     FrozenJson,
     GitHubJob,
     PrReviewReconciled,
@@ -31,6 +31,7 @@ from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
     empty_diff_outcome,
+    recovery_reply_job,
     restart_direct_pr_review,
 )
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
@@ -1272,6 +1273,12 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                         item.payload["review_audit_failure"] = True
                         return Continue(next_state=EVAL)
                     feedback[thread_id] = detail
+        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        deadline_s = (
+            pending.deadline_s
+            if isinstance(pending, ReconcilePrReviewRequest)
+            else operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+        )
         request = ReconcilePrReviewRequest(
             issue_number=item.issue,
             pr_number=item.pr,
@@ -1286,8 +1293,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             feedback=FrozenJson.snapshot(feedback),
             findings=FrozenJson.snapshot(findings),
             review_diff=str(item.payload.get("pr_diff") or ""),
+            deadline_s=deadline_s,
         )
-        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
         if pending is None:
             item.payload[_PENDING_GITHUB_REQUEST] = request
         elif pending != request:
@@ -1332,44 +1339,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         return StageOutcome(Disposition.FINISH_FAIL, reason) if reason is not None else None
 
     def _recovery_reply_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Dispatch one exact recovery-only reply handoff to a worker."""
-        if item.issue is None or item.pr is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
-        handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
-        retries = item.payload.get(
-            _REPLY_VISIBILITY_RETRIES,
-            0,
-        )
-        if (
-            not isinstance(handoff, dict)
-            or isinstance(retries, bool)
-            or not isinstance(retries, int)
-            or retries < 0
-        ):
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
-        try:
-            request = DeliverReplyHandoffRequest(
-                issue_number=item.issue,
-                pr_number=item.pr,
-                handoff=FrozenJson.snapshot(handoff),
-                visibility_retries=retries,
-            )
-        except (TypeError, ValueError):
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
-        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
-        if pending is None:
-            item.payload[_PENDING_GITHUB_REQUEST] = request
-        elif pending != request:
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
-        return JobRequest(
-            GitHubJob(
-                repo=item.repo,
-                repo_root=Path(str(ctx.paths.repo_root)).resolve(),
-                request=request,
-                descr="recover_implementation_reply_handoff",
-            ),
-            on_done_state=EVAL,
-        )
+        return recovery_reply_job(item, ctx, _PENDING_GITHUB_REQUEST)
 
     @staticmethod
     def _on_reply_handoff_done(item: WorkItem, result: JobResult) -> None:

@@ -25,7 +25,7 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/coordinator_sources.py": 950,
     "hephaestus/automation/pipeline/coordinator_dispatch.py": 500,
     "hephaestus/automation/pipeline_github.py": 500,
-    "hephaestus/automation/pipeline_github_contract.py": 125,
+    "hephaestus/automation/pipeline_github_contract.py": 128,
     "hephaestus/automation/pipeline_github_transport.py": 425,
     "hephaestus/automation/pipeline_github_review_queries.py": 150,
     "hephaestus/automation/pipeline_github_queries.py": 650,

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
@@ -21,15 +23,20 @@ from hephaestus.automation.pipeline.github_jobs import (
     PrReviewReconciled,
     ReconcilePrReviewRequest,
     ReconcileScopeExpansionDependenciesRequest,
+    RecoverRemediationReplyJournalRequest,
     RecoverReplyJournalRequest,
+    RemediationReplyJournalRecovered,
     ReplyHandoffAttempted,
     ReplyJournalAppended,
     ReplyJournalRecovered,
     RunMergeWaitCycleRequest,
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
+    bind_delivery_request,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
+    implementation_remediation_reply_handoff,
+    implementation_remediation_reply_handoff_journal_entry,
     implementation_reply_handoff,
     implementation_reply_handoff_journal_entry,
 )
@@ -37,6 +44,10 @@ from hephaestus.automation.pipeline.scope_expansion_records import (
     parse_scope_expansion_lifecycle_comment,
     render_scope_expansion_child_body,
     render_scope_expansion_lifecycle_comment,
+)
+from hephaestus.automation.remediation_recovery import (
+    RemediationReplyResult,
+    RemediationReviewInput,
 )
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.scope_expansion_domain import ScopeExpansion
@@ -581,6 +592,101 @@ def test_runner_dispatches_append_with_a_fresh_accessor_per_job(
     assert appends == [(3, marker, request.body), (3, marker, request.body)]
 
 
+def test_verified_remediation_journal_append_removes_prepublication_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The durable prepared receipt remains until the journal append succeeds."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    events: list[object] = []
+
+    class FakePipelineGitHub:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def operation_deadline(self, _deadline_s: float) -> object:
+            return nullcontext()
+
+        def append_issue_comment(self, issue: int, marker: str, body: str) -> None:
+            events.append(("append", issue, marker, body))
+
+    def remove_receipt(**kwargs: object) -> None:
+        events.append(("remove", kwargs))
+
+    monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
+    monkeypatch.setattr(module, "remove_prepublication_receipt", remove_receipt)
+    marker = (
+        "<!-- hephaestus-implementation-remediation-reply-handoff:"
+        f"pr=7:head={'a' * 40}:batch={'b' * 32}:seq=0 -->"
+    )
+    request = AppendReplyJournalRequest(
+        issue_number=7,
+        marker=marker,
+        body=f'{marker}\n<!-- {{"format":3}} -->',
+        prepublication_receipt_sha256="c" * 64,
+    )
+    job = GitHubJob(
+        repo="example",
+        repo_root=tmp_path.resolve(),
+        request=request,
+        descr="append remediation journal",
+    )
+
+    receipt = module.PipelineGitHubJobRunner(org="example-org", dry_run=False).run(job)
+
+    assert receipt == ReplyJournalAppended(request=request)
+    assert events == [
+        ("append", 7, marker, request.body),
+        (
+            "remove",
+            {
+                "repo_root": tmp_path.resolve(),
+                "pr_number": 7,
+                "expected_review_input_sha256": "c" * 64,
+            },
+        ),
+    ]
+
+
+def test_dry_run_journal_append_keeps_prepublication_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A skipped dry-run append cannot remove restart authority."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    events: list[str] = []
+
+    class FakePipelineGitHub:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def append_issue_comment(self, _issue: int, _marker: str, _body: str) -> None:
+            events.append("append")
+
+    monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
+    monkeypatch.setattr(
+        module,
+        "remove_prepublication_receipt",
+        lambda **_kwargs: events.append("remove"),
+    )
+    marker = (
+        "<!-- hephaestus-implementation-remediation-reply-handoff:"
+        f"pr=7:head={'a' * 40}:batch={'b' * 32}:seq=0 -->"
+    )
+    request = AppendReplyJournalRequest(
+        issue_number=7,
+        marker=marker,
+        body=f'{marker}\n<!-- {{"format":3}} -->',
+        prepublication_receipt_sha256="c" * 64,
+    )
+
+    module.PipelineGitHubJobRunner(org="example-org", dry_run=True).run(
+        GitHubJob("example", tmp_path.resolve(), request, "dry-run append")
+    )
+
+    assert events == ["append"]
+
+
 def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -607,6 +713,9 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
         def issue_comments(self, issue: int) -> list[IssueComment]:
             assert issue == 7
             return [IssueComment(body=journal_body, viewer_did_author=True)]
+
+        def operation_deadline(self, _deadline_s: float) -> object:
+            return nullcontext()
 
         def gh_pr_state(self, pr: int) -> dict[str, object]:
             assert pr == 7
@@ -675,6 +784,135 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
         retry_delay_s=None,
     )
     assert delivery_calls == []
+
+
+def test_runner_recovers_only_the_bound_format_three_remediation_journal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The closed dispatcher returns a format-3 receipt for exact identities."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    threads = [{"id": "T1", "comments": [{"id": "C1", "body": "Fix.", "author": "dev"}]}]
+    diff = "diff --git a/a.py b/a.py\n"
+    review_input = RemediationReviewInput(
+        format_version=3,
+        repository="example-org/example",
+        issue_number=3,
+        pr_number=7,
+        repo_root=str(tmp_path.resolve()),
+        worktree_path=str((tmp_path / "writer").resolve()),
+        branch="fix/three",
+        reviewed_parent_sha="a" * 40,
+        candidate_tree_sha="b" * 40,
+        recovery_commit_sha="c" * 40,
+        changed_paths=("a.py",),
+        committed_diff_sha256=hashlib.sha256(diff.encode()).hexdigest(),
+        committed_diff=diff,
+        failure_diagnostic="provider failed",
+        thread_snapshot_sha256=RemediationReviewInput.thread_snapshot_digest(threads),
+        thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(threads),
+    )
+    reply_result = RemediationReplyResult.create(
+        review_input_sha256=review_input.review_input_sha256,
+        replies={"T1": "Fixed."},
+        thread_snapshot_json=review_input.thread_snapshot_json,
+    )
+    handoff = implementation_remediation_reply_handoff(review_input, reply_result, "d" * 32)
+    assert handoff is not None
+    journal = implementation_remediation_reply_handoff_journal_entry(7, handoff)
+    assert journal is not None
+    journal_body = journal[1]
+
+    class FakePipelineGitHub:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def operation_deadline(self, _deadline_s: float) -> object:
+            return nullcontext()
+
+        def issue_comments(self, issue: int) -> list[IssueComment]:
+            assert issue == 7
+            return [IssueComment(body=journal_body, viewer_did_author=True)]
+
+    monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
+    request = RecoverRemediationReplyJournalRequest(
+        issue_number=3,
+        pr_number=7,
+        repository="example-org/example",
+        branch="fix/three",
+        current_remote_head="c" * 40,
+        threads=FrozenJson.snapshot(threads),
+        deadline_s=10.0,
+    )
+    receipt = module.PipelineGitHubJobRunner(org="example-org", dry_run=False).run(
+        GitHubJob(
+            repo="example",
+            repo_root=tmp_path.resolve(),
+            request=request,
+            descr="recover remediation journal",
+        )
+    )
+
+    expected_handoff = dict(handoff)
+    expected_handoff["reconciliation_only"] = False
+    expected_handoff["recover_pending_review"] = True
+    assert receipt == RemediationReplyJournalRecovered(
+        request=request,
+        handoff=FrozenJson.snapshot(expected_handoff),
+    )
+
+
+def test_recover_remediation_journal_requires_operation_deadline() -> None:
+    """A recovery request cannot disable its operation-wide time limit."""
+    with pytest.raises(ValueError, match="deadline_s is required"):
+        RecoverRemediationReplyJournalRequest(
+            issue_number=3,
+            pr_number=7,
+            repository="example-org/example",
+            branch="fix/three",
+            current_remote_head="c" * 40,
+            threads=FrozenJson.snapshot([]),
+            deadline_s=None,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("changed", ["issue", "pr", "handoff", "visibility", "deadline"])
+def test_bind_delivery_request_rejects_stale_identity(changed: str) -> None:
+    """A restored delivery request cannot cross a retry identity boundary."""
+    handoff = {"head_sha": "a" * 40, "threads": []}
+    pending = bind_delivery_request(
+        None,
+        issue_number=3,
+        pr_number=7,
+        handoff=handoff,
+        visibility_retries=1,
+        deadline_s=10.0,
+    )
+    inputs: dict[str, object] = {
+        "issue_number": 3,
+        "pr_number": 7,
+        "handoff": handoff,
+        "visibility_retries": 1,
+        "deadline_s": 10.0,
+    }
+    replacements: dict[str, object] = {
+        "issue": 4,
+        "pr": 8,
+        "handoff": {"head_sha": "b" * 40, "threads": []},
+        "visibility": 2,
+        "deadline": 11.0,
+    }
+    key = {
+        "issue": "issue_number",
+        "pr": "pr_number",
+        "handoff": "handoff",
+        "visibility": "visibility_retries",
+        "deadline": "deadline_s",
+    }[changed]
+    inputs[key] = replacements[changed]
+
+    with pytest.raises(ValueError, match="identity is invalid"):
+        bind_delivery_request(pending, **inputs)  # type: ignore[arg-type]
 
 
 def test_runner_ensures_scope_expansion_children_idempotently(
@@ -1074,6 +1312,9 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             self.reads = 0
 
+        def operation_deadline(self, _deadline_s: float) -> object:
+            return nullcontext()
+
         def list_unresolved_review_threads(self, _pr: int) -> list[dict[str, object]]:
             self.reads += 1
             return [] if self.reads < 3 else [posted, late]
@@ -1101,6 +1342,7 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         feedback=FrozenJson.snapshot({}),
         findings=FrozenJson.snapshot([finding]),
         review_diff="diff",
+        deadline_s=time.monotonic() + 60,
     )
     job = GitHubJob(
         repo="example",

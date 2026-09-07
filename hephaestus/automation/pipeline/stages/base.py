@@ -346,6 +346,7 @@ class StageGitHub(Protocol):
         replies: dict[str, str],
         batch_nonce: str,
         progress: ImplementationReplyProgress | None = None,
+        recover_pending_review: bool = False,
     ) -> ImplementationThreadReplyResult:
         """Post host-validated implementation replies after a successful push.
 

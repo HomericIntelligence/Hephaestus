@@ -275,6 +275,22 @@ def test_normalization_rejects_non_string_body(body: object) -> None:
         )
 
 
+@pytest.mark.parametrize("database_id", [True, 1.5, 0, -1])
+def test_normalization_rejects_invalid_database_id(database_id: object) -> None:
+    """Only a positive integer can identify a comment for mutation."""
+    with pytest.raises(CommentJournalReadError, match="database id was not correct"):
+        normalize_issue_comments(
+            [
+                {
+                    "body": "Comment",
+                    "databaseId": database_id,
+                    "user": {"login": "bot"},
+                }
+            ],
+            viewer_login="bot",
+        )
+
+
 def test_snapshot_rejects_foreign_marker_spoofing() -> None:
     """A foreign planning marker is a conflict before journal reconstruction."""
     comments = [

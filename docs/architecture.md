@@ -1084,27 +1084,50 @@ Architectural contract:
   remediation, the implementation stage asks the Git worker to inspect the
   registered repository path, branch, and expected head without a change. The
   worker rejects executable or path-redirection Git configuration before it
-  reads the writer. Fixed byte, file-count, and snapshot limits bound the
-  inspection. A clean, invalid, or oversized inspection finishes with
-  `implementation_reply_failed`. A dirty inspection permits one read-only
-  reply-recovery turn with `Read,Glob,Grep`. That turn cannot edit, run Git,
-  publish, call GitHub, or resolve threads. It must produce one valid exhaustive
-  thread-reply mapping before tests, commits, pushes, or review can continue.
-  The commit worker compares the captured head and content snapshot immediately
-  before the commit. An ambiguous or false commit result fails and preserves
-  the dirty writer. It cannot prepare a reply handoff for the unchanged head.
-  The worker binds the new head and content snapshot again before the push. The
-  stage preserves the writer, snapshots, and diagnostic on every recovery
-  failure.
+  reads the writer. It binds the linked-worktree metadata with no-follow
+  directory descriptors when the host supplies them. On another host, it
+  rejects each link, junction, and reparse point and compares file identities.
+  Fixed byte, file-count, and snapshot limits bound the inspection. Empty path
+  sets do not require secure content traversal. Nonempty path inspection
+  requires POSIX no-follow directory-descriptor operations; another host fails
+  closed instead of following a reparse point. A clean,
+  invalid, or oversized inspection finishes with
+  `implementation_reply_failed`. After the tests pass, the commit worker
+  compares the captured head, content snapshot, candidate tree, bounded diff,
+  and diff SHA-256 digest. It prepares one signed, DCO-signed child commit with
+  the captured head as its only parent and the candidate tree as its exact tree.
+  Preparation does not publish the commit. The stage then permits one
+  receipt-only reply-recovery turn. That fresh, one-shot turn has no tools and
+  receives only the canonical format-three review input and its digest. It
+  cannot read the writer, edit, run Git, publish, call GitHub, or resolve
+  threads. Its reply result must echo the input
+  digest and contain one valid reply for each thread. Before publication, the
+  worker verifies the complete format-three journal encoding. It then publishes
+  only the prepared commit with the original remote-head lease. The worker uses
+  private Git metadata and host signing
+  configuration for this commit. Thus, a late repository configuration change
+  cannot run a filter or select a publication URL. It also requires a clean
+  worktree after the commit. An ambiguous or false commit result fails and
+  preserves the dirty writer. It cannot prepare a reply handoff for the
+  unchanged head. The stage retains the complete preparation receipt and reply
+  result across a transient publication failure. A retry can publish only that
+  child with the original remote-head lease. The stage does not prepare a
+  second commit for this retry. It preserves the writer, snapshots, diagnostic,
+  and receipt on every recovery failure.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That
   metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot
-  turn worker ownership admission into source verification. This is the only
-  hook-bypassing push: it contains no implementation changes, retains the
-  empty `--force-with-lease` expectation for collision safety, and every later
-  implementation, remediation, rebase, release, and developer push continues
-  to run its configured hooks. Pre-commit hooks are unaffected because the
-  reservation creates no commit.
+  turn worker ownership admission into source verification. This push contains
+  no implementation changes and retains the empty `--force-with-lease`
+  expectation for collision safety. One other narrow exception applies to the
+  inspected dirty-writer recovery above. Its exact commit and lease-protected
+  push do not run repository hooks because the repository configuration is
+  untrusted input at that boundary. The bounded path manifest, content
+  snapshot, exact candidate tree, signed DCO child, clean postflight, literal
+  GitHub URL, and remote-head lease replace hook authority for that recovery.
+  All ordinary implementation, remediation, rebase, release, and developer
+  commits and pushes continue to run their configured hooks. Pre-commit hooks
+  are unaffected by branch reservation because it creates no commit.
 - When parallel file-overlap serialization is enabled, normal-item dependency
   order remains authoritative while repeated overlap deferrals raise priority.
   Cross-repo same-number items are interleaved with normal items by that age
@@ -1225,9 +1248,11 @@ Architectural contract:
 - The implementation agent replies to every fixed open thread but never resolves it.
 - A remediation provider failure stores only a redacted diagnostic of at most
   500 characters. The recovery prompt fences the retained thread snapshots,
-  inspection status, diff, and diagnostic. A missing, invalid, partial, or
-  exhausted mapping fails before publication; a pushed branch cannot return to
-  review without the valid mapping.
+  inspection status, diff, and diagnostic. The recovery agent uses a fresh
+  one-shot session in an empty host directory. It has no tools and cannot use
+  the writer transcript. A missing, invalid, partial, or exhausted mapping
+  fails before publication; a pushed branch cannot return to review without
+  the valid mapping.
 - The implementation stage rebases and lease-publishes the writer branch before
   review; a rebase is never performed by a reviewer checkout.
 - When that host rebase conflicts, it remains paused under the captured base and
@@ -1245,10 +1270,21 @@ Architectural contract:
   a restart journal: before the first replay, the implementation stage writes
   the exact response map, source-snapshot fingerprint, head, and batch nonce
   to an immutable actor-owned GitHub journal record, retrying only that append
-  on a transient host failure. A restarted loop can recover only that exact
-  record when its immutable source-comment snapshots still match; the journal
-  is a machine recovery artifact, not an implementation response, so the only
-  human-facing `[Response]` remains anchored to the source review thread.
+  on a transient host failure. A pushed remediation uses the remediation-only
+  format-three record. This record contains the compressed canonical 16-field
+  review input, its digest, the exhaustive reply result and digest, and reply
+  progress. Normal handoffs keep their version-one and version-two formats.
+  Remediation recovery rejects those legacy formats and incomplete
+  format-three records. A restarted loop can recover only the exact record for
+  the current repository, issue, PR, branch, head, and thread snapshot. An old
+  record for another head is not a recovery candidate. The journal is a machine
+  recovery artifact, not an implementation response, so the only human-facing
+  `[Response]` remains anchored to the source review thread.
+- Before its first push, the Git worker stores the exact prepared commit receipt
+  and batch identity in a bounded no-follow host record. A restarted coordinator
+  can use this record only if the repository, writer, branch, remote parent,
+  complete thread snapshot, signed commit, tree, paths, and diff remain exact.
+  Publication then uses the same prepared commit SHA.
 - A pushed remediation records its exact commit as a one-use expected review
   head. The next review entry clears prior round and dependency receipts, then
   waits on the timer until GitHub reports that exact open, unarmed PR head.
@@ -1262,8 +1298,13 @@ Architectural contract:
   to validation without reconciling; it never resolves based on a stale
   receipt. An unproven resolution similarly returns through fresh review and
   never attempts an unsafe compensating unresolve mutation.
-- Open-thread pagination and multi-page conversation reads are stabilized by
-  matching complete rereads before they become remediation or mutation facts.
+- Review-thread pagination and multi-page conversation reads are stabilized by
+  two matching complete rereads before they become remediation or mutation
+  facts. Each reread binds the exact open PR identity before and after it,
+  repeats the full pagination for all resolved and unresolved threads, and
+  reads the complete comment history for every thread. A final PR identity read
+  must also match. Only then does the host derive the unresolved set. A thread,
+  resolution, comment, or PR-head mutation makes the read fail closed.
 - Standalone PR review-thread connections follow every `hasNextPage` cursor.
   Full per-thread comment histories are limited to 2,000 comments; exceeding
   that ceiling, malformed pagination, or a cursor cycle fails the read without
@@ -1591,6 +1632,13 @@ touch `WorkItem`s or stage queues. GitHub I/O is allowed only through the
 closed typed runner; generic worker code does not import the GitHub
 implementation.
 
+The neutral `commit_runtime` module owns commit staging, message validation,
+signing, and commit creation. The product-facing `pr_manager.commit_changes`
+compatibility adapter reads issue data before it calls this module. Pipeline
+stages put immutable issue title and body values in the job. The Git worker
+calls only the neutral commit seam and cannot import the GitHub client through
+the commit route.
+
 ### Job kinds
 
 Every job that can read repository source carries a provider-neutral
@@ -1642,22 +1690,24 @@ The exhaustive classification is maintained in the
  fixed host-review verification registry). A non-null
  `verified_runner_source_revision` keeps launcher construction in the closed
  worker boundary.
-- [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
- sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
- rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
+- [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op` is one operation
+ in the canonical [`GIT_OPS`](../hephaestus/automation/pipeline/git_jobs.py)
+ inventory. `__post_init__` validates the operation. Before a PR-review
  agent job, `verify_pr_review_checkout` receives the worktree path, branch,
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
  checks cleanliness again ([`_git_verify_pr_review_checkout`](../hephaestus/automation/pipeline/worker_pool.py)).
-- [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one of seven
- frozen typed requests: recover or append the version-one reply journal,
- deliver an exact reply handoff, reconcile one exact-head PR review, run one
- complete merge-wait cycle, create scope-expansion children, or reconcile their
+- [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one frozen
+ typed request. The request can recover a normal reply journal, recover a
+ remediation-only format-three journal, append a prepared journal, deliver an
+ exact reply handoff, reconcile one exact-head PR review, run one complete
+ merge-wait cycle, create scope-expansion children, or reconcile their
  dependencies. Nested service data uses canonical JSON snapshots;
  each receipt contains its request and fresh decodes, so stage and worker never
  share mutable GitHub responses. These jobs and their wait-state names are
- process-local. The durable reply marker and `"format": 1` body are unchanged,
- preserving restart, downgrade, and rollback recovery.
+ process-local. Normal version-one and version-two reply records are unchanged.
+ Format three is only for remediation recovery and has a separate marker and
+ parser.
 - [`CompactJob`](../hephaestus/automation/pipeline/jobs.py) — a best-effort
  `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
  the retry lifecycle.

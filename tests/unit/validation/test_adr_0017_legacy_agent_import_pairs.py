@@ -22,7 +22,6 @@ _APPROVED_DIRECT_IMPORTS: frozenset[tuple[str, str]] = frozenset(
         ("plan_reviewer.py", "claude_models"),
         ("post_merge_processor.py", "claude_invoke"),
         ("pr_manager.py", "claude_invoke"),
-        ("pr_manager.py", "claude_models"),
         ("pr_review_core.py", "claude_invoke"),
     }
 )

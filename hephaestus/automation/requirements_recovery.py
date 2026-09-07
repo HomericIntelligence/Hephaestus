@@ -119,12 +119,12 @@ class RecoveryProvenance:
 
 
 class RecoveryCommentIdentityError(RuntimeError):
-    """Indicate that the bounded recovery-comment journal is unsafe to use."""
+    """Identify a bounded recovery-comment journal that is not safe to use."""
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryCommentSelection[T]:
-    """Pair one validated actor-owned comment with its parsed provenance."""
+    """Hold one validated comment and its parsed provenance."""
 
     comment: T
     provenance: RecoveryProvenance
@@ -180,7 +180,7 @@ def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
 
 
 def _recovery_provenance_candidate_lines(body: str) -> list[str]:
-    """Return top-level lines that claim the recovery provenance marker family."""
+    """Return top-level lines that contain a recovery marker-family claim."""
     raw_lines: list[str] = []
     line_start = 0
     for line_end in _COMMONMARK_LINE_END_RE.finditer(body):
@@ -455,23 +455,23 @@ def select_recovery_comment[T](
     body_of: Callable[[T], str],
     owned_of: Callable[[T], bool],
 ) -> RecoveryCommentSelection[T] | None:
-    """Select the sole valid actor-owned recovery comment from a full journal.
+    """Select one correct actor-owned recovery comment from a full journal.
 
-    Every top-level recovery marker claim is part of the identity protocol.
+    Each top-level recovery marker claim is part of the identity protocol.
     The selector rejects a marker with leading whitespace, a foreign claim, a
     malformed provenance value, repeated claims in one comment, or duplicate
     actor-owned comments. A journal with no claim returns ``None``.
 
     Args:
-        comments: Complete bounded issue-comment journal in chronological order.
+        comments: Full bounded issue-comment journal in chronological order.
         body_of: Return the exact body for one journal entry.
-        owned_of: Return whether GitHub proves actor ownership for one entry.
+        owned_of: Return True when GitHub proves actor ownership for one entry.
 
     Returns:
         The one validated comment and its parsed provenance, or ``None``.
 
     Raises:
-        RecoveryCommentIdentityError: If any recovery claim is unsafe to use.
+        RecoveryCommentIdentityError: If it is not safe to use a recovery claim.
 
     """
     selections: list[RecoveryCommentSelection[T]] = []
@@ -484,7 +484,7 @@ def select_recovery_comment[T](
             raise RecoveryCommentIdentityError("recovery marker must start at byte zero")
         if not owned_of(comment):
             raise RecoveryCommentIdentityError(
-                "foreign or unverifiable recovered requirements marker"
+                "The recovered requirements marker is foreign, or GitHub cannot verify it"
             )
         if len(claims) > 1:
             raise RecoveryCommentIdentityError(
