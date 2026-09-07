@@ -17,9 +17,12 @@ from pathlib import Path
 from typing import Any, Self
 
 from hephaestus.agents.workspace import (
+    DirtyDirectClaim,
+    DirtyPlanIdentity,
     SourceLane,
     WorkspaceBinding,
     WorkspaceBindingError,
+    _dirty_workspace_permit,
     validate_workspace_binding,
 )
 from hephaestus.automation.implementation_writer import (
@@ -31,6 +34,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
     consume_implementation_writer_authority,
 )
+from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
@@ -270,10 +274,11 @@ class SourceWorkspaceReceipt:
     branch: str | None
     obligations: tuple[str, ...] = ()
     schema_version: int = 1
+    dirty_claim: DirtyDirectClaim | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible receipt."""
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "repository": self.repository,
             "repository_identity": self.repository_identity,
@@ -287,6 +292,9 @@ class SourceWorkspaceReceipt:
             "branch": self.branch,
             "obligations": list(self.obligations),
         }
+        if self.schema_version == 2:
+            payload["dirty_claim"] = self.dirty_claim.to_dict() if self.dirty_claim else None
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> Self:
@@ -305,6 +313,8 @@ class SourceWorkspaceReceipt:
             "branch",
             "obligations",
         }
+        if payload.get("schema_version") == 2:
+            fields.add("dirty_claim")
         if set(payload) != fields:
             raise SourceWorkspaceError("source workspace receipt schema mismatch")
         try:
@@ -322,10 +332,15 @@ class SourceWorkspaceReceipt:
                 detached=bool(payload["detached"]),
                 branch=str(branch) if branch is not None else None,
                 obligations=tuple(str(value) for value in payload["obligations"]),
+                dirty_claim=(
+                    DirtyDirectClaim.from_dict(payload["dirty_claim"])
+                    if payload["schema_version"] == 2
+                    else None
+                ),
             )
         except (TypeError, ValueError) as exc:
             raise SourceWorkspaceError(f"invalid source workspace receipt: {exc}") from exc
-        if receipt.schema_version != 1 or receipt.generation < 1:
+        if receipt.schema_version not in (1, 2) or receipt.generation < 1:
             raise SourceWorkspaceError("unsupported source workspace receipt")
         return receipt
 
@@ -1376,9 +1391,161 @@ class SourceWorkspaceManager:
             f"Then rerun issue #{item_number}."
         )
 
+    def claim_dirty_direct_continuation(
+        self, item_number: int, *, claim: DirtyDirectClaim, expected_generation: int
+    ) -> WorkspaceBinding:
+        """Arm one owned writer after the worker proves plan and PR absence."""
+        with file_lock(
+            self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION), require_exclusive=True
+        ):
+            return self._arm_dirty_direct_claim_locked(
+                item_number, claim=claim, expected_generation=expected_generation
+            )
+
+    def _arm_dirty_direct_claim_locked(
+        self, item_number: int, *, claim: DirtyDirectClaim, expected_generation: int
+    ) -> WorkspaceBinding:
+        """Write a claim while the caller holds the exact source lane lock."""
+        lane = SourceLane.IMPLEMENTATION
+        DirtyDirectClaim.from_dict(claim.to_dict())
+        receipt = self._require_receipt(item_number, lane)
+        self._reject_foreign_owner(receipt, item_number, lane)
+        if (
+            receipt.schema_version != 1
+            or receipt.generation != expected_generation
+            or claim.state != "armed"
+            or receipt.branch != claim.branch
+            or receipt.revision != claim.reservation_base_sha
+            or not _is_direct_implementation_branch(item_number, receipt.branch)
+            or not self._is_dirty(receipt.path)
+        ):
+            raise SourceWorkspaceError("dirty direct claim does not match its predecessor")
+        self._validate_dirty_claim_physical(receipt, claim)
+        successor = replace(
+            receipt,
+            schema_version=2,
+            generation=receipt.generation + 1,
+            dirty_claim=claim,
+            obligations=tuple(dict.fromkeys((*receipt.obligations, "dirty-direct-continuation"))),
+        )
+        self._write_receipt(successor)
+        if self._read_receipt(item_number, lane) != successor:
+            raise SourceWorkspaceError("dirty direct claim write is unconfirmed")
+        return self._binding(successor)
+
     @contextmanager
-    def acquire(self, binding: WorkspaceBinding, *, allowed_tools: str = "") -> Iterator[Path]:
-        """Hold the lane lease while validating and using a source workspace."""
+    def dirty_direct_publication(
+        self, binding: WorkspaceBinding
+    ) -> Iterator[Callable[[str], None]]:
+        """Hold a consumed writer claim through controlled commit and publication."""
+        claim = binding.dirty_claim
+        item = binding.item_number
+        if binding.schema_version != 2 or claim is None or item is None or claim.state != "armed":
+            raise SourceWorkspaceError("dirty direct publication binding is invalid")
+        lane = SourceLane.IMPLEMENTATION
+        with file_lock(self._lane_lock_path(item, lane), require_exclusive=True):
+            original = self._require_receipt(item, lane)
+            self._reject_foreign_owner(original, item, lane)
+            if (
+                self._binding(original)
+                != replace(binding, dirty_claim=replace(claim, state="consumed"))
+                or original.path != self._implementation_path(item)
+                or not self._path_is_registered_to_repository(original.path)
+                or self._head_revision(original.path) != original.revision
+                or self._head_branch(original.path) != f"refs/heads/{claim.branch}"
+            ):
+                raise SourceWorkspaceError("dirty direct publication ownership changed")
+            active = True
+            advanced = False
+
+            def advance(head: str) -> None:
+                nonlocal advanced
+                if (
+                    not active
+                    or advanced
+                    or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", head) is None
+                ):
+                    raise SourceWorkspaceError("dirty direct publication advancement is invalid")
+                if self._read_receipt(item, lane) != original:
+                    raise SourceWorkspaceError("dirty direct publication receipt changed")
+                parents = _git(
+                    original.path, "rev-list", "--parents", "-n", "1", head
+                ).stdout.split()
+                successor = replace(original, revision=head, generation=original.generation + 1)
+                if parents != [head, original.revision] or not self._physical_matches_receipt(
+                    successor
+                ):
+                    raise SourceWorkspaceError("dirty direct controlled commit is unconfirmed")
+                self._write_receipt(successor)
+                if self._read_receipt(item, lane) != successor:
+                    raise SourceWorkspaceError("dirty direct commit receipt write is unconfirmed")
+                advanced = True
+
+            try:
+                yield advance
+            finally:
+                active = False
+
+    def finish_dirty_direct_publication(
+        self, item_number: int, *, expected_head: str, pr_number: int
+    ) -> None:
+        """Restore a clean v1 receipt after the host verifies strict PR creation."""
+        if type(pr_number) is not int or pr_number < 1:
+            raise SourceWorkspaceError("dirty direct PR identity is invalid")
+        lane = SourceLane.IMPLEMENTATION
+        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+            original = self._require_receipt(item_number, lane)
+            self._reject_foreign_owner(original, item_number, lane)
+            if (
+                original.schema_version != 2
+                or original.dirty_claim is None
+                or original.dirty_claim.state != "consumed"
+                or original.revision != expected_head
+                or original.revision == original.dirty_claim.reservation_base_sha
+                or not self._physical_matches_receipt(original)
+            ):
+                raise SourceWorkspaceError("dirty direct completed publication changed")
+            successor = replace(
+                original,
+                schema_version=1,
+                dirty_claim=None,
+                generation=original.generation + 1,
+                obligations=tuple(
+                    value for value in original.obligations if value != "dirty-direct-continuation"
+                ),
+            )
+            self._write_receipt(successor)
+            if self._read_receipt(item_number, lane) != successor:
+                raise SourceWorkspaceError("dirty direct completion write is unconfirmed")
+
+    def _validate_dirty_claim_physical(
+        self, receipt: SourceWorkspaceReceipt, claim: DirtyDirectClaim
+    ) -> None:
+        """Check exact owner, branch, revision, and pending content under the lease."""
+        if (
+            receipt.detached
+            or receipt.branch != claim.branch
+            or receipt.revision != claim.reservation_base_sha
+            or receipt.path != self._implementation_path(receipt.item_number)
+            or receipt.path.resolve(strict=True) != receipt.path
+            or not self._path_is_registered_to_repository(receipt.path)
+            or self._head_revision(receipt.path) != receipt.revision
+            or self._head_branch(receipt.path) != f"refs/heads/{claim.branch}"
+            or _dirty_worktree_content_snapshot(receipt.path, timeout=30)
+            != claim.content_snapshot()
+        ):
+            raise SourceWorkspaceError("dirty direct claim physical identity changed")
+
+    @contextmanager
+    def acquire(
+        self,
+        binding: WorkspaceBinding,
+        *,
+        allowed_tools: str = "",
+        dirty_plan_identity: DirtyPlanIdentity | None = None,
+        validate_dirty_job: Callable[[object], Path] | None = None,
+    ) -> Iterator[Path]:
+        """Hold the lane lease and consume a dirty claim before provider execution."""
         if binding.item_number is None or binding.lane is None:
             raise SourceWorkspaceError("source workspace binding is incomplete")
         with file_lock(
@@ -1389,7 +1556,35 @@ class SourceWorkspaceManager:
             if receipt is None or self._binding(receipt) != binding:
                 raise SourceWorkspaceError("source workspace receipt no longer matches binding")
             try:
-                yield validate_workspace_binding(binding, allowed_tools=allowed_tools)
+                if binding.schema_version == 1:
+                    yield validate_workspace_binding(binding, allowed_tools=allowed_tools)
+                    return
+                claim = receipt.dirty_claim
+                if (
+                    claim is None
+                    or claim.state != "armed"
+                    or dirty_plan_identity
+                    != DirtyPlanIdentity(
+                        claim.plan_revision,
+                        claim.plan_fingerprint,
+                        claim.review_fingerprint,
+                        claim.allowed_paths,
+                    )
+                ):
+                    raise SourceWorkspaceError("dirty direct plan identity changed")
+                self._reject_foreign_owner(receipt, binding.item_number, binding.lane)
+                self._validate_dirty_claim_physical(receipt, claim)
+                consumed = replace(receipt, dirty_claim=replace(claim, state="consumed"))
+                self._write_receipt(consumed)
+                if self._read_receipt(binding.item_number, binding.lane) != consumed:
+                    raise SourceWorkspaceError("dirty direct consumption is unconfirmed")
+                with _dirty_workspace_permit(binding) as permit:
+                    cwd = validate_workspace_binding(
+                        binding, allowed_tools=allowed_tools, dirty_permit=permit
+                    )
+                    if validate_dirty_job is not None and validate_dirty_job(permit) != cwd:
+                        raise SourceWorkspaceError("dirty direct job workspace changed")
+                    yield cwd
             except WorkspaceBindingError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
 
@@ -1600,16 +1795,20 @@ class SourceWorkspaceManager:
         return branch
 
     def _binding(self, receipt: SourceWorkspaceReceipt) -> WorkspaceBinding:
-        return WorkspaceBinding.source(
-            cwd=receipt.path,
-            reusable_root=self.repo_root,
-            repository=receipt.repository,
-            ownership_key=receipt.ownership_key,
-            item_number=receipt.item_number,
-            lane=receipt.lane,
-            revision=receipt.revision,
-            generation=receipt.generation,
-            detached=receipt.detached,
+        return replace(
+            WorkspaceBinding.source(
+                cwd=receipt.path,
+                reusable_root=self.repo_root,
+                repository=receipt.repository,
+                ownership_key=receipt.ownership_key,
+                item_number=receipt.item_number,
+                lane=receipt.lane,
+                revision=receipt.revision,
+                generation=receipt.generation,
+                detached=receipt.detached,
+            ),
+            schema_version=receipt.schema_version,
+            dirty_claim=receipt.dirty_claim,
         )
 
     def _terminal_path(self, item_number: int) -> Path:

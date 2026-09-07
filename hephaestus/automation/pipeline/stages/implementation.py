@@ -83,7 +83,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.runtime import requires_codex_implementation_isolation
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.address_review_core import (
     _parse_addressed_block,
     parse_addressed_replies,
@@ -99,11 +99,13 @@ from hephaestus.automation.agent_config import (
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
 from hephaestus.automation.operation_deadlines import operation_deadline_after
+from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
 from hephaestus.automation.prompts.address_review import (
     get_address_review_prompt,
     get_remediation_reply_recovery_prompt,
 )
 from hephaestus.automation.prompts.implementation import (
+    get_dirty_direct_continuation_prompt,
     get_dirty_reused_worktree_decision_prompt,
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
@@ -121,6 +123,7 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
+    SourceWorkspaceManager,
     SourceWorkspaceRecoveryKind,
     SourceWorkspaceTerminalReference,
 )
@@ -321,6 +324,7 @@ RUNNER_FALLBACK_REASONS = frozenset(
 ENTER = "ENTER"
 GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
+DIRTY_DIRECT_CLAIM_WAIT = "DIRTY_DIRECT_CLAIM_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
 DIRTY_RECOVERY_WAIT = "DIRTY_RECOVERY_WAIT"
 REMEDIATION_REPLY_RECOVERY_WAIT = "REMEDIATION_REPLY_RECOVERY_WAIT"
@@ -345,6 +349,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
     GATE: "_gate",
     WORKTREE_WAIT: "_worktree_wait",
+    DIRTY_DIRECT_CLAIM_WAIT: "_dirty_direct_claim_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
     DIRTY_RECOVERY_WAIT: "_dirty_recovery_wait",
     REMEDIATION_REPLY_RECOVERY_WAIT: "_remediation_reply_recovery_wait",
@@ -1160,6 +1165,12 @@ class ImplementationStage(Stage):
         """
         if not item.issue:
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if item.payload.get("dirty_direct_active") and (
+            item.state == TESTFIX_WAIT
+            or (item.state == TEST_WAIT and item.payload.get("implement_error"))
+            or (item.state == COMMIT_PUSH_WAIT and item.payload.get("tests_failed"))
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_turn_failed")
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
             handler = cast(
@@ -1178,6 +1189,29 @@ class ImplementationStage(Stage):
     def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
+        if (
+            item.pr is None
+            and not item.payload.get("existing_pr")
+            and not item.payload.get("dirty_direct_checked")
+            and getattr(ctx.paths, "source_workspaces", None) is not None
+        ):
+            item.payload["dirty_direct_claim_inflight"] = True
+            item.payload["dirty_direct_preserve"] = True
+            return JobRequest(
+                GitJob(
+                    repo=item.repo,
+                    op="claim_dirty_direct_continuation",
+                    timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                    expected_repository=f"{ctx.org}/{item.repo}",
+                    kwargs={
+                        "repo_root": str(ctx.paths.repo_root),
+                        "issue_number": issue,
+                        "probe": True,
+                    },
+                    descr="claim_dirty_direct_continuation",
+                ),
+                on_done_state=DIRTY_DIRECT_CLAIM_WAIT,
+            )
         inspection = self._restored_remediation_inspection_job(item, ctx)
         if inspection is not None:
             return inspection
@@ -1261,6 +1295,103 @@ class ImplementationStage(Stage):
             descr="create_worktree",
         )
         return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
+
+    def _dirty_direct_claim_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Route a fresh claim to exactly one implementation turn."""
+        result = item.payload.pop("dirty_direct_claim_result", None)
+        manager = getattr(ctx.paths, "source_workspaces", None)
+        if callable(manager):
+            manager = manager()
+            ctx.paths.source_workspaces = manager
+        if isinstance(result, dict) and isinstance(manager, SourceWorkspaceManager):
+            value = result.get("value")
+            if isinstance(value, dict) and item.issue is not None:
+                path = manager.path_for(item.issue, SourceLane.IMPLEMENTATION)
+                if (
+                    value.get("preserved_worktree") == str(path)
+                    and manager.repository == item.repo
+                    and (path.exists() or path.is_symlink())
+                ):
+                    item.worktree = str(path)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_failed")
+        value = result.get("value")
+        if not isinstance(value, dict):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_invalid")
+        item.payload["dirty_direct_checked"] = True
+        if value.get("dirty_direct_not_applicable") is True:
+            item.payload.pop("dirty_direct_preserve", None)
+            return Continue(next_state=WORKTREE_WAIT)
+        try:
+            binding = WorkspaceBinding.from_dict(value["source_workspace"])
+            if (
+                binding.item_number != item.issue
+                or binding.repository != item.repo
+                or binding.dirty_claim is None
+            ):
+                raise ValueError("dirty claim owner changed")
+            plan = value["dirty_plan"]
+            if not isinstance(plan, dict):
+                raise ValueError("dirty plan is unavailable")
+            DirtyDirectPlanInput(**{**plan, "allowed_paths": tuple(plan["allowed_paths"])})
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_invalid")
+        item.worktree = str(binding.cwd)
+        item.branch = binding.dirty_claim.branch
+        item.payload.update(
+            {
+                "dirty_direct_active": True,
+                "dirty_direct_binding": binding.to_dict(),
+                "dirty_direct_plan": plan,
+                "dirty_status": value.get("dirty_status", ""),
+                "dirty_diff": value.get("dirty_diff", ""),
+                DIRECT_SCOPE_RESERVATION_KEY: value["direct_scope_reservation"],
+                DIRECT_SCOPE_BASE_SHA_KEY: binding.revision,
+                "_impl_source_revision": binding.revision,
+            }
+        )
+        return Continue(next_state=IMPLEMENT_WAIT)
+
+    def _dirty_direct_implement(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit the single edit-and-test turn with its independent plan inputs."""
+        if item.payload.get("dirty_direct_turn_submitted"):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_turn_already_submitted")
+        try:
+            binding = WorkspaceBinding.from_dict(item.payload["dirty_direct_binding"])
+            raw = item.payload["dirty_direct_plan"]
+            plan = DirtyDirectPlanInput(**{**raw, "allowed_paths": tuple(raw["allowed_paths"])})
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_invalid")
+        item.payload["dirty_direct_turn_submitted"] = True
+        return JobRequest(
+            AgentJob(
+                repo=item.repo,
+                issue=_issue_number(item),
+                agent=agent_provider(ctx, "implementer"),
+                model=stage_model(ctx, "implementer", implementer_model),
+                prompt_builder=get_dirty_direct_continuation_prompt,
+                cwd=binding.cwd,
+                workspace=binding,
+                retryable=False,
+                dirty_plan=plan,
+                timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout),
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                session_agent=AGENT_IMPLEMENTER,
+                execution_request=ExecutionRequest(
+                    AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW
+                ),
+                prompt_kwargs={
+                    "plan": plan.plan,
+                    "review": plan.review,
+                    "allowed_paths": plan.allowed_paths,
+                    "status": item.payload.get("dirty_status", ""),
+                    "diff": item.payload.get("dirty_diff", ""),
+                },
+                **_codex_isolation_job_kwargs(ctx),
+                descr="dirty_direct_continuation",
+            ),
+            on_done_state=TEST_WAIT,
+        )
 
     @staticmethod
     def _restored_remediation_inspection_job(
@@ -1848,6 +1979,8 @@ class ImplementationStage(Stage):
                 Disposition.FINISH_FAIL,
                 athena_advise_failure_reason(item),
             )
+        if item.payload.get("dirty_direct_active"):
+            return self._dirty_direct_implement(item, ctx)
         entry_outcome = self._implementation_agent_turn_entry_outcome(item, ctx, issue)
         if entry_outcome is not None:
             return entry_outcome
@@ -2234,6 +2367,22 @@ class ImplementationStage(Stage):
             if "remediation_reply_result" not in item.payload:
                 return Continue(next_state=REMEDIATION_REPLY_RECOVERY_WAIT)
             return Continue(next_state=REMEDIATION_PUBLISH_WAIT)
+        if item.payload.get("dirty_direct_active"):
+            return JobRequest(
+                GitJob(
+                    repo=item.repo,
+                    op="publish_dirty_direct_continuation",
+                    timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                    expected_repository=f"{ctx.org}/{item.repo}",
+                    kwargs={
+                        "repo_root": str(ctx.paths.repo_root),
+                        "issue_number": issue,
+                        "source_workspace": item.payload.get("dirty_direct_binding"),
+                    },
+                    descr="publish_dirty_direct_continuation",
+                ),
+                on_done_state=PR_CREATE,
+            )
         logger.info("implementation:%d: requesting commit+push job", issue)
         return _commit_push_request(item, ctx)
 
@@ -2460,6 +2609,15 @@ class ImplementationStage(Stage):
             ctx: Stage context.
 
         """
+        if item.payload.pop("dirty_direct_claim_inflight", False):
+            item.payload["dirty_direct_claim_result"] = {"ok": result.ok, "value": result.value}
+            return
+        if item.state == COMMIT_PUSH_WAIT and item.payload.get("dirty_direct_active"):
+            item.payload["dirty_direct_publication_result"] = {
+                "ok": result.ok,
+                "value": result.value,
+            }
+            return
         if item.payload.pop("remediation_writer_inspection_inflight", False):
             value = result.value if isinstance(result.value, dict) else {}
             receipt = dict(value)
@@ -3706,6 +3864,54 @@ class ImplementationStage(Stage):
             item.branch = issue_auto_impl_branch_name(item.issue)
         return Continue(next_state=WORKTREE_WAIT)
 
+    def _create_dirty_direct_pr(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Create one PR without adopting a concurrent PR or clearing failed work."""
+        result = item.payload.get("dirty_direct_publication_result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_publication_failed")
+        value = result.get("value")
+        if not isinstance(value, dict) or value.get("pushed") is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_publication_invalid")
+        head = value.get("head_sha")
+        if not is_full_commit_sha(head) or item.issue is None or item.pr is not None:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_pr_identity_invalid")
+        try:
+            binding = WorkspaceBinding.from_dict(item.payload["dirty_direct_binding"])
+            if binding.reusable_root is None:
+                raise ValueError("dirty direct source root is unavailable")
+            title = normalize_strict_conventional_title(
+                str(item.payload.get("issue_title") or f"Implement issue #{item.issue}")
+            )
+            body = get_pr_description(
+                item.issue,
+                summary=f"Implements the requested changes for issue #{item.issue}.",
+                changes="See the PR diff for the full change set.",
+                testing=item.payload.get("test_receipt") or "Not run by the automation pipeline.",
+            )
+            item.pr = ctx.github.create_pr(
+                item.issue, item.branch, title, body, strict_absence=True
+            )
+            state = ctx.github.gh_pr_state(item.pr)
+            if (
+                not isinstance(state, dict)
+                or state.get("state") != "OPEN"
+                or state.get("headRefOid") != head
+                or state.get("baseRefName") != "main"
+                or ctx.github.get_pr_head_branch(item.pr) != item.branch
+                or not ctx.github.pr_head_is_writable(item.pr)
+            ):
+                raise ValueError("dirty direct created PR head is unconfirmed")
+            SourceWorkspaceManager(
+                binding.reusable_root, repository=item.repo, base_dir=binding.cwd.parent
+            ).finish_dirty_direct_publication(item.issue, expected_head=head, pr_number=item.pr)
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_pr_creation_failed")
+        item.payload.pop("dirty_direct_preserve", None)
+        item.payload.pop("dirty_direct_active", None)
+        item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+        item.payload["_impl_source_revision"] = head
+        return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
+
     def _create_pr(  # noqa: C901
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult:
@@ -3714,6 +3920,8 @@ class ImplementationStage(Stage):
         The ``create_pr`` write is the stage's journal entry and happens
         BEFORE the advancing outcome (durable write precedes the queue push).
         """
+        if item.payload.get("dirty_direct_active"):
+            return self._create_dirty_direct_pr(item, ctx)
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         if terminal := item.payload.pop(_COMMIT_PUSH_TERMINAL, None):

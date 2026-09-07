@@ -68,6 +68,9 @@ if TYPE_CHECKING:
         def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
             pass
 
+        def open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
+            pass
+
         def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
             pass
 
@@ -106,12 +109,7 @@ if TYPE_CHECKING:
         def _implementation_reply_lock_path(self, pr_number: int) -> Path:
             pass
 
-        def upsert_issue_comment(
-            self,
-            issue_number: int,
-            marker: str,
-            body: str,
-        ) -> None:
+        def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
             pass
 
         def _delete_issue_comment(self, comment_id: int) -> None:

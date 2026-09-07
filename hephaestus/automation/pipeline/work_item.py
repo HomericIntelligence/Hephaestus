@@ -267,6 +267,7 @@ _POST_PROCESSING_PAYLOAD_KEYS = frozenset(
         "_worktree_cleanup_head_sha",
         "_wave_lease",
         "detached_push_failure",
+        "dirty_direct_preserve",
         "learning_failures",
     }
 )

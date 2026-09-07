@@ -403,7 +403,19 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
+    def open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
+        """Return every open branch PR, or fail when the read is incomplete."""
+        ...
+
+    def create_pr(
+        self,
+        issue_number: int,
+        branch: str,
+        title: str,
+        body: str,
+        *,
+        strict_absence: bool = False,
+    ) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
         Backing (#1817): ``_review_utils.find_pr_for_issue`` first (reuse an

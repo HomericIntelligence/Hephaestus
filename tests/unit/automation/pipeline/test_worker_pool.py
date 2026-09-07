@@ -354,7 +354,7 @@ def test_trusted_git_executable_rejects_discovered_binary_outside_fixed_roots(
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o555)
     monkeypatch.setattr(f"{_WP}.shutil.which", lambda _name: str(executable))
-    monkeypatch.setattr(f"{_WP}._TRUSTED_GIT_CANDIDATES", ())
+    monkeypatch.setattr("hephaestus.automation.worktree_snapshot._TRUSTED_GIT_CANDIDATES", ())
 
     assert _trusted_git_executable() is None
 
@@ -725,8 +725,10 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     expected_tools: tuple[str, ...],
     retry_effort: bool = False,
     retry_failure: str | None = None,
+    dirty_direct: bool = False,
 ) -> None:
     """The worker binds all host inputs before it invokes the admitted adapter."""
+    tmp_path, manager, initial_head = _dirty_test_workspace(tmp_path, dirty_direct)
     worktree = tmp_path.resolve()
     git_dir = worktree / ".git-control"
     common_dir = worktree / ".git-common"
@@ -828,10 +830,15 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         codex_isolation_deployment_lock_sha256="a" * 64,
     )
 
+    job = _dirty_test_job(job, worktree, manager, initial_head)
+    assert_dirty_lease = partial(_assert_dirty_test_lease, manager)
+    adapter._close.side_effect = assert_dirty_lease
+
     requests: list[Any] = []
     worker_clock = MagicMock(wraps=time)
 
     def invoke_adapter(**_kwargs: object) -> AgentRunResult:
+        assert_dirty_lease()
         requests.append(_kwargs["request"])
         if retry_failure == "isolation":
             raise CodexIsolationError("codex_adapter_inventory_uncertain")
@@ -870,6 +877,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         patch(f"{_WP}.resolve_agent") as resolve,
     ):
         result = pool._run_agent(job)
+        _assert_dirty_test_replay(dirty_direct, pool, job, invoke)
 
     assert result.ok is (not replace_staged_after_return and retry_failure is None)
     resolve.assert_not_called()
@@ -3193,6 +3201,26 @@ class TestAgentErrorHandling:
         assert invoke.call_count == 1
         sleep.assert_not_called()
 
+    def test_nonretryable_agent_runs_once_after_transient_failure(self, pool: WorkerPool) -> None:
+        """A one-use writer turn must not repeat after a provider failure."""
+        job = replace(
+            _agent_job(model="model-one-use-writer", prompt_builder=lambda: "prompt"),
+            retryable=False,
+        )
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                side_effect=OSError("connection reset"),
+            ) as invoke,
+            patch("hephaestus.utils.retry.time.sleep") as sleep,
+        ):
+            result = pool._run_agent(job)
+        assert result.ok is False
+        assert result.error == "OSError: connection reset"
+        assert invoke.call_count == 1
+        sleep.assert_not_called()
+
     def test_unknown_job_type_returns_error_result(self, pool: WorkerPool) -> None:
         """A job of unknown type is converted to a TypeError error result."""
         result = pool._run(cast(AgentJob, object()))
@@ -4191,7 +4219,10 @@ class TestGitOps:
     def test_bounded_git_output_thread_backend_preserves_the_limit(self) -> None:
         """The pipe-thread backend keeps the same stdout byte limit."""
         with (
-            patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False),
+            patch(
+                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                return_value=False,
+            ),
             pytest.raises(RuntimeError, match="Git output limit exceeded"),
         ):
             _run_bounded_git_output(
@@ -4204,7 +4235,10 @@ class TestGitOps:
 
     def test_bounded_git_output_thread_backend_returns_exact_output(self) -> None:
         """The pipe-thread backend returns the exact text and digest."""
-        with patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False):
+        with patch(
+            "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+            return_value=False,
+        ):
             result = _run_bounded_git_output(
                 (sys.executable, "-c", "import sys; sys.stdout.write('bounded')"),
                 cwd=Path.cwd(),
@@ -4221,7 +4255,10 @@ class TestGitOps:
         """The pipe-thread backend reports only the configured stderr tail."""
         script = "import sys; sys.stderr.write('x' * 5000 + 'end'); raise SystemExit(3)"
         with (
-            patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False),
+            patch(
+                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                return_value=False,
+            ),
             pytest.raises(subprocess.CalledProcessError) as raised,
         ):
             _run_bounded_git_output(
@@ -4239,7 +4276,10 @@ class TestGitOps:
     def test_bounded_git_output_thread_backend_enforces_timeout(self) -> None:
         """The pipe-thread backend terminates a child after its deadline."""
         with (
-            patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False),
+            patch(
+                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                return_value=False,
+            ),
             pytest.raises(subprocess.TimeoutExpired),
         ):
             _run_bounded_git_output(
@@ -4262,7 +4302,10 @@ class TestGitOps:
         started = time.monotonic()
         prior_threads = set(threading.enumerate())
         with (
-            patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False),
+            patch(
+                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                return_value=False,
+            ),
             pytest.raises(subprocess.TimeoutExpired),
         ):
             _run_bounded_git_output(
@@ -4287,7 +4330,10 @@ class TestGitOps:
         process = MagicMock(pid=1234)
         with (
             patch(f"{_WP}.os.name", "nt"),
-            patch(f"{_WP}._trusted_windows_taskkill", return_value=r"C:\Windows\taskkill.exe"),
+            patch(
+                "hephaestus.automation.worktree_snapshot._trusted_windows_taskkill",
+                return_value=r"C:\Windows\taskkill.exe",
+            ),
             patch(f"{_WP}.subprocess.run", side_effect=termination_error),
         ):
             _terminate_bounded_process_tree(process, process_group=True)
@@ -4352,7 +4398,12 @@ class TestGitOps:
         selector = selectors.DefaultSelector()
         with ExitStack() as stack:
             stack.enter_context(patch(f"{_WP}.subprocess.Popen", side_effect=launch))
-            stack.enter_context(patch(f"{_WP}.selectors.DefaultSelector", return_value=selector))
+            stack.enter_context(
+                patch(
+                    "hephaestus.automation.worktree_snapshot.selectors.DefaultSelector",
+                    return_value=selector,
+                )
+            )
             if failure_point == "register":
                 stack.enter_context(
                     patch.object(selector, "register", side_effect=OSError("register"))
@@ -4401,7 +4452,10 @@ class TestGitOps:
 
         prior_threads = set(threading.enumerate())
         with (
-            patch(f"{_WP}._subprocess_pipe_selector_supported", return_value=False),
+            patch(
+                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                return_value=False,
+            ),
             patch(f"{_WP}.subprocess.Popen", side_effect=launch),
             patch(f"{_WP}.threading.Thread.start", new=fail_second_start),
             pytest.raises(RuntimeError, match="thread resource unavailable"),
@@ -4824,7 +4878,13 @@ class TestGitOps:
         if dirty:
             (writer / "tracked.txt").write_text("changed\n", encoding="utf-8")
 
-        with patch(f"{_WP}._secure_dir_fd_supported", return_value=False):
+        with (
+            patch(f"{_WP}._secure_dir_fd_supported", return_value=False),
+            patch(
+                "hephaestus.automation.worktree_snapshot._secure_dir_fd_supported",
+                return_value=False,
+            ),
+        ):
             result = pool._git_inspect_implementation_worktree(
                 GitJob(
                     repo="test/repo",
@@ -15657,3 +15717,99 @@ def test_ordinary_review_keeps_noncanonical_bootstrap_filenames(
             base_sha=base,
             manifest=result.value["status_manifest"],
         )
+
+
+def test_dirty_codex_adapter_retains_consumed_lease_through_close(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """The admitted adapter runs inside the one-use dirty writer lease."""
+    test_codex_implementation_builds_one_frozen_admitted_request(
+        "gpt-6-astra:low",
+        pool,
+        tmp_path,
+        False,
+        SessionLifecycle.START_NEW,
+        None,
+        AgentOperation.IMPLEMENT,
+        "workspace-write",
+        None,
+        "workspace-write",
+        ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+        dirty_direct=True,
+    )
+
+
+def _dirty_test_workspace(tmp_path: Path, enabled: bool) -> tuple[Path, Any, str]:
+    """Prepare the real dirty source used by the adapter fixture."""
+    if not enabled:
+        return tmp_path, None, ""
+    from hephaestus.agents.workspace import SourceLane
+    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+    from tests.unit.agents.test_dirty_workspace import _claim
+    from tests.unit.automation.test_source_worktree import _repository
+
+    repo, _, initial_head = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="repo")
+    original = manager.prepare(12, SourceLane.IMPLEMENTATION, initial_head, branch=_claim().branch)
+    tmp_path = original.cwd
+    (tmp_path / "tracked.txt").write_text("pending\n")
+    return tmp_path, manager, initial_head
+
+
+def _dirty_test_job(job: AgentJob, worktree: Path, manager: Any, initial_head: str) -> AgentJob:
+    """Bind the adapter fixture to its one-use dirty claim."""
+    if manager is None:
+        return job
+    from dataclasses import replace
+
+    from hephaestus.agents.workspace import WorkspaceBindingError, validate_workspace_binding
+    from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
+    from hephaestus.automation.pipeline.worker_pool import _dirty_plan_input_identity
+    from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
+    from tests.unit.agents.test_dirty_workspace import _claim
+
+    assert manager is not None
+    plan = "## Files to Modify\n- `tracked.txt`\n- `staged-codex`\n"
+    inputs = DirtyDirectPlanInput(5, plan, 5, "state:plan-go", ("staged-codex", "tracked.txt"))
+    identity = _dirty_plan_input_identity(inputs)
+    snapshot = _dirty_worktree_content_snapshot(worktree, timeout=10)
+    claim = replace(
+        _claim(),
+        reservation_base_sha=initial_head,
+        plan_fingerprint=identity.plan_fingerprint,
+        review_fingerprint=identity.review_fingerprint,
+        allowed_paths=identity.allowed_paths,
+        index_sha256=snapshot["index_sha256"],
+        worktree_sha256=snapshot["worktree_sha256"],
+        untracked_sha256=snapshot["untracked_sha256"],
+    )
+    binding = manager.claim_dirty_direct_continuation(12, claim=claim, expected_generation=1)
+    job = replace(job, repo="repo", issue=12, workspace=binding, retryable=False, dirty_plan=inputs)
+    with pytest.raises(WorkspaceBindingError):
+        validate_workspace_binding(binding)
+
+    return job
+
+
+def _assert_dirty_test_lease(manager: Any) -> None:
+    """Require a consumed claim while the adapter or its close method runs."""
+    if manager is None:
+        return
+    from hephaestus.agents.workspace import _DIRTY_PERMITS, SourceLane
+
+    stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+    assert stored.dirty_claim is not None and stored.dirty_claim.state == "consumed"
+    records = _DIRTY_PERMITS.get()
+    assert len(records) == 1 and records[0].active
+
+
+def _assert_dirty_test_replay(enabled: bool, pool: WorkerPool, job: AgentJob, invoke: Any) -> None:
+    """Reject a replay after the adapter lease has ended."""
+    if not enabled:
+        return
+    from hephaestus.agents.workspace import _DIRTY_PERMITS
+
+    assert not _DIRTY_PERMITS.get()
+    replay = pool._run_agent(job)
+    assert not replay.ok
+    invoke.assert_called_once()

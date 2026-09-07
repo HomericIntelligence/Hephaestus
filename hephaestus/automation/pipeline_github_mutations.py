@@ -267,7 +267,15 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
             return
         close_issue_as_covered(issue_number, pr_number)
 
-    def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
+    def create_pr(
+        self,
+        issue_number: int,
+        branch: str,
+        title: str,
+        body: str,
+        *,
+        strict_absence: bool = False,
+    ) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
         PR creation requires a repo-scoped accessor.  The legacy helper can
@@ -282,16 +290,48 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         """
         if self._repo_slug is None:
             raise RuntimeError("create PR requires a repo-scoped PipelineGitHub accessor")
-        if self._repo_slug is not None:
+        if type(strict_absence) is not bool:
+            raise ValueError("strict_absence must be a boolean")
+        if strict_absence:
+            self._require_strict_pr_absence(issue_number, branch)
+        else:
             open_prs = self._open_prs_for_branch(branch)
             existing_on_branch = github_api._select_open_pr_for_base(open_prs, "main")
             if existing_on_branch is not None:
                 return existing_on_branch
-        existing = self.find_pr_for_issue(issue_number)
-        if existing:
-            return existing
+            existing = self.find_pr_for_issue(issue_number)
+            if existing:
+                return existing
         if self._skip(f"create PR for #{issue_number} from {branch!r}"):
             return 0
+        try:
+            return self._create_pr_once(issue_number, branch, title, body, strict_absence)
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, TypeError):
+            if not strict_absence:
+                raise
+            # A failed create can still have reached GitHub. Never adopt its result.
+            self._require_strict_pr_absence(issue_number, branch)
+            raise RuntimeError("strict PR creation outcome is ambiguous") from None
+
+    def _require_strict_pr_absence(self, issue_number: int, branch: str) -> None:
+        """Reject reuse using a fresh complete branch and issue read."""
+        try:
+            branches = self.open_prs_for_branch(branch)
+            issue_pr = self.find_pr_for_issue(issue_number)
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, TypeError):
+            raise RuntimeError("strict PR absence read failed") from None
+        if branches or issue_pr is not None:
+            raise RuntimeError("strict PR absence violated by an existing open PR")
+
+    def _create_pr_once(
+        self,
+        issue_number: int,
+        branch: str,
+        title: str,
+        body: str,
+        strict_absence: bool,
+    ) -> int:
+        """Submit one create request without a PR adoption path."""
         if self._repo_slug is not None:
             github_api._assert_body_has_closes(body)
             github_api._assert_branch_commits_signed(branch, base="main")
@@ -311,10 +351,16 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
                     ]
                 )
             raw_output = result.stdout
+            if strict_absence and (
+                not isinstance(raw_output, str) or getattr(result, "returncode", 0) != 0
+            ):
+                raise RuntimeError("strict PR creation outcome is ambiguous")
             output = raw_output.strip()
             match = re.search(r"/pull/(\d+)", output)
             if match:
                 return int(match.group(1))
+            if strict_absence:
+                raise RuntimeError("strict PR creation outcome is ambiguous")
             logger.error("Failed to parse PR number from gh pr create output: %r", raw_output)
             raise RuntimeError(
                 f"Failed to parse PR number from gh pr create output: {raw_output!r}"

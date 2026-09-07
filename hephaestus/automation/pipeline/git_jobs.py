@@ -6,12 +6,20 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from hephaestus.automation.worktree_snapshot import (
+    DIRTY_SNAPSHOT_CHANGED_FILE_MAX as DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+    DIRTY_SNAPSHOT_CONTENT_MAX_BYTES as DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
+    DIRTY_SNAPSHOT_GIT_MAX_BYTES as DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+)
+
 GIT_OPS: frozenset[str] = frozenset(
     {
         "clone",
         "sync_checkout",
         "verify_issue_wave_ancestry",
         "create_worktree",
+        "claim_dirty_direct_continuation",
+        "publish_dirty_direct_continuation",
         "inspect_implementation_worktree",
         "recover_dirty_worktree",
         "verify_pr_review_checkout",
@@ -34,9 +42,6 @@ WORKTREE_MATERIALIZED_KEY = "worktree_materialized"
 IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES = 64 * 1024
 IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES = 64 * 1024
 IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES = 256 * 1024
-DIRTY_SNAPSHOT_GIT_MAX_BYTES = 4 * 1024 * 1024
-DIRTY_SNAPSHOT_CONTENT_MAX_BYTES = 8 * 1024 * 1024
-DIRTY_SNAPSHOT_CHANGED_FILE_MAX = 512
 
 
 @dataclass(frozen=True)

@@ -1506,3 +1506,107 @@ def test_bootstrap_merge_rechecks_grant_and_preserves_required_gates(revoke_at: 
         github.required_checks_pass_for_head.assert_called_once()
         github.merge_pr_if_head.assert_called_once()
     assert reads == (revoke_at or 2)
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "foreign",
+        "6-auto-impl-direct-" + "a" * 32,
+        "../branch",
+        "--all",
+        "5-auto-impl-direct-" + "g" * 32,
+    ],
+)
+def test_dirty_direct_pr_request_rejects_foreign_branch(branch: str) -> None:
+    """A closed read cannot select a different or malformed writer branch."""
+    from hephaestus.automation.pipeline.github_jobs import InspectDirtyDirectPrStateRequest
+
+    with pytest.raises(ValueError, match="branch"):
+        InspectDirtyDirectPrStateRequest("org/repo", 5, branch)
+
+
+def test_dirty_direct_pr_receipt_keeps_immutable_complete_evidence() -> None:
+    """Only complete empty evidence supplies absence."""
+    from dataclasses import FrozenInstanceError
+
+    from hephaestus.automation.pipeline.github_jobs import DirtyDirectPrStateRead
+
+    branch = "5-auto-impl-direct-" + "a" * 32
+    empty = DirtyDirectPrStateRead("org/repo", 5, branch, (), None)
+    assert empty.absent
+    assert not DirtyDirectPrStateRead("org/repo", 5, branch, (), None, complete=False).absent
+    assert not DirtyDirectPrStateRead("org/repo", 5, branch, ((7, "release"),), None).absent
+    assert not DirtyDirectPrStateRead("org/repo", 5, branch, (), 8).absent
+    with pytest.raises(FrozenInstanceError):
+        cast(Any, empty).complete = False
+    with pytest.raises(ValueError):
+        DirtyDirectPrStateRead("org/repo", 5, branch, ((7, "main"), (7, "release")), None)
+
+
+def test_dirty_direct_pr_runner_uses_fresh_repo_bound_accessors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each locked worker read gets an independent repository-scoped accessor."""
+    from hephaestus.automation import pipeline_github_jobs as module
+    from hephaestus.automation.pipeline.github_jobs import (
+        DirtyDirectPrStateRead,
+        InspectDirtyDirectPrStateRequest,
+    )
+
+    accessors: list[object] = []
+    calls: list[object] = []
+
+    class Accessor:
+        def __init__(self, org: str, *, repo: str, **kwargs: object) -> None:
+            accessors.append(self)
+            calls.append((org, repo))
+
+        def open_prs_for_branch(self, branch: str) -> list[tuple[int, str]]:
+            calls.append(branch)
+            return []
+
+        def find_pr_for_issue(self, issue_number: int) -> int | None:
+            calls.append(issue_number)
+            return None
+
+        def issue_comments(self, issue_number: int) -> list[object]:
+            return []
+
+        def gh_issue_json(self, issue_number: int) -> dict[str, object]:
+            return {"state": "OPEN", "labels": [{"name": "state:plan-go"}]}
+
+    monkeypatch.setattr(module, "PipelineGitHub", Accessor)
+    branch = "5-auto-impl-direct-" + "a" * 32
+    request = InspectDirtyDirectPrStateRequest("org/repo", 5, branch)
+    job = GitHubJob(repo="repo", repo_root=tmp_path, request=request, descr="Read direct PR state")
+    runner = module.PipelineGitHubJobRunner(org="org", dry_run=False)
+    for _ in range(2):
+        receipt = runner.run(job)
+        assert isinstance(receipt, DirtyDirectPrStateRead)
+        assert receipt.repository == "org/repo"
+        assert receipt.branch == branch
+        assert receipt.issue_number == 5
+        assert receipt.complete and receipt.absent
+    assert len(accessors) == 2 and accessors[0] is not accessors[1]
+    assert calls == [("org", "repo"), branch, 5] * 2
+    with pytest.raises(ValueError, match="repository"):
+        module.PipelineGitHubJobRunner(org="foreign", dry_run=False).run(job)
+    assert len(accessors) == 2
+    with pytest.raises(ValueError, match="repository"):
+        GitHubJob(repo="foreign", repo_root=tmp_path, request=request, descr="Read direct PR state")
+
+
+def test_dirty_direct_read_bounds_plan_journal() -> None:
+    """Reject unbounded plan evidence before it reaches the worker."""
+    from hephaestus.automation.pipeline.github_jobs import DirtyDirectPrStateRead, FrozenJson
+
+    with pytest.raises(ValueError, match="journal"):
+        DirtyDirectPrStateRead(
+            "org/repo",
+            5,
+            "5-auto-impl-direct-" + "a" * 32,
+            (),
+            None,
+            plan_journal=FrozenJson.snapshot(["x" * (1024 * 1024)]),
+        )

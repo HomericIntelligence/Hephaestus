@@ -459,8 +459,84 @@ class ReconcileScopeExpansionDependenciesRequest:
         _full_sha(self.source_head_sha, "source_head_sha")
 
 
+@dataclass(frozen=True)
+class InspectDirtyDirectPrStateRequest:
+    """Select the exact repository, issue, and interrupted direct branch."""
+
+    repository: str
+    issue_number: int
+    branch: str
+
+    def __post_init__(self) -> None:
+        """Reject identities outside the closed direct-writer read."""
+        _positive_identifier(self.issue_number, "issue_number")
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository) is None
+        ):
+            raise ValueError("repository must be OWNER/REPOSITORY")
+        if (
+            not isinstance(self.branch, str)
+            or re.fullmatch(rf"{self.issue_number}-auto-impl-direct-[0-9a-f]{{32}}", self.branch)
+            is None
+        ):
+            raise ValueError("branch must name the exact direct issue writer")
+
+
+@dataclass(frozen=True)
+class DirtyDirectPrStateRead:
+    """Retain the complete immutable open-PR evidence for one direct writer."""
+
+    repository: str
+    issue_number: int
+    branch: str
+    branch_prs: tuple[tuple[int, str], ...]
+    issue_pr_number: int | None
+    complete: bool = True
+    plan_journal: FrozenJson | None = None
+    issue_state: str = ""
+    issue_labels: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate identity, immutable rows, and complete-read classification."""
+        InspectDirtyDirectPrStateRequest(self.repository, self.issue_number, self.branch)
+        if self.plan_journal is not None and (
+            not isinstance(self.plan_journal, FrozenJson)
+            or len(self.plan_journal.encoded.encode("utf-8")) > 1024 * 1024
+            or not isinstance(self.plan_journal.thaw(), list)
+        ):
+            raise ValueError("dirty direct plan journal is invalid or exceeds its bound")
+        if not isinstance(self.issue_state, str) or not isinstance(self.issue_labels, tuple):
+            raise ValueError("dirty direct issue state must be immutable")
+        if any(not isinstance(label, str) for label in self.issue_labels):
+            raise ValueError("dirty direct issue labels must be strings")
+        if type(self.complete) is not bool:
+            raise ValueError("complete must be a boolean")
+        if not isinstance(self.branch_prs, tuple) or len(self.branch_prs) >= 1000:
+            raise ValueError("branch PRs must be a bounded immutable tuple")
+        numbers: set[int] = set()
+        for row in self.branch_prs:
+            if not isinstance(row, tuple) or len(row) != 2:
+                raise ValueError("branch PR rows must be immutable number/base pairs")
+            number, base = row
+            _positive_identifier(number, "branch PR number")
+            if not isinstance(base, str) or not base or base != base.strip():
+                raise ValueError("branch PR base must be a nonblank exact string")
+            if number in numbers:
+                raise ValueError("branch PR numbers must be unique")
+            numbers.add(number)
+        if self.issue_pr_number is not None:
+            _positive_identifier(self.issue_pr_number, "issue_pr_number")
+
+    @property
+    def absent(self) -> bool:
+        """Return absence only from a complete read with no open PR."""
+        return self.complete and not self.branch_prs and self.issue_pr_number is None
+
+
 type GitHubRequest = (
-    RecoverReplyJournalRequest
+    InspectDirtyDirectPrStateRequest
+    | RecoverReplyJournalRequest
     | RecoverRemediationReplyJournalRequest
     | AppendReplyJournalRequest
     | DeliverReplyHandoffRequest
@@ -489,6 +565,7 @@ class GitHubJob:
         if not isinstance(
             self.request,
             (
+                InspectDirtyDirectPrStateRequest,
                 RecoverReplyJournalRequest,
                 RecoverRemediationReplyJournalRequest,
                 AppendReplyJournalRequest,
@@ -500,6 +577,10 @@ class GitHubJob:
             ),
         ):
             raise TypeError("request must be a supported GitHub request")
+        if isinstance(self.request, InspectDirtyDirectPrStateRequest) and (
+            self.request.repository.rsplit("/", 1)[-1].casefold() != self.repo.casefold()
+        ):
+            raise ValueError("dirty direct request repository does not match the job")
         if not isinstance(self.descr, str) or not self.descr:
             raise ValueError("descr must be a non-empty string")
 
@@ -717,7 +798,8 @@ class ScopeExpansionDependenciesReconciled:
 
 
 type GitHubReceipt = (
-    ReplyJournalRecovered
+    DirtyDirectPrStateRead
+    | ReplyJournalRecovered
     | RemediationReplyJournalRecovered
     | ReplyJournalAppended
     | ReplyHandoffAttempted

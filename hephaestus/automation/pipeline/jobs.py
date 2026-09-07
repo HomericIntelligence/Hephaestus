@@ -45,6 +45,17 @@ class JobWorkspaceError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class DirtyDirectPlanInput:
+    """Keep the host-approved plan inputs separate from the workspace claim."""
+
+    revision: int
+    plan: str
+    review_revision: int
+    review: str
+    allowed_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AgentJob:
     """Job to invoke an agent (Claude or other)."""
 
@@ -99,6 +110,8 @@ class AgentJob:
     session_checkpoint: Callable[[str, AgentSessionBinding | None], None] | None = None
     descr: str = ""
     deadline_s: float | None = None
+    retryable: bool = True
+    dirty_plan: DirtyDirectPlanInput | None = None
 
     def __post_init__(self) -> None:
         """Validate an optional operation-wide monotonic deadline."""
@@ -111,13 +124,15 @@ class AgentJob:
             raise ValueError("deadline_s must be a finite positive monotonic time")
 
 
-def validate_job_workspace(job: AgentJob) -> Path:
+def validate_job_workspace(job: AgentJob, *, dirty_permit: object | None = None) -> Path:
     """Resolve and fail-closed validate an agent job's execution directory."""
     tools = job.allowed_tools
     if tools is None and job.sandbox in {"read-only", "workspace-write"}:
         tools = "Read,Glob,Grep,Write,Edit,Bash"
     if job.workspace is not None:
-        canonical = validate_workspace_binding(job.workspace, allowed_tools=tools or "")
+        canonical = validate_workspace_binding(
+            job.workspace, allowed_tools=tools or "", dirty_permit=dirty_permit
+        )
         if canonical != job.cwd.resolve(strict=True):
             raise JobWorkspaceError("job cwd does not match its workspace binding")
         return canonical

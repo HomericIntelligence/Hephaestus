@@ -23,17 +23,18 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
 
     def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
         """Return open PRs on ``branch_name`` without altering auto-merge."""
-        discovery_error: github_api.OpenPrDiscoveryIncompleteError | None = None
         try:
-            open_prs = github_api._find_open_prs_for_head(branch_name, self._gh)
+            return github_api._find_open_prs_for_head(branch_name, self._gh)
         except github_api.OpenPrDiscoveryIncompleteError as exc:
-            open_prs = exc.open_prs
-            discovery_error = exc
-        if discovery_error is not None:
             raise RuntimeError(
                 f"could not verify existing PR state for head {branch_name!r}"
-            ) from discovery_error
-        return open_prs
+            ) from exc
+
+    def open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
+        """Read every open branch PR through the repository-scoped boundary."""
+        if self._repo_slug is None:
+            raise RuntimeError("complete branch PR reads require a repo-scoped accessor")
+        return self._open_prs_for_branch(branch_name)
 
     def _find_open_pr_for_branch(self, branch_name: str) -> int | None:
         """Select the unique ``main`` target among open head PRs."""

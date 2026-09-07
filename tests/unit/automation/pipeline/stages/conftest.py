@@ -457,9 +457,42 @@ class FakeStageGitHub(FakeGitHub):
             body,
         )
 
-    def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
-        """Mirror the coordinator PR-ensure (delegates to gh_pr_create)."""
-        return self.gh_pr_create(branch, title, body)
+    def open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
+        """Return all stored open PRs for the exact branch."""
+        rows = {
+            number: str(pr.get("base", "main"))
+            for number, pr in self.prs.items()
+            if pr.get("branch") == branch_name and pr.get("state", "OPEN") == "OPEN"
+        }
+        if self._open_pr is not None and self._pr_head_branch == branch_name:
+            rows[self._open_pr] = "main"
+        return sorted(rows.items())
+
+    def create_pr(
+        self,
+        issue_number: int,
+        branch: str,
+        title: str,
+        body: str,
+        *,
+        strict_absence: bool = False,
+    ) -> int:
+        """Mirror normal and strict PR creation through the fake store."""
+        if type(strict_absence) is not bool:
+            raise ValueError("strict_absence must be a boolean")
+        stored_issue_pr = any(
+            pr.get("issue_number") == issue_number and pr.get("state", "OPEN") == "OPEN"
+            for pr in self.prs.values()
+        )
+        if strict_absence and (
+            self.open_prs_for_branch(branch)
+            or self.find_pr_for_issue(issue_number) is not None
+            or stored_issue_pr
+        ):
+            raise RuntimeError("strict PR creation found an existing PR")
+        number = self.gh_pr_create(branch, title, body)
+        self.prs[number]["issue_number"] = issue_number
+        return number
 
     def post_review_threads(
         self,
