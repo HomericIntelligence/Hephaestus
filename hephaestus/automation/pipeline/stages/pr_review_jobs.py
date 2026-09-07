@@ -9,13 +9,6 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.host_verification_bootstrap import (
-    BOOTSTRAP_PROOF_KEY,
-    BootstrapGrantError,
-    BootstrapProof,
-    authenticate_bootstrap_grant,
-    read_fresh_bootstrap_proof,
-)
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.prompts.pr_review import (
     build_bounded_pr_review_analysis_prompt,
@@ -34,8 +27,12 @@ from ..github_jobs import (
 )
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
+from .pr_review_bootstrap import (
+    admit_bootstrap_receipt,
+    bootstrap_review_failure,
+    store_host_verification_result,
+)
 from .pr_review_diagnostics import publish_host_verification_failure
-from .pr_review_receipts import _authentic_linux_bootstrap_receipt
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
     empty_diff_outcome,
@@ -347,24 +344,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             on_done_state=HOST_VERIFICATION_WAIT,
         )
 
-    def _bootstrap_submission_failure(self, item: WorkItem, ctx: StageContext) -> StepResult | None:
-        """Revalidate exact source-review authority at each agent submission."""
-        proof = item.payload.get(BOOTSTRAP_PROOF_KEY)
-        if BOOTSTRAP_PROOF_KEY in item.payload and (
-            not isinstance(proof, BootstrapProof)
-            or proof.repository != f"{ctx.org}/{item.repo}"
-            or proof.issue != item.issue
-            or proof.pr != item.pr
-            or proof.head_sha != item.payload.get("reviewed_pr_head_sha")
-            or proof.base_sha != item.payload.get("reviewed_pr_base_sha")
-            or proof.manifest != item.payload.get("review_status_manifest")
-            or not read_fresh_bootstrap_proof(proof, ctx.github)
-        ):
-            return self._handle_host_verification_failure(
-                item, ctx, None, "host_verification_bootstrap_revoked"
-            )
-        return None
-
     def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Create the agent job after the checkout/head barrier succeeds."""
         issue = _issue_number(item)
@@ -375,7 +354,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             round_index,
             item.pr,
         )
-        if failure := self._bootstrap_submission_failure(item, ctx):
+        if failure := bootstrap_review_failure(item, ctx, self._handle_host_verification_failure):
             return failure
         workspace = source_workspace_binding(
             item,
@@ -562,7 +541,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             validation_threads, ensure_ascii=False, sort_keys=True
         )
         logger.info("pr_review:%d: requesting validation job", issue)
-        if failure := self._bootstrap_submission_failure(item, ctx):
+        if failure := bootstrap_review_failure(item, ctx, self._handle_host_verification_failure):
             return failure
         workspace = source_workspace_binding(
             item,
@@ -620,42 +599,13 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 None,
                 "host_verification_receipt_invalid",
             )
-        comment_id = getattr(ctx.config, "host_verification_bootstrap_comment_id", None)
-        if (
-            comment_id is not None
-            and len(receipts) == 1
-            and verifications
-            and _authentic_linux_bootstrap_receipt(receipts[0], verifications[0], reviewed_head)
-        ):
-            try:
-                proof = authenticate_bootstrap_grant(
-                    ctx.github.issue_comments(3006),
-                    comment_id=comment_id,
-                    repository=f"{ctx.org}/{item.repo}",
-                    issue=_issue_number(item),
-                    pr=item.pr or 0,
-                    head_sha=reviewed_head,
-                    base_sha=str(item.payload.get("reviewed_pr_base_sha") or ""),
-                    manifest=item.payload.get("review_status_manifest"),
-                )
-                if not read_fresh_bootstrap_proof(proof, ctx.github):
-                    raise BootstrapGrantError("bootstrap grant changed")
-            except Exception:
-                return self._handle_host_verification_failure(
-                    item, ctx, verifications[0], "host_verification_bootstrap_invalid"
-                )
-            item.payload[BOOTSTRAP_PROOF_KEY] = proof
-            item.payload["host_verification_bootstrap_json"] = json.dumps(
-                {
-                    "permission": "source review only",
-                    "comment_id": proof.comment_id,
-                    "head_sha": proof.head_sha,
-                    "base_sha": proof.base_sha,
-                    "manifest_sha256": proof.manifest_sha256,
-                    "local_execution_evidence": False,
-                },
-                sort_keys=True,
+        try:
+            admitted = admit_bootstrap_receipt(item, ctx, receipts, verifications, reviewed_head)
+        except Exception:
+            return self._handle_host_verification_failure(
+                item, ctx, verifications[0], "host_verification_bootstrap_invalid"
             )
+        if admitted:
             return self._route_threads_before_broad_review(item, ctx)
         matched_receipts = cast(list[dict[str, Any]], receipts)
         for verification, receipt in zip(verifications, matched_receipts, strict=False):
@@ -1063,53 +1013,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         del result
         return item.payload.pop(_HOST_VERIFICATION_PENDING, None) is not None
 
-    @staticmethod
-    def _store_host_verification_result(item: WorkItem, result: JobResult) -> None:
-        """Append a bounded, head-bound receipt from the fixed host plan."""
-        specs = _payload_host_verification_specs(item.payload)
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        receipts = item.payload.get("host_verification_receipts")
-        if (
-            not specs
-            or not is_full_commit_sha(reviewed_head)
-            or not isinstance(receipts, list)
-            or len(receipts) >= len(specs)
-        ):
-            item.payload.pop("host_verification_receipts", None)
-            return
-        spec = specs[len(receipts)]
-        result_value = result.value if isinstance(result.value, dict) else {}
-        status, platform = _host_verification_result_status(
-            result.value, result.ok, result.error, reviewed_head
-        )
-        receipts.append(
-            {
-                "argv": list(spec.argv),
-                "head_sha": reviewed_head,
-                "immutable_source": bool(
-                    isinstance(result.value, dict)
-                    and result.value.get("head_sha") == reviewed_head
-                    and result.value.get("immutable_source") is True
-                ),
-                "failure_kind": _host_verification_failure_kind(result_value),
-                "ok": result.ok,
-                "error": redact_diagnostic_text(result.error or "")[:500],
-                "platform": platform,
-                "status": status,
-                "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
-                "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
-            }
-        )
-        if (
-            result.ok is False
-            and result.error == "unsupported_host_verification_boundary"
-            and result_value.get("head_sha") == reviewed_head
-            and result_value.get("immutable_source") is False
-            and result_value.get("failure_kind") == "runner"
-            and result_value.get("status") == "skipped"
-            and result_value.get("platform") == "linux"
-        ):
-            receipts[-1]["bootstrap_unsupported_result"] = True
+    _store_host_verification_result = staticmethod(store_host_verification_result)
 
     def _consume_failed_job(
         self, item: WorkItem, result: JobResult, is_review_result: bool

@@ -394,6 +394,17 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
     ),
     "ci_driver": (
         _action_spec(
+            ("--host-verification-bootstrap-comment",),
+            "host_verification_bootstrap_comment",
+            "_StoreAction",
+            None,
+            help_text=(
+                "Select an authenticated source-review grant comment for PR #3006. "
+                "Requires only --prs 3006 in HomericIntelligence/Hephaestus. "
+                "The selector does not grant authority."
+            ),
+        ),
+        _action_spec(
             ("--issues",),
             "issues",
             "_StoreAction",
