@@ -28,10 +28,16 @@ from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
 from ..requirements_recovery import (
     RECOVERY_PROVENANCE_PREFIX,
+    RecoveryCommentIdentityError,
     RecoveryCommentSelection,
     select_recovery_comment,
 )
-from ..review_journal import has_exact_leading_marker
+from ..review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    has_exact_leading_marker,
+    normalize_issue_comments,
+)
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
 MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
@@ -340,33 +346,36 @@ def gh_issue_upsert_comment(
 
     The marker must be an opaque canonical marker at byte zero of the outgoing
     body. Versioned recovery bodies use the recovery marker family and the
-    complete-journal selector. Display headings and historical heading-only
-    comments are inert.
+    full-journal selector. Display headings and old heading-only
+    comments do not have an effect.
 
     For a shared plan or review marker, this function delegates to the
     authenticated-actor upsert path. That path rejects foreign, unverifiable,
     repeated, and cross-role planning identities before it creates or updates
-    a comment. Other marker families retain the generic behavior below.
+    a comment. Other marker families use the behavior that follows.
 
-    Generic behavior:
-    - Find every existing comment whose body has the exact top-level marker.
-    - If none: create a new comment.
-    - If one: PATCH it with ``body`` and verify the exact replacement.
-    - If more than one: stop for manual recovery. Selecting a newest comment
-      could delete an independent artifact.
+    Behavior for a different marker family:
+    - Find each comment whose body has the exact top-level marker.
+    - If there is no matching comment, create a comment.
+    - If there is one matching comment, update it with ``body``. Then, verify
+      the exact replacement.
+    - If there is more than one matching comment, stop for manual recovery.
+      If the function selects the last comment, it can remove a different
+      artifact.
 
     Args:
         issue_number: GitHub issue number.
         marker_prefix: The role marker the comment body must start with.
-        body: The full new comment body (should itself start with the marker).
+        body: The full new comment body that starts with the marker.
 
     Returns:
-        The ``databaseId`` of an updated comment. A generic fresh comment
-        returns ``None``. A shared plan, review, or recovery comment returns
-        its verified actor-owned ``databaseId`` after creation or update.
+        The ``databaseId`` of an updated comment. A new comment for a different
+        marker family returns ``None``. A shared plan, review, or recovery
+        comment returns its verified actor-owned ``databaseId`` after creation
+        or update.
 
     Raises:
-        RuntimeError: If a create/update/delete call fails.
+        RuntimeError: A comment mutation error occurs.
 
     """
     if marker_prefix == RECOVERY_PROVENANCE_PREFIX:
@@ -447,27 +456,21 @@ def gh_issue_upsert_comment(
     return target_id
 
 
-def _recovery_comment_owned_by_viewer(
-    comment: dict[str, Any],
-    viewer_login: str,
-) -> bool:
-    """Return whether comment metadata proves actor ownership."""
-    if "viewerDidAuthor" in comment:
-        return comment.get("viewerDidAuthor") is True
-    user = comment.get("user") or comment.get("author")
-    login = user.get("login") if isinstance(user, dict) else ""
-    return bool(login) and str(login).lower() == viewer_login
-
-
 def _select_recovery_metadata_comment(
     comments: list[dict[str, Any]],
     viewer_login: str,
-) -> RecoveryCommentSelection[dict[str, Any]] | None:
-    """Select one recovery comment from complete metadata."""
+) -> RecoveryCommentSelection[IssueComment] | None:
+    """Select one recovery comment from full metadata."""
+    try:
+        normalized = normalize_issue_comments(comments, viewer_login=viewer_login)
+    except CommentJournalReadError as exc:
+        raise RecoveryCommentIdentityError(
+            f"recovery comment journal is not correct: {exc}"
+        ) from exc
     return select_recovery_comment(
-        comments,
-        body_of=lambda comment: str(comment.get("body", "")),
-        owned_of=lambda comment: _recovery_comment_owned_by_viewer(comment, viewer_login),
+        normalized,
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
     )
 
 
@@ -478,7 +481,7 @@ def _patch_recovery_comment(
     *,
     repo: tuple[str, str] | None,
 ) -> None:
-    """Patch one recovery comment body and report transport errors."""
+    """Update one recovery comment body."""
     owner, name = repo if repo is not None else _api.get_repo_info()
     try:
         with _body_file(body) as path:
@@ -494,7 +497,7 @@ def _patch_recovery_comment(
             )
     except subprocess.CalledProcessError as error:
         raise RuntimeError(
-            f"Failed to update recovery comment {comment_id} on #{issue_number}: {error}"
+            f"GitHub did not update recovery comment {comment_id} on #{issue_number}: {error}"
         ) from error
 
 
@@ -512,10 +515,10 @@ def _gh_issue_upsert_recovery_comment(
         owned_of=lambda _comment: True,
     )
     if outgoing is None:
-        raise RuntimeError("recovery comment body did not contain a valid provenance marker")
+        raise RuntimeError("recovery comment body did not contain a correct provenance marker")
     viewer_login = (_api.gh_current_login() or "").strip().lower()
     if not viewer_login:
-        raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
+        raise RuntimeError("GitHub viewer login is not available")
 
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
     target = _select_recovery_metadata_comment(comments, viewer_login)
@@ -527,16 +530,17 @@ def _gh_issue_upsert_recovery_comment(
         )
         if target is None:
             raise RuntimeError(
-                f"created recovery comment on #{issue_number} was not observable as actor-owned"
+                f"GitHub did not show the new recovery comment on #{issue_number} as actor-owned"
             )
-        if str(target.comment.get("body", "")) != body:
-            raise RuntimeError(f"created recovery comment on #{issue_number} was not confirmed")
+        if target.comment.body != body:
+            raise RuntimeError(
+                f"The recovery comment readback for #{issue_number} did not show the specified body"
+            )
 
-    target_id = target.comment.get("databaseId")
+    target_id = target.comment.database_id
     if target_id is None:
         raise RuntimeError(f"recovery comment on #{issue_number} has no database id")
-    target_id = int(target_id)
-    if str(target.comment.get("body", "")) != body:
+    if target.comment.body != body:
         _patch_recovery_comment(issue_number, target_id, body, repo=repo)
 
         confirmed = _select_recovery_metadata_comment(
@@ -545,11 +549,12 @@ def _gh_issue_upsert_recovery_comment(
         )
         if (
             confirmed is None
-            or confirmed.comment.get("databaseId") != target_id
-            or str(confirmed.comment.get("body", "")) != body
+            or confirmed.comment.database_id != target_id
+            or confirmed.comment.body != body
         ):
             raise RuntimeError(
-                f"updated recovery comment {target_id} on #{issue_number} was not confirmed"
+                f"The recovery comment readback did not show the update "
+                f"for comment {target_id} on #{issue_number}"
             )
     return target_id
 

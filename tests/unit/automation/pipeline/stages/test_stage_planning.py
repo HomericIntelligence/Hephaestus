@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2678,6 +2679,184 @@ class TestPlanningStageStep:
         assert "plan_text" not in item.payload
         assert "plan_revision" not in item.payload
 
+    def test_restart_migrates_valid_v1_recovery_comment_to_v3_without_duplicate(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A restart refreshes v1 recovery identity in place before it uses v3."""
+
+        class StableRecoveryGitHub(FakeStageGitHub):
+            def upsert_issue_comment(
+                self,
+                issue_number: int,
+                marker: str,
+                body: str,
+                *,
+                legacy_marker: str | None = None,
+            ) -> None:
+                if marker != RECOVERY_PROVENANCE_PREFIX:
+                    super().upsert_issue_comment(
+                        issue_number,
+                        marker,
+                        body,
+                        legacy_marker=legacy_marker,
+                    )
+                    return
+                comments = self.comments.setdefault(issue_number, [])
+                matches = [
+                    index
+                    for index, comment in enumerate(comments)
+                    if isinstance(comment, IssueComment)
+                    and comment.body.startswith(RECOVERY_PROVENANCE_PREFIX)
+                ]
+                if matches:
+                    selected = comments[matches[0]]
+                    assert isinstance(selected, IssueComment)
+                    comments[matches[0]] = replace(selected, body=body)
+                else:
+                    comments.append(
+                        IssueComment(
+                            body=body,
+                            author_login="hephaestus-bot",
+                            viewer_did_author=True,
+                            database_id=501,
+                        )
+                    )
+                self._log("gh_issue_upsert_comment", issue_number, marker)
+
+        issue = 77
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        requirements = "Recovered requirements"
+        legacy = render_recovered_requirements(
+            source,
+            requirements,
+            _recovery_binding(source, issue=issue),
+        ).replace(":v=2:", ":v=1:", 1)
+        github = StableRecoveryGitHub(
+            labels=[STATE_PLAN_NO_GO],
+            issue_body=source,
+        )
+        github.comments[issue] = [
+            IssueComment(
+                body=legacy,
+                author_login="hephaestus-bot",
+                viewer_did_author=True,
+                database_id=501,
+            )
+        ]
+        item = make_work_item(issue=issue, state="ENTER")
+        _bind_recovery_revision(item)
+        ctx = make_ctx(github=github)
+
+        assert PlanningStage().on_enter(item, ctx) is None
+        assert item.payload["requirements_recovery_required"] is True
+        assert "requirements_recovered_comment" not in item.payload
+
+        item.state = "REQUIREMENTS_RECOVERY_APPLY"
+        item.payload.update(
+            {
+                "requirements_evidence_digest": _recovery_binding(source, issue=issue),
+                "requirements_repository_revision": _RECOVERY_REVISION,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    requirements,
+                    "Recovered from repository evidence.",
+                    "Bound repository evidence.",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "The requirements agree with the evidence.",
+                ),
+            }
+        )
+        result = PlanningStage().step(item, ctx)
+
+        assert isinstance(result, Continue)
+        recovery_comments = [
+            comment
+            for comment in github.comments[issue]
+            if isinstance(comment, IssueComment)
+            and comment.body.startswith(RECOVERY_PROVENANCE_PREFIX)
+        ]
+        assert len(recovery_comments) == 1
+        assert recovery_comments[0].database_id == 501
+        provenance = parse_recovery_provenance(recovery_comments[0].body)
+        assert provenance is not None
+        assert provenance.version == 3
+
+        restarted = make_work_item(issue=issue, state="ENTER")
+        _bind_recovery_revision(restarted)
+        assert PlanningStage().on_enter(restarted, ctx) is None
+        assert restarted.payload["requirements_recovered_comment"] is True
+        assert restarted.payload["issue_body"] == requirements
+
+    @pytest.mark.parametrize("conflict", ["malformed", "foreign", "repeated", "duplicate"])
+    def test_restart_rejects_recovery_successor_journal_conflict(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        conflict: str,
+    ) -> None:
+        """A full recovery journal conflict cannot authorize a pending successor."""
+        issue = 78
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        source_digest = hashlib.sha256(source.encode()).hexdigest()
+        plan = "Recovered successor plan"
+        recovery = _recovered_body(
+            source,
+            "Recovered requirements",
+            issue=issue,
+            source_digest=source_digest,
+            successor_revision=2,
+            successor_plan_digest=plan_fingerprint(plan),
+        )
+        valid = IssueComment(
+            body=recovery,
+            author_login="hephaestus-bot",
+            viewer_did_author=True,
+            database_id=601,
+        )
+        if conflict == "malformed":
+            extra = replace(valid, body=recovery.replace(":v=3:", ":v=9:", 1), database_id=602)
+        elif conflict == "foreign":
+            extra = replace(
+                valid,
+                author_login="another-user",
+                viewer_did_author=False,
+                database_id=602,
+            )
+        elif conflict == "repeated":
+            marker = recovery.partition("\n")[0]
+            extra = replace(valid, body=f"{recovery}\n\n{marker}\n\nrepeated", database_id=602)
+        else:
+            extra = replace(valid, database_id=602)
+        github = FakeStageGitHub(
+            labels=[STATE_NEEDS_PLAN],
+            issue_body=source,
+            has_plan=True,
+        )
+        github.comments[issue] = [
+            render_current_plan(plan, revision=2, recovery_source_digest=source_digest),
+            render_current_review("Review pending for implementation plan revision 2.", revision=2),
+            valid,
+            extra,
+        ]
+        item = make_work_item(issue=issue, state="ENTER")
+        _bind_recovery_revision(item)
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(github=github, budget_fn=lambda name: 2 if name == "plan" else 1),
+        )
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert item.attempts["plan"] == 1
+        assert "plan_text" not in item.payload
+        assert not github.mutation_log
+
     def test_recovered_successor_restart_resumes_pending_review_without_replan_entry(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -2954,26 +3133,33 @@ class TestPlanningStageStep:
         assert STATE_PLAN_NO_GO in github.labels[76]
 
     @pytest.mark.parametrize(
-        "recovery_issue",
-        [None, 999],
-        ids=["missing-comment", "invalid-context"],
+        "recovery_comment_issue",
+        [
+            None,
+            999,
+        ],
+        ids=["missing-recovery-comment", "invalid-recovery-context"],
     )
-    def test_unusable_recovery_successor_uses_plan_budget_and_receipt(
+    def test_recovery_successor_validation_failure_uses_plan_budget(
         self,
         make_ctx: Any,
         make_work_item: Any,
-        recovery_issue: int | None,
+        recovery_comment_issue: int | None,
     ) -> None:
-        """A missing or invalid recovery comment cannot cause unlimited VERIFY retries."""
+        """A recovery successor validation failure cannot retry without a limit."""
         source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
         github = FakeStageGitHub(
             labels=[STATE_NEEDS_PLAN],
             issue_body=source,
             has_plan=False,
         )
-        if recovery_issue is not None:
+        if recovery_comment_issue is not None:
             github.comments[77] = [
-                _recovered_body(source, "Recovered requirements", issue=recovery_issue)
+                _recovered_body(
+                    source,
+                    "Recovered requirements",
+                    issue=recovery_comment_issue,
+                )
             ]
         item = make_work_item(issue=77, state="VERIFY")
         item.payload.update(
@@ -2990,11 +3176,14 @@ class TestPlanningStageStep:
         ctx = make_ctx(github=github, budget_fn=lambda name: 2 if name == "plan" else 1)
 
         first = PlanningStage().step(item, ctx)
+        assert isinstance(first, StageOutcome)
+        assert first.disposition is Disposition.RETRY
+        assert item.attempts["plan"] == 1
+        assert "published_plan_pending_followup" in item.payload
+
         item.state = "VERIFY"
         second = PlanningStage().step(item, ctx)
 
-        assert isinstance(first, StageOutcome)
-        assert first.disposition is Disposition.RETRY
         assert isinstance(second, StageOutcome)
         assert second.disposition is Disposition.FINISH_FAIL
         assert item.attempts["plan"] == 2

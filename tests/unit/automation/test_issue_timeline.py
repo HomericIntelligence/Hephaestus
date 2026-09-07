@@ -331,7 +331,7 @@ def test_compaction_deletes_complete_three_revision_history_chain() -> None:
 
 
 def test_compaction_keeps_one_recovery_and_obsolete_role_per_issue() -> None:
-    """Compaction keeps the sole recovery role and one obsolete explanation."""
+    """Compaction keeps one recovery role and one obsolete explanation."""
     recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
     obsolete = render_obsolete_explanation("Superseded by #42")
     comments = [
@@ -347,7 +347,7 @@ def test_compaction_keeps_one_recovery_and_obsolete_role_per_issue() -> None:
 
 
 def test_compaction_rejects_duplicate_or_foreign_recovery_claims() -> None:
-    """Recovery identity conflicts stop compaction before any deletion plan."""
+    """Recovery identity conflicts stop compaction before a deletion plan."""
     recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
 
     with pytest.raises(RuntimeError, match="duplicate"):
