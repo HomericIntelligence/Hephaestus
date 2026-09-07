@@ -261,12 +261,6 @@ def _capture_codex_publication_scope(
     """Freeze one accepted plan scope before Codex implementation starts."""
     if not requires_codex_implementation_isolation(agent_provider(ctx)):
         return None
-    if (
-        ctx.config.codex_isolation_adapter is None
-        or ctx.config.codex_isolation_deployment_lock is None
-        or ctx.config.codex_isolation_deployment_lock_sha256 is None
-    ):
-        return StageOutcome(Disposition.FINISH_FAIL, "codex_adapter_not_selected")
     if item.issue is None:
         return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_plan_unavailable")
     captured = item.payload.get(_CODEX_PUBLICATION_SCOPE_KEY)

@@ -3579,18 +3579,28 @@ class TestImplementBudget:
         assert result.job.codex_isolation_deployment_lock_sha256 == "a" * 64
         assert result.job.codex_isolation_request is None
 
-    def test_codex_gate_fails_before_worktree_when_adapter_inputs_are_absent(
+    def test_codex_gate_keeps_plan_scope_without_adapter(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A stock Codex implementation stops before it creates a worktree."""
-        github = FakeStageGitHub(labels=[STATE_PLAN_GO], has_plan=True)
+        """A native Codex job must keep its approved publication scope."""
+
+        class PlannedGitHub(FakeStageGitHub):
+            def discover_plan(self, issue_number: int) -> Any:
+                return PlanDiscoveryResult.found(
+                    "# Implementation Plan\n\n## Files to Modify\n\n- `src/change.py`\n"
+                )
+
+        github = PlannedGitHub(labels=[STATE_PLAN_GO], has_plan=True)
         ctx = make_ctx(config_overrides={"agent": "codex"}, github=github)
         item = make_work_item(issue=3019, state="GATE")
 
         result = ImplementationStage().step(item, ctx)
 
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "codex_adapter_not_selected")
-        assert not item.worktree
+        assert isinstance(result, Continue)
+        assert result.next_state == "WORKTREE_WAIT"
+        scope = implementation_module._codex_publication_kwargs(item, ctx, "a" * 40)
+        assert isinstance(scope, dict)
+        assert scope["allowed_paths"] == ("src/change.py",)
 
     def test_non_codex_implement_job_has_no_codex_isolation_inputs(
         self, make_ctx: Any, make_work_item: Any

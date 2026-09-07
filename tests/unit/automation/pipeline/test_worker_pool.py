@@ -511,6 +511,77 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     return AgentJob(**defaults)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("resume_session_id", [None, "session-3059"])
+def test_codex_implementation_without_adapter_uses_native_session(
+    pool: WorkerPool, tmp_path: Path, resume_session_id: str | None
+) -> None:
+    """A native job returns and checkpoints its provider session."""
+    checkpoint = MagicMock()
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        resume_session_id=resume_session_id,
+        session_checkpoint=checkpoint,
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER,
+            AgentOperation.IMPLEMENT,
+            SessionLifecycle.RESUME_REQUIRED if resume_session_id else SessionLifecycle.START_NEW,
+        ),
+    )
+    with (
+        patch(f"{_WP}.resolve_agent", return_value="codex"),
+        patch(
+            f"{_WP}.run_agent_session", return_value=AgentRunResult("done", "", "session-3059")
+        ) as start,
+        patch(
+            f"{_WP}.resume_agent_session", return_value=AgentRunResult("done", "", "session-3059")
+        ) as resume,
+        patch(f"{_WP}.WorkerPool._run_codex_implementation") as isolated,
+    ):
+        result = pool._run_agent(job)
+
+    assert result.ok is True
+    assert result.value == "done"
+    assert result.session_id == "session-3059"
+    checkpoint.assert_called_once_with("session-3059", None)
+    (resume if resume_session_id else start).assert_called_once()
+    (start if resume_session_id else resume).assert_not_called()
+    isolated.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"codex_isolation_adapter": "production"},
+        {"codex_isolation_deployment_lock": Path("missing.json")},
+        {"codex_isolation_deployment_lock_sha256": "a" * 64},
+        {"codex_isolation_adapter": ""},
+    ],
+)
+def test_codex_partial_adapter_selection_never_uses_native_session(
+    pool: WorkerPool, tmp_path: Path, selection: dict[str, Any]
+) -> None:
+    """An incomplete adapter selection cannot use the native runner."""
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW
+        ),
+        **selection,
+    )
+    with (
+        patch(f"{_WP}.run_agent_session") as native,
+        patch(f"{_WP}.resolve_agent") as resolve,
+    ):
+        result = pool._run_agent(job)
+
+    assert result.ok is False
+    assert "codex_adapter_not_selected" in str(result.error)
+    native.assert_not_called()
+    resolve.assert_not_called()
+
+
 def test_codex_boundary_failure_blocks_commit_and_push(pool: WorkerPool, tmp_path: Path) -> None:
     """A failed Codex Git boundary stops all agent and publication actions."""
     prompt_builder = MagicMock(return_value="private implementation prompt")
