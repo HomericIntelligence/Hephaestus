@@ -20,31 +20,29 @@ def extract_pyproject_versions(pyproject_path: Path) -> dict[str, str]:
     """Extract the declared Python versions from ``pyproject.toml``."""
     if not pyproject_path.is_file():
         return {}
-    if tomllib is not None:
-        with pyproject_path.open("rb") as fh:
-            data = tomllib.load(fh)
-        versions: dict[str, str] = {}
-        requires_python = str(data.get("project", {}).get("requires-python", ""))
-        match = re.search(r"(\d+\.\d+)", requires_python)
-        if match:
-            versions["requires-python"] = match.group(1)
-        classifiers = data.get("project", {}).get("classifiers", [])
-        supported = [
-            tuple(map(int, match.group(1).split(".")))
-            for classifier in classifiers
-            if (match := _CLASSIFIER_VERSION_RE.match(classifier.strip()))
-        ]
-        if supported:
-            major, minor = max(supported)
-            versions["classifiers-highest"] = f"{major}.{minor}"
-        mypy = data.get("tool", {}).get("mypy", {}).get("python_version")
-        if mypy:
-            versions["mypy.python_version"] = str(mypy)
-        ruff = data.get("tool", {}).get("ruff", {}).get("target-version")
-        if isinstance(ruff, str) and (match := re.match(r"py(\d)(\d+)", ruff)):
-            versions["ruff.target-version"] = f"{match.group(1)}.{match.group(2)}"
-        return versions
-    return extract_pyproject_versions_str(pyproject_path.read_text(encoding="utf-8"))
+    with pyproject_path.open("rb") as fh:
+        data = tomllib.load(fh)
+    versions: dict[str, str] = {}
+    requires_python = str(data.get("project", {}).get("requires-python", ""))
+    match = re.search(r"(\d+\.\d+)", requires_python)
+    if match:
+        versions["requires-python"] = match.group(1)
+    classifiers = data.get("project", {}).get("classifiers", [])
+    supported = [
+        tuple(map(int, match.group(1).split(".")))
+        for classifier in classifiers
+        if (match := _CLASSIFIER_VERSION_RE.match(classifier.strip()))
+    ]
+    if supported:
+        major, minor = max(supported)
+        versions["classifiers-highest"] = f"{major}.{minor}"
+    mypy = data.get("tool", {}).get("mypy", {}).get("python_version")
+    if mypy:
+        versions["mypy.python_version"] = str(mypy)
+    ruff = data.get("tool", {}).get("ruff", {}).get("target-version")
+    if isinstance(ruff, str) and (match := re.match(r"py(\d)(\d+)", ruff)):
+        versions["ruff.target-version"] = f"{match.group(1)}.{match.group(2)}"
+    return versions
 
 
 def extract_pyproject_versions_str(content: str) -> dict[str, str]:
