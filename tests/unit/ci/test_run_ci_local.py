@@ -34,6 +34,7 @@ def _fake_engine(
     validator_marker_command: str = "",
     git_failing_command: str = "",
     external_git_common_dir: Path | None = None,
+    zstd_available: bool = True,
 ) -> tuple[Path, Path]:
     """Create a controlled container-engine boundary that records invocations."""
     engine_path = tmp_path / "podman"
@@ -145,16 +146,28 @@ def _fake_engine(
         encoding="utf-8",
     )
     engine_path.chmod(0o755)
-    for command in ("just", "shellcheck", "bats"):
+    for command in ("just", "shellcheck", "bats", "zstd"):
         executable = tmp_path / command
+        exit_code = 0 if command != "zstd" or zstd_available else 1
         executable.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             'printf "%s " "$(basename "$0")" "$@" >> "$FAKE_ENGINE_LOG"\n'
-            'printf "\\n" >> "$FAKE_ENGINE_LOG"\n',
+            'printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
+            f"exit {exit_code}\n",
             encoding="utf-8",
         )
         executable.chmod(0o755)
+    python3 = tmp_path / "python3"
+    python3.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "python3 " >> "$FAKE_ENGINE_LOG"\n'
+        'printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
+        'printf "\\n" >> "$FAKE_ENGINE_LOG"\n',
+        encoding="utf-8",
+    )
+    python3.chmod(0o755)
     if external_git_common_dir is not None or git_failing_command:
         git = tmp_path / "git"
         git.write_text(
@@ -202,6 +215,7 @@ def _run_runner(
     machine_architecture: str | None = None,
     machine_system: str | None = None,
     execution_path: str | None = None,
+    zstd_available: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -217,6 +231,7 @@ def _run_runner(
         validator_marker_command=validator_marker_command,
         git_failing_command=git_failing_command,
         external_git_common_dir=external_git_common_dir,
+        zstd_available=zstd_available,
     )
     bash = shutil.which("bash")
     assert bash is not None
@@ -450,7 +465,8 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         "uv build --wheel",
         "build/cli-venv/bin/pytest",
         "uv run pytest tests/integration --override-ini=addopts= "
-        "--basetemp=build/pytest-artifacts -v --strict-markers -m artifact",
+        "--basetemp=build/pytest-artifacts -v --strict-markers "
+        "-m artifact\\ and\\ not\\ codex_release_artifact",
         "uv run pip-audit",
         "uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium",
         "uv run zizmor --no-online-audits --min-severity medium .github/workflows/",
@@ -557,9 +573,50 @@ def test_build_matches_required_artifact_lane(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert (
         "uv run pytest tests/integration --override-ini=addopts= "
-        "--basetemp=build/pytest-artifacts -v --strict-markers -m artifact"
+        "--basetemp=build/pytest-artifacts -v --strict-markers "
+        "-m artifact\\ and\\ not\\ codex_release_artifact"
     ) in log
+    assert "scripts/provision_codex_sigstore_fixture.py" in log
+    assert "--network=none" in log
+    assert "--env UV_NO_SYNC=1" in log
+    assert "--env PYTHONPATH=/workspace" in log
+    assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in log
+    assert (
+        "build/test-fixtures/codex-sigstore/rust-v0.153.4:/codex-sigstore/rust-v0.153.4:ro" in log
+    )
+    assert (
+        "build/test-fixtures/codex-sigstore/rust-v0.153.4:"
+        "/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro" in log
+    )
     assert "python -m build --no-isolation" not in log
+    runs = [line for line in log.splitlines() if "uv run pytest tests/integration" in line]
+    assert len(runs) == 2
+    assert "--network=none" not in runs[0]
+    assert "-m artifact\\ and\\ not\\ codex_release_artifact" in runs[0]
+    assert "--network=none" in runs[1]
+    assert "-m codex_release_artifact" in runs[1]
+    assert "--basetemp=build/pytest-codex-artifacts" in runs[1]
+
+
+@pytest.mark.parametrize("failing_lane", ["pytest-artifacts", "pytest-codex-artifacts"])
+def test_build_propagates_each_artifact_failure(tmp_path: Path, failing_lane: str) -> None:
+    """Either failed artifact run must fail the build subset."""
+    result, log = _run_runner(tmp_path, "build", failing_command=failing_lane)
+    assert result.returncode != 0
+    if failing_lane == "pytest-artifacts":
+        assert "--basetemp=build/pytest-codex-artifacts" not in log
+    else:
+        assert "--basetemp=build/pytest-artifacts" in log
+
+
+def test_build_fails_before_provisioning_when_host_zstd_is_unavailable(tmp_path: Path) -> None:
+    """The artifact lane must preflight its documented host decompressor."""
+    result, log = _run_runner(tmp_path, "build", zstd_available=False)
+
+    assert result.returncode == 1
+    assert "Host zstd is required for the build subset." in result.stderr
+    assert "zstd --version" in log
+    assert "scripts/provision_codex_sigstore_fixture.py" not in log
 
 
 def test_all_separates_general_integration_from_artifact_lane(tmp_path: Path) -> None:

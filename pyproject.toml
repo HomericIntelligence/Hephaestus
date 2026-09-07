@@ -61,6 +61,7 @@ nats = [
 automation = [
     "markdown-it-py>=4.0,<5",
     "pydantic>=2.12.5,<3",
+    "sigstore>=4.5,<5",
 ]
 all = [
     "HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]",
@@ -102,6 +103,7 @@ dev = [
 automation = [
     "markdown-it-py>=4.0,<5",
     "pydantic>=2.12.5,<3",
+    "sigstore>=4.5,<5",
 ]
 
 [tool.uv]
@@ -233,7 +235,7 @@ addopts = [
     "-v",
     "--strict-markers",
     "-m",
-    "not performance and not nightly",
+    "not performance and not nightly and not codex_release_artifact",
     "--cov=hephaestus",
     "--cov-report=term-missing",
 ]
@@ -241,6 +243,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "artifact: reproducible-build, archive-integrity, and installed-package lifecycle tests",
+    "codex_release_artifact: requires the offline read-only Codex release fixture container lane",
     "unit: marks tests as unit tests",
     "performance: bounded capacity, latency, and sustained-concurrency tests",
     "nightly: high-cost functional tests run by the scheduled nightly workflow",

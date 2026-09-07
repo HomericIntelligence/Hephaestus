@@ -7,10 +7,10 @@ not receive source-reading tools.
 
 | Stage / call | Job | Source capability | Lane |
 |---|---|---:|---|
-| planning advise | `AthenaSkillJob(advise)` | yes | impl |
-| planning plan | `AgentJob(planner)` | yes | impl |
+| planning advise | `AthenaSkillJob(advise)` | yes | review |
+| planning plan | `AgentJob(planner)` | yes | review |
 | plan review | `AgentJob(plan_reviewer)` | yes | review |
-| plan amendment | `AgentJob(planner)` | yes | impl |
+| plan amendment | `AgentJob(planner)` | yes | review |
 | implementation dirty-state inspection | `AgentJob(implementer)` | yes | impl |
 | implementation advise | `AthenaSkillJob(advise)` | yes | impl |
 | implementation / remediation | `AgentJob(implementer)` | yes | impl |

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Literal, assert_never
+from typing import Any, Literal, assert_never, cast
 
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
@@ -16,7 +17,9 @@ from hephaestus.automation.pipeline.github_jobs import (
     PrReviewReconciled,
     ReconcilePrReviewRequest,
     ReconcileScopeExpansionDependenciesRequest,
+    RecoverRemediationReplyJournalRequest,
     RecoverReplyJournalRequest,
+    RemediationReplyJournalRecovered,
     ReplyJournalAppended,
     ReplyJournalRecovered,
     RunMergeWaitCycleRequest,
@@ -25,11 +28,15 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
+    journaled_implementation_remediation_reply_handoff,
     journaled_implementation_reply_handoff,
 )
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
+from hephaestus.automation.remediation_prepublication import (
+    remove_prepublication_receipt,
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,29 @@ class PipelineGitHubJobRunner:
             repo_root=job.repo_root,
             gh_timeout=self.gh_timeout,
         )
+        deadline_s = (
+            job.request.deadline_s
+            if isinstance(
+                job.request,
+                (
+                    RecoverRemediationReplyJournalRequest,
+                    AppendReplyJournalRequest,
+                    DeliverReplyHandoffRequest,
+                    ReconcilePrReviewRequest,
+                ),
+            )
+            else None
+        )
+        deadline_context = (
+            cast(Any, github).operation_deadline(deadline_s)
+            if deadline_s is not None
+            else nullcontext()
+        )
+        with deadline_context:
+            return self._run_request(job, github)
+
+    def _run_request(self, job: GitHubJob, github: StageGitHub) -> GitHubReceipt:
+        """Dispatch one closed request inside its operation deadline."""
         match job.request:
             case RecoverReplyJournalRequest():
                 threads = job.request.threads.thaw()
@@ -63,12 +93,35 @@ class PipelineGitHubJobRunner:
                     request=job.request,
                     handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
                 )
+            case RecoverRemediationReplyJournalRequest():
+                threads = job.request.threads.thaw()
+                if not isinstance(threads, list):
+                    raise ValueError("remediation recovery threads must be a list")
+                handoff = journaled_implementation_remediation_reply_handoff(
+                    github.issue_comments(job.request.pr_number),
+                    repository=job.request.repository,
+                    issue_number=job.request.issue_number,
+                    pr_number=job.request.pr_number,
+                    branch=job.request.branch,
+                    current_remote_head=job.request.current_remote_head,
+                    threads=threads,
+                )
+                return RemediationReplyJournalRecovered(
+                    request=job.request,
+                    handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
+                )
             case AppendReplyJournalRequest():
                 github.append_issue_comment(
                     job.request.issue_number,
                     job.request.marker,
                     job.request.body,
                 )
+                if job.request.prepublication_receipt_sha256 is not None and not self.dry_run:
+                    remove_prepublication_receipt(
+                        repo_root=job.repo_root,
+                        pr_number=job.request.issue_number,
+                        expected_review_input_sha256=(job.request.prepublication_receipt_sha256),
+                    )
                 return ReplyJournalAppended(request=job.request)
             case DeliverReplyHandoffRequest():
                 return attempt_reply_handoff(job.request, github)
@@ -315,9 +368,7 @@ class PipelineGitHubJobRunner:
             reviewed_head_sha=request.source_head_sha,
             threads=live_threads,
         )
-        normalized_threads = _normalize_remediation_threads(
-            live_threads, reviewed_head_sha=request.source_head_sha
-        )
+        normalized_threads = _normalize_remediation_threads(live_threads)
         snapshots = _validation_thread_snapshots(live_threads, validation_receipts)
         if (
             len(normalized_threads) != len(live_threads)
@@ -831,9 +882,7 @@ class PipelineGitHubJobRunner:
         if len(posted_receipts) != len(findings):
             return receipt("audit_failure")
         live_threads = github.list_unresolved_review_threads(request.pr_number)
-        remediation_threads = _normalize_remediation_threads(
-            live_threads, reviewed_head_sha=request.reviewed_head_sha
-        )
+        remediation_threads = _normalize_remediation_threads(live_threads)
         if len(remediation_threads) != len(live_threads):
             return receipt("audit_failure")
         return receipt(

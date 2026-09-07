@@ -8,6 +8,7 @@ touch coordinator state. Closed GitHub jobs use a separately injected runner.
 from __future__ import annotations
 
 import csv
+import ctypes
 import hashlib
 import io
 import json
@@ -27,29 +28,53 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, TypeGuard, cast
 
+import hephaestus.agents.runtime as agent_runtime
 import hephaestus.automation.claude_invoke as claude_invoke
+import hephaestus.automation.codex_adapter_admission as codex_adapter_admission
 import hephaestus.automation.git_utils as git_utils
+import hephaestus.automation.pipeline.codex_worktree_boundary as codex_worktree_boundary
 import hephaestus.automation.subprocess_registry as subprocess_registry
+from hephaestus.agents.codex_isolation import (
+    CodexExecutionPolicyV1,
+    CodexGitReceiptV1,
+    CodexIsolationAdapterV1,
+    CodexIsolationError,
+    CodexIsolationRequestV1,
+    StagedLinuxExecutable,
+    canonical_sha256,
+    close_staged_linux_executable,
+    new_run_nonce,
+    stage_linux_executable,
+)
 from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
     ExecutionPolicyError,
+    ExecutionRequest,
+    FilesystemMode,
+    SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.model_selection import resolve_codex_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
-    requires_fresh_agent_session,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
+    run_agent_text,
+    uses_direct_agent_runner,
+    validate_agent_execution_support,
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
+from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -85,6 +110,10 @@ from hephaestus.automation.pipeline.rebase_policy import (
     RebasePolicySelector,
     RebaseValidationPolicy,
 )
+from hephaestus.automation.pipeline.reply_handoff import (
+    implementation_remediation_reply_handoff,
+    implementation_remediation_reply_handoff_journal_entry,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.pipeline.tool_scopes import (
@@ -93,12 +122,31 @@ from hephaestus.automation.pipeline.tool_scopes import (
     tool_scope_for,
 )
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
+from hephaestus.automation.remediation_prepublication import (
+    load_prepublication_intent,
+    load_prepublication_receipt,
+    prepublication_private_git_dir,
+    read_prepublication_private_head,
+    save_prepublication_intent,
+    save_prepublication_receipt,
+)
+from hephaestus.automation.remediation_recovery import (
+    RemediationRecoveryReceipt,
+    RemediationReplyResult,
+    RemediationReviewInput,
+    encode_remediation_review_input,
+)
 from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
 from hephaestus.automation.review_journal import CommentJournalReadError
-from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspaceRecovery,
+)
 from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
@@ -109,6 +157,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
 )
 from hephaestus.config.child_environments import (
+    build_codex_implementation_child_env,
     build_git_child_env,
     build_git_signing_env,
     build_host_verification_env,
@@ -133,6 +182,161 @@ _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _DIRTY_CONTENT_SNAPSHOT_KEYS = frozenset({"index_sha256", "worktree_sha256", "untracked_sha256"})
+_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
+_CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
+_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS = 1.0
+_CODEX_IMPLEMENTATION_PROVIDER_RELAY = "vsock://2:443"
+
+
+def _remediation_review_input(
+    job: GitJob,
+    *,
+    repo_root: Path,
+    worktree: Path,
+    branch: str,
+    parent_sha: str,
+    candidate_tree_sha: str,
+    recovery_commit_sha: str,
+    paths: CommitPaths,
+    committed_diff: str,
+    committed_diff_sha256: str,
+) -> RemediationReviewInput:
+    """Build the exact immutable input for one prepared recovery commit."""
+    repository = job.kwargs.get("remediation_repository")
+    issue_number = job.kwargs.get("issue_number")
+    pr_number = job.kwargs.get("remediation_pr_number")
+    diagnostic = job.kwargs.get("remediation_failure_diagnostic")
+    threads = job.kwargs.get("remediation_thread_snapshots")
+    if (
+        not isinstance(repository, str)
+        or isinstance(issue_number, bool)
+        or not isinstance(issue_number, int)
+        or isinstance(pr_number, bool)
+        or not isinstance(pr_number, int)
+        or not isinstance(diagnostic, str)
+        or not isinstance(threads, list)
+    ):
+        raise ValueError("remediation recovery input is incomplete")
+    return RemediationReviewInput(
+        format_version=3,
+        repository=repository,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        repo_root=str(repo_root),
+        worktree_path=str(worktree),
+        branch=branch,
+        reviewed_parent_sha=parent_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        recovery_commit_sha=recovery_commit_sha,
+        changed_paths=(*paths.add_paths, *paths.update_paths),
+        committed_diff_sha256=committed_diff_sha256,
+        committed_diff=committed_diff,
+        failure_diagnostic=diagnostic,
+        thread_snapshot_sha256=RemediationReviewInput.thread_snapshot_digest(threads),
+        thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(threads),
+    )
+
+
+def _remediation_recovery_artifacts(
+    job: GitJob,
+    *,
+    repo_root: Path,
+    worktree: Path,
+    branch: str,
+    parent_sha: str,
+    candidate_tree_sha: str,
+    recovery_commit_sha: str,
+    paths: CommitPaths,
+    committed_diff: str,
+    committed_diff_sha256: str,
+) -> tuple[dict[str, Any], tuple[str, str]]:
+    """Build and verify the complete durable record before publication."""
+    review_input = _remediation_review_input(
+        job,
+        repo_root=repo_root,
+        worktree=worktree,
+        branch=branch,
+        parent_sha=parent_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        recovery_commit_sha=recovery_commit_sha,
+        paths=paths,
+        committed_diff=committed_diff,
+        committed_diff_sha256=committed_diff_sha256,
+    )
+    replies = job.kwargs.get("remediation_replies")
+    batch_nonce = job.kwargs.get("remediation_batch_nonce")
+    if (
+        not isinstance(replies, dict)
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in replies.items()
+        )
+        or not isinstance(batch_nonce, str)
+    ):
+        raise ValueError("remediation recovery reply input is incomplete")
+    reply_result = RemediationReplyResult.create(
+        review_input_sha256=review_input.review_input_sha256,
+        replies=cast(dict[str, str], replies),
+        thread_snapshot_json=review_input.thread_snapshot_json,
+    )
+    handoff = implementation_remediation_reply_handoff(
+        review_input,
+        reply_result,
+        batch_nonce,
+        journal_input_encoding=job.kwargs.get("remediation_journal_input_encoding"),
+        journal_input_data=job.kwargs.get("remediation_journal_input_data"),
+    )
+    journal = implementation_remediation_reply_handoff_journal_entry(
+        review_input.pr_number,
+        handoff,
+    )
+    if handoff is None or journal is None:
+        raise ValueError("remediation recovery journal is not encodable")
+    return handoff, journal
+
+
+def _invoke_claude_commit_message(
+    issue_number: int,
+    prompt: str,
+    worktree_path: Path,
+    agent: str,
+    timeout: int,
+    model: str,
+    pi_dir: Path | None,
+) -> str:
+    """Run a commit-message request from the approved worker adapter."""
+    remaining_s = cast(float, git_utils.remaining_operation_timeout(timeout))
+    if remaining_s < 1:
+        raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
+    timeout = min(timeout, int(remaining_s))
+    if uses_direct_agent_runner(agent):
+        result = run_agent_text(
+            agent,
+            prompt,
+            cwd=worktree_path,
+            timeout=timeout,
+            model=model,
+            sandbox="read-only",
+            approval="never",
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.GIT_MESSAGE,
+                SessionLifecycle.ONE_SHOT,
+            ),
+            pi_dir=pi_dir,
+        )
+        return (result.stdout or "").strip()
+    stdout, _ = claude_invoke.invoke_claude_with_session(
+        repo=git_utils.get_repo_slug(worktree_path),
+        issue=issue_number,
+        agent=AGENT_COMMIT_MESSAGE,
+        prompt=prompt,
+        model=model,
+        cwd=worktree_path,
+        timeout=timeout,
+        output_format="text",
+        allowed_tools="Read,Glob,Grep",
+    )
+    return (stdout or "").strip()
 
 
 class _GitInspectionResourceLimitError(RuntimeError):
@@ -156,43 +360,228 @@ class _DirtySnapshotEvidence:
     changed_file_count: int
 
 
+def _subprocess_pipe_selector_supported() -> bool:
+    """Return whether the platform selector supports subprocess pipes."""
+    return os.name != "nt"
+
+
+def _trusted_windows_taskkill() -> str:
+    """Return the absolute Windows system ``taskkill`` executable."""
+    system_directory = ctypes.create_unicode_buffer(32_768)
+    ctypes_any = cast(Any, ctypes)
+    kernel32 = ctypes_any.WinDLL("kernel32", use_last_error=True)
+    length = kernel32.GetSystemDirectoryW(system_directory, len(system_directory))
+    if length <= 0 or length >= len(system_directory):
+        raise RuntimeError("Windows system directory is unavailable")
+    taskkill = (Path(system_directory.value) / "taskkill.exe").resolve(strict=True)
+    if not taskkill.is_absolute():  # pragma: no cover - resolve guarantees this
+        raise RuntimeError("Windows task termination capability is unavailable")
+    return str(taskkill)
+
+
+def _terminate_bounded_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    process_group: bool,
+) -> None:
+    """Stop a bounded-output child and descendants that hold its pipes."""
+    if process_group and os.name == "posix":
+        with suppress(PermissionError, ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    elif process_group and os.name == "nt":  # pragma: no cover - Windows only
+        with suppress(OSError, RuntimeError, subprocess.TimeoutExpired):
+            subprocess.run(
+                [_trusted_windows_taskkill(), "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=build_git_child_env(),
+                timeout=5,
+                check=False,
+            )
+    with suppress(OSError):
+        process.kill()
+    with suppress(OSError, subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+
+
+def _read_bounded_git_output_with_threads(  # noqa: C901
+    process: subprocess.Popen[bytes],
+    argv: tuple[str, ...],
+    *,
+    timeout: int | float,
+    max_bytes: int,
+    retain_text: bool,
+    process_group: bool = False,
+) -> _BoundedGitOutput:
+    """Read both child pipes with bounded reader threads."""
+    if process.stdout is None or process.stderr is None:  # pragma: no cover
+        raise RuntimeError("Git output pipes are unavailable")
+    streams = (process.stdout, process.stderr)
+    events: queue_mod.Queue[tuple[str, bytes | BaseException | None]] = queue_mod.Queue(maxsize=16)
+    stop = threading.Event()
+
+    def put_event(name: str, value: bytes | BaseException | None) -> None:
+        while not stop.is_set():
+            try:
+                events.put((name, value), timeout=0.05)
+                return
+            except queue_mod.Full:
+                continue
+
+    def read_pipe(name: str, stream: io.BufferedReader) -> None:
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    stop.wait(0.01)
+                    continue
+                if not chunk:
+                    break
+                put_event(name, chunk)
+        except BaseException as exc:
+            put_event(name, exc)
+        finally:
+            put_event(name, None)
+
+    readers: tuple[threading.Thread, ...] = ()
+    started_readers: list[threading.Thread] = []
+    digest = hashlib.sha256()
+    output = bytearray()
+    stderr_tail = bytearray()
+    byte_count = 0
+    ended: set[str] = set()
+    deadline = time.monotonic() + timeout
+    process_completed = False
+    try:
+        for stream in streams:
+            os.set_blocking(stream.fileno(), False)
+        readers = (
+            threading.Thread(
+                target=read_pipe,
+                args=("stdout", process.stdout),
+                name=f"hephaestus-git-pipe-{process.pid}-stdout",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=read_pipe,
+                args=("stderr", process.stderr),
+                name=f"hephaestus-git-pipe-{process.pid}-stderr",
+                daemon=True,
+            ),
+        )
+        for reader in readers:
+            reader.start()
+            started_readers.append(reader)
+        while len(ended) != len(readers):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            try:
+                name, chunk = events.get(timeout=min(remaining, 0.1))
+            except queue_mod.Empty:
+                continue
+            if chunk is None:
+                ended.add(name)
+                continue
+            if isinstance(chunk, BaseException):
+                raise RuntimeError(f"Git {name} pipe read failed") from chunk
+            if name == "stderr":
+                stderr_tail.extend(chunk)
+                if len(stderr_tail) > _TAIL:
+                    del stderr_tail[:-_TAIL]
+                continue
+            byte_count += len(chunk)
+            if byte_count > max_bytes:
+                raise _GitInspectionResourceLimitError("Git output limit exceeded")
+            digest.update(chunk)
+            if retain_text:
+                output.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        returncode = process.wait(timeout=remaining)
+        process_completed = True
+    finally:
+        stop.set()
+        if not process_completed:
+            _terminate_bounded_process_tree(process, process_group=process_group)
+        for reader in started_readers:
+            reader.join(timeout=1.0)
+        for reader, stream in zip(readers, (process.stdout, process.stderr), strict=True):
+            if reader not in started_readers or not reader.is_alive():
+                with suppress(OSError):
+                    stream.close()
+        if not readers:
+            for stream in streams:
+                with suppress(OSError):
+                    stream.close()
+    text = output.decode("utf-8", errors="surrogateescape") if retain_text else ""
+    if returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode,
+            argv,
+            output=text,
+            stderr=stderr_tail.decode("utf-8", errors="replace"),
+        )
+    return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
+
+
 def _run_bounded_git_output(  # noqa: C901
     argv: tuple[str, ...],
     *,
     cwd: Path,
-    timeout: int,
+    timeout: int | float,
     max_bytes: int,
     retain_text: bool,
+    env: dict[str, str] | None = None,
 ) -> _BoundedGitOutput:
     """Run Git with bounded memory and return an exact output digest."""
+    timeout = cast(float, git_utils.remaining_operation_timeout(timeout))
+    thread_backend = not _subprocess_pipe_selector_supported()
+    process_options: dict[str, object] = {}
+    if os.name == "posix":
+        process_options["start_new_session"] = True
+    elif os.name == "nt":  # pragma: no cover - Windows only
+        process_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(
         argv,
         cwd=str(cwd),
-        env=_controlled_git_env(),
+        env=env or _controlled_git_env(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **cast(Any, process_options),
     )
     if process.stdout is None or process.stderr is None:  # pragma: no cover
-        process.kill()
-        process.wait()
+        _terminate_bounded_process_tree(process, process_group=True)
         raise RuntimeError("Git output pipes are unavailable")
-    os.set_blocking(process.stdout.fileno(), False)
-    os.set_blocking(process.stderr.fileno(), False)
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    if thread_backend:
+        return _read_bounded_git_output_with_threads(
+            process,
+            argv,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            retain_text=retain_text,
+            process_group=True,
+        )
+    selector: selectors.BaseSelector | None = None
     digest = hashlib.sha256()
     output = bytearray()
     stderr_tail = bytearray()
     byte_count = 0
     deadline = time.monotonic() + timeout
+    process_completed = False
     try:
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                process.kill()
-                process.wait()
                 raise subprocess.TimeoutExpired(argv, timeout)
             for key, _events in selector.select(timeout=min(remaining, 0.1)):
                 try:
@@ -209,22 +598,24 @@ def _run_bounded_git_output(  # noqa: C901
                     continue
                 byte_count += len(chunk)
                 if byte_count > max_bytes:
-                    process.kill()
-                    process.wait()
                     raise _GitInspectionResourceLimitError("Git output limit exceeded")
                 digest.update(chunk)
                 if retain_text:
                     output.extend(chunk)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            process.kill()
-            process.wait()
             raise subprocess.TimeoutExpired(argv, timeout)
         returncode = process.wait(timeout=remaining)
+        process_completed = True
     finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
+        if not process_completed:
+            _terminate_bounded_process_tree(process, process_group=True)
+        if selector is not None:
+            selector.close()
+        with suppress(OSError):
+            process.stdout.close()
+        with suppress(OSError):
+            process.stderr.close()
     text = output.decode("utf-8", errors="surrogateescape") if retain_text else ""
     if returncode != 0:
         raise subprocess.CalledProcessError(
@@ -236,65 +627,223 @@ def _run_bounded_git_output(  # noqa: C901
     return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
 
 
-def _path_content_identity(
+def _path_content_identity(  # noqa: C901
     root: Path,
     paths_output: str,
     *,
     seed_digest: str = "",
     remaining_content_bytes: list[int] | None = None,
+    timeout: int | None = None,
+    copy_root: Path | None = None,
 ) -> str:
     """Hash NUL-delimited paths and their current file-system content."""
+    relative_values = tuple(value for value in paths_output.split("\0") if value)
+    if copy_root is not None:
+        relative_values = tuple(
+            sorted(
+                set(relative_values),
+                key=lambda value: (-len(Path(value).parts), os.fsencode(value)),
+            )
+        )
     digest = hashlib.sha256()
     digest.update(b"D")
     digest.update(seed_digest.encode("ascii"))
-    for relative in (value for value in paths_output.split("\0") if value):
-        relative_path = Path(relative)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise RuntimeError("dirty snapshot contains an unsafe path")
-        encoded_path = os.fsencode(relative)
-        digest.update(len(encoded_path).to_bytes(8, "big"))
-        digest.update(encoded_path)
-        path = root / relative_path
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            digest.update(b"M")
-            continue
-        digest.update(f"{stat.S_IFMT(metadata.st_mode):o}\0".encode())
-        if stat.S_ISLNK(metadata.st_mode):
-            digest.update(b"L")
-            target = os.fsencode(os.readlink(path))
-            if remaining_content_bytes is not None:
-                remaining_content_bytes[0] -= len(target)
-                if remaining_content_bytes[0] < 0:
-                    raise _GitInspectionResourceLimitError("dirty snapshot content limit exceeded")
-            digest.update(len(target).to_bytes(8, "big"))
-            digest.update(target)
-        elif stat.S_ISREG(metadata.st_mode):
-            digest.update(b"F")
-            digest.update(metadata.st_size.to_bytes(8, "big"))
-            if remaining_content_bytes is not None:
-                remaining_content_bytes[0] -= metadata.st_size
-                if remaining_content_bytes[0] < 0:
-                    raise _GitInspectionResourceLimitError("dirty snapshot content limit exceeded")
-            with path.open("rb") as stream:
-                while block := stream.read(1024 * 1024):
-                    digest.update(block)
-        else:
-            digest.update(b"O")
-            digest.update(f"{metadata.st_size}:{metadata.st_rdev}".encode())
+    if not relative_values:
+        return digest.hexdigest()
+    if not _secure_dir_fd_supported():
+        raise RuntimeError("secure dirty snapshot path inspection is unavailable")
+
+    def identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+            stat.S_IMODE(metadata.st_mode),
+        )
+
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def check_deadline() -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired("dirty snapshot content", cast(int, timeout))
+
+    def destination_path(parts: tuple[str, ...]) -> Path:
+        """Return one trusted snapshot path without following copied links."""
+        if copy_root is None:  # pragma: no cover - guarded by callers
+            raise RuntimeError("candidate snapshot root is unavailable")
+        parent = copy_root
+        for component in parts[:-1]:
+            candidate = parent / component
+            try:
+                candidate.mkdir()
+            except FileExistsError:
+                if candidate.is_symlink() or not candidate.is_dir():
+                    raise RuntimeError("candidate snapshot has an unsafe path prefix") from None
+            parent = candidate
+        return parent / parts[-1]
+
+    open_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    root_fd = os.open(root, open_flags | os.O_DIRECTORY)
+    try:
+        for relative in relative_values:
+            check_deadline()
+            relative_path = Path(relative)
+            parts = relative_path.parts
+            if (
+                relative_path.is_absolute()
+                or not parts
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise RuntimeError("dirty snapshot contains an unsafe path")
+            encoded_path = os.fsencode(relative)
+            digest.update(len(encoded_path).to_bytes(8, "big"))
+            digest.update(encoded_path)
+            descriptors: list[int] = []
+            parent_fd = root_fd
+            try:
+                try:
+                    missing_ancestor = False
+                    for component in parts[:-1]:
+                        check_deadline()
+                        component_metadata = os.stat(
+                            component,
+                            dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                        if stat.S_ISLNK(component_metadata.st_mode):
+                            missing_ancestor = True
+                            break
+                        if not stat.S_ISDIR(component_metadata.st_mode):
+                            missing_ancestor = True
+                            break
+                        parent_fd = os.open(
+                            component,
+                            open_flags | os.O_DIRECTORY,
+                            dir_fd=parent_fd,
+                        )
+                        descriptors.append(parent_fd)
+                    if missing_ancestor:
+                        digest.update(b"M")
+                        continue
+                    metadata = os.stat(
+                        parts[-1],
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    digest.update(b"M")
+                    continue
+                except NotADirectoryError as exc:
+                    raise RuntimeError("dirty snapshot contains an unsafe path") from exc
+                digest.update(f"{stat.S_IFMT(metadata.st_mode):o}\0".encode())
+                if stat.S_ISLNK(metadata.st_mode):
+                    digest.update(b"L")
+                    target = os.fsencode(os.readlink(parts[-1], dir_fd=parent_fd))
+                    after = os.stat(
+                        parts[-1],
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                    if identity(metadata) != identity(after):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    if remaining_content_bytes is not None:
+                        remaining_content_bytes[0] -= len(target)
+                        if remaining_content_bytes[0] < 0:
+                            raise _GitInspectionResourceLimitError(
+                                "dirty snapshot content limit exceeded"
+                            )
+                    digest.update(len(target).to_bytes(8, "big"))
+                    digest.update(target)
+                    if copy_root is not None:
+                        os.symlink(os.fsdecode(target), destination_path(parts))
+                elif stat.S_ISREG(metadata.st_mode):
+                    file_fd = os.open(
+                        parts[-1],
+                        open_flags | os.O_NONBLOCK,
+                        dir_fd=parent_fd,
+                    )
+                    descriptors.append(file_fd)
+                    before = os.fstat(file_fd)
+                    if not stat.S_ISREG(before.st_mode) or (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ) != (before.st_dev, before.st_ino):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    if (
+                        remaining_content_bytes is not None
+                        and before.st_size > remaining_content_bytes[0]
+                    ):
+                        raise _GitInspectionResourceLimitError(
+                            "dirty snapshot content limit exceeded"
+                        )
+                    digest.update(b"F")
+                    digest.update(b"X" if before.st_mode & 0o111 else b"N")
+                    digest.update(before.st_size.to_bytes(8, "big"))
+                    os.set_blocking(file_fd, True)
+                    captured = bytearray()
+                    while True:
+                        check_deadline()
+                        read_limit = 1024 * 1024
+                        if remaining_content_bytes is not None:
+                            read_limit = min(read_limit, remaining_content_bytes[0] + 1)
+                        block = os.read(file_fd, max(1, read_limit))
+                        if not block:
+                            break
+                        if remaining_content_bytes is not None:
+                            remaining_content_bytes[0] -= len(block)
+                            if remaining_content_bytes[0] < 0:
+                                raise _GitInspectionResourceLimitError(
+                                    "dirty snapshot content limit exceeded"
+                                )
+                        digest.update(block)
+                        if copy_root is not None:
+                            captured.extend(block)
+                    if identity(before) != identity(os.fstat(file_fd)):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    if copy_root is not None:
+                        copy_path = destination_path(parts)
+                        copy_path.write_bytes(captured)
+                        copy_path.chmod(stat.S_IMODE(before.st_mode))
+                else:
+                    if copy_root is not None and not stat.S_ISDIR(metadata.st_mode):
+                        raise RuntimeError("candidate tree contains an unsupported path type")
+                    after = os.stat(
+                        parts[-1],
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                    if identity(metadata) != identity(after):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    digest.update(b"O")
+                    digest.update(f"{metadata.st_size}:{metadata.st_rdev}".encode())
+                    if copy_root is not None:
+                        destination_path(parts).mkdir(exist_ok=True)
+            finally:
+                for descriptor in reversed(descriptors):
+                    os.close(descriptor)
+    finally:
+        os.close(root_fd)
     return digest.hexdigest()
 
 
-def _dirty_worktree_snapshot_evidence(worktree: Path, *, timeout: int) -> _DirtySnapshotEvidence:
+def _dirty_worktree_snapshot_evidence(
+    worktree: Path,
+    *,
+    timeout: int,
+    git_env: dict[str, str] | None = None,
+) -> _DirtySnapshotEvidence:
     """Return bounded identities for index, tracked, and untracked content."""
     command_prefix = ("git", "-c", "core.fsmonitor=false")
+    env = dict(git_env or _isolated_checkout_git_env())
     index = _run_bounded_git_output(
         (*command_prefix, "ls-files", "--stage", "-z"),
         cwd=worktree,
         timeout=timeout,
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=False,
+        env=env,
     )
     tracked_paths = _run_bounded_git_output(
         (
@@ -311,6 +860,7 @@ def _dirty_worktree_snapshot_evidence(worktree: Path, *, timeout: int) -> _Dirty
         timeout=timeout,
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=True,
+        env=env,
     )
     tracked_diff = _run_bounded_git_output(
         (
@@ -327,6 +877,7 @@ def _dirty_worktree_snapshot_evidence(worktree: Path, *, timeout: int) -> _Dirty
         timeout=timeout,
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=False,
+        env=env,
     )
     untracked_paths = _run_bounded_git_output(
         (*command_prefix, "ls-files", "--others", "--exclude-standard", "-z"),
@@ -334,6 +885,7 @@ def _dirty_worktree_snapshot_evidence(worktree: Path, *, timeout: int) -> _Dirty
         timeout=timeout,
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=True,
+        env=env,
     )
     tracked = tuple(path for path in tracked_paths.text.split("\0") if path)
     untracked = tuple(path for path in untracked_paths.text.split("\0") if path)
@@ -348,19 +900,269 @@ def _dirty_worktree_snapshot_evidence(worktree: Path, *, timeout: int) -> _Dirty
             tracked_paths.text,
             seed_digest=tracked_diff.sha256,
             remaining_content_bytes=remaining_content_bytes,
+            timeout=timeout,
         ),
         "untracked_sha256": _path_content_identity(
             worktree,
             untracked_paths.text,
             remaining_content_bytes=remaining_content_bytes,
+            timeout=timeout,
         ),
     }
     return _DirtySnapshotEvidence(snapshot=snapshot, changed_file_count=changed_file_count)
 
 
-def _dirty_worktree_content_snapshot(worktree: Path, *, timeout: int) -> dict[str, str]:
+def _bounded_candidate_commit_paths(
+    worktree: Path,
+    head: str,
+    *,
+    timeout: int,
+    git_env: dict[str, str] | None = None,
+) -> CommitPaths:
+    """Return one bounded, filtered path manifest for candidate staging."""
+    from hephaestus.automation.commit_paths import (
+        parse_porcelain_status,
+        reject_filtered_path_shape_changes,
+        select_commit_paths,
+    )
+
+    env = dict(git_env or _isolated_checkout_git_env())
+    porcelain = _run_bounded_git_output(
+        (
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--no-renames",
+        ),
+        cwd=worktree,
+        timeout=timeout,
+        max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+        retain_text=True,
+        env=env,
+    ).text
+    status_entries = parse_porcelain_status(porcelain)
+    if len({path for _status, path in status_entries}) > DIRTY_SNAPSHOT_CHANGED_FILE_MAX:
+        raise _GitInspectionResourceLimitError("dirty snapshot file limit exceeded")
+    selected = select_commit_paths(status_entries, None)
+    if not selected.add_paths and not selected.update_paths:
+        raise RuntimeError("dirty writer has no publishable non-secret paths")
+    reject_filtered_path_shape_changes(status_entries, selected)
+    if not is_bounded_commit_paths(
+        selected,
+        max_paths=DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+        max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+    ):
+        raise _GitInspectionResourceLimitError("dirty snapshot path manifest limit exceeded")
+    return selected
+
+
+def _candidate_commit_tree_evidence(
+    worktree: Path,
+    head: str,
+    *,
+    timeout: int,
+    selected: CommitPaths | None = None,
+    git_env: dict[str, str] | None = None,
+    snapshot_root: Path | None = None,
+) -> tuple[str, _BoundedGitOutput]:
+    """Build and diff the non-secret tree in a disposable Git object store."""
+    selected = selected or _bounded_candidate_commit_paths(
+        worktree,
+        head,
+        timeout=timeout,
+        git_env=git_env,
+    )
+    with tempfile.TemporaryDirectory(prefix="hephaestus-candidate-index-") as temporary:
+        temporary_root = Path(temporary)
+        index = temporary_root / "index"
+        objects = temporary_root / "objects"
+        objects.mkdir()
+        if snapshot_root is None:
+            snapshot_root = temporary_root / "worktree"
+        snapshot_root.mkdir(mode=0o700)
+        env = dict(git_env or _isolated_checkout_git_env())
+        shared_objects = git_utils.run(
+            ["git", "rev-parse", "--git-path", "objects"],
+            cwd=worktree,
+            timeout=timeout,
+            env=env,
+        ).stdout.strip()
+        shared_object_path = Path(shared_objects)
+        if not shared_object_path.is_absolute():
+            shared_object_path = worktree / shared_object_path
+        shared_object_path = shared_object_path.resolve(strict=True)
+        if not shared_object_path.is_dir():
+            raise RuntimeError("shared Git object store is unavailable")
+        env["GIT_INDEX_FILE"] = str(index)
+        env["GIT_OBJECT_DIRECTORY"] = str(objects)
+        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(shared_object_path)
+        selected_paths = (*selected.add_paths, *selected.update_paths)
+        _path_content_identity(
+            worktree,
+            "\0".join(selected_paths) + "\0",
+            remaining_content_bytes=[DIRTY_SNAPSHOT_CONTENT_MAX_BYTES],
+            timeout=timeout,
+            copy_root=snapshot_root,
+        )
+        env["GIT_WORK_TREE"] = str(snapshot_root)
+        git_utils.run(
+            ["git", "read-tree", head],
+            cwd=worktree,
+            timeout=timeout,
+            env=env,
+        )
+        if selected.update_paths:
+            update_pathspec = temporary_root / "update-paths"
+            update_pathspec.write_bytes(
+                b"\0".join(os.fsencode(path) for path in selected.update_paths) + b"\0"
+            )
+            git_utils.run(
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "rm",
+                    "-r",
+                    "-f",
+                    "--cached",
+                    "--ignore-unmatch",
+                    f"--pathspec-from-file={update_pathspec}",
+                    "--pathspec-file-nul",
+                ],
+                cwd=worktree,
+                timeout=timeout,
+                env=env,
+            )
+        if selected.add_paths:
+            add_pathspec = temporary_root / "add-paths"
+            add_pathspec.write_bytes(
+                b"\0".join(os.fsencode(path) for path in selected.add_paths) + b"\0"
+            )
+            git_utils.run(
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "add",
+                    "-A",
+                    f"--pathspec-from-file={add_pathspec}",
+                    "--pathspec-file-nul",
+                ],
+                cwd=worktree,
+                timeout=timeout,
+                env=env,
+            )
+        if not selected.update_paths and not selected.add_paths:
+            raise RuntimeError("dirty writer has no publishable non-secret tree change")
+        tree = git_utils.run(
+            ["git", "write-tree"],
+            cwd=worktree,
+            timeout=timeout,
+            env=env,
+        ).stdout.strip()
+        if not _is_full_commit_sha(tree):
+            raise RuntimeError("candidate commit tree is unavailable")
+        diff = _run_bounded_git_output(
+            (
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--binary",
+                "--full-index",
+                head,
+                tree,
+            ),
+            cwd=worktree,
+            timeout=timeout,
+            max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+            retain_text=True,
+            env=env,
+        )
+    return tree, diff
+
+
+def _inspect_candidate_with_private_git(
+    worktree: Path,
+    head: str,
+    *,
+    timeout: int,
+    linked_env: dict[str, str],
+) -> tuple[_DirtySnapshotEvidence, _BoundedGitOutput, str, _BoundedGitOutput, CommitPaths | None]:
+    """Inspect one candidate without use of repository-local Git configuration."""
+    with _private_linked_worktree_git_env(linked_env, detached_head=head) as env:
+        private_head = git_utils.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree,
+            timeout=timeout,
+            env=env,
+        ).stdout.strip()
+        if private_head != head:
+            raise RuntimeError("private Git metadata HEAD changed")
+        before = _dirty_worktree_snapshot_evidence(worktree, timeout=timeout, git_env=env)
+        status_result = _run_bounded_git_output(
+            (
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "status.relativePaths=false",
+                "status",
+                "--short",
+                "--untracked-files=all",
+                "--no-renames",
+            ),
+            cwd=worktree,
+            timeout=timeout,
+            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+            retain_text=True,
+            env=env,
+        )
+        selected_paths: CommitPaths | None = None
+        if status_result.text.strip():
+            selected_paths = _bounded_candidate_commit_paths(
+                worktree,
+                head,
+                timeout=timeout,
+                git_env=env,
+            )
+            candidate_tree, diff_result = _candidate_commit_tree_evidence(
+                worktree,
+                head,
+                timeout=timeout,
+                selected=selected_paths,
+                git_env=env,
+            )
+        else:
+            candidate_tree = head
+            diff_result = _BoundedGitOutput(
+                text="",
+                sha256=hashlib.sha256(b"").hexdigest(),
+                byte_count=0,
+            )
+        after = _dirty_worktree_snapshot_evidence(worktree, timeout=timeout, git_env=env)
+        if before != after:
+            raise RuntimeError("dirty writer changed during inspection")
+        return after, status_result, candidate_tree, diff_result, selected_paths
+
+
+def _dirty_worktree_content_snapshot(
+    worktree: Path,
+    *,
+    timeout: int,
+    git_env: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Return the bounded content identity for one dirty worktree."""
-    return _dirty_worktree_snapshot_evidence(worktree, timeout=timeout).snapshot
+    return _dirty_worktree_snapshot_evidence(
+        worktree,
+        timeout=timeout,
+        git_env=git_env,
+    ).snapshot
 
 
 def _valid_dirty_content_snapshot(value: object) -> TypeGuard[dict[str, str]]:
@@ -404,6 +1206,8 @@ def _classify_github_failure(error: BaseException, *, now_epoch: float) -> tuple
         return "github_unavailable", delay
     if any(isinstance(item, subprocess.CalledProcessError) for item in chain):
         return "github_cli_error", 1.0
+    if any(isinstance(item, (subprocess.TimeoutExpired, _GitLockTimeoutError)) for item in chain):
+        return "github_timeout", 1.0
     if any(isinstance(item, CommentJournalReadError) for item in chain):
         return "comment_journal_read_error", 1.0
     return None
@@ -1498,6 +2302,17 @@ def _controlled_git_env() -> dict[str, str]:
     return env
 
 
+def _isolated_checkout_git_env() -> dict[str, str]:
+    """Return a legacy Git environment with host configuration disabled.
+
+    ``GIT_CONFIG`` controls ``git config``. A private ``GIT_DIR`` is also
+    necessary when another Git command must not load repository configuration.
+    """
+    env = _controlled_git_env()
+    env["GIT_CONFIG"] = os.devnull
+    return env
+
+
 _HOST_SIGNING_CONFIG_KEYS = (
     "user.name",
     "user.email",
@@ -1576,7 +2391,12 @@ def _read_host_git_signing_config(cwd: Path, *, timeout: int) -> dict[str, str] 
     return parsed
 
 
-def _controlled_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str] | JobResult:
+def _controlled_git_signing_env(
+    cwd: Path,
+    *,
+    timeout: int,
+    private_metadata: bool = False,
+) -> dict[str, str] | JobResult:
     """Return the controlled Git environment with an allowlisted signing identity."""
     signing = _read_host_git_signing_config(cwd, timeout=timeout)
     if signing is None:
@@ -1592,7 +2412,9 @@ def _controlled_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str] | 
             value={"failure_kind": "signing_configuration"},
             error="trusted SSH signing executable unavailable",
         )
-    env = _controlled_git_env()
+    env = _isolated_checkout_git_env()
+    if private_metadata:
+        env.pop("GIT_CONFIG", None)
     injected = {
         **signing,
         "commit.gpgsign": "true",
@@ -1744,30 +2566,80 @@ def _unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
     return None
 
 
-def _checkout_preflight_error(
+def _checkout_preflight_error(  # noqa: C901
     checkout: Path,
     timeout_s: int,
     *,
     max_config_bytes: int | None = None,
 ) -> str | None:
     """Return a reusable-checkout metadata safety failure before synchronization."""
-    if not (checkout / ".git").exists():
+    git_marker = checkout / ".git"
+    if not git_marker.exists():
         return None
-    if max_config_bytes is None:
-        config = git_utils.run(
-            ["git", "config", "--null", "--list"],
-            cwd=checkout,
-            timeout=timeout_s,
-            env=_controlled_git_env(),
-        ).stdout
+    if git_marker.is_symlink():
+        return "checkout has unsafe Git metadata"
+    config_paths: list[Path]
+    if git_marker.is_dir():
+        config_paths = [git_marker / "config"]
+        worktree_config = git_marker / "config.worktree"
+    elif git_marker.is_file():
+        pointer, _identity = _portable_read_git_pointer(git_marker)
+        if not pointer.startswith("gitdir: "):
+            return "checkout has unsafe Git metadata"
+        admin_dir = _normalized_metadata_path(checkout, pointer.removeprefix("gitdir: "))
+        if admin_dir.parent.name != "worktrees":
+            return "checkout has unsafe Git metadata"
+        repo_git_dir = admin_dir.parent.parent
+        if not repo_git_dir.is_dir():
+            return "checkout has unsafe Git metadata"
+        config_paths = [repo_git_dir / "config"]
+        worktree_config = admin_dir / "config.worktree"
     else:
-        config = _run_bounded_git_output(
-            ("git", "config", "--null", "--list"),
-            cwd=checkout,
-            timeout=timeout_s,
-            max_bytes=max_config_bytes,
-            retain_text=True,
-        ).text
+        return "checkout has unsafe Git metadata"
+    if worktree_config.exists():
+        config_paths.append(worktree_config)
+    config_parts: list[str] = []
+    if max_config_bytes is None:
+        for config_path in config_paths:
+            neutral_cwd = Path(config_path.anchor)
+            config_parts.append(
+                git_utils.run(
+                    [
+                        "git",
+                        "config",
+                        "--file",
+                        str(config_path),
+                        "--no-includes",
+                        "--null",
+                        "--list",
+                    ],
+                    cwd=neutral_cwd,
+                    timeout=timeout_s,
+                    env=_controlled_git_env(),
+                ).stdout
+            )
+    else:
+        remaining = max_config_bytes
+        for config_path in config_paths:
+            neutral_cwd = Path(config_path.anchor)
+            output = _run_bounded_git_output(
+                (
+                    "git",
+                    "config",
+                    "--file",
+                    str(config_path),
+                    "--no-includes",
+                    "--null",
+                    "--list",
+                ),
+                cwd=neutral_cwd,
+                timeout=timeout_s,
+                max_bytes=remaining,
+                retain_text=True,
+            ).text
+            config_parts.append(output)
+            remaining -= len(output.encode("utf-8", "surrogateescape"))
+    config = "\0".join(config_parts)
     unsafe_config = _unsafe_local_git_config_key(config)
     if unsafe_config is not None:
         return "checkout has unsafe local Git configuration"
@@ -1785,6 +2657,771 @@ def _checkout_preflight_error(
     if graft_path.is_file():
         return "checkout has unsafe legacy Git grafts"
     return None
+
+
+@dataclass(frozen=True)
+class _FilesystemIdentity:
+    """Identify one open file-system object."""
+
+    device: int
+    inode: int
+    file_type: int
+
+
+@dataclass(frozen=True)
+class _LinkedWorktreeBinding:
+    """Bind one linked worktree to its validated Git metadata graph."""
+
+    repo_root: Path
+    worktree: Path
+    common_dir: Path
+    admin_dir: Path
+    index: Path
+    objects: Path
+    branch_ref: str
+    branch_sha: str
+    common_identity: _FilesystemIdentity
+    index_identity: _FilesystemIdentity
+    structural_identity: tuple[_FilesystemIdentity, ...]
+
+
+class _LinkedWorktreeGitEnvironment(dict[str, str]):
+    """Carry a Git child environment and its structural binding."""
+
+    def __init__(self, values: dict[str, str], binding: _LinkedWorktreeBinding) -> None:
+        """Initialize the environment for one validated binding."""
+        super().__init__(values)
+        self.binding = binding
+
+
+class _PrivateLinkedWorktreeGitEnvironment(dict[str, str]):
+    """Carry private Git metadata and its real linked-worktree binding."""
+
+    def __init__(self, values: dict[str, str], linked_env: dict[str, str]) -> None:
+        """Initialize one private environment from a validated real binding."""
+        super().__init__(values)
+        self.linked_env = linked_env
+        self.binding = getattr(linked_env, "binding", None)
+
+
+def _filesystem_identity(metadata: os.stat_result) -> _FilesystemIdentity:
+    """Return the stable identity fields for one open object."""
+    return _FilesystemIdentity(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        file_type=stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _secure_dir_fd_supported() -> bool:
+    """Return whether secure descriptor-relative path traversal is available."""
+    required = (os.open, os.stat, os.readlink, os.mkdir)
+    return bool(
+        os.name == "posix"
+        and getattr(os, "O_DIRECTORY", 0)
+        and getattr(os, "O_NOFOLLOW", 0)
+        and all(function in os.supports_dir_fd for function in required)
+        and os.stat in os.supports_follow_symlinks
+    )
+
+
+def _open_directory_no_follow(path: Path) -> tuple[int, _FilesystemIdentity]:
+    """Open one directory and reject a final-component link or replacement."""
+    metadata = path.lstat()
+    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("linked worktree metadata directory is unsafe")
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0)
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (
+            metadata.st_dev,
+            metadata.st_ino,
+        ) or not stat.S_ISDIR(opened.st_mode):
+            raise RuntimeError("linked worktree metadata directory changed")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, _filesystem_identity(opened)
+
+
+def _open_directory_at_no_follow(
+    parent_fd: int,
+    name: str,
+) -> tuple[int, _FilesystemIdentity]:
+    """Open one child directory without following a path component link."""
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("linked worktree metadata directory is unsafe")
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0)
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (
+            metadata.st_dev,
+            metadata.st_ino,
+        ) or not stat.S_ISDIR(opened.st_mode):
+            raise RuntimeError("linked worktree metadata directory changed")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, _filesystem_identity(opened)
+
+
+def _read_bounded_regular_at(
+    parent_fd: int,
+    name: str,
+    *,
+    max_bytes: int,
+) -> tuple[bytes, _FilesystemIdentity]:
+    """Read one bounded regular file through a bound parent descriptor."""
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
+        raise RuntimeError("linked worktree metadata file is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino) or not stat.S_ISREG(
+            opened.st_mode
+        ):
+            raise RuntimeError("linked worktree metadata file changed")
+        payload = os.read(descriptor, max_bytes + 1)
+        if len(payload) > max_bytes or os.read(descriptor, 1):
+            raise RuntimeError("linked worktree metadata file is too large")
+    finally:
+        os.close(descriptor)
+    return payload, _filesystem_identity(opened)
+
+
+def _read_bounded_git_pointer_at(parent_fd: int, name: str) -> tuple[str, _FilesystemIdentity]:
+    """Read one small regular Git metadata file without following a link."""
+    payload, identity = _read_bounded_regular_at(parent_fd, name, max_bytes=4096)
+    try:
+        return payload.decode("utf-8").strip(), identity
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("linked worktree metadata pointer is invalid") from exc
+
+
+def _reject_object_alternates_at(objects_fd: int) -> None:
+    """Reject a repository object store that can redirect object reads."""
+    try:
+        info_fd, _identity = _open_directory_at_no_follow(objects_fd, "info")
+    except FileNotFoundError:
+        return
+    try:
+        try:
+            os.stat("alternates", dir_fd=info_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise RuntimeError("linked worktree object store has unsafe alternates")
+    finally:
+        os.close(info_fd)
+
+
+def _reject_portable_object_alternates(objects: Path) -> None:
+    """Reject an alternate-object entry without following a portable path."""
+    info = objects / "info"
+    try:
+        _portable_path_identity(info, directory=True)
+    except FileNotFoundError:
+        return
+    try:
+        (info / "alternates").lstat()
+    except FileNotFoundError:
+        return
+    raise RuntimeError("linked worktree object store has unsafe alternates")
+
+
+def _regular_file_identity_at(parent_fd: int, name: str) -> _FilesystemIdentity:
+    """Open one regular metadata file and return its no-follow identity."""
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("linked worktree metadata file is unsafe")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino) or not stat.S_ISREG(
+            opened.st_mode
+        ):
+            raise RuntimeError("linked worktree metadata file changed")
+        return _filesystem_identity(opened)
+    finally:
+        os.close(descriptor)
+
+
+def _read_bounded_git_pointer(path: Path) -> str:
+    """Read one small regular Git metadata pointer without following a link."""
+    parent_fd, _identity = _open_directory_no_follow(path.parent)
+    try:
+        value, _file_identity = _read_bounded_git_pointer_at(parent_fd, path.name)
+    finally:
+        os.close(parent_fd)
+    return value
+
+
+def _read_branch_ref(
+    common_fd: int,
+    common_dir: Path,
+    branch_ref: str,
+) -> str:
+    """Read one direct loose or packed branch reference from bound metadata."""
+    components = tuple(branch_ref.split("/"))
+    if (
+        len(components) < 3
+        or components[:2] != ("refs", "heads")
+        or any(component in {"", ".", ".."} for component in components)
+    ):
+        raise RuntimeError("linked worktree branch reference is invalid")
+    descriptors: list[int] = []
+    parent_fd = common_fd
+    try:
+        try:
+            for component in components[:-1]:
+                parent_fd, _identity = _open_directory_at_no_follow(parent_fd, component)
+                descriptors.append(parent_fd)
+            value, _identity = _read_bounded_git_pointer_at(parent_fd, components[-1])
+        except FileNotFoundError:
+            value = ""
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    if value:
+        if not _is_full_commit_sha(value):
+            raise RuntimeError("linked worktree branch reference is invalid")
+        return value
+
+    try:
+        packed_bytes, _packed_identity = _read_bounded_regular_at(
+            common_fd,
+            "packed-refs",
+            max_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
+        )
+    except FileNotFoundError:
+        packed_bytes = b""
+    try:
+        packed = packed_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("linked worktree packed references are invalid") from exc
+    matches = [
+        line.partition(" ")[0]
+        for line in packed.splitlines()
+        if not line.startswith(("#", "^")) and line.partition(" ")[2] == branch_ref
+    ]
+    if len(matches) != 1 or not _is_full_commit_sha(matches[0]):
+        raise RuntimeError("linked worktree branch reference is unavailable")
+    return matches[0]
+
+
+def _portable_path_identity(path: Path, *, directory: bool) -> _FilesystemIdentity:
+    """Validate one absolute path without a symlink, junction, or reparse point."""
+    if not path.is_absolute():
+        raise RuntimeError("linked worktree metadata path is not absolute")
+    current = Path(path.anchor)
+    final: os.stat_result | None = None
+    for component in path.parts[1:]:
+        current /= component
+        metadata = current.lstat()
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & reparse_flag
+        ):
+            raise RuntimeError("linked worktree metadata path has a reparse point")
+        if current != path and not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("linked worktree metadata path prefix is unsafe")
+        final = metadata
+    if final is None:
+        final = path.lstat()
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(final.st_mode):
+        raise RuntimeError("linked worktree metadata path has an unsafe type")
+    return _filesystem_identity(final)
+
+
+def _portable_read_bounded_regular(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> tuple[bytes, _FilesystemIdentity]:
+    """Read one bounded regular file after portable reparse-point validation."""
+    identity = _portable_path_identity(path, directory=False)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if _filesystem_identity(opened) != identity or opened.st_size > max_bytes:
+            raise RuntimeError("linked worktree metadata file changed")
+        payload = os.read(descriptor, max_bytes + 1)
+        if len(payload) > max_bytes or os.read(descriptor, 1):
+            raise RuntimeError("linked worktree metadata file is too large")
+    finally:
+        os.close(descriptor)
+    return payload, identity
+
+
+def _portable_read_git_pointer(path: Path) -> tuple[str, _FilesystemIdentity]:
+    """Read one portable bounded Git pointer."""
+    payload, identity = _portable_read_bounded_regular(path, max_bytes=4096)
+    try:
+        return payload.decode("utf-8").strip(), identity
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("linked worktree metadata pointer is invalid") from exc
+
+
+def _normalized_metadata_path(base: Path, value: str) -> Path:
+    """Return one absolute lexical metadata path without resolving links."""
+    raw = Path(value)
+    candidate = raw if raw.is_absolute() else base / raw
+    return Path(os.path.abspath(candidate))
+
+
+def _portable_read_branch_ref(common_dir: Path, branch_ref: str) -> str:
+    """Read one loose or packed branch through portable validated paths."""
+    components = tuple(branch_ref.split("/"))
+    windows_components = tuple(PureWindowsPath(component) for component in components)
+    if (
+        len(components) < 3
+        or components[:2] != ("refs", "heads")
+        or any(component in {"", ".", ".."} for component in components)
+        or any(
+            component.drive or component.root or component.parts != (value,)
+            for value, component in zip(components, windows_components, strict=True)
+        )
+    ):
+        raise RuntimeError("linked worktree branch reference is invalid")
+    loose = common_dir.joinpath(*components)
+    if not loose.is_relative_to(common_dir):
+        raise RuntimeError("linked worktree branch reference is invalid")
+    try:
+        payload, _identity = _portable_read_bounded_regular(loose, max_bytes=4096)
+    except FileNotFoundError:
+        payload = b""
+    if payload:
+        try:
+            value = payload.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("linked worktree branch reference is invalid") from exc
+        if not _is_full_commit_sha(value):
+            raise RuntimeError("linked worktree branch reference is invalid")
+        return value
+    try:
+        packed, _identity = _portable_read_bounded_regular(
+            common_dir / "packed-refs",
+            max_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
+        )
+    except FileNotFoundError:
+        packed = b""
+    try:
+        packed_text = packed.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("linked worktree packed references are invalid") from exc
+    matches = [
+        line.partition(" ")[0]
+        for line in packed_text.splitlines()
+        if not line.startswith(("#", "^")) and line.partition(" ")[2] == branch_ref
+    ]
+    if len(matches) != 1 or not _is_full_commit_sha(matches[0]):
+        raise RuntimeError("linked worktree branch reference is unavailable")
+    return matches[0]
+
+
+def _git_environment_for_binding(
+    binding: _LinkedWorktreeBinding,
+) -> _LinkedWorktreeGitEnvironment:
+    """Return one controlled Git environment for a validated binding."""
+    env = _isolated_checkout_git_env()
+    env.update(
+        {
+            "GIT_DIR": str(binding.admin_dir),
+            "GIT_COMMON_DIR": str(binding.common_dir),
+            "GIT_INDEX_FILE": str(binding.index),
+            "GIT_WORK_TREE": str(binding.worktree),
+            "GIT_OBJECT_DIRECTORY": str(binding.objects),
+        }
+    )
+    return _LinkedWorktreeGitEnvironment(env, binding)
+
+
+def _linked_worktree_git_env_portable(
+    repo_root: Path,
+    worktree: Path,
+) -> _LinkedWorktreeGitEnvironment:
+    """Bind a linked worktree on a host without descriptor-relative traversal."""
+    repo_identity = _portable_path_identity(repo_root, directory=True)
+    worktree_identity = _portable_path_identity(worktree, directory=True)
+    common_dir = repo_root / ".git"
+    common_identity = _portable_path_identity(common_dir, directory=True)
+    registered_root = common_dir / "worktrees"
+    registry_identity = _portable_path_identity(registered_root, directory=True)
+    pointer, marker_identity = _portable_read_git_pointer(worktree / ".git")
+    if not pointer.startswith("gitdir: "):
+        raise RuntimeError("linked worktree gitfile is invalid")
+    admin_dir = _normalized_metadata_path(worktree, pointer.removeprefix("gitdir: "))
+    if admin_dir.parent != registered_root:
+        raise RuntimeError("linked worktree admin directory is unregistered")
+    admin_identity = _portable_path_identity(admin_dir, directory=True)
+    back_pointer, back_pointer_identity = _portable_read_git_pointer(admin_dir / "gitdir")
+    if _normalized_metadata_path(admin_dir, back_pointer) != worktree / ".git":
+        raise RuntimeError("linked worktree admin back-pointer changed")
+    common_pointer, common_pointer_identity = _portable_read_git_pointer(admin_dir / "commondir")
+    if _normalized_metadata_path(admin_dir, common_pointer) != common_dir:
+        raise RuntimeError("linked worktree common directory changed")
+    head_pointer, head_identity = _portable_read_git_pointer(admin_dir / "HEAD")
+    if not head_pointer.startswith("ref: "):
+        raise RuntimeError("linked worktree HEAD is detached")
+    branch_ref = head_pointer.removeprefix("ref: ")
+    branch_sha = _portable_read_branch_ref(common_dir, branch_ref)
+    index = admin_dir / "index"
+    index_identity = _portable_path_identity(index, directory=False)
+    objects = common_dir / "objects"
+    objects_identity = _portable_path_identity(objects, directory=True)
+    _reject_portable_object_alternates(objects)
+    binding = _LinkedWorktreeBinding(
+        repo_root=repo_root,
+        worktree=worktree,
+        common_dir=common_dir,
+        admin_dir=admin_dir,
+        index=index,
+        objects=objects,
+        branch_ref=branch_ref,
+        branch_sha=branch_sha,
+        common_identity=common_identity,
+        index_identity=index_identity,
+        structural_identity=(
+            repo_identity,
+            worktree_identity,
+            common_identity,
+            registry_identity,
+            admin_identity,
+            marker_identity,
+            back_pointer_identity,
+            common_pointer_identity,
+            head_identity,
+            objects_identity,
+        ),
+    )
+    return _git_environment_for_binding(binding)
+
+
+def _linked_worktree_git_env(
+    repo_root: Path,
+    worktree: Path,
+) -> _LinkedWorktreeGitEnvironment:
+    """Bind Git commands to one registered linked-worktree metadata graph."""
+    if not _secure_dir_fd_supported():
+        return _linked_worktree_git_env_portable(repo_root, worktree)
+    repo_fd, repo_identity = _open_directory_no_follow(repo_root)
+    descriptors = [repo_fd]
+    try:
+        worktree_fd, worktree_identity = _open_directory_no_follow(worktree)
+        descriptors.append(worktree_fd)
+        common_fd, common_identity = _open_directory_at_no_follow(repo_fd, ".git")
+        descriptors.append(common_fd)
+        registry_fd, registry_identity = _open_directory_at_no_follow(common_fd, "worktrees")
+        descriptors.append(registry_fd)
+        pointer, marker_identity = _read_bounded_git_pointer_at(worktree_fd, ".git")
+        prefix = "gitdir: "
+        if not pointer.startswith(prefix):
+            raise RuntimeError("linked worktree gitfile is invalid")
+        common_dir = repo_root / ".git"
+        registered_root = common_dir / "worktrees"
+        raw_admin = Path(pointer.removeprefix(prefix))
+        if not raw_admin.is_absolute():
+            raw_admin = worktree / raw_admin
+        admin_dir = raw_admin.resolve(strict=True)
+        if admin_dir.parent != registered_root or raw_admin.is_symlink():
+            raise RuntimeError("linked worktree admin directory is unregistered")
+        admin_fd, admin_identity = _open_directory_at_no_follow(registry_fd, admin_dir.name)
+        descriptors.append(admin_fd)
+        back_pointer, back_pointer_identity = _read_bounded_git_pointer_at(admin_fd, "gitdir")
+        raw_back_pointer = Path(back_pointer)
+        if not raw_back_pointer.is_absolute():
+            raw_back_pointer = admin_dir / raw_back_pointer
+        if raw_back_pointer.resolve(strict=True) != worktree / ".git":
+            raise RuntimeError("linked worktree admin back-pointer changed")
+        common_pointer, common_pointer_identity = _read_bounded_git_pointer_at(
+            admin_fd, "commondir"
+        )
+        raw_common = Path(common_pointer)
+        if not raw_common.is_absolute():
+            raw_common = admin_dir / raw_common
+        if raw_common.resolve(strict=True) != common_dir:
+            raise RuntimeError("linked worktree common directory changed")
+        head_pointer, head_identity = _read_bounded_git_pointer_at(admin_fd, "HEAD")
+        head_prefix = "ref: "
+        if not head_pointer.startswith(head_prefix):
+            raise RuntimeError("linked worktree HEAD is detached")
+        branch_ref = head_pointer.removeprefix(head_prefix)
+        branch_sha = _read_branch_ref(common_fd, common_dir, branch_ref)
+        index_identity = _regular_file_identity_at(admin_fd, "index")
+        objects_fd, objects_identity = _open_directory_at_no_follow(common_fd, "objects")
+        descriptors.append(objects_fd)
+        _reject_object_alternates_at(objects_fd)
+        index = admin_dir / "index"
+        objects = common_dir / "objects"
+        binding = _LinkedWorktreeBinding(
+            repo_root=repo_root,
+            worktree=worktree,
+            common_dir=common_dir,
+            admin_dir=admin_dir,
+            index=index,
+            objects=objects,
+            branch_ref=branch_ref,
+            branch_sha=branch_sha,
+            common_identity=common_identity,
+            index_identity=index_identity,
+            structural_identity=(
+                repo_identity,
+                worktree_identity,
+                common_identity,
+                registry_identity,
+                admin_identity,
+                marker_identity,
+                back_pointer_identity,
+                common_pointer_identity,
+                head_identity,
+                objects_identity,
+            ),
+        )
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    return _git_environment_for_binding(binding)
+
+
+@contextmanager
+def _private_linked_worktree_git_env(
+    linked_env: dict[str, str],
+    *,
+    detached_head: str,
+    durable_git_dir: Path | None = None,
+) -> Iterator[dict[str, str]]:
+    """Use private Git metadata with the validated real index and object store."""
+    if not _is_full_commit_sha(detached_head):
+        raise RuntimeError("private Git metadata HEAD is invalid")
+    with ExitStack() as stack:
+        if durable_git_dir is None:
+            temporary = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="hephaestus-recovery-git-")
+            )
+            git_dir = Path(temporary) / "git"
+            git_dir.mkdir(mode=0o700)
+        else:
+            git_dir = durable_git_dir.resolve(strict=True)
+            if durable_git_dir.is_symlink() or not git_dir.is_dir():
+                raise RuntimeError("durable private Git metadata is invalid")
+        (git_dir / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+        (git_dir / "refs" / "tags").mkdir(parents=True, exist_ok=True)
+        head_path = git_dir / "HEAD"
+        if head_path.exists():
+            if (
+                head_path.is_symlink()
+                or head_path.read_text(encoding="ascii").strip() != detached_head
+            ):
+                raise RuntimeError("durable private Git HEAD changed")
+        else:
+            write_secure(head_path, f"{detached_head}\n", permissions=0o600)
+        if len(detached_head) == 64:
+            write_secure(
+                git_dir / "config",
+                "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n",
+                permissions=0o600,
+            )
+        binding = getattr(linked_env, "binding", None)
+        if isinstance(binding, _LinkedWorktreeBinding):
+            rebound = _linked_worktree_git_env(binding.repo_root, binding.worktree)
+            if not _linked_binding_matches(linked_env, rebound, include_index=True):
+                kind = "durable" if durable_git_dir is not None else "temporary"
+                raise RuntimeError(
+                    f"linked worktree metadata changed before {kind} private Git use "
+                    f"({binding.index_identity!r} != {rebound.binding.index_identity!r})"
+                )
+            linked_env = rebound
+            binding = rebound.binding
+        objects = (
+            binding.objects
+            if isinstance(binding, _LinkedWorktreeBinding)
+            else Path(linked_env["GIT_COMMON_DIR"]) / "objects"
+        )
+        env = dict(linked_env)
+        env.update(
+            {
+                "GIT_DIR": str(git_dir),
+                "GIT_COMMON_DIR": str(git_dir),
+                "GIT_OBJECT_DIRECTORY": str(objects),
+                "GIT_OPTIONAL_LOCKS": "0",
+            }
+        )
+        env.pop("GIT_CONFIG", None)
+        yield _PrivateLinkedWorktreeGitEnvironment(env, linked_env)
+
+
+def _linked_binding_matches(
+    expected_env: dict[str, str],
+    current_env: dict[str, str],
+    *,
+    include_index: bool,
+) -> bool:
+    """Return whether two environments bind to the same metadata objects."""
+    expected = getattr(expected_env, "binding", None)
+    current = getattr(current_env, "binding", None)
+    if isinstance(expected, _LinkedWorktreeBinding) and isinstance(current, _LinkedWorktreeBinding):
+        return (
+            expected.repo_root == current.repo_root
+            and expected.worktree == current.worktree
+            and expected.common_dir == current.common_dir
+            and expected.admin_dir == current.admin_dir
+            and expected.index == current.index
+            and expected.objects == current.objects
+            and expected.branch_ref == current.branch_ref
+            and expected.structural_identity == current.structural_identity
+            and (not include_index or expected.index_identity == current.index_identity)
+        )
+    keys = ("GIT_DIR", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")
+    return all(expected_env.get(key) == current_env.get(key) for key in keys)
+
+
+def _refresh_verified_recovery_index(
+    repo_root: Path,
+    worktree: Path,
+    *,
+    expected_git_env: dict[str, str],
+    private_git_env: dict[str, str],
+    source_sha: str,
+    expected_tree: str,
+    timeout: int,
+) -> None:
+    """Refresh the real index from one verified child after an exact rebind."""
+    expected_linked = getattr(expected_git_env, "linked_env", expected_git_env)
+    rebound = _linked_worktree_git_env(repo_root, worktree)
+    if not _linked_binding_matches(expected_linked, rebound, include_index=True):
+        raise RuntimeError("remediation writer Git metadata identity changed")
+    expected_binding = getattr(expected_linked, "binding", None)
+    rebound_binding = getattr(rebound, "binding", None)
+    if (
+        not isinstance(expected_binding, _LinkedWorktreeBinding)
+        or not isinstance(rebound_binding, _LinkedWorktreeBinding)
+        or rebound_binding.branch_ref != expected_binding.branch_ref
+        or rebound_binding.branch_sha != expected_binding.branch_sha
+    ):
+        raise RuntimeError("remediation writer branch binding changed")
+    refresh_env = dict(private_git_env)
+    refresh_env.update(
+        {
+            "GIT_INDEX_FILE": str(rebound_binding.index),
+            "GIT_WORK_TREE": str(worktree),
+        }
+    )
+    git_utils.run(
+        ["git", "read-tree", source_sha],
+        cwd=worktree,
+        timeout=timeout,
+        env=refresh_env,
+    )
+    refreshed_tree = git_utils.run(
+        ["git", "write-tree"],
+        cwd=worktree,
+        timeout=timeout,
+        env=refresh_env,
+    ).stdout.strip()
+    if refreshed_tree != expected_tree:
+        raise RuntimeError("remediation writer refreshed index tree changed")
+    refreshed = _linked_worktree_git_env(repo_root, worktree)
+    refreshed_binding = getattr(refreshed, "binding", None)
+    if (
+        not _linked_binding_matches(rebound, refreshed, include_index=False)
+        or not isinstance(refreshed_binding, _LinkedWorktreeBinding)
+        or refreshed_binding.branch_ref != rebound_binding.branch_ref
+        or refreshed_binding.branch_sha != rebound_binding.branch_sha
+    ):
+        raise RuntimeError("remediation writer Git metadata identity changed")
+
+
+def _compare_and_swap_linked_branch(  # noqa: C901
+    binding: _LinkedWorktreeBinding,
+    *,
+    expected_sha: str,
+    new_sha: str,
+) -> None:
+    """Update one bound local branch without loading repository configuration."""
+    if not _is_full_commit_sha(expected_sha) or not _is_full_commit_sha(new_sha):
+        raise RuntimeError("remediation branch update has an invalid commit")
+    components = tuple(binding.branch_ref.split("/"))
+    if (
+        len(components) < 3
+        or components[:2] != ("refs", "heads")
+        or any(component in {"", ".", ".."} for component in components)
+    ):
+        raise RuntimeError("remediation branch update has an invalid reference")
+    if not _secure_dir_fd_supported():
+        raise RuntimeError("secure branch update is unavailable")
+    common_fd, common_identity = _open_directory_no_follow(binding.common_dir)
+    if common_identity != binding.common_identity:
+        os.close(common_fd)
+        raise RuntimeError("remediation branch metadata identity changed")
+    descriptors = [common_fd]
+    lock_name = f"{components[-1]}.lock"
+    lock_fd: int | None = None
+    lock_exists = False
+    try:
+        parent_fd = common_fd
+        for component in components[:-1]:
+            try:
+                next_fd, _identity = _open_directory_at_no_follow(parent_fd, component)
+            except FileNotFoundError:
+                with suppress(FileExistsError):
+                    os.mkdir(component, 0o755, dir_fd=parent_fd)
+                next_fd, _identity = _open_directory_at_no_follow(parent_fd, component)
+            parent_fd = next_fd
+            descriptors.append(parent_fd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if os.name == "posix":
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            lock_fd = os.open(lock_name, flags, 0o644, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise RuntimeError("remediation branch update is locked") from exc
+        lock_exists = True
+        observed = _read_branch_ref(common_fd, binding.common_dir, binding.branch_ref)
+        if observed == new_sha:
+            return
+        if observed != expected_sha:
+            raise RuntimeError("remediation branch changed before local update")
+        payload = f"{new_sha}\n".encode("ascii")
+        written = 0
+        while written < len(payload):
+            count = os.write(lock_fd, payload[written:])
+            if count <= 0:
+                raise RuntimeError("remediation branch update write failed")
+            written += count
+        os.fsync(lock_fd)
+        os.close(lock_fd)
+        lock_fd = None
+        os.replace(
+            lock_name,
+            components[-1],
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        lock_exists = False
+        os.fsync(parent_fd)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        if lock_exists:
+            with suppress(OSError):
+                os.unlink(lock_name, dir_fd=descriptors[-1])
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
@@ -1915,6 +3552,427 @@ def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
     return fields
 
 
+def _is_codex_implementation_job(job: AgentJob) -> bool:
+    """Return true only for a Codex implementation-role job."""
+    return bool(
+        agent_runtime.requires_codex_implementation_isolation(job.agent)
+        and job.execution_request is not None
+        and job.execution_request.role is AgentRole.IMPLEMENTER
+    )
+
+
+@contextmanager
+def _codex_git_boundary(cwd: Path) -> Iterator[codex_worktree_boundary.CodexWorktreeBoundary]:
+    """Map Git receipt failures to one stable adapter error."""
+    try:
+        with codex_worktree_boundary.capture_codex_worktree_boundary(cwd) as boundary:
+            yield boundary
+    except codex_worktree_boundary.CodexWorktreeBoundaryError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+
+
+def _codex_implementation_command(
+    *,
+    executable: Path,
+    worktree: Path,
+    model: str,
+    session_id: str | None,
+    sandbox: str,
+    operation: AgentOperation,
+    allowed_tools: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Build one exact guest command from frozen worker inputs."""
+    command = [str(executable), "exec"]
+    if session_id:
+        command.extend(("resume", session_id))
+    selection = resolve_codex_model_selection(model)
+    if selection.model:
+        command.extend(("--model", selection.model))
+    if selection.reasoning_effort not in {"", "default"}:
+        command.extend(("-c", f"model_reasoning_effort={json.dumps(selection.reasoning_effort)}"))
+    if session_id:
+        command.extend(
+            (
+                "-c",
+                f"sandbox_mode={json.dumps(sandbox)}",
+                "-c",
+                'approval_policy="never"',
+            )
+        )
+    else:
+        command.extend(
+            (
+                "--cd",
+                str(worktree),
+                "--sandbox",
+                sandbox,
+                "-c",
+                'approval_policy="never"',
+            )
+        )
+    command.extend(
+        (
+            "-c",
+            f"hephaestus_automation.operation={json.dumps(operation.value)}",
+            "-c",
+            "hephaestus_automation.allowed_tools="
+            + json.dumps(list(allowed_tools), separators=(",", ":")),
+            "--json",
+            "-",
+        )
+    )
+    return tuple(command)
+
+
+_CODEX_TOOL_CAPABILITIES = {
+    "Bash": "bash",
+    "Edit": "edit",
+    "Glob": "find",
+    "Grep": "grep",
+    "Read": "read",
+    "Write": "write",
+}
+_CODEX_NON_APPLICABLE_TOOLS = {
+    AgentOperation.ADDRESS_REVIEW: frozenset({"Skill", "Task"}),
+}
+_CODEX_OPERATION_TOOLS = {
+    AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
+    AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+}
+
+
+def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], bool]:
+    """Resolve and validate the operation-specific Codex grants."""
+    execution = job.execution_request
+    if execution is None or execution.role is not AgentRole.IMPLEMENTER:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    try:
+        operation_policy = resolve_policy(execution)
+    except ExecutionPolicyError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    workspace_write = operation_policy.filesystem is FilesystemMode.WORKTREE_RW
+    sandbox = "workspace-write" if workspace_write else "read-only"
+    if job.sandbox != sandbox:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    expected_tools = _CODEX_OPERATION_TOOLS.get(execution.operation)
+    if expected_tools is None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    declared_tools = {
+        value.strip()
+        for value in (job.allowed_tools or ",".join(expected_tools)).split(",")
+        if value.strip()
+    }
+    non_applicable = _CODEX_NON_APPLICABLE_TOOLS.get(execution.operation, frozenset())
+    allowed_tools = tuple(sorted(declared_tools - non_applicable))
+    capabilities = {_CODEX_TOOL_CAPABILITIES.get(value, "") for value in allowed_tools}
+    rebase_tools = ("Edit", "Glob", "Grep", "Read", "Write")
+    rebase_grant = execution.operation is AgentOperation.IMPLEMENT and allowed_tools == rebase_tools
+    if (
+        (allowed_tools != expected_tools and not rebase_grant)
+        or "" in capabilities
+        or not capabilities <= operation_policy.builtins
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return sandbox, allowed_tools, workspace_write
+
+
+def _reject_codex_terminal_cleanup_tombstone(profiles: Path) -> None:
+    """Reject a session store while terminal cleanup is incomplete."""
+    terminal_cleanup = profiles.with_name(profiles.name + ".terminal-cleanup")
+    try:
+        terminal_cleanup.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+    raise CodexIsolationError("codex_adapter_inventory_uncertain")
+
+
+def _codex_private_profile(job: AgentJob, build_root: Path) -> Path:
+    """Return one durable profile that is bound to the issue and cycle."""
+    logical_session = job.session_key or job.session_agent
+    if not logical_session:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    identity = canonical_sha256(
+        (job.repo, int(job.issue), logical_session, str(job.cwd.resolve(strict=True)), job.model)
+    )
+    worktree = job.cwd.resolve(strict=True)
+    profiles = worktree.parent / f".{worktree.name}-codex-sessions"
+    _reject_codex_terminal_cleanup_tombstone(profiles)
+    descriptor = -1
+    try:
+        with suppress(FileExistsError):
+            profiles.mkdir(mode=0o700)
+        lexical = profiles.lstat()
+        descriptor = os.open(
+            profiles,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(lexical.st_mode)
+            or lexical.st_uid != os.geteuid()
+            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise OSError("invalid Codex profile root")
+        os.fchmod(descriptor, 0o700)
+        canonical_profiles = profiles.resolve(strict=True)
+        if canonical_profiles != profiles.absolute():
+            raise OSError("Codex profile root is not canonical")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if canonical_profiles.is_relative_to(worktree) or not build_root.is_relative_to(worktree):
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    profile = canonical_profiles / identity
+    if profile.is_symlink():
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    receipt_paths = (profile / ".active.json", profile / ".quarantine.json")
+    if any(path.exists() or path.is_symlink() for path in receipt_paths):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    try:
+        with suppress(FileExistsError):
+            profile.mkdir(mode=0o700)
+        profile_status = profile.lstat()
+        if (
+            not stat.S_ISDIR(profile_status.st_mode)
+            or profile_status.st_uid != os.geteuid()
+            or stat.S_IMODE(profile_status.st_mode) != 0o700
+        ):
+            raise OSError("invalid Codex durable store")
+        runs = profile / ".runs"
+        with suppress(FileExistsError):
+            runs.mkdir(mode=0o700)
+        runs_status = runs.lstat()
+        if (
+            not stat.S_ISDIR(runs_status.st_mode)
+            or runs_status.st_uid != os.geteuid()
+            or stat.S_IMODE(runs_status.st_mode) != 0o700
+        ):
+            raise OSError("invalid Codex run store")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+    return profile
+
+
+def _initialize_codex_adapter(
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+) -> CodexIsolationAdapterV1:
+    """Initialize one admitted adapter and check its locked identity."""
+    factory = admission.factory
+    if (
+        not callable(factory)
+        or getattr(factory, "codex_isolation_api_version", None)
+        != admission.lock.adapter_api_version
+    ):
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    try:
+        adapter = factory()
+        admission.validate_adapter_identity(
+            distribution=getattr(adapter, "adapter_distribution", ""),
+            version=getattr(adapter, "adapter_version", ""),
+            installed_tree_sha256=getattr(adapter, "installed_tree_sha256", ""),
+        )
+    except CodexIsolationError:
+        raise
+    except BaseException:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    return cast(CodexIsolationAdapterV1, adapter)
+
+
+@contextmanager
+def _owned_codex_adapter(
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+) -> Iterator[CodexIsolationAdapterV1]:
+    """Close one admitted helper on all initialization and execution paths."""
+    adapter: CodexIsolationAdapterV1 | None = None
+    try:
+        adapter = _initialize_codex_adapter(admission)
+        yield adapter
+    finally:
+        owner = adapter if adapter is not None else admission.factory
+        close_adapter = getattr(owner, "_close", None)
+        if callable(close_adapter):
+            close_adapter()
+
+
+def _validate_staged_codex_executable(executable: StagedLinuxExecutable) -> None:
+    """Recheck the staged path identity and bytes without following a link."""
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            executable.path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        value = os.fstat(descriptor)
+        identity = (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_uid,
+            value.st_size,
+            value.st_mtime_ns,
+        )
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+        if identity != executable.file_identity or digest.hexdigest() != executable.digest:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _codex_implementation_request(
+    *,
+    job: AgentJob,
+    worktree: Path,
+    prompt: str,
+    private_profile: Path,
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+    git_receipt: CodexGitReceiptV1,
+    executable: StagedLinuxExecutable,
+) -> CodexIsolationRequestV1:
+    """Build the complete frozen request for one admitted adapter."""
+    lock = admission.lock
+    execution = job.execution_request
+    if execution is None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    sandbox, allowed_tools, workspace_write = _codex_implementation_grants(job)
+    if executable.digest != lock.extracted_elf_sha256:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    run_nonce = new_run_nonce()
+    ephemeral_profile = private_profile / ".runs" / run_nonce / "profile"
+    fixed_git_environment = dict(git_receipt.fixed_environment)
+    environment = tuple(
+        sorted(
+            build_codex_implementation_child_env(
+                codex_home=ephemeral_profile,
+                fixed_git_environment=fixed_git_environment,
+            ).items()
+        )
+    )
+    if execution.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+        if job.resume_binding is not None:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+        session_id = job.resume_session_id
+        if not session_id:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    elif job.resume_binding is not None or job.resume_session_id is not None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    else:
+        session_id = None
+    session = json.dumps(
+        {
+            "allowed_tools": list(allowed_tools),
+            "lifecycle": execution.lifecycle.value,
+            "operation": execution.operation.value,
+            "session_id": session_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    command = _codex_implementation_command(
+        executable=executable.path,
+        worktree=worktree,
+        model=job.model,
+        session_id=session_id,
+        sandbox=sandbox,
+        operation=execution.operation,
+        allowed_tools=allowed_tools,
+    )
+    profile_read_only, profile_read_write = agent_runtime._codex_profile_policy_paths(
+        ephemeral_profile,
+        run_nonce,
+    )
+    read_only_mounts = {
+        *git_receipt.read_only_paths,
+        str(executable.path),
+        *profile_read_only,
+    }
+    read_write_mounts = set(profile_read_write)
+    if workspace_write:
+        read_write_mounts.update(git_receipt.read_write_paths)
+    else:
+        read_only_mounts.update(git_receipt.read_write_paths)
+    policy = CodexExecutionPolicyV1(
+        schema_version=1,
+        read_only_mounts=tuple(sorted(read_only_mounts)),
+        read_write_mounts=tuple(sorted(read_write_mounts)),
+        protected_overlay_mounts=tuple(sorted(git_receipt.protected_paths)),
+        provider_relay=_CODEX_IMPLEMENTATION_PROVIDER_RELAY,
+        command_network="deny",
+        max_output_bytes=_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES,
+        term_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        kill_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        pipe_close_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        inventory_quiescence_seconds=_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS,
+        total_deadline=float(job.timeout_s),
+    )
+    worktree_identity = git_receipt.canonical_worktree
+    model = job.model or "default"
+    issue = int(job.issue)
+    session_identity = (
+        job.repo,
+        issue,
+        "implementer",
+        worktree_identity,
+        model,
+        session,
+    )
+    return CodexIsolationRequestV1(
+        schema_version=1,
+        run_nonce=run_nonce,
+        entry_point_name=lock.entry_point_name,
+        adapter_api_version=lock.adapter_api_version,
+        package_version=lock.adapter_version,
+        deployment_lock_digest=admission.deployment_lock_sha256,
+        wheel_digest=lock.wheel_sha256,
+        installed_tree_digest=lock.installed_tree_sha256,
+        command=command,
+        command_digest=canonical_sha256(command),
+        executable_platform="linux",
+        executable_target=lock.codex_target,
+        executable_release=lock.codex_release_tag,
+        executable_asset_name=lock.codex_archive_asset,
+        executable_path=str(executable.path),
+        executable_digest=executable.digest,
+        executable_file_identity=executable.file_identity,
+        guest_image_digest=lock.guest_image_sha256,
+        environment=environment,
+        environment_digest=canonical_sha256(environment),
+        prompt=prompt,
+        prompt_digest=canonical_sha256(prompt),
+        worktree_path=str(worktree),
+        private_profile_path=str(ephemeral_profile),
+        policy=policy,
+        policy_digest=canonical_sha256(policy),
+        git_receipt=git_receipt,
+        git_receipt_digest=canonical_sha256(git_receipt),
+        repository=job.repo,
+        issue=issue,
+        role="implementer",
+        worktree_identity=worktree_identity,
+        model=model,
+        session=session,
+        session_identity_digest=canonical_sha256(session_identity),
+        monotonic_deadline=time.monotonic() + job.timeout_s,
+    )
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -1985,7 +4043,7 @@ class WorkerPool:
         self._evidence_receipt_dir = evidence_receipt_dir
 
     @contextmanager
-    def _repo_lock(self, repo: str) -> Iterator[None]:
+    def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
         """Serialize in-process worker operations for one repository."""
         with self._repo_locks_guard:
             entry = self._repo_locks.get(repo)
@@ -1994,10 +4052,20 @@ class WorkerPool:
                 self._repo_locks[repo] = entry
             entry.users += 1
 
+        acquired = False
         try:
-            with entry.lock:
-                yield
+            if deadline_s is None:
+                entry.lock.acquire()
+                acquired = True
+            else:
+                remaining_s = deadline_s - time.monotonic()
+                if remaining_s <= 0 or not entry.lock.acquire(timeout=remaining_s):
+                    raise _GitLockTimeoutError
+                acquired = True
+            yield
         finally:
+            if acquired:
+                entry.lock.release()
             with self._repo_locks_guard:
                 entry.users -= 1
                 if entry.users == 0 and self._repo_locks.get(repo) is entry:
@@ -2334,7 +4402,8 @@ class WorkerPool:
         if self._github_job_runner is None:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
         try:
-            with self._repo_lock(job.repo):
+            deadline_s = getattr(job.request, "deadline_s", None)
+            with self._repo_lock(job.repo, deadline_s=deadline_s):
                 receipt = self._github_job_runner.run(job)
         except Exception as exc:
             failure = _classify_github_failure(exc, now_epoch=time.time())
@@ -2362,6 +4431,85 @@ class WorkerPool:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
 
+    @staticmethod
+    def _run_codex_implementation(job: AgentJob, cwd: Path) -> agent_runtime.AgentRunResult:
+        """Run one implementation job through the selected external adapter."""
+        if (
+            not job.codex_isolation_adapter
+            or job.codex_isolation_deployment_lock is None
+            or job.codex_isolation_deployment_lock_sha256 is None
+        ):
+            raise CodexIsolationError("codex_adapter_not_selected")
+        with _agent_workspace_lease(job) as leased:
+            if leased != cwd:
+                raise CodexIsolationError("codex_adapter_request_mismatch")
+            with _codex_git_boundary(cwd) as boundary:
+                try:
+                    admission = codex_adapter_admission.admit_codex_adapter(
+                        lock_path=job.codex_isolation_deployment_lock,
+                        expected_sha256=job.codex_isolation_deployment_lock_sha256,
+                        selected_entry_point=job.codex_isolation_adapter,
+                    )
+                except codex_adapter_admission.CodexAdapterAdmissionError:
+                    raise CodexIsolationError("codex_adapter_initialization_failed") from None
+                with _owned_codex_adapter(admission) as adapter:
+                    build_root = cwd / "build"
+                    if build_root.is_symlink():
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                    try:
+                        build_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        canonical_build_root = build_root.resolve(strict=True)
+                    except OSError:
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+                    if not canonical_build_root.is_relative_to(cwd):
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                    private_profile = _codex_private_profile(job, canonical_build_root)
+                    with tempfile.TemporaryDirectory(
+                        prefix="codex-implementation-",
+                        dir=canonical_build_root,
+                    ) as temporary:
+                        job_root = Path(temporary)
+                        job_root.chmod(0o700)
+                        executable = stage_linux_executable(
+                            Path(admission.lock.extracted_elf_path),
+                            job_root,
+                        )
+                        try:
+                            with plugin_skills_context(job.plugin_skills_dir):
+                                prompt = job.prompt_builder(**job.prompt_kwargs)
+                            request = _codex_implementation_request(
+                                job=job,
+                                worktree=cwd,
+                                prompt=prompt,
+                                private_profile=private_profile,
+                                admission=admission,
+                                git_receipt=boundary.receipt,
+                                executable=executable,
+                            )
+                            boundary.verify_before_launch()
+                            _validate_staged_codex_executable(executable)
+                            try:
+                                execution_request = job.execution_request
+                                if execution_request is None:
+                                    raise CodexIsolationError("codex_adapter_request_mismatch")
+                                terminal_reaper = getattr(adapter, "_close", None)
+                                if not callable(terminal_reaper):
+                                    raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                                return agent_runtime._run_admitted_codex_implementation_session(
+                                    adapter=adapter,
+                                    request=request,
+                                    execution_request=execution_request,
+                                    executable_descriptor=executable.descriptor,
+                                    terminal_reaper=cast(Callable[[], None], terminal_reaper),
+                                )
+                            finally:
+                                try:
+                                    _validate_staged_codex_executable(executable)
+                                finally:
+                                    boundary.verify_after_return()
+                        finally:
+                            close_staged_linux_executable(executable)
+
     def _run_agent(  # noqa: C901 - provider and session dispatch are one atomic boundary
         self, job: AgentJob
     ) -> JobResult:
@@ -2384,8 +4532,50 @@ class WorkerPool:
         escapes are converted by :meth:`_run` so the returned result preserves
         the executing worker identity.
         """
+
+        def remaining_timeout() -> int:
+            """Return the checked time for the next recovery subprocess."""
+            if job.deadline_s is None:
+                return int(job.timeout_s)
+            remaining = float(job.deadline_s) - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("agent operation deadline", 0)
+            bounded = int(min(float(job.timeout_s), remaining))
+            if bounded <= 0:
+                raise subprocess.TimeoutExpired("agent operation deadline", 0)
+            return bounded
+
         try:
+            remaining_timeout()
             cwd = validate_job_workspace(job)
+            if _is_codex_implementation_job(job):
+                validate_agent_execution_support("codex", job.execution_request)
+                agent_result = self._run_codex_implementation(job, cwd)
+                session_id = agent_result.session_id or job.resume_session_id
+                if session_id is not None and job.session_checkpoint is not None:
+                    job.session_checkpoint(session_id, agent_result.session_binding)
+                stdout = agent_result.stdout or ""
+                value = None
+                if job.parse is not None:
+                    try:
+                        value = job.parse(stdout)
+                    except Exception as exc:
+                        logger.exception("Parse callable raised for Codex implementation job")
+                        return JobResult(
+                            ok=False,
+                            error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                            stdout_tail=stdout[-_TAIL:],
+                            session_id=session_id,
+                            session_binding=agent_result.session_binding,
+                        )
+                return JobResult(
+                    ok=True,
+                    value=value if value is not None else stdout,
+                    stdout_tail=stdout[-_TAIL:],
+                    session_id=session_id,
+                    session_binding=agent_result.session_binding,
+                    observed_skill_invocations=agent_result.observed_skill_invocations,
+                )
             agent = resolve_agent(
                 job.agent,
                 cwd=cwd,
@@ -2396,10 +4586,12 @@ class WorkerPool:
                 model_references=(job.model,),
             )
             is_claude = agent == "claude"
+            validate_agent_execution_support(agent, job.execution_request)
             session_agent = job.session_agent or job.agent
             session_key = job.session_key or session_agent
             with plugin_skills_context(job.plugin_skills_dir):
                 prompt = job.prompt_builder(**job.prompt_kwargs)
+            remaining_timeout()
 
             def _invoke() -> tuple[str, str | None, AgentSessionBinding | None, tuple[str, ...]]:
                 if is_claude:
@@ -2407,7 +4599,7 @@ class WorkerPool:
                     # knows its exact needs, e.g. pr_review) wins; a read-only
                     # sandbox without one clamps to the fail-closed default;
                     # everything else resolves by session-agent role.
-                    if job.allowed_tools:
+                    if job.allowed_tools is not None:
                         scope = ToolScope(job.allowed_tools)
                     elif job.sandbox == "read-only":
                         scope = DEFAULT_TOOL_SCOPE
@@ -2420,7 +4612,7 @@ class WorkerPool:
                         prompt=prompt,
                         model=job.model,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         output_format=job.output_format,
                         allowed_tools=scope.allowed_tools,
                         permission_mode=scope.permission_mode,
@@ -2432,28 +4624,13 @@ class WorkerPool:
                         ),
                     )
                     return stdout, claude_session_id, None, ()
-                if requires_fresh_agent_session(agent):
-                    agent_result = run_agent_session(
-                        agent=agent,
-                        prompt=prompt,
-                        cwd=cwd,
-                        timeout=job.timeout_s,
-                        model=job.model,
-                        sandbox=job.sandbox,
-                        approval="never",
-                        process_tracker=subprocess_registry.track_process_group,
-                        execution_request=job.execution_request,
-                        resume_binding=None,
-                        disable_pi_automation=job.disable_pi_automation,
-                        pi_dir=job.pi_dir,
-                    )
-                elif job.resume_binding is not None:
+                if job.resume_binding is not None:
                     agent_result = resume_agent_session(
                         agent=agent,
                         session_id=job.resume_binding.session_id,
                         prompt=prompt,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
@@ -2469,7 +4646,7 @@ class WorkerPool:
                         session_id=job.resume_session_id,
                         prompt=prompt,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
@@ -2484,7 +4661,7 @@ class WorkerPool:
                         agent=agent,
                         prompt=prompt,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
@@ -2549,6 +4726,8 @@ class WorkerPool:
                 observed_skill_invocations=observed_skill_invocations,
             )
 
+        except CodexIsolationError as exc:
+            return JobResult(ok=False, error=exc.code)
         except CircuitBreakerOpenError:
             return JobResult(ok=False, error="circuit_open")
         except subprocess.TimeoutExpired:
@@ -2780,11 +4959,15 @@ class WorkerPool:
         lock_path = _repo_lock_path(job.repo, self._lock_dir)
         try:
             with (
-                self._repo_lock(job.repo),
+                git_utils.operation_deadline(job.deadline_s),
+                self._repo_lock(job.repo, deadline_s=job.deadline_s),
                 _interruptible_file_lock(
                     lock_path,
                     shutdown=self._shutdown,
-                    timeout_s=job.timeout_s,
+                    timeout_s=cast(
+                        float,
+                        git_utils.remaining_operation_timeout(job.timeout_s),
+                    ),
                 ),
             ):
                 return self._dispatch_git_op(job)
@@ -2879,6 +5062,9 @@ class WorkerPool:
         elif job.op == "verify_pr_review_checkout":
             return self._git_verify_pr_review_checkout(job)
 
+        elif job.op == "verify_remediation_journal":
+            return self._git_verify_remediation_journal(job)
+
         elif job.op == "remove_worktree":
             from .git_cleanup import run_cleanup_job
 
@@ -2906,8 +5092,11 @@ class WorkerPool:
             )
             return JobResult(ok=True)
 
-        elif job.op == "commit_push":
+        elif job.op == "commit_push" or job.op == "prepare_remediation_recovery":
             return self._git_commit_push(job)
+
+        elif job.op == "publish_remediation_recovery":
+            return self._git_publish_remediation_recovery(job)
 
         elif job.op == "release_branch_reservation":
             from .git_cleanup import run_cleanup_job
@@ -2947,6 +5136,192 @@ class WorkerPool:
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
+
+    def _git_publish_remediation_recovery(self, job: GitJob) -> JobResult:
+        """Validate and publish one already-prepared remediation commit."""
+        try:
+            receipt = RemediationRecoveryReceipt.from_dict(job.kwargs.get("recovery_receipt"))
+            reply_result = RemediationReplyResult.from_dict(job.kwargs.get("reply_result"))
+        except ValueError as error:
+            return JobResult(ok=False, error=f"remediation publication receipt is invalid: {error}")
+        review_input = receipt.review_input
+        batch_nonce = job.kwargs.get("remediation_batch_nonce")
+        if (
+            reply_result.review_input_sha256 != receipt.review_input_sha256
+            or job.transport_repository.casefold() != review_input.repository
+            or not isinstance(batch_nonce, str)
+        ):
+            return JobResult(ok=False, error="remediation publication identity is invalid")
+        if job.kwargs.get("already_published") is True:
+            worktree = Path(review_input.worktree_path)
+            remote_head = self._read_remote_branch_head(
+                worktree,
+                remote="origin",
+                branch=review_input.branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            exact_commit = self._is_exact_recovery_commit(
+                worktree,
+                review_input.recovery_commit_sha,
+                parent=review_input.reviewed_parent_sha,
+                tree=review_input.candidate_tree_sha,
+                timeout=job.timeout_s,
+            )
+            if remote_head != review_input.recovery_commit_sha or not exact_commit:
+                return JobResult(
+                    ok=False,
+                    error="published remediation recovery commit is not exact",
+                    value={"failure_kind": "publication_unavailable"},
+                )
+            artifact_job = replace(
+                job,
+                kwargs={
+                    **job.kwargs,
+                    "remediation_repository": review_input.repository,
+                    "remediation_pr_number": review_input.pr_number,
+                    "remediation_thread_snapshots": json.loads(review_input.thread_snapshot_json),
+                    "remediation_replies": dict(reply_result.replies),
+                    "remediation_failure_diagnostic": review_input.failure_diagnostic,
+                    "remediation_journal_input_encoding": receipt.journal_input_encoding,
+                    "remediation_journal_input_data": receipt.journal_input_data,
+                },
+            )
+            try:
+                handoff, journal = _remediation_recovery_artifacts(
+                    artifact_job,
+                    repo_root=Path(review_input.repo_root),
+                    worktree=worktree,
+                    branch=review_input.branch,
+                    parent_sha=review_input.reviewed_parent_sha,
+                    candidate_tree_sha=review_input.candidate_tree_sha,
+                    recovery_commit_sha=review_input.recovery_commit_sha,
+                    paths=CommitPaths(receipt.add_paths, receipt.update_paths),
+                    committed_diff=review_input.committed_diff,
+                    committed_diff_sha256=review_input.committed_diff_sha256,
+                )
+            except (TypeError, ValueError) as exc:
+                return JobResult(ok=False, error=f"remediation journal is unavailable: {exc}")
+            return JobResult(
+                ok=True,
+                value={
+                    "pushed": True,
+                    "head_sha": review_input.recovery_commit_sha,
+                    "remediation_handoff": handoff,
+                    "remediation_journal": {"marker": journal[0], "body": journal[1]},
+                },
+            )
+        retry_job = replace(
+            job,
+            kwargs={
+                "issue_number": review_input.issue_number,
+                "worktree_path": review_input.worktree_path,
+                "repo_root": review_input.repo_root,
+                "branch": review_input.branch,
+                "expected_recovery_head": receipt.expected_remote_sha,
+                "expected_recovery_content_snapshot": dict(receipt.content_snapshot),
+                "expected_recovery_tree_sha": review_input.candidate_tree_sha,
+                "expected_recovery_diff": review_input.committed_diff,
+                "expected_recovery_diff_sha256": review_input.committed_diff_sha256,
+                "expected_recovery_add_paths": receipt.add_paths,
+                "expected_recovery_update_paths": receipt.update_paths,
+                "expected_recovery_commit_sha": review_input.recovery_commit_sha,
+                "remediation_repository": review_input.repository,
+                "remediation_pr_number": review_input.pr_number,
+                "remediation_thread_snapshots": json.loads(review_input.thread_snapshot_json),
+                "remediation_replies": dict(reply_result.replies),
+                "remediation_batch_nonce": batch_nonce,
+                "remediation_failure_diagnostic": review_input.failure_diagnostic,
+                "remediation_journal_input_encoding": receipt.journal_input_encoding,
+                "remediation_journal_input_data": receipt.journal_input_data,
+            },
+        )
+        return self._git_commit_push(retry_job)
+
+    def _git_verify_remediation_journal(self, job: GitJob) -> JobResult:
+        """Prove one recovered journal against exact local Git objects."""
+        raw_handoff = job.kwargs.get("handoff")
+        raw_repo_root = job.kwargs.get("repo_root")
+        if not isinstance(raw_handoff, dict) or not isinstance(raw_repo_root, str):
+            return JobResult(ok=False, error="remediation journal Git identity is invalid")
+        try:
+            review_input_bytes = raw_handoff.get("review_input_bytes")
+            if not isinstance(review_input_bytes, str):
+                raise ValueError("remediation journal review input is unavailable")
+            review_input = RemediationReviewInput.from_canonical_bytes(
+                review_input_bytes.encode("utf-8")
+            )
+            repo_root = Path(raw_repo_root).resolve(strict=True)
+            if (
+                str(repo_root) != review_input.repo_root
+                or job.transport_repository.casefold() != review_input.repository
+                or raw_handoff.get("head_sha") != review_input.recovery_commit_sha
+            ):
+                raise ValueError("remediation journal repository binding is invalid")
+            git_env = _isolated_checkout_git_env()
+            if not self._is_exact_recovery_commit(
+                repo_root,
+                review_input.recovery_commit_sha,
+                parent=review_input.reviewed_parent_sha,
+                tree=review_input.candidate_tree_sha,
+                timeout=job.timeout_s,
+                git_env=git_env,
+            ):
+                raise ValueError("remediation journal commit identity is invalid")
+            committed_diff = _run_bounded_git_output(
+                (
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-renames",
+                    "--binary",
+                    "--full-index",
+                    review_input.reviewed_parent_sha,
+                    review_input.candidate_tree_sha,
+                ),
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+                retain_text=True,
+                env=git_env,
+            )
+            changed = _run_bounded_git_output(
+                (
+                    "git",
+                    "diff",
+                    "--name-only",
+                    "--no-renames",
+                    "-z",
+                    review_input.reviewed_parent_sha,
+                    review_input.candidate_tree_sha,
+                ),
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                retain_text=True,
+                env=git_env,
+            )
+            changed_paths = tuple(path for path in changed.text.split("\0") if path)
+            if (
+                committed_diff.text != review_input.committed_diff
+                or committed_diff.sha256 != review_input.committed_diff_sha256
+                or len(changed_paths) != len(review_input.changed_paths)
+                or set(changed_paths) != set(review_input.changed_paths)
+            ):
+                raise ValueError("remediation journal committed evidence is invalid")
+        except (OSError, RuntimeError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+            return JobResult(ok=False, error=f"remediation journal Git verification failed: {exc}")
+        return JobResult(
+            ok=True,
+            value={
+                "verified": True,
+                "review_input_sha256": review_input.review_input_sha256,
+                "head_sha": review_input.recovery_commit_sha,
+            },
+        )
 
     def _git_verify_issue_wave_ancestry(self, job: GitJob) -> JobResult:
         """Verify checkpoint commits are ancestors of synchronized main."""
@@ -4071,12 +6446,351 @@ class WorkerPool:
         )
         try:
             with source_manager.implementation_writer_handoff(item_number) as handoff:
+                recovered = self._recover_prepared_remediation_worktree(job, repo_root)
+                if recovered is not None:
+                    return recovered
                 return self._git_create_worktree_with_handoff(job, source_manager, handoff)
         except SourceWorkspaceError as exc:
             return JobResult(
                 ok=False,
                 error=f"source_workspace_ownership_unavailable: {exc}",
             )
+
+    def _recover_prepared_remediation_worktree(  # noqa: C901
+        self,
+        job: GitJob,
+        repo_root: Path,
+    ) -> JobResult | None:
+        """Return one exact durable prepared child before adopted-branch sync."""
+        if job.kwargs.get("recover_prepared_remediation") is not True:
+            return None
+        issue_number = job.kwargs.get("issue_number")
+        pr_number = job.kwargs.get("remediation_pr_number")
+        repository = job.kwargs.get("remediation_repository")
+        branch = job.kwargs.get("branch_name")
+        remote_head = job.kwargs.get("implementation_adoption_head")
+        threads = job.kwargs.get("remediation_thread_snapshots")
+        if (
+            isinstance(issue_number, bool)
+            or not isinstance(issue_number, int)
+            or isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or not isinstance(repository, str)
+            or not isinstance(branch, str)
+            or not _is_full_commit_sha(remote_head)
+            or not isinstance(threads, list)
+        ):
+            return JobResult(ok=False, error="prepared remediation recovery identity is invalid")
+        try:
+            thread_json = RemediationReviewInput.canonical_thread_snapshot(threads)
+            intent = load_prepublication_intent(
+                repo_root=repo_root,
+                repository=repository,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                expected_remote_sha=remote_head,
+                thread_snapshot_json=thread_json,
+            )
+            if intent is not None:
+                child = read_prepublication_private_head(
+                    repo_root=repo_root,
+                    pr_number=pr_number,
+                )
+                worktree = Path(intent.worktree_path)
+                expected_path = (
+                    repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+                ).resolve(strict=False)
+                if worktree.resolve(strict=True) != expected_path:
+                    raise ValueError("prepared remediation writer path is invalid")
+                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+                binding = getattr(linked_env, "binding", None)
+                if (
+                    not isinstance(binding, _LinkedWorktreeBinding)
+                    or binding.branch_ref != f"refs/heads/{intent.branch}"
+                    or binding.branch_sha != intent.expected_remote_sha
+                ):
+                    raise ValueError("prepared remediation writer binding is invalid")
+                if child == intent.expected_remote_sha:
+                    (
+                        current,
+                        status_result,
+                        candidate_tree,
+                        diff_result,
+                        selected_paths,
+                    ) = _inspect_candidate_with_private_git(
+                        worktree,
+                        intent.expected_remote_sha,
+                        timeout=job.timeout_s,
+                        linked_env=linked_env,
+                    )
+                    if (
+                        not status_result.text.strip()
+                        or selected_paths is None
+                        or current.snapshot != dict(intent.content_snapshot)
+                        or candidate_tree != intent.candidate_tree_sha
+                        or diff_result.text != intent.committed_diff
+                        or diff_result.sha256 != intent.committed_diff_sha256
+                        or selected_paths.add_paths != intent.add_paths
+                        or selected_paths.update_paths != intent.update_paths
+                    ):
+                        raise ValueError("prepared remediation intent candidate changed")
+                    inspection = {
+                        "outcome": "dirty",
+                        "branch": intent.branch,
+                        "worktree_path": intent.worktree_path,
+                        "head_sha": intent.expected_remote_sha,
+                        "status": status_result.text,
+                        "diff": diff_result.text,
+                        "status_sha256": status_result.sha256,
+                        "diff_sha256": diff_result.sha256,
+                        "candidate_tree_sha": candidate_tree,
+                        "content_snapshot": current.snapshot,
+                        "changed_file_count": current.changed_file_count,
+                        "candidate_add_paths": list(selected_paths.add_paths),
+                        "candidate_update_paths": list(selected_paths.update_paths),
+                    }
+                    return JobResult(
+                        ok=True,
+                        value={
+                            "path": str(worktree),
+                            "impl_source_revision": intent.expected_remote_sha,
+                            "branch": intent.branch,
+                            "head_sha": intent.expected_remote_sha,
+                            "dirty": True,
+                            "status": status_result.text,
+                            "diff": diff_result.text,
+                            "content_snapshot": current.snapshot,
+                            "incomplete_remediation_inspection": inspection,
+                            "remediation_batch_nonce": intent.batch_nonce,
+                        },
+                    )
+                with _private_linked_worktree_git_env(
+                    linked_env,
+                    detached_head=intent.expected_remote_sha,
+                ) as parent_env:
+                    current_snapshot = _dirty_worktree_content_snapshot(
+                        worktree,
+                        timeout=job.timeout_s,
+                        git_env=parent_env,
+                    )
+                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+                index_is_original = current_snapshot == dict(intent.content_snapshot)
+                index_tree = git_utils.run(
+                    ["git", "write-tree"],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                    env=linked_env,
+                ).stdout.strip()
+                if not index_is_original and index_tree != intent.candidate_tree_sha:
+                    raise ValueError("prepared remediation writer index changed")
+                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+                durable_git_dir = prepublication_private_git_dir(
+                    repo_root=repo_root,
+                    pr_number=pr_number,
+                    create=False,
+                )
+                with _private_linked_worktree_git_env(
+                    linked_env,
+                    detached_head=child,
+                    durable_git_dir=durable_git_dir,
+                ) as child_env:
+                    if not self._is_exact_recovery_commit(
+                        worktree,
+                        child,
+                        parent=intent.expected_remote_sha,
+                        tree=intent.candidate_tree_sha,
+                        timeout=job.timeout_s,
+                        git_env=child_env,
+                    ):
+                        raise ValueError("prepared remediation private child is not exact")
+                    with tempfile.TemporaryDirectory(
+                        prefix="hephaestus-recovery-verify-index-"
+                    ) as temporary:
+                        verify_env = dict(child_env)
+                        verify_env["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+                        git_utils.run(
+                            ["git", "read-tree", child],
+                            cwd=worktree,
+                            timeout=job.timeout_s,
+                            env=verify_env,
+                        )
+                        status = _run_bounded_git_output(
+                            (
+                                "git",
+                                "-c",
+                                "core.fsmonitor=false",
+                                "status",
+                                "--porcelain=v1",
+                                "-z",
+                                "--untracked-files=all",
+                                "--no-renames",
+                            ),
+                            cwd=worktree,
+                            timeout=job.timeout_s,
+                            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                            retain_text=True,
+                            env=verify_env,
+                        ).text
+                    if status:
+                        raise ValueError("prepared remediation writer content changed")
+                    _refresh_verified_recovery_index(
+                        repo_root.resolve(strict=True),
+                        worktree,
+                        expected_git_env=child_env,
+                        private_git_env=child_env,
+                        source_sha=child,
+                        expected_tree=intent.candidate_tree_sha,
+                        timeout=job.timeout_s,
+                    )
+                recovered_receipt = intent.receipt(child)
+                save_prepublication_receipt(
+                    repo_root=repo_root,
+                    receipt=recovered_receipt,
+                    batch_nonce=intent.batch_nonce,
+                )
+            loaded = load_prepublication_receipt(
+                repo_root=repo_root,
+                repository=repository,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                expected_remote_sha=remote_head,
+                thread_snapshot_json=thread_json,
+            )
+            if loaded is None:
+                expected_path = (
+                    repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+                ).resolve(strict=False)
+                if expected_path.exists():
+                    linked_env = _linked_worktree_git_env(
+                        repo_root.resolve(strict=True),
+                        expected_path,
+                    )
+                    binding = getattr(linked_env, "binding", None)
+                    if not isinstance(binding, _LinkedWorktreeBinding):
+                        raise ValueError("prepared remediation writer binding is invalid")
+                    if (
+                        binding.branch_ref == f"refs/heads/{branch}"
+                        and binding.branch_sha != remote_head
+                    ):
+                        raise ValueError(
+                            "prepared remediation receipt is absent for a preserved local child"
+                        )
+                return None
+            receipt, batch_nonce, already_published = loaded
+            review_input = receipt.review_input
+            worktree = Path(review_input.worktree_path)
+            expected_path = (
+                repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+            ).resolve(strict=False)
+            if worktree.resolve(strict=True) != expected_path:
+                raise ValueError("prepared remediation writer path is invalid")
+            linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+            binding = getattr(linked_env, "binding", None)
+            if (
+                not isinstance(binding, _LinkedWorktreeBinding)
+                or binding.branch_ref != f"refs/heads/{branch}"
+                or binding.branch_sha
+                not in {
+                    review_input.reviewed_parent_sha,
+                    review_input.recovery_commit_sha,
+                }
+                or not self._is_exact_recovery_commit(
+                    worktree,
+                    review_input.recovery_commit_sha,
+                    parent=review_input.reviewed_parent_sha,
+                    tree=review_input.candidate_tree_sha,
+                    timeout=job.timeout_s,
+                    git_env=linked_env,
+                )
+            ):
+                raise ValueError("prepared remediation commit is not exact")
+            if (
+                git_utils.run(
+                    ["git", "write-tree"],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                    env=linked_env,
+                ).stdout.strip()
+                != review_input.candidate_tree_sha
+            ):
+                raise ValueError("prepared remediation writer index changed")
+            linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+            with _private_linked_worktree_git_env(
+                linked_env,
+                detached_head=review_input.recovery_commit_sha,
+            ) as child_env:
+                with tempfile.TemporaryDirectory(
+                    prefix="hephaestus-recovery-verify-index-"
+                ) as temporary:
+                    verify_env = dict(child_env)
+                    verify_env["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+                    git_utils.run(
+                        ["git", "read-tree", review_input.recovery_commit_sha],
+                        cwd=worktree,
+                        timeout=job.timeout_s,
+                        env=verify_env,
+                    )
+                    status = _run_bounded_git_output(
+                        (
+                            "git",
+                            "-c",
+                            "core.fsmonitor=false",
+                            "status",
+                            "--porcelain=v1",
+                            "-z",
+                            "--untracked-files=all",
+                            "--no-renames",
+                        ),
+                        cwd=worktree,
+                        timeout=job.timeout_s,
+                        max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                        retain_text=True,
+                        env=verify_env,
+                    ).text
+                    if status:
+                        raise ValueError("prepared remediation writer content changed")
+                committed = _run_bounded_git_output(
+                    (
+                        "git",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-renames",
+                        "--binary",
+                        "--full-index",
+                        review_input.reviewed_parent_sha,
+                        review_input.candidate_tree_sha,
+                    ),
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                    max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+                    retain_text=True,
+                    env=child_env,
+                )
+                if (
+                    committed.text != review_input.committed_diff
+                    or committed.sha256 != review_input.committed_diff_sha256
+                ):
+                    raise ValueError("prepared remediation committed diff changed")
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+            return JobResult(ok=False, error=f"prepared remediation recovery failed: {exc}")
+        return JobResult(
+            ok=True,
+            value={
+                "path": str(worktree),
+                "impl_source_revision": review_input.reviewed_parent_sha,
+                "dirty": False,
+                "status": "",
+                "diff": "",
+                "prepared_remediation_receipt": receipt.as_dict(),
+                "remediation_batch_nonce": batch_nonce,
+                "remediation_recovery_already_published": already_published,
+            },
+        )
 
     def _git_create_worktree_with_handoff(  # noqa: C901
         self,
@@ -4087,9 +6801,6 @@ class WorkerPool:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
-        capture_source_revision = kwargs.pop("capture_source_revision", False)
-        if not isinstance(capture_source_revision, bool):
-            return JobResult(ok=False, error="worktree source revision capture flag is invalid")
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
@@ -4166,27 +6877,34 @@ class WorkerPool:
             kwargs["implementation_writer_handoff"] = implementation_writer_handoff
         if (
             implementation_source_lane
-            and base_sha is not None
             and source_manager is not None
             and implementation_writer_handoff is not None
+            and (base_sha is not None or adopting_implementation_writer)
         ):
-            writer_path = base_dir / source_worktree_name(cast(int, kwargs["issue_number"]), "impl")
-            if writer_path.exists():
-                try:
-                    source_manager.authorize_direct_implementation_writer_transition(
-                        cast(int, kwargs["issue_number"]),
+            try:
+                item_number = cast(int, kwargs["issue_number"])
+                if adopting_implementation_writer:
+                    source_manager.authorize_adopted_implementation_writer_transition(
+                        item_number,
                         branch=branch_name,
-                        base_sha=base_sha,
+                        expected_head=cast(str, implementation_adoption_head),
                         handoff=implementation_writer_handoff,
                     )
-                except SourceWorkspaceError as exc:
-                    return self._creation_receipt_failure(
-                        base_dir=base_dir,
-                        item_number=kwargs.get("issue_number"),
-                        exc=exc,
-                        branch_name=branch_name,
-                        base_sha=base_sha,
+                else:
+                    source_manager.authorize_direct_implementation_writer_transition(
+                        item_number,
+                        branch=branch_name,
+                        base_sha=cast(str, base_sha),
+                        handoff=implementation_writer_handoff,
                     )
+            except SourceWorkspaceError as exc:
+                return self._creation_receipt_failure(
+                    base_dir=base_dir,
+                    item_number=kwargs.get("issue_number"),
+                    exc=exc,
+                    branch_name=branch_name,
+                    base_sha=base_sha,
+                )
         created_or_failure = self._create_managed_worktree(
             manager=manager,
             kwargs=kwargs,
@@ -4224,7 +6942,6 @@ class WorkerPool:
             repo=job.transport_repository,
             source_repository=job.repo,
             sync_to_remote=sync_to_remote,
-            capture_source_revision=capture_source_revision,
             pr_number=pr_number,
             source_lane=kwargs.get("source_lane"),
             item_number=kwargs.get("issue_number"),
@@ -4297,6 +7014,14 @@ class WorkerPool:
             "path": str(worktree_path),
             WORKTREE_MATERIALIZED_KEY: worktree_path.exists(),
         }
+        recovery = getattr(exc, "recovery", None)
+        if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)) and isinstance(
+            recovery, (dict, SourceWorkspaceRecovery)
+        ):
+            value["failure_kind"] = "source_workspace_ownership"
+            value["source_workspace_recovery"] = (
+                recovery.to_dict() if isinstance(recovery, SourceWorkspaceRecovery) else recovery
+            )
         if base_sha is not None:
             value["direct_scope_reservation"] = {
                 "branch": branch_name,
@@ -4377,7 +7102,6 @@ class WorkerPool:
         repo: str,
         source_repository: str | None = None,
         sync_to_remote: bool,
-        capture_source_revision: bool = False,
         pr_number: object,
         timeout_s: int,
         source_lane: object = None,
@@ -4491,15 +7215,27 @@ class WorkerPool:
                         raise SourceWorkspaceError(
                             "implementation writer authority manager is missing"
                         )
-                    writer_authority = (
-                        worktree_manager.mint_adopted_implementation_writer_authority(
-                            issue_number=implementation_item_number,
-                            branch_name=branch_name,
-                            worktree_path=worktree_path,
-                            expected_head=implementation_adoption_head,
-                            timeout=timeout_s,
+                    if implementation_writer_handoff is None:
+                        writer_authority = (
+                            worktree_manager.mint_adopted_implementation_writer_authority(
+                                issue_number=implementation_item_number,
+                                branch_name=branch_name,
+                                worktree_path=worktree_path,
+                                expected_head=implementation_adoption_head,
+                                timeout=timeout_s,
+                            )
                         )
-                    )
+                    else:
+                        writer_authority = (
+                            worktree_manager.mint_adopted_implementation_writer_authority(
+                                issue_number=implementation_item_number,
+                                branch_name=branch_name,
+                                worktree_path=worktree_path,
+                                expected_head=implementation_adoption_head,
+                                timeout=timeout_s,
+                                implementation_writer_handoff=implementation_writer_handoff,
+                            )
+                        )
             if source_lane == "impl" and not dirty:
                 if writer_authority is None:
                     raise SourceWorkspaceError("implementation writer authority is missing")
@@ -4526,7 +7262,7 @@ class WorkerPool:
                 error=f"worktree post-create preparation failed: {exc}",
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
-        if not dirty and not sync_to_remote and base_sha is None and not capture_source_revision:
+        if not dirty and not sync_to_remote and base_sha is None:
             if source_lane == "impl":
                 return JobResult(
                     ok=True,
@@ -4541,27 +7277,6 @@ class WorkerPool:
             value["impl_source_revision"] = binding.revision
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
-        if capture_source_revision:
-            try:
-                source_revision = git_utils.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    timeout=timeout_s,
-                ).stdout.strip()
-            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                return JobResult(
-                    ok=False,
-                    error="worktree source revision is unavailable",
-                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
-                )
-            if not _is_full_commit_sha(source_revision):
-                return JobResult(
-                    ok=False,
-                    error="worktree source revision is invalid",
-                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
-                )
-            value.update(dirty=dirty, status=status, diff=diff, source_revision=source_revision)
         if dirty:
             observed_branch = git_utils.run(
                 ["git", "branch", "--show-current"],
@@ -4775,9 +7490,12 @@ class WorkerPool:
         worktree = Path(raw_worktree)
         repo_root = Path(raw_repo_root)
         try:
+            if not _secure_dir_fd_supported():
+                _portable_path_identity(repo_root, directory=True)
+                _portable_path_identity(worktree, directory=True)
             confined_root = repo_root.resolve(strict=True)
             confined_worktree = worktree.resolve(strict=True)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             return fail("worktree_unavailable", str(exc))
         if (
             repo_root.is_symlink()
@@ -4791,7 +7509,6 @@ class WorkerPool:
         ):
             return fail("worktree_unconfined", "worktree is outside the repository root")
         try:
-            env = _controlled_git_env()
             for checkout in (confined_root, confined_worktree):
                 if preflight_error := _checkout_preflight_error(
                     checkout,
@@ -4799,81 +7516,34 @@ class WorkerPool:
                     max_config_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
                 ):
                     return fail("unsafe_git_configuration", preflight_error)
-            canonical_root = git_utils.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=confined_root,
-                timeout=job.timeout_s,
-                env=env,
-            ).stdout.strip()
-            if not canonical_root or Path(canonical_root).resolve(strict=True) != confined_root:
-                return fail("worktree_unconfined", "repository root identity changed")
-            listing = _run_bounded_git_output(
-                ("git", "-c", "core.fsmonitor=false", "worktree", "list", "--porcelain"),
-                cwd=confined_root,
-                timeout=job.timeout_s,
-                max_bytes=IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
-                retain_text=True,
-            ).text
-            expected_block = (
-                f"worktree {confined_worktree}\nHEAD {expected_head}\nbranch refs/heads/{branch}\n"
-            )
-            if expected_block not in f"{listing.rstrip()}\n":
-                return fail("worktree_identity_drift", "registered worktree identity changed")
-            head_sha = git_utils.run(
-                ["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD"],
-                cwd=confined_worktree,
-                timeout=job.timeout_s,
-                env=env,
-            ).stdout.strip()
-            current_branch = git_utils.run(
-                ["git", "-c", "core.fsmonitor=false", "branch", "--show-current"],
-                cwd=confined_worktree,
-                timeout=job.timeout_s,
-                env=env,
-            ).stdout.strip()
-            if head_sha != expected_head or current_branch != branch:
+            linked_env = _linked_worktree_git_env(confined_root, confined_worktree)
+            binding = getattr(linked_env, "binding", None)
+            if not isinstance(binding, _LinkedWorktreeBinding):
+                raise RuntimeError("linked worktree binding is unavailable")
+            if binding.branch_ref != f"refs/heads/{branch}" or binding.branch_sha != expected_head:
                 return fail("worktree_identity_drift", "worktree branch or head changed")
-            status_result = _run_bounded_git_output(
-                (
-                    "git",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "-c",
-                    "status.relativePaths=false",
-                    "status",
-                    "--short",
-                    "--untracked-files=all",
-                    "--no-renames",
-                ),
-                cwd=confined_worktree,
-                timeout=job.timeout_s,
-                max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-                retain_text=True,
+            after, status_result, candidate_tree, diff_result, selected_paths = (
+                _inspect_candidate_with_private_git(
+                    confined_worktree,
+                    expected_head,
+                    timeout=job.timeout_s,
+                    linked_env=linked_env,
+                )
             )
-            diff_result = _run_bounded_git_output(
-                (
-                    "git",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-renames",
-                    "--binary",
-                    "--full-index",
-                    "HEAD",
-                ),
-                cwd=confined_worktree,
-                timeout=job.timeout_s,
-                max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
-                retain_text=True,
-            )
+            rebound = _linked_worktree_git_env(confined_root, confined_worktree)
+            rebound_binding = getattr(rebound, "binding", None)
+            if (
+                not _linked_binding_matches(linked_env, rebound, include_index=True)
+                or not isinstance(rebound_binding, _LinkedWorktreeBinding)
+                or rebound_binding.branch_sha != expected_head
+            ):
+                raise RuntimeError("linked worktree metadata changed during inspection")
             status = status_result.text
             diff = diff_result.text
             receipt: dict[str, object] = {
                 "outcome": "dirty" if status.strip() else "clean",
                 "branch": branch,
-                "head_sha": head_sha,
+                "head_sha": expected_head,
                 "status": status,
                 "diff": diff,
                 "status_sha256": status_result.sha256,
@@ -4881,12 +7551,13 @@ class WorkerPool:
                 "worktree_path": str(confined_worktree),
             }
             if status.strip():
-                evidence = _dirty_worktree_snapshot_evidence(
-                    confined_worktree,
-                    timeout=job.timeout_s,
-                )
-                receipt["content_snapshot"] = evidence.snapshot
-                receipt["changed_file_count"] = evidence.changed_file_count
+                if selected_paths is None:
+                    raise RuntimeError("candidate path manifest is unavailable")
+                receipt["candidate_tree_sha"] = candidate_tree
+                receipt["content_snapshot"] = after.snapshot
+                receipt["changed_file_count"] = after.changed_file_count
+                receipt["candidate_add_paths"] = list(selected_paths.add_paths)
+                receipt["candidate_update_paths"] = list(selected_paths.update_paths)
             return JobResult(ok=True, value=receipt)
         except _GitInspectionResourceLimitError as exc:
             return fail("resource_limit_exceeded", str(exc))
@@ -4894,6 +7565,8 @@ class WorkerPool:
             return fail("timeout", str(exc))
         except subprocess.CalledProcessError as exc:
             return fail("git_error", str(exc))
+        except (OSError, RuntimeError) as exc:
+            return fail("inspection_unavailable", str(exc))
 
     def _git_recover_dirty_worktree(self, job: GitJob) -> JobResult:  # noqa: C901
         """Preserve one identity-bound dirty writer by commit or stash."""
@@ -5132,7 +7805,16 @@ class WorkerPool:
         receipt["cause"] = ""
         return JobResult(ok=True, value=receipt)
 
-    def _git_commit_push(self, job: GitJob) -> JobResult:  # noqa: C901
+    def _git_commit_push(self, job: GitJob) -> JobResult:
+        """Commit and publish while private recovery metadata remains live."""
+        with ExitStack() as recovery_stack:
+            return self._git_commit_push_inner(job, recovery_stack)
+
+    def _git_commit_push_inner(  # noqa: C901
+        self,
+        job: GitJob,
+        recovery_stack: ExitStack,
+    ) -> JobResult:
         """Commit pending changes in a worktree, then push its branch.
 
         Only the keys ``commit_if_changes`` actually accepts are forwarded —
@@ -5153,45 +7835,256 @@ class WorkerPool:
                 ok=False,
                 error="detached reviewer commit publication is unsupported",
             )
+        branch = str(job.kwargs.get("branch") or "")
         expected_recovery_head = job.kwargs.get("expected_recovery_head")
         expected_recovery_snapshot = job.kwargs.get("expected_recovery_content_snapshot")
+        expected_recovery_tree = job.kwargs.get("expected_recovery_tree_sha")
+        expected_recovery_diff = job.kwargs.get("expected_recovery_diff")
+        expected_recovery_diff_sha256 = job.kwargs.get("expected_recovery_diff_sha256")
+        expected_recovery_add_paths = job.kwargs.get("expected_recovery_add_paths")
+        expected_recovery_update_paths = job.kwargs.get("expected_recovery_update_paths")
+        expected_recovery_commit = job.kwargs.get("expected_recovery_commit_sha")
+        prepare_only = job.op == "prepare_remediation_recovery"
         recovery_bound = (
-            expected_recovery_head is not None or expected_recovery_snapshot is not None
+            expected_recovery_head is not None
+            or expected_recovery_snapshot is not None
+            or expected_recovery_tree is not None
+            or expected_recovery_diff is not None
+            or expected_recovery_diff_sha256 is not None
+            or expected_recovery_add_paths is not None
+            or expected_recovery_update_paths is not None
+            or expected_recovery_commit is not None
         )
+        if recovery_bound and not branch:
+            return JobResult(ok=False, error="commit publication branch is unavailable")
         worktree = Path(worktree_path)
+        allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+        scope_check = self._verify_implementation_edit_scope(
+            job,
+            worktree,
+            allowed_paths=allowed_paths,
+        )
+        if scope_check is not None:
+            return scope_check
+        if allowed_paths is not None and job.kwargs.get("scope_retraction_paths"):
+            allowed_paths = tuple(
+                sorted(set(allowed_paths).union(job.kwargs["scope_retraction_paths"]))
+            )
+        retry_recovery_commit = False
+        selected_recovery_commit: str | None = None
+        recovery_paths: CommitPaths | None = None
+        recovery_git_env: dict[str, str] | None = None
+        recovery_commit_git_env: dict[str, str] | None = None
+        recovery_repo_root: Path | None = None
+        remediation_parent_sha: str | None = None
+        remediation_tree_sha: str | None = None
+        remediation_diff: _BoundedGitOutput | None = None
         if recovery_bound:
-            if not _is_full_commit_sha(expected_recovery_head) or not (
-                _valid_dirty_content_snapshot(expected_recovery_snapshot)
+            raw_repo_root = job.kwargs.get("repo_root")
+            if (
+                not isinstance(raw_repo_root, str)
+                or not Path(raw_repo_root).is_absolute()
+                or not worktree.is_absolute()
+                or Path(raw_repo_root).is_symlink()
+                or worktree.is_symlink()
             ):
                 return JobResult(ok=False, error="remediation writer binding invalid")
-            current_head = self._read_publish_head(worktree, timeout=job.timeout_s)
+            if not isinstance(expected_recovery_add_paths, tuple) or not isinstance(
+                expected_recovery_update_paths, tuple
+            ):
+                return JobResult(ok=False, error="remediation writer binding invalid")
+            recovery_paths = CommitPaths(
+                expected_recovery_add_paths,
+                expected_recovery_update_paths,
+            )
+            if (
+                not _is_full_commit_sha(expected_recovery_head)
+                or not (_valid_dirty_content_snapshot(expected_recovery_snapshot))
+                or not _is_full_commit_sha(expected_recovery_tree)
+                or not isinstance(expected_recovery_diff, str)
+                or len(expected_recovery_diff.encode("utf-8", "surrogateescape"))
+                > IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES
+                or not isinstance(expected_recovery_diff_sha256, str)
+                or expected_recovery_diff_sha256
+                != hashlib.sha256(
+                    expected_recovery_diff.encode("utf-8", "surrogateescape")
+                ).hexdigest()
+                or not is_bounded_commit_paths(
+                    recovery_paths,
+                    max_paths=DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
+                    max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                )
+                or (
+                    expected_recovery_commit is not None
+                    and not _is_full_commit_sha(expected_recovery_commit)
+                )
+            ):
+                return JobResult(ok=False, error="remediation writer binding invalid")
+            try:
+                if not _secure_dir_fd_supported():
+                    _portable_path_identity(Path(raw_repo_root), directory=True)
+                    _portable_path_identity(worktree, directory=True)
+                recovery_repo_root = Path(raw_repo_root).resolve(strict=True)
+                linked_env = _linked_worktree_git_env(recovery_repo_root, worktree)
+                linked_binding = getattr(linked_env, "binding", None)
+                if isinstance(linked_binding, _LinkedWorktreeBinding):
+                    expected_branch_ref = f"refs/heads/{branch}"
+                    allowed_branch_heads = {expected_recovery_head}
+                    if expected_recovery_commit is not None:
+                        allowed_branch_heads.add(expected_recovery_commit)
+                    if (
+                        linked_binding.branch_ref != expected_branch_ref
+                        or linked_binding.branch_sha not in allowed_branch_heads
+                    ):
+                        raise RuntimeError("remediation writer branch binding changed")
+                private_head = expected_recovery_commit or expected_recovery_head
+                durable_git_dir: Path | None = None
+                if prepare_only:
+                    private_pr_number = job.kwargs.get("remediation_pr_number")
+                    if isinstance(private_pr_number, bool) or not isinstance(
+                        private_pr_number, int
+                    ):
+                        raise RuntimeError("remediation PR identity is invalid")
+                    durable_git_dir = prepublication_private_git_dir(
+                        repo_root=recovery_repo_root,
+                        pr_number=private_pr_number,
+                        create=True,
+                    )
+                recovery_git_env = recovery_stack.enter_context(
+                    _private_linked_worktree_git_env(
+                        linked_env,
+                        detached_head=private_head,
+                        durable_git_dir=durable_git_dir,
+                    )
+                )
+            except (OSError, RuntimeError):
+                return JobResult(ok=False, error="remediation writer Git metadata binding invalid")
+            current_head = self._read_publish_head(
+                worktree,
+                timeout=job.timeout_s,
+                git_env=recovery_git_env,
+            )
             if isinstance(current_head, JobResult):
                 return current_head
-            if current_head != expected_recovery_head:
+            if expected_recovery_commit is not None:
+                retry_recovery_commit = current_head == expected_recovery_commit and (
+                    self._is_exact_recovery_commit(
+                        worktree,
+                        current_head,
+                        parent=expected_recovery_head,
+                        tree=expected_recovery_tree,
+                        timeout=job.timeout_s,
+                        git_env=recovery_git_env,
+                    )
+                )
+                if not retry_recovery_commit:
+                    return JobResult(
+                        ok=False,
+                        error="remediation writer retry commit is unavailable",
+                    )
+                selected_recovery_commit = current_head
+            elif current_head != expected_recovery_head:
                 return JobResult(
                     ok=False,
                     error="remediation writer head drift before commit",
                 )
+            else:
+                try:
+                    snapshot_parent = Path(
+                        recovery_stack.enter_context(
+                            tempfile.TemporaryDirectory(
+                                prefix="hephaestus-recovery-snapshot-",
+                            )
+                        )
+                    )
+                    snapshot_root = snapshot_parent / "worktree"
+                    private_index = snapshot_parent / "index"
+                    current_snapshot = _dirty_worktree_content_snapshot(
+                        worktree,
+                        timeout=job.timeout_s,
+                        git_env=recovery_git_env,
+                    )
+                    current_tree, current_diff = _candidate_commit_tree_evidence(
+                        worktree,
+                        current_head,
+                        timeout=job.timeout_s,
+                        selected=recovery_paths,
+                        git_env=recovery_git_env,
+                        snapshot_root=snapshot_root,
+                    )
+                    recovery_commit_git_env = _PrivateLinkedWorktreeGitEnvironment(
+                        {
+                            **recovery_git_env,
+                            "GIT_INDEX_FILE": str(private_index),
+                            "GIT_WORK_TREE": str(snapshot_root),
+                        },
+                        cast(
+                            _PrivateLinkedWorktreeGitEnvironment,
+                            recovery_git_env,
+                        ).linked_env,
+                    )
+                except _GitInspectionResourceLimitError:
+                    return JobResult(
+                        ok=False,
+                        value={"failure_kind": "resource_limit_exceeded"},
+                        error="remediation writer resource limit exceeded before commit",
+                    )
+                except (
+                    OSError,
+                    RuntimeError,
+                    subprocess.SubprocessError,
+                ):
+                    return JobResult(
+                        ok=False,
+                        error="remediation writer content binding unavailable before commit",
+                    )
+                same_content = all(
+                    current_snapshot[key] == expected_recovery_snapshot[key]
+                    for key in ("worktree_sha256", "untracked_sha256")
+                )
+                if not same_content or current_tree != expected_recovery_tree:
+                    return JobResult(
+                        ok=False,
+                        error="remediation writer content drift before commit",
+                    )
+                if (
+                    current_diff.text != expected_recovery_diff
+                    or current_diff.sha256 != expected_recovery_diff_sha256
+                ):
+                    return JobResult(
+                        ok=False,
+                        error="remediation writer diff drift before commit",
+                    )
+            remediation_parent_sha = expected_recovery_head
+            remediation_tree_sha = expected_recovery_tree
+            remediation_diff = _BoundedGitOutput(
+                text=expected_recovery_diff,
+                sha256=expected_recovery_diff_sha256,
+                byte_count=len(expected_recovery_diff.encode("utf-8", "surrogateescape")),
+            )
+        elif job.kwargs.get("remediation_repository") is not None:
             try:
-                current_snapshot = _dirty_worktree_content_snapshot(
+                remediation_parent = self._read_publish_head(worktree, timeout=job.timeout_s)
+                if isinstance(remediation_parent, JobResult):
+                    return remediation_parent
+                remediation_paths = _bounded_candidate_commit_paths(
                     worktree,
+                    remediation_parent,
                     timeout=job.timeout_s,
                 )
-            except (
-                _GitInspectionResourceLimitError,
-                OSError,
-                RuntimeError,
-                subprocess.SubprocessError,
-            ):
-                return JobResult(
-                    ok=False,
-                    error="remediation writer content binding unavailable before commit",
+                remediation_tree_sha, remediation_diff = _candidate_commit_tree_evidence(
+                    worktree,
+                    remediation_parent,
+                    timeout=job.timeout_s,
+                    selected=remediation_paths,
                 )
-            if current_snapshot != expected_recovery_snapshot:
-                return JobResult(
-                    ok=False,
-                    error="remediation writer content drift before commit",
-                )
+                recovery_paths = remediation_paths
+                remediation_parent_sha = remediation_parent
+            except RuntimeError:
+                if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
+                    return JobResult(
+                        ok=False, error="remediation candidate evidence is unavailable"
+                    )
         # ``commit_if_changes`` returns False for a clean worktree.  An agent
         # is instructed to leave its edits uncommitted, but a defensive
         # recovery still recognizes a clean branch that is ahead of its
@@ -5203,37 +8096,93 @@ class WorkerPool:
             worktree,
             str(job.kwargs.get("agent", "claude")),
         )
-        allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
-        edit_scope = self._verify_allowed_edit_scope(
-            Path(worktree_path),
-            allowed_paths=allowed_paths,
-            history_base_sha=job.kwargs.get("scope_history_base_sha"),
-            timeout=job.timeout_s,
-        )
-        if edit_scope is not None:
-            return edit_scope
-        changed = self._commit_if_changes_with_controlled_signing(
-            job,
-            commit_args,
-            allowed_paths,
-            agent_model,
-            git_message_timeout,
-        )
-        if isinstance(changed, JobResult):
-            return changed
-        branch = str(job.kwargs.get("branch") or "")
-        if not changed and recovery_bound:
+        changed: bool | str | JobResult = False
+        if prepare_only and not retry_recovery_commit:
+            try:
+                intent_repository = job.kwargs.get("remediation_repository")
+                intent_pr_number = job.kwargs.get("remediation_pr_number")
+                intent_threads = job.kwargs.get("remediation_thread_snapshots")
+                intent_batch = job.kwargs.get("remediation_batch_nonce")
+                intent_diagnostic = job.kwargs.get("remediation_failure_diagnostic")
+                if (
+                    not isinstance(intent_repository, str)
+                    or isinstance(intent_pr_number, bool)
+                    or not isinstance(intent_pr_number, int)
+                    or not isinstance(intent_threads, list)
+                    or not isinstance(intent_batch, str)
+                    or not isinstance(intent_diagnostic, str)
+                ):
+                    raise ValueError("remediation prepublication intent is incomplete")
+                save_prepublication_intent(
+                    repo_root=cast(Path, recovery_repo_root),
+                    repository=intent_repository,
+                    issue_number=cast(int, issue_number),
+                    pr_number=intent_pr_number,
+                    worktree_path=worktree,
+                    branch=branch,
+                    expected_remote_sha=cast(str, expected_recovery_head),
+                    candidate_tree_sha=cast(str, expected_recovery_tree),
+                    add_paths=cast(CommitPaths, recovery_paths).add_paths,
+                    update_paths=cast(CommitPaths, recovery_paths).update_paths,
+                    committed_diff_sha256=cast(str, expected_recovery_diff_sha256),
+                    committed_diff=cast(str, expected_recovery_diff),
+                    failure_diagnostic=intent_diagnostic,
+                    thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(
+                        intent_threads
+                    ),
+                    content_snapshot=tuple(
+                        sorted(cast(dict[str, str], expected_recovery_snapshot).items())
+                    ),
+                    batch_nonce=intent_batch,
+                )
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return JobResult(
+                    ok=False,
+                    error=f"remediation prepublication intent is unavailable: {exc}",
+                )
+        if not retry_recovery_commit:
+            try:
+                changed = self._commit_if_changes_with_controlled_signing(
+                    job,
+                    commit_args,
+                    allowed_paths,
+                    agent_model,
+                    git_message_timeout,
+                    recovery_paths=recovery_paths,
+                    expected_tree_sha=remediation_tree_sha,
+                    git_env=recovery_commit_git_env or recovery_git_env,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                if recovery_bound:
+                    return self._classify_recovery_commit_failure(
+                        worktree,
+                        expected_head=cast(str, expected_recovery_head),
+                        expected_tree=cast(str, expected_recovery_tree),
+                        timeout=job.timeout_s,
+                        cause=exc,
+                        git_env=recovery_git_env,
+                    )
+                raise
+            if isinstance(changed, JobResult):
+                return changed
+            if isinstance(changed, str):
+                if not _is_full_commit_sha(changed):
+                    return JobResult(ok=False, error="remediation commit receipt is invalid")
+                selected_recovery_commit = changed
+        if not changed and recovery_bound and not retry_recovery_commit:
             # The inspected writer was dirty immediately before this call.
             # ``commit_if_changes`` also returns False when its commit helper
             # catches RuntimeError, so False cannot prove a safe no-op here.
-            return JobResult(
-                ok=False,
-                value={"failure_kind": "commit_failed"},
-                error="remediation writer commit did not complete",
+            return self._classify_recovery_commit_failure(
+                worktree,
+                expected_head=cast(str, expected_recovery_head),
+                expected_tree=cast(str, expected_recovery_tree),
+                timeout=job.timeout_s,
+                git_env=recovery_git_env,
             )
-        if not changed:
+        if not changed and not retry_recovery_commit:
             publish_state = self._commit_push_requires_publish(
                 job=job,
                 branch=branch,
@@ -5257,44 +8206,499 @@ class WorkerPool:
             )
             if status.stdout.strip():
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
-        scope_retraction = self._verify_scope_retraction(job, worktree)
-        if scope_retraction is not None:
-            return scope_retraction
-        edit_scope = self._verify_allowed_edit_scope(
-            Path(worktree_path),
+        scope_check = self._verify_implementation_edit_scope(
+            job,
+            worktree,
             allowed_paths=allowed_paths,
-            history_base_sha=job.kwargs.get("scope_history_base_sha"),
-            timeout=job.timeout_s,
         )
-        if edit_scope is not None:
-            return edit_scope
+        if scope_check is not None:
+            return scope_check
         if not recovery_bound:
-            return self._publish_commit_push(job, branch, worktree)
-        publication_head = self._read_publish_head(worktree, timeout=job.timeout_s)
+            scope_retraction = self._verify_scope_retraction(job, worktree)
+            if scope_retraction is not None:
+                return scope_retraction
+            remediation_artifacts: tuple[dict[str, Any], tuple[str, str]] | None = None
+            if (
+                selected_recovery_commit is not None
+                and remediation_parent_sha is not None
+                and remediation_tree_sha is not None
+                and remediation_diff is not None
+                and recovery_paths is not None
+            ):
+                try:
+                    raw_repo_root = job.kwargs.get("repo_root")
+                    if not isinstance(raw_repo_root, str):
+                        raise ValueError("remediation repository root is unavailable")
+                    remediation_artifacts = _remediation_recovery_artifacts(
+                        job,
+                        repo_root=Path(raw_repo_root).resolve(strict=True),
+                        worktree=worktree.resolve(strict=True),
+                        branch=branch,
+                        parent_sha=remediation_parent_sha,
+                        candidate_tree_sha=remediation_tree_sha,
+                        recovery_commit_sha=selected_recovery_commit,
+                        paths=recovery_paths,
+                        committed_diff=remediation_diff.text,
+                        committed_diff_sha256=remediation_diff.sha256,
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    return JobResult(
+                        ok=False,
+                        value={"recovery_commit_sha": selected_recovery_commit},
+                        error=f"remediation recovery journal is unavailable: {exc}",
+                    )
+            publication = self._publish_commit_push(job, branch, worktree)
+            if not publication.ok or remediation_artifacts is None:
+                return publication
+            handoff, journal = remediation_artifacts
+            value = dict(publication.value) if isinstance(publication.value, dict) else {}
+            value["remediation_handoff"] = handoff
+            value["remediation_journal"] = {"marker": journal[0], "body": journal[1]}
+            return replace(publication, value=value)
+        publication_head = self._read_publish_head(
+            worktree,
+            timeout=job.timeout_s,
+            git_env=recovery_git_env,
+        )
         if isinstance(publication_head, JobResult):
+            if selected_recovery_commit is not None:
+                value = (
+                    dict(publication_head.value) if isinstance(publication_head.value, dict) else {}
+                )
+                value["recovery_commit_sha"] = selected_recovery_commit
+                return replace(publication_head, value=value)
             return publication_head
-        try:
-            publication_snapshot = _dirty_worktree_content_snapshot(
-                worktree,
-                timeout=job.timeout_s,
-            )
-        except (
-            _GitInspectionResourceLimitError,
-            OSError,
-            RuntimeError,
-            subprocess.SubprocessError,
-        ):
+        if selected_recovery_commit is not None and publication_head != selected_recovery_commit:
             return JobResult(
                 ok=False,
-                error="remediation writer content binding unavailable before push",
+                value={"recovery_commit_sha": selected_recovery_commit},
+                error="remediation writer head changed after recovery selection",
             )
-        return self._publish_commit_push(
+        selected_recovery_commit = publication_head
+
+        def recovery_failure(result: JobResult) -> JobResult:
+            """Attach the exact local child to each post-commit failure."""
+            value = dict(result.value) if isinstance(result.value, dict) else {}
+            value["recovery_commit_sha"] = selected_recovery_commit
+            return replace(result, value=value)
+
+        scope_retraction = self._verify_scope_retraction(
+            job,
+            worktree,
+            git_env=recovery_git_env,
+        )
+        if scope_retraction is not None:
+            return recovery_failure(scope_retraction)
+        if not self._is_exact_recovery_commit(
+            worktree,
+            selected_recovery_commit,
+            parent=cast(str, expected_recovery_head),
+            tree=cast(str, expected_recovery_tree),
+            timeout=job.timeout_s,
+            git_env=recovery_git_env,
+        ):
+            return recovery_failure(
+                JobResult(
+                    ok=False,
+                    error="remediation writer commit does not match the inspected tree",
+                )
+            )
+        try:
+            _refresh_verified_recovery_index(
+                cast(Path, recovery_repo_root),
+                worktree,
+                expected_git_env=cast(dict[str, str], recovery_git_env),
+                private_git_env=cast(
+                    dict[str, str],
+                    recovery_commit_git_env or recovery_git_env,
+                ),
+                source_sha=selected_recovery_commit,
+                expected_tree=cast(str, expected_recovery_tree),
+                timeout=job.timeout_s,
+            )
+            clean = _run_bounded_git_output(
+                (
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--no-renames",
+                ),
+                cwd=worktree,
+                timeout=job.timeout_s,
+                max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                retain_text=True,
+                env=recovery_git_env,
+            ).text
+            from hephaestus.automation.commit_paths import parse_porcelain_status
+
+            clean_entries = parse_porcelain_status(clean)
+            if len({path for _status, path in clean_entries}) > DIRTY_SNAPSHOT_CHANGED_FILE_MAX:
+                raise _GitInspectionResourceLimitError("dirty snapshot file limit exceeded")
+        except _GitInspectionResourceLimitError as exc:
+            return recovery_failure(
+                JobResult(
+                    ok=False,
+                    value={"failure_kind": "resource_limit_exceeded"},
+                    error=f"remediation post-commit resource limit exceeded: {exc}",
+                )
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return recovery_failure(
+                JobResult(ok=False, error=f"remediation post-commit check failed: {exc}")
+            )
+        if clean.strip():
+            return recovery_failure(
+                JobResult(ok=False, error="remediation writer changed after commit")
+            )
+        if prepare_only:
+            try:
+                review_input = _remediation_review_input(
+                    job,
+                    repo_root=cast(Path, recovery_repo_root),
+                    worktree=worktree,
+                    branch=branch,
+                    parent_sha=cast(str, expected_recovery_head),
+                    candidate_tree_sha=cast(str, expected_recovery_tree),
+                    recovery_commit_sha=selected_recovery_commit,
+                    paths=cast(CommitPaths, recovery_paths),
+                    committed_diff=cast(_BoundedGitOutput, remediation_diff).text,
+                    committed_diff_sha256=cast(_BoundedGitOutput, remediation_diff).sha256,
+                )
+                journal_input_encoding, journal_input_data = encode_remediation_review_input(
+                    review_input.canonical_bytes
+                )
+                receipt = RemediationRecoveryReceipt(
+                    review_input_bytes=review_input.canonical_bytes.decode("utf-8"),
+                    review_input_sha256=review_input.review_input_sha256,
+                    journal_input_encoding=journal_input_encoding,
+                    journal_input_data=journal_input_data,
+                    expected_remote_sha=cast(str, expected_recovery_head),
+                    content_snapshot=tuple(
+                        sorted(cast(dict[str, str], expected_recovery_snapshot).items())
+                    ),
+                    add_paths=cast(CommitPaths, recovery_paths).add_paths,
+                    update_paths=cast(CommitPaths, recovery_paths).update_paths,
+                )
+                batch_nonce = job.kwargs.get("remediation_batch_nonce")
+                if not isinstance(batch_nonce, str):
+                    raise ValueError("remediation recovery batch identity is unavailable")
+                save_prepublication_receipt(
+                    repo_root=cast(Path, recovery_repo_root),
+                    receipt=receipt,
+                    batch_nonce=batch_nonce,
+                )
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return recovery_failure(
+                    JobResult(ok=False, error=f"remediation recovery receipt is unavailable: {exc}")
+                )
+            return JobResult(
+                ok=True,
+                value={
+                    "pushed": False,
+                    "head_sha": selected_recovery_commit,
+                    "recovery_receipt": receipt.as_dict(),
+                },
+            )
+        try:
+            remediation_handoff, remediation_journal = _remediation_recovery_artifacts(
+                job,
+                repo_root=cast(Path, recovery_repo_root),
+                worktree=worktree,
+                branch=branch,
+                parent_sha=cast(str, expected_recovery_head),
+                candidate_tree_sha=cast(str, expected_recovery_tree),
+                recovery_commit_sha=selected_recovery_commit,
+                paths=cast(CommitPaths, recovery_paths),
+                committed_diff=cast(_BoundedGitOutput, remediation_diff).text,
+                committed_diff_sha256=cast(_BoundedGitOutput, remediation_diff).sha256,
+            )
+        except (TypeError, ValueError) as exc:
+            return recovery_failure(
+                JobResult(
+                    ok=False,
+                    error=f"remediation recovery journal is unavailable: {exc}",
+                )
+            )
+        publication = self._publish_recovery_commit(
             job,
             branch,
             worktree,
-            expected_head=publication_head,
-            expected_content_snapshot=publication_snapshot,
+            source_sha=selected_recovery_commit,
+            expected_remote_sha=cast(str, expected_recovery_head),
+            repo_root=cast(Path, recovery_repo_root),
+            expected_git_env=cast(dict[str, str], recovery_git_env),
         )
+        if not publication.ok:
+            return publication
+        value = dict(publication.value) if isinstance(publication.value, dict) else {}
+        value["remediation_handoff"] = remediation_handoff
+        value["remediation_journal"] = {
+            "marker": remediation_journal[0],
+            "body": remediation_journal[1],
+        }
+        return replace(publication, value=value)
+
+    def _classify_recovery_commit_failure(
+        self,
+        worktree: Path,
+        *,
+        expected_head: str,
+        expected_tree: str,
+        timeout: int,
+        cause: BaseException | None = None,
+        git_env: dict[str, str] | None = None,
+    ) -> JobResult:
+        """Classify a failed commit without losing an exact completed child."""
+        current_head = self._read_publish_head(worktree, timeout=timeout, git_env=git_env)
+        if isinstance(current_head, str) and current_head != expected_head:
+            if self._is_exact_recovery_commit(
+                worktree,
+                current_head,
+                parent=expected_head,
+                tree=expected_tree,
+                timeout=timeout,
+                git_env=git_env,
+            ):
+                return JobResult(
+                    ok=False,
+                    value={
+                        "failure_kind": "commit_result_ambiguous",
+                        "recovery_commit_sha": current_head,
+                    },
+                    error="remediation writer commit result is ambiguous",
+                )
+            return JobResult(ok=False, error="remediation writer head drift after commit")
+        error = "remediation writer commit did not complete"
+        if cause is not None:
+            error = f"{error}: {cause}"
+        return JobResult(
+            ok=False,
+            value={"failure_kind": "commit_failed"},
+            error=error,
+        )
+
+    @staticmethod
+    def _is_exact_recovery_commit(
+        worktree: Path,
+        commit: str,
+        *,
+        parent: str,
+        tree: str,
+        timeout: int,
+        git_env: dict[str, str] | None = None,
+    ) -> bool:
+        """Return whether a signed DCO commit has the inspected parent and tree."""
+        try:
+            raw = git_utils.run(
+                ["git", "cat-file", "-p", commit],
+                cwd=worktree,
+                timeout=timeout,
+                env=git_env or _isolated_checkout_git_env(),
+            ).stdout
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return False
+        parents = [
+            line.removeprefix("parent ") for line in raw.splitlines() if line.startswith("parent ")
+        ]
+        trees = [
+            line.removeprefix("tree ") for line in raw.splitlines() if line.startswith("tree ")
+        ]
+        signature_header = "gpgsig-sha256 " if len(commit) == 64 else "gpgsig "
+        return (
+            parents == [parent]
+            and trees == [tree]
+            and any(line.startswith(signature_header) for line in raw.splitlines())
+            and "Signed-off-by:" in raw
+        )
+
+    def _publish_recovery_commit(  # noqa: C901
+        self,
+        job: GitJob,
+        branch: str,
+        worktree: Path,
+        *,
+        source_sha: str,
+        expected_remote_sha: str,
+        repo_root: Path,
+        expected_git_env: dict[str, str],
+    ) -> JobResult:
+        """Publish one inspected recovery commit with an exact remote lease."""
+        if not branch:
+            return JobResult(ok=False, error="commit publication branch is unavailable")
+        try:
+            expected_linked_env = getattr(expected_git_env, "linked_env", expected_git_env)
+            rebound = _linked_worktree_git_env(repo_root, worktree)
+            if not _linked_binding_matches(
+                expected_linked_env,
+                rebound,
+                include_index=False,
+            ):
+                raise RuntimeError("remediation writer Git metadata identity changed")
+            initial_binding = getattr(expected_linked_env, "binding", None)
+            publication_binding = getattr(rebound, "binding", None)
+            expected_branch_ref = f"refs/heads/{branch}"
+            if isinstance(initial_binding, _LinkedWorktreeBinding) and (
+                not isinstance(publication_binding, _LinkedWorktreeBinding)
+                or initial_binding.branch_ref != expected_branch_ref
+                or publication_binding.branch_ref != expected_branch_ref
+                or initial_binding.branch_sha not in {expected_remote_sha, source_sha}
+                or publication_binding.branch_sha != initial_binding.branch_sha
+            ):
+                raise RuntimeError("remediation writer branch binding changed")
+
+            def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
+                """Rebind metadata and return one literal trusted remote."""
+                current = _linked_worktree_git_env(repo_root, worktree)
+                if not _linked_binding_matches(rebound, current, include_index=True):
+                    raise RuntimeError("remediation writer Git metadata identity changed")
+                current_binding = getattr(current, "binding", None)
+                if isinstance(publication_binding, _LinkedWorktreeBinding) and (
+                    not isinstance(current_binding, _LinkedWorktreeBinding)
+                    or current_binding.branch_ref != expected_branch_ref
+                    or current_binding.branch_sha != publication_binding.branch_sha
+                ):
+                    raise RuntimeError("remediation writer branch binding changed")
+                remote_env, remote_config = self._authenticated_remote_git_configuration()
+                remote_env.update(expected_git_env)
+                return remote_env, remote_config
+
+            remote_env, remote_config = revalidate_remote()
+            trusted_url = f"https://github.com/{job.transport_repository}.git"
+            git_utils.push_head_to_branch(
+                branch,
+                expected_remote_sha,
+                worktree,
+                source_sha=source_sha,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
+                disable_hooks=True,
+                remote=trusted_url,
+            )
+            post_push = _linked_worktree_git_env(repo_root, worktree)
+            if not _linked_binding_matches(rebound, post_push, include_index=True):
+                raise RuntimeError("remediation writer Git metadata identity changed")
+            post_push_binding = getattr(post_push, "binding", None)
+            if isinstance(publication_binding, _LinkedWorktreeBinding):
+                if (
+                    not isinstance(post_push_binding, _LinkedWorktreeBinding)
+                    or post_push_binding.branch_ref != expected_branch_ref
+                    or post_push_binding.branch_sha != publication_binding.branch_sha
+                ):
+                    raise RuntimeError("remediation writer branch binding changed")
+                _compare_and_swap_linked_branch(
+                    post_push_binding,
+                    expected_sha=publication_binding.branch_sha,
+                    new_sha=source_sha,
+                )
+                final_binding_env = _linked_worktree_git_env(repo_root, worktree)
+                final_binding = getattr(final_binding_env, "binding", None)
+                if (
+                    not _linked_binding_matches(post_push, final_binding_env, include_index=True)
+                    or not isinstance(final_binding, _LinkedWorktreeBinding)
+                    or final_binding.branch_ref != expected_branch_ref
+                    or final_binding.branch_sha != source_sha
+                ):
+                    raise RuntimeError("remediation writer local branch update is unavailable")
+        except (
+            git_utils.DetachedHeadPushRemoteHeadChangedError,
+            git_utils.DetachedHeadPushRemoteHeadUnchangedError,
+            git_utils.DetachedHeadPushRemoteProbeError,
+        ) as exc:
+            return JobResult(
+                ok=False,
+                error="recovery commit publication failed",
+                value={
+                    "failure_kind": exc.failure_kind,
+                    "recovery_commit_sha": source_sha,
+                },
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return JobResult(
+                ok=False,
+                error=f"recovery commit publication unavailable: {exc}",
+                value={
+                    "failure_kind": "publication_unavailable",
+                    "recovery_commit_sha": source_sha,
+                },
+            )
+        return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
+
+    @staticmethod
+    def _verify_implementation_edit_scope(
+        job: GitJob,
+        worktree: Path,
+        *,
+        allowed_paths: Collection[str] | None,
+    ) -> JobResult | None:
+        """Reject dirty and committed edits outside the host-approved scope."""
+        if allowed_paths is None:
+            if agent_runtime.requires_codex_implementation_isolation(
+                str(job.kwargs.get("agent", ""))
+            ):
+                return JobResult(ok=False, error="implementation approved scope is unavailable")
+            return None
+        if not allowed_paths or not all(
+            is_safe_scope_retraction_path(path) for path in allowed_paths
+        ):
+            return JobResult(ok=False, error="implementation approved scope is unavailable")
+        history_base_sha = job.kwargs.get("scope_history_base_sha")
+        if not _is_full_commit_sha(history_base_sha):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        probes = (
+            ["git", "diff", "--no-renames", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{history_base_sha}..HEAD",
+            ],
+        )
+        try:
+            changed: set[str] = set()
+            untracked: set[str] = set()
+            for argv in probes:
+                result = git_utils.run(
+                    argv,
+                    cwd=worktree,
+                    capture_output=True,
+                    timeout=job.timeout_s,
+                )
+                paths = {path for path in str(result.stdout or "").split("\0") if path}
+                changed.update(paths)
+                if "ls-files" in argv:
+                    untracked = paths
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        permitted = set(allowed_paths)
+        retractions = job.kwargs.get("scope_retraction_paths")
+        if retractions is not None:
+            if (
+                not isinstance(retractions, tuple)
+                or not retractions
+                or not all(is_safe_scope_retraction_path(path) for path in retractions)
+                or untracked.intersection(retractions)
+            ):
+                return JobResult(ok=False, error="scope retraction verification unavailable")
+            restoration = WorkerPool._verify_scope_retraction(job, worktree, include_worktree=True)
+            if restoration is not None:
+                return restoration
+            permitted.update(retractions)
+        if not changed.issubset(permitted):
+            return JobResult(
+                ok=False,
+                error="implementation changed paths outside approved scope",
+            )
+        return None
 
     @staticmethod
     def _commit_if_changes_with_controlled_signing(
@@ -5303,21 +8707,69 @@ class WorkerPool:
         allowed_paths: Collection[str] | None,
         agent_model: object,
         git_message_timeout: int,
-    ) -> bool | JobResult:
+        *,
+        recovery_paths: CommitPaths | None = None,
+        expected_tree_sha: str | None = None,
+        git_env: dict[str, str] | None = None,
+    ) -> bool | str | JobResult:
         """Commit only dirty worktrees with the validated host signing identity."""
+        operation_timeout = float(job.timeout_s)
+        if job.deadline_s is not None:
+            operation_timeout = cast(
+                float,
+                git_utils.remaining_operation_timeout(job.timeout_s),
+            )
+            if operation_timeout < 1:
+                raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
+            git_message_timeout = min(git_message_timeout, int(operation_timeout))
 
         def signing_env_factory() -> dict[str, str]:
-            signing_env = _controlled_git_signing_env(commit_args[1], timeout=job.timeout_s)
+            signing_env = _controlled_git_signing_env(
+                commit_args[1],
+                timeout=cast(int, operation_timeout),
+                private_metadata=isinstance(
+                    git_env,
+                    _PrivateLinkedWorktreeGitEnvironment,
+                ),
+            )
             if isinstance(signing_env, JobResult):
                 raise git_utils.SigningEnvironmentUnavailableError(signing_env.error)
+            if git_env is not None:
+                signing_env.update(
+                    {
+                        key: value
+                        for key, value in git_env.items()
+                        if key
+                        in {
+                            "GIT_DIR",
+                            "GIT_COMMON_DIR",
+                            "GIT_INDEX_FILE",
+                            "GIT_WORK_TREE",
+                            "GIT_OBJECT_DIRECTORY",
+                            "GIT_OPTIONAL_LOCKS",
+                        }
+                    }
+                )
             return signing_env
 
         commit_kwargs: dict[str, Any] = {
             "allowed_paths": allowed_paths,
-            "timeout": job.timeout_s,
+            "timeout": operation_timeout,
             "git_message_timeout": git_message_timeout,
             "signing_env_factory": signing_env_factory,
+            "git_env": git_env or _isolated_checkout_git_env(),
+            "issue_title": job.kwargs.get("issue_title"),
+            "issue_body": job.kwargs.get("issue_body"),
+            "claude_message_agent": _invoke_claude_commit_message,
         }
+        if expected_tree_sha is not None:
+            commit_kwargs["expected_tree_sha"] = expected_tree_sha
+            commit_kwargs["return_commit_sha"] = True
+            if recovery_paths is None:
+                return JobResult(ok=False, error="remediation writer path manifest is unavailable")
+            commit_kwargs["expected_add_paths"] = recovery_paths.add_paths
+            commit_kwargs["expected_update_paths"] = recovery_paths.update_paths
+            commit_kwargs["disable_hooks"] = True
         if agent_model is not None:
             commit_kwargs["agent_model"] = agent_model
         pi_dir = job.kwargs.get("pi_dir")
@@ -5333,58 +8785,13 @@ class WorkerPool:
             )
 
     @staticmethod
-    def _verify_allowed_edit_scope(
+    def _verify_scope_retraction(
+        job: GitJob,
         worktree_path: Path,
         *,
-        allowed_paths: Collection[str] | None,
-        history_base_sha: object,
-        timeout: int,
+        git_env: dict[str, str] | None = None,
+        include_worktree: bool = False,
     ) -> JobResult | None:
-        """Reject a publication that changes paths outside the approved plan."""
-        if allowed_paths is None:
-            return None
-        allowed = set(allowed_paths)
-        if not allowed:
-            return JobResult(ok=False, error="implementation approved scope is unavailable")
-        probes = (
-            ["git", "diff", "--no-renames", "--name-only", "-z"],
-            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        )
-        try:
-            changed: set[str] = set()
-            for argv in probes:
-                result = git_utils.run(
-                    argv,
-                    cwd=worktree_path,
-                    capture_output=True,
-                    timeout=timeout,
-                )
-                changed.update(path for path in str(result.stdout or "").split("\0") if path)
-            if not _is_full_commit_sha(history_base_sha):
-                return JobResult(ok=False, error="cannot validate implementation edit scope")
-            history = git_utils.run(
-                [
-                    "git",
-                    "diff",
-                    "--no-renames",
-                    "--name-only",
-                    "-z",
-                    f"{history_base_sha}..HEAD",
-                ],
-                cwd=worktree_path,
-                capture_output=True,
-                timeout=timeout,
-            )
-            changed.update(path for path in str(history.stdout or "").split("\0") if path)
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return JobResult(ok=False, error="cannot validate implementation edit scope")
-        if not changed.issubset(allowed):
-            return JobResult(ok=False, error="implementation changed paths outside approved scope")
-        return None
-
-    @staticmethod
-    def _verify_scope_retraction(job: GitJob, worktree_path: Path) -> JobResult | None:
         """Reject publication unless host-designated paths match the reviewed base.
 
         The coordinator derives these paths only from validated scope-control
@@ -5410,20 +8817,27 @@ class WorkerPool:
                 error="scope retraction verification unavailable",
             )
         try:
+            run_kwargs: dict[str, Any] = {
+                "capture_output": True,
+                "timeout": job.timeout_s,
+            }
+            if git_env is not None:
+                run_kwargs["env"] = git_env
             result = git_utils.run(
                 [
                     "git",
                     "--literal-pathspecs",
                     "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
                     "--name-only",
                     base_sha,
-                    "HEAD",
+                    *(() if include_worktree else ("HEAD",)),
                     "--",
                     *paths,
                 ],
                 cwd=worktree_path,
-                capture_output=True,
-                timeout=job.timeout_s,
+                **run_kwargs,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return JobResult(
@@ -5449,7 +8863,8 @@ class WorkerPool:
         expected_content_snapshot: dict[str, str] | None = None,
     ) -> JobResult:
         """Publish a newly created commit and return its exact immutable SHA."""
-        branch = branch or "HEAD"
+        if not branch:
+            return JobResult(ok=False, error="commit publication branch is unavailable")
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
         if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
             return JobResult(ok=False, error="direct scope base pin invalid")
@@ -5495,9 +8910,8 @@ class WorkerPool:
                 "timeout": job.timeout_s,
                 "env": remote_env,
                 "remote_config": remote_config,
+                "source_sha": source_sha,
             }
-            if publication_bound:
-                strict_push_kwargs["source_sha"] = source_sha
             git_utils.push_branch_if_remote_matches(
                 branch,
                 expected_remote_sha,
@@ -5509,14 +8923,18 @@ class WorkerPool:
                 "timeout": job.timeout_s,
                 "env": remote_env,
                 "remote_config": remote_config,
+                "source_sha": source_sha,
             }
-            if publication_bound:
-                push_kwargs["source_sha"] = source_sha
             git_utils.push_branch(branch, worktree_path, **push_kwargs)
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     @staticmethod
-    def _read_publish_head(worktree_path: Path, *, timeout: int) -> str | JobResult:
+    def _read_publish_head(
+        worktree_path: Path,
+        *,
+        timeout: int,
+        git_env: dict[str, str] | None = None,
+    ) -> str | JobResult:
         """Read the immutable commit the implementation writer will publish."""
         try:
             head = git_utils.run(
@@ -5524,6 +8942,7 @@ class WorkerPool:
                 cwd=worktree_path,
                 capture_output=True,
                 timeout=timeout,
+                env=git_env or _isolated_checkout_git_env(),
             ).stdout.strip()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return JobResult(ok=False, error="cannot bind implementation publish head")

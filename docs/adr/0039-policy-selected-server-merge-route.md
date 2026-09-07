@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-09-05
 - Tracks: #2965
+- Amended: 2026-09-06 for #3015
+- Amended: 2026-09-07 for #3023
 - Supersedes: ADR-0038
 
 ## Context
@@ -30,15 +32,23 @@ It must not create or change native auto-merge.
    and run-ID validation still applies to the global response.
 3. When an applicable ruleset requires the merge queue, the stage sends one
    `enqueuePullRequest` GraphQL mutation. It supplies the PR node ID and
-   `expectedHeadOid`. The receipt must identify the same PR and head, a valid
-   base commit, a queue entry, and the request correlation value.
+   `expectedHeadOid`. These mutation inputs make GitHub apply the exact-head
+   condition. The receipt must contain a queue entry ID, a valid queue state,
+   and the request correlation value. GitHub defines the nested PR and base
+   commit fields as nullable. The receipt does not require these fields.
 4. The queue route is valid for an actor that can bypass the ruleset and for an
    actor that cannot bypass it. The explicit queue request does not bypass the
    queue. GitHub tests the queued change with the latest base and the merge-group
    checks before it merges.
 5. After queue admission, the stage records the admitted head in the current
-   work item and polls lifecycle state. It does not replay the mutation. An
-   uncertain mutation outcome is terminal for the request.
+   work item and polls lifecycle state. It does not replay the mutation. If
+   GitHub returns the typed exact already-enqueued rejection, the adapter can
+   run one read-only query within the remaining operation deadline. The query
+   must prove the same open pull request node, exact reviewed head, and valid
+   queue entry. A matching entry is successful idempotent admission. A
+   canceled, late, unavailable, malformed, absent, or mismatched readback is
+   fail-closed. All other uncertain mutation outcomes are terminal for the
+   request.
 6. When no merge queue applies, a direct REST merge is valid only if effective
    strict-update protection applies and the current actor cannot bypass it. The
    request keeps `sha=<reviewed head>` and `merge_method=squash`.
@@ -68,4 +78,6 @@ A base advance before admission remains safe because GitHub tests the queue
 entry with the latest base. A repository without a merge queue can use direct
 merge only with strict-update protection from a source that the current actor
 cannot bypass.
-Incomplete policy, receipt, or required status evidence stops the merge path.
+Incomplete policy, queue entry, or required status evidence stops the merge
+path. A missing nullable hydration field does not change an accepted queue
+entry into an unknown mutation result.

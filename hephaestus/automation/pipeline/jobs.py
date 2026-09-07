@@ -9,10 +9,11 @@ must stay off the coordinator thread), so :class:`AgentJob` carries a
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.pi_session import AgentSessionBinding
@@ -20,6 +21,9 @@ from hephaestus.agents.workspace import WorkspaceBinding, validate_workspace_bin
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
 from .job_results import JobHandle, JobResult
+
+if TYPE_CHECKING:
+    from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
 
 __all__ = [
     "GIT_OPS",
@@ -55,6 +59,10 @@ class AgentJob:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    codex_isolation_adapter: str | None = None
+    codex_isolation_deployment_lock: Path | None = None
+    codex_isolation_deployment_lock_sha256: str | None = None
+    codex_isolation_request: CodexIsolationRequestV1 | None = None
     fallback_model: str | None = None
     plugin_skills_dir: Path | None = None
     session_agent: str = ""
@@ -85,6 +93,17 @@ class AgentJob:
     # output parsing, closing the restart window for durable conversations.
     session_checkpoint: Callable[[str, AgentSessionBinding | None], None] | None = None
     descr: str = ""
+    deadline_s: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate an optional operation-wide monotonic deadline."""
+        if self.deadline_s is not None and (
+            isinstance(self.deadline_s, bool)
+            or not isinstance(self.deadline_s, (int, float))
+            or not math.isfinite(self.deadline_s)
+            or self.deadline_s <= 0
+        ):
+            raise ValueError("deadline_s must be a finite positive monotonic time")
 
 
 def validate_job_workspace(job: AgentJob) -> Path:

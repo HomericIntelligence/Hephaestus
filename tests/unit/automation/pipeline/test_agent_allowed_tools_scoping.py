@@ -49,7 +49,7 @@ EXPECTED_SCOPES = {
         "stages/implementation.py",
         "_remediation_reply_recovery_wait",
         "get_remediation_reply_recovery_prompt",
-    ): READ_ONLY,
+    ): "",
     ("stages/implementation.py", "_implement_wait", "get_address_review_prompt"): ADDRESS,
     ("stages/implementation.py", "_implement_wait", "build_implementation_prompt"): WRITE,
     (
@@ -132,7 +132,9 @@ def _discover_agent_jobs() -> dict[tuple[str, str, str], str]:
                         f"{self.relative_path}:{node.lineno}: AgentJob in {function}() "
                         f"({builder_source}) allowed_tools must be a string literal"
                     )
-                if not scope.value.strip():
+                if not scope.value.strip() and (
+                    builder_source != "get_remediation_reply_recovery_prompt"
+                ):
                     pytest.fail(
                         f"{self.relative_path}:{node.lineno}: AgentJob in {function}() "
                         f"({builder_source}) allowed_tools must be non-empty"

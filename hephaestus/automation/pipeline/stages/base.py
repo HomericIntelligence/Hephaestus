@@ -69,7 +69,7 @@ from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..events import StageEvent
-from ..github_jobs import GitHubJob
+from ..github_jobs import GitHubJob, ImplementationReplyProgress
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
@@ -109,6 +109,7 @@ __all__ = [
     "WorkItem",
     "agent_provider",
     "athena_advise_failure_reason",
+    "planning_source_workspace_binding",
     "source_workspace_binding",
     "stage_model",
     "stage_timeout",
@@ -165,80 +166,6 @@ class ConditionalMergeResult:
     malformed: bool = False
     dry_run: bool = False
     queued: bool = False
-
-
-@dataclass(frozen=True)
-class ImplementationReplyProgress:
-    """Durable progress for one safe, partially completed reply batch."""
-
-    phase: Literal[
-        "create_review",
-        "post_replies",
-        "verify_reply",
-        "submit_review",
-        "verify_submission",
-    ]
-    pull_request_id: str
-    pending_review_id: str | None = None
-    replied_thread_ids: tuple[str, ...] = ()
-    receipts: tuple[dict[str, Any], ...] = ()
-    active_thread_id: str | None = None
-    active_comment_id: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        """Return a JSON-safe snapshot for a handoff journal."""
-        return {
-            "phase": self.phase,
-            "pull_request_id": self.pull_request_id,
-            "pending_review_id": self.pending_review_id,
-            "replied_thread_ids": list(self.replied_thread_ids),
-            "receipts": [dict(receipt) for receipt in self.receipts],
-            "active_thread_id": self.active_thread_id,
-            "active_comment_id": self.active_comment_id,
-        }
-
-    @classmethod
-    def from_dict(cls, value: object) -> ImplementationReplyProgress | None:
-        """Validate and restore progress persisted in a handoff."""
-        if not isinstance(value, dict):
-            return None
-        phase = value.get("phase")
-        phases = {
-            "create_review",
-            "post_replies",
-            "verify_reply",
-            "submit_review",
-            "verify_submission",
-        }
-        pull_request_id = value.get("pull_request_id")
-        ids = value.get("replied_thread_ids", [])
-        receipts = value.get("receipts", [])
-        pending_review_id = value.get("pending_review_id")
-        active_thread_id = value.get("active_thread_id")
-        active_comment_id = value.get("active_comment_id")
-        if (
-            not isinstance(phase, str)
-            or phase not in phases
-            or not isinstance(pull_request_id, str)
-            or not pull_request_id
-            or not isinstance(ids, list)
-            or not all(isinstance(item, str) and item for item in ids)
-            or not isinstance(receipts, list)
-            or not all(isinstance(item, dict) for item in receipts)
-            or (pending_review_id is not None and not isinstance(pending_review_id, str))
-            or (active_thread_id is not None and not isinstance(active_thread_id, str))
-            or (active_comment_id is not None and not isinstance(active_comment_id, str))
-        ):
-            return None
-        return cls(
-            phase=phase,  # type: ignore[arg-type]
-            pull_request_id=pull_request_id,
-            pending_review_id=pending_review_id,
-            replied_thread_ids=tuple(ids),
-            receipts=tuple(dict(item) for item in receipts),
-            active_thread_id=active_thread_id,
-            active_comment_id=active_comment_id,
-        )
 
 
 @dataclass(frozen=True)
@@ -419,6 +346,7 @@ class StageGitHub(Protocol):
         replies: dict[str, str],
         batch_nonce: str,
         progress: ImplementationReplyProgress | None = None,
+        recover_pending_review: bool = False,
     ) -> ImplementationThreadReplyResult:
         """Post host-validated implementation replies after a successful push.
 
@@ -785,14 +713,18 @@ def source_workspace_binding(
     item_number = item.issue or item.pr
     if item_number is None:
         raise RuntimeError("source workspace requires an issue or pull request number")
-    target = revision or str(
-        item.payload.get("_worktree_cleanup_head_sha")
-        or item.payload.get("_impl_source_revision")
-        or item.payload.get("reviewed_pr_head_sha")
-        or item.payload.get("pr_head_sha")
-        or item.payload.get("_synced_default_branch_sha")
-        or item.payload.get("_direct_scope_base_sha")
-        or ""
+    target = (
+        revision
+        if revision is not None
+        else str(
+            item.payload.get("_worktree_cleanup_head_sha")
+            or item.payload.get("_impl_source_revision")
+            or item.payload.get("reviewed_pr_head_sha")
+            or item.payload.get("pr_head_sha")
+            or item.payload.get("_synced_default_branch_sha")
+            or item.payload.get("_direct_scope_base_sha")
+            or ""
+        )
     )
     if len(target) != 40:
         raise RuntimeError("source workspace requires a captured full revision")
@@ -816,6 +748,32 @@ def source_workspace_binding(
     if lane is SourceLane.IMPLEMENTATION:
         item.payload["_impl_source_revision"] = binding.revision
     return cast(WorkspaceBinding, binding)
+
+
+def planning_source_workspace_binding(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    preparation_timeout_s: float | None = None,
+) -> WorkspaceBinding | None:
+    """Prepare the detached review lane for a planning source read.
+
+    Planning uses the captured default-branch revision. It does not use
+    implementation, cleanup, or pull-request revisions because those values
+    can refer to a preserved writer workspace or a stale source.
+    """
+    synced_revision = item.payload.get("_synced_default_branch_sha")
+    if synced_revision is None:
+        synced_revision = item.payload.get("_direct_scope_base_sha")
+    selected_revision = synced_revision if isinstance(synced_revision, str) else ""
+    return source_workspace_binding(
+        item,
+        ctx,
+        SourceLane.REVIEW,
+        revision=selected_revision,
+        branch=None,
+        preparation_timeout_s=preparation_timeout_s,
+    )
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

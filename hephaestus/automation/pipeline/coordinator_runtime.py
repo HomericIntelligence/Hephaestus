@@ -26,7 +26,11 @@ from hephaestus.automation.pipeline.routing import Disposition, Route
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
-from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
+from .diagnostics import (
+    bounded_source_workspace_recovery,
+    redact_bounded_diagnostic_tails,
+    redact_diagnostic_text,
+)
 from .job_failures import durable_error_class, is_durable_failure_kind
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
@@ -282,6 +286,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     "prs": self.config.prs,
                     "loops": self.config.loops,
                     "max_workers": self.config.max_workers,
+                    "package_version": self.config.package_version,
+                    "source_revision": self.config.source_revision,
                 },
             )
             self._loops_run = 1
@@ -313,10 +319,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             logger.exception("pipeline run failed")
             self._fatal = True
         finally:
-            # Reap the pool on EVERY exit path — a fatal exception never sets
-            # self.shutdown, so without this the executor and in-flight AgentJob
-            # subprocesses (e.g. claude reviewers) would leak (#2059). Idempotent
-            # via _pool_shut_down, so the signal path's earlier call is a no-op.
+            # Reap the pool on every exit. A fatal exception does not set shutdown,
+            # so the executor and agent subprocesses would leak (#2059). This call is
+            # idempotent, so an earlier signal-path call is a no-op.
             self._shutdown_pool()
             self._finalize_resumable()
             exit_code = self._exit_code()
@@ -784,6 +789,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
         if diagnostics:
             fields["diagnostics"] = diagnostics
+        if isinstance(value, dict) and value.get("failure_kind") == "source_workspace_ownership":
+            recovery = bounded_source_workspace_recovery(value.get("source_workspace_recovery"))
+            if recovery is not None:
+                fields["source_workspace_recovery"] = recovery
         if (
             isinstance(value, dict)
             and value.get("failure_kind") in {"signing", "continuation"}

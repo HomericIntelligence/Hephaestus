@@ -8,9 +8,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     add_agent_argument,
     agent_stage_execution_request,
+    normalize_provider_model_reference,
     resolve_agent,
     run_agent_session,
     run_claude_text,
@@ -319,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     validate_agent_flags(parser, args)
+    if args.agent is not None:
+        try:
+            args.model = normalize_provider_model_reference(args.agent, args.model)
+        except UnknownModelAliasError as exc:
+            parser.error(str(exc))
     validate_input_files(parser, args)
 
     install_sigtstp_only()

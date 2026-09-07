@@ -22,6 +22,9 @@ class _StageRunConfig:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    codex_isolation_adapter: str | None = None
+    codex_isolation_deployment_lock: Path | None = None
+    codex_isolation_deployment_lock_sha256: str | None = None
     model: str = ""
     planner_model: str = ""
     reviewer_model: str = ""

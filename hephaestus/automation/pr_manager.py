@@ -30,12 +30,11 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
-from hephaestus.utils.git import git_config_get
 
-from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT, HAIKU
+from . import commit_runtime as _commit_runtime
+from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT, HAIKU, implementer_model
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import implementer_model
 from .commit_policy import (
     ALLOWED_CONVENTIONAL_TYPES,
     normalize_conventional_type,
@@ -64,88 +63,19 @@ from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
 
-# Shared secret-file detection constants. These patterns identify files that
-# should never be staged or committed during automated workflows.
-# Exact basenames that are always considered secrets regardless of extension.
-SECRET_FILE_NAMES: frozenset[str] = frozenset(
-    {
-        ".env",
-        ".secret",
-        "credentials.json",
-        "id_rsa",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-    }
-)
-
-# File extensions whose presence indicates a cryptographic key or certificate.
-SECRET_FILE_EXTENSIONS: frozenset[str] = frozenset({".key", ".pem", ".pfx", ".p12"})
-
-# Valid ``git status --porcelain=v1`` status pairs for this command. ``!!``
-# is intentionally excluded because this call does not request ignored paths.
-_PORCELAIN_STATUS_PAIRS: frozenset[str] = frozenset(
-    {"D ", "DD", "AU", "UD", "UA", "DU", "AA", "UU", "??"}
-    | {f" {worktree_status}" for worktree_status in "AMDTRC"}
-    | {f"{index_status}{worktree_status}" for index_status in "MTARC" for worktree_status in " MTD"}
-)
+# Preserve public secret-file names for callers and policy tests.
+SECRET_FILE_NAMES = _commit_runtime.SECRET_FILE_NAMES
+SECRET_FILE_EXTENSIONS = _commit_runtime.SECRET_FILE_EXTENSIONS
 
 _RESERVED_MESSAGE_LINE = re.compile(
     r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
     re.IGNORECASE,
 )
-# Co-author display names per agent backend. The trailer EMAIL is shared by
-# every agentic client and is resolved from the operator's global git identity
-# at render time (#2806) — never pinned to one machine's address.
-_AGENT_COMMIT_NAMES = {
-    "claude": "Claude Code",
-    "codex": "Codex",
-    "pi": "Pi",
-    "opencode": "OpenCode-AI",
-}
-_FALLBACK_AGENT_COMMIT_EMAIL = "noreply@hephaestus.invalid"
 
 
 def _git_timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a git timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
-
-
-def _clear_local_committer_identity(worktree_path: Path, git_timeout: int | None) -> None:
-    """Drop any worktree/local ``user.email``/``user.name`` override before committing.
-
-    A sub-agent that ran ``git config user.email <fabricated>`` in the worktree
-    would otherwise poison the orchestrator's commit, since git resolves local
-    config ahead of the operator's global, GitHub-verifiable identity — producing
-    ``no_user`` commits that fail the signed-commit policy gate (issue #2110).
-    ``git config --unset --local`` returns exit 5 when the key is absent, the
-    expected no-op case, so ``check=False``; ``log_errors=False`` keeps that
-    common case from emitting spurious ERROR logs on every commit.
-    """
-    for key in ("user.email", "user.name"):
-        run(
-            ["git", "config", "--unset", "--local", key],
-            cwd=worktree_path,
-            check=False,
-            log_errors=False,
-            **_git_timeout_kw(git_timeout),
-        )
-
-
-@dataclass(frozen=True)
-class _CommitMessageParts:
-    """Agent-proposed commit message content before policy trailers."""
-
-    subject: str
-    body: str
-
-
-@dataclass(frozen=True)
-class _CommitPaths:
-    """Paths classified for ordinary and index-update staging."""
-
-    add_paths: tuple[str, ...]
-    update_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -161,41 +91,6 @@ class _PrMessageParts:
 def _agent_display_name(agent: str) -> str:
     """Return a short human-facing name for generated commits/PR bodies."""
     return agent_display_name(agent)
-
-
-def _agentic_commit_email() -> str:
-    """Return the co-author email shared by every agentic client.
-
-    The commit path strips worktree-local ``user.email`` overrides before
-    committing (#2110), so the commit's author resolves through the operator's
-    GLOBAL git config. The trailer queries that same surface — via
-    :func:`git_config_get` — instead of pinning any single machine's address,
-    so attribution follows whoever runs the automation (#2806).
-    """
-    return git_config_get("user.email", global_=True) or _FALLBACK_AGENT_COMMIT_EMAIL
-
-
-def _coauthor_for_agent(agent: str) -> tuple[str, str]:
-    """Return the co-author identity for fallback commits made by automation.
-
-    Returns a stable, human-shaped (name, email) pair suitable for the
-    ``Co-Authored-By:`` git trailer. Model identifiers are intentionally NOT
-    placed in the name slot — see ``_provenance_for_agent`` for that.
-    """
-    name = _AGENT_COMMIT_NAMES.get(agent, _AGENT_COMMIT_NAMES["claude"])
-    return name, _agentic_commit_email()
-
-
-def _provenance_for_agent(agent: str, model: str | None = None) -> str:
-    """Return the value for an ``Implemented-By:`` trailer.
-
-    For Claude agents this is the resolved model id (honoring
-    the explicitly selected implementation model); for direct agents it is the
-    provider display name.
-    """
-    if uses_direct_agent_runner(agent):
-        return agent_display_name(agent)
-    return model or implementer_model()
 
 
 def _issue_body(issue: Any) -> str:
@@ -248,28 +143,31 @@ def _parse_agent_json(text: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _git_output(worktree_path: Path, args: list[str], *, timeout: int | None = None) -> str:
+def _git_output(
+    worktree_path: Path,
+    args: list[str],
+    *,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
     """Return best-effort git output for message-agent context."""
     try:
+        run_kwargs: dict[str, Any] = {
+            "capture_output": True,
+            "check": False,
+            **_git_timeout_kw(timeout),
+        }
+        if env is not None:
+            run_kwargs["env"] = env
         result = run(
             ["git", *args],
             cwd=worktree_path,
-            capture_output=True,
-            check=False,
-            **_git_timeout_kw(timeout),
+            **run_kwargs,
         )
     except Exception as exc:
         logger.debug("Could not collect git message context for %s: %s", args, exc)
         return ""
     return (result.stdout or "").strip()
-
-
-def _staged_change_context(worktree_path: Path, *, timeout: int | None = None) -> tuple[str, str]:
-    """Return staged changed files and diff stat for commit-message generation."""
-    return (
-        _git_output(worktree_path, ["diff", "--cached", "--name-status"], timeout=timeout),
-        _git_output(worktree_path, ["diff", "--cached", "--stat"], timeout=timeout),
-    )
 
 
 def _branch_change_context(worktree_path: Path, base: str) -> tuple[str, str, str]:
@@ -282,28 +180,6 @@ def _branch_change_context(worktree_path: Path, base: str) -> tuple[str, str, st
         if changed_files or diff_stat or commits:
             return changed_files, diff_stat, commits
     return "", "", ""
-
-
-def _commit_message_prompt(
-    *,
-    issue_number: int,
-    issue_title: str,
-    issue_body: str,
-    changed_files: str,
-    diff_stat: str,
-) -> str:
-    """Build a read-only prompt for the commit-message agent."""
-    fenced = fence_content()
-    return PromptCatalog.current().render(
-        "pr_management/commit_message.j2",
-        allowed_types=", ".join(sorted(ALLOWED_CONVENTIONAL_TYPES)),
-        issue_number=issue_number,
-        issue_title_block=fenced.fence("ISSUE_TITLE", issue_title),
-        issue_body_block=fenced.fence("ISSUE_BODY", issue_body or "(empty)"),
-        changed_files_block=fenced.fence("CHANGED_FILES", changed_files or "(none reported)"),
-        diff_stat_block=fenced.fence("DIFF_STAT", diff_stat or "(none reported)"),
-        untrusted_notice=fenced.untrusted_notice,
-    )
 
 
 def _pr_message_prompt(
@@ -381,104 +257,26 @@ def _invoke_git_message_agent(
     return (stdout or "").strip()
 
 
-def _format_commit_message(
-    *,
+def _invoke_claude_commit_message(
     issue_number: int,
-    agent: str,
-    subject: str,
-    body: str,
-    model: str | None = None,
-) -> str:
-    """Render the final commit message with orchestrator-owned policy trailers."""
-    coauthor_name, coauthor_email = _coauthor_for_agent(agent)
-    provenance = _provenance_for_agent(agent, model)
-    clean_body = _strip_reserved_lines(body)
-    body_block = f"\n\n{clean_body}" if clean_body else ""
-    return f"""{subject}{body_block}
-
-Closes #{issue_number}
-
-Implemented-By: {provenance}
-Co-Authored-By: {coauthor_name} <{coauthor_email}>
-"""
-
-
-def _fallback_commit_message(issue_number: int, issue_title: str, agent: str) -> str:
-    """Return the deterministic commit message used when agent output is invalid."""
-    return _format_commit_message(
-        issue_number=issue_number,
-        agent=agent,
-        subject=f"feat: Implement #{issue_number}",
-        body=issue_title,
-    )
-
-
-def _generate_commit_message(
-    *,
-    issue_number: int,
-    issue_title: str,
-    issue_body: str,
+    prompt: str,
     worktree_path: Path,
     agent: str,
-    git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
-    git_timeout: int | None = None,
-    agent_model: str | None = None,
-    pi_dir: Path | None = None,
+    timeout: int,
+    model: str,
+    pi_dir: Path | None,
 ) -> str:
-    """Generate a commit message via a lightweight agent with deterministic fallback."""
-    changed_files, diff_stat = _staged_change_context(worktree_path, timeout=git_timeout)
-    prompt = _commit_message_prompt(
+    """Adapt a product Claude session to the neutral commit contract."""
+    return _invoke_git_message_agent(
         issue_number=issue_number,
-        issue_title=issue_title,
-        issue_body=issue_body,
-        changed_files=changed_files,
-        diff_stat=diff_stat,
+        agent_kind=AGENT_COMMIT_MESSAGE,
+        prompt=prompt,
+        worktree_path=worktree_path,
+        agent=agent,
+        timeout=timeout,
+        model_override=model,
+        pi_dir=pi_dir,
     )
-    try:
-        raw = _invoke_git_message_agent(
-            issue_number=issue_number,
-            agent_kind=AGENT_COMMIT_MESSAGE,
-            prompt=prompt,
-            worktree_path=worktree_path,
-            agent=agent,
-            timeout=git_message_timeout,
-            model_override=agent_model,
-            pi_dir=pi_dir,
-        )
-        data = _parse_agent_json(raw)
-        if data is None:
-            raise ValueError("message agent returned no JSON object")
-        subject = _single_line(
-            data.get("subject"),
-            fallback=f"feat: Implement #{issue_number}",
-            max_len=120,
-        )
-        # #1587: the agent can emit a type the pr-policy gate forbids
-        # (e.g. ``security(audit):``). Normalize it locally so the automation
-        # never produces a commit that fails its own required CI.
-        subject = normalize_conventional_type(subject)
-        body = _strip_reserved_lines(_message_text(data.get("body")))
-        parts = _CommitMessageParts(subject=subject, body=body)
-        return _format_commit_message(
-            issue_number=issue_number,
-            agent=agent,
-            subject=parts.subject,
-            body=parts.body,
-            model=agent_model,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Commit-message agent failed for %s; using fallback message (%s)",
-            issue_ref(issue_number),
-            exc,
-        )
-        return _format_commit_message(
-            issue_number=issue_number,
-            agent=agent,
-            subject=f"feat: Implement #{issue_number}",
-            body=issue_title,
-            model=agent_model,
-        )
 
 
 def _fallback_pr_message(issue_number: int, issue_title: str, agent: str) -> _PrMessageParts:
@@ -763,127 +561,6 @@ def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
     )
 
 
-def _read_porcelain_status(worktree_path: Path, git_timeout: int | None) -> str:
-    """Return stable, NUL-delimited porcelain-v1 worktree status."""
-    try:
-        result = run(
-            ["git", "status", "--porcelain=v1", "-z"],
-            cwd=worktree_path,
-            capture_output=True,
-            **_git_timeout_kw(git_timeout),
-        )
-    except UnicodeDecodeError as exc:
-        raise RuntimeError("Could not decode git status --porcelain=v1 -z output") from exc
-    return result.stdout or ""
-
-
-def _parse_porcelain_status(output: str) -> tuple[tuple[str, str], ...]:
-    """Return ``(status, target_path)`` entries from porcelain-v1 ``-z`` output."""
-    if not output:
-        return ()
-    if not output.endswith("\0"):
-        raise RuntimeError("Malformed git status --porcelain=v1 -z output")
-
-    records = output[:-1].split("\0")
-    if any(not record for record in records):
-        raise RuntimeError("Malformed git status --porcelain=v1 -z output")
-
-    entries: list[tuple[str, str]] = []
-    index = 0
-
-    while index < len(records):
-        record = records[index]
-        if len(record) < 4 or record[2] != " " or not record[3:]:
-            raise RuntimeError("Malformed git status --porcelain=v1 -z output")
-
-        status = record[:2]
-        if status not in _PORCELAIN_STATUS_PAIRS:
-            raise RuntimeError("Malformed git status --porcelain=v1 -z output")
-        entries.append((status, record[3:]))
-        index += 1
-
-        if "R" in status or "C" in status:
-            if index >= len(records):
-                raise RuntimeError("Malformed renamed path in git porcelain output")
-            index += 1
-
-    return tuple(entries)
-
-
-def _is_secret_path(path: str) -> bool:
-    """Return whether a repository-relative path matches secret-file policy."""
-    filename = Path(path).name
-    return filename in SECRET_FILE_NAMES or any(
-        filename.endswith(extension) for extension in SECRET_FILE_EXTENSIONS
-    )
-
-
-def _select_commit_paths(
-    entries: Collection[tuple[str, str]],
-    allowed_paths: Collection[str] | None,
-) -> _CommitPaths:
-    """Apply exact allowlist and secret policy to parsed status entries."""
-    allowed = set(allowed_paths) if allowed_paths is not None else None
-    add_paths: list[str] = []
-    update_paths: list[str] = []
-
-    for status, path in entries:
-        if allowed is not None and path not in allowed:
-            logger.debug("Skipping non-allowlisted file: %r", path)
-            continue
-        if _is_secret_path(path):
-            logger.warning("Skipping potential secret file: %r", path)
-            continue
-        if "D" in status:
-            update_paths.append(path)
-        else:
-            add_paths.append(path)
-
-    return _CommitPaths(tuple(add_paths), tuple(update_paths))
-
-
-def _stage_commit_paths(
-    paths: _CommitPaths,
-    worktree_path: Path,
-    git_timeout: int | None,
-) -> None:
-    """Stage selected paths without broad or implicit pathspecs."""
-    if paths.update_paths:
-        run(
-            ["git", "add", "-u", "--", *paths.update_paths],
-            cwd=worktree_path,
-            **_git_timeout_kw(git_timeout),
-        )
-    if paths.add_paths:
-        run(
-            ["git", "add", "--", *paths.add_paths],
-            cwd=worktree_path,
-            **_git_timeout_kw(git_timeout),
-        )
-
-
-def _commit_with_signature(
-    commit_message: str,
-    worktree_path: Path,
-    git_timeout: int | None,
-    signing_env: dict[str, str] | None = None,
-) -> None:
-    """Create the repository-policy signed and DCO-signed commit."""
-    if signing_env is not None:
-        run(
-            ["git", "commit", "-S", "-s", "-m", commit_message],
-            cwd=worktree_path,
-            env=signing_env,
-            **_git_timeout_kw(git_timeout),
-        )
-        return
-    run(
-        ["git", "commit", "-S", "-s", "-m", commit_message],
-        cwd=worktree_path,
-        **_git_timeout_kw(git_timeout),
-    )
-
-
 def commit_changes(
     issue_number: int,
     worktree_path: Path,
@@ -893,9 +570,15 @@ def commit_changes(
     git_timeout: int | None = None,
     agent_model: str | None = None,
     *,
+    expected_tree_sha: str | None = None,
+    return_commit_sha: bool = False,
     signing_env: dict[str, str] | None = None,
+    git_env: dict[str, str] | None = None,
+    expected_add_paths: tuple[str, ...] | None = None,
+    expected_update_paths: tuple[str, ...] | None = None,
+    disable_hooks: bool = False,
     pi_dir: Path | None = None,
-) -> None:
+) -> str | None:
     """Commit changes in worktree, filtering out secret files.
 
     Args:
@@ -913,46 +596,43 @@ def commit_changes(
             command line for the message-generation session. When omitted,
             the deterministic lightweight-message default is used.
         signing_env: Optional validated Git environment for commit signing.
+        git_env: Optional isolated Git environment for status and staging.
+        expected_add_paths: Bounded inspected paths to add without re-enumeration.
+        expected_update_paths: Bounded inspected paths to update without re-enumeration.
+        disable_hooks: Disable hooks for a host-validated recovery commit.
+        expected_tree_sha: Optional immutable tree that staging must produce.
+        return_commit_sha: Return the exact new commit SHA after the commit.
 
     Raises:
         RuntimeError: If there are no changes, or all changes are secret files.
 
+    Returns:
+        The exact commit SHA when ``return_commit_sha`` is true. Otherwise,
+        return ``None`` after the commit is created.
+
     """
-    porcelain = _read_porcelain_status(worktree_path, git_timeout)
-    if not porcelain:
-        raise RuntimeError(
-            f"No changes to commit for issue {issue_ref(issue_number)}. "
-            "Check if the implementation was successful or if the plan needs revision."
-        )
-
-    paths = _select_commit_paths(_parse_porcelain_status(porcelain), allowed_paths)
-    if not paths.add_paths and not paths.update_paths:
-        raise RuntimeError(
-            f"No non-secret files to commit for issue {issue_ref(issue_number)}. "
-            "All changes appear to be secret files."
-        )
-
-    _stage_commit_paths(paths, worktree_path, git_timeout)
-
-    # Generate commit message
     issue = fetch_issue_info(issue_number)
-    commit_message = _generate_commit_message(
-        issue_number=issue_number,
-        issue_title=issue.title,
-        issue_body=_issue_body(issue),
-        worktree_path=worktree_path,
-        agent=agent,
-        agent_model=agent_model,
-        pi_dir=pi_dir,
-        git_message_timeout=git_message_timeout,
-        git_timeout=git_timeout,
+    resolved_agent_model = (
+        implementer_model() if agent == "claude" and agent_model is None else agent_model
     )
-
-    # Defense-in-depth: strip any fabricated worktree-local identity a sub-agent
-    # may have set, so the commit inherits the operator's verifiable identity (#2110).
-    _clear_local_committer_identity(worktree_path, git_timeout)
-
-    _commit_with_signature(commit_message, worktree_path, git_timeout, signing_env)
+    return _commit_runtime.commit_changes(
+        _commit_runtime.CommitIssueMetadata(issue_number, issue.title, _issue_body(issue)),
+        worktree_path,
+        agent,
+        git_message_timeout,
+        allowed_paths,
+        git_timeout,
+        resolved_agent_model,
+        expected_tree_sha=expected_tree_sha,
+        return_commit_sha=return_commit_sha,
+        signing_env=signing_env,
+        git_env=git_env,
+        expected_add_paths=expected_add_paths,
+        expected_update_paths=expected_update_paths,
+        disable_hooks=disable_hooks,
+        pi_dir=pi_dir,
+        claude_message_agent=_invoke_claude_commit_message,
+    )
 
 
 def ensure_pr_created(

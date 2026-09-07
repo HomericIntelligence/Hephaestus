@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Final
@@ -117,6 +118,18 @@ class RecoveryProvenance:
     successor_plan_digest: str | None = None
 
 
+class RecoveryCommentIdentityError(RuntimeError):
+    """Identify a bounded recovery-comment journal that is not safe to use."""
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCommentSelection[T]:
+    """Hold one validated comment and its parsed provenance."""
+
+    comment: T
+    provenance: RecoveryProvenance
+
+
 @dataclass(frozen=True, slots=True)
 class FinalizedPlanIdentity:
     """Sealed identities from one self-verifying shared finalized-plan body."""
@@ -163,6 +176,29 @@ def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
         # comment, script, or container block.
         if _FINALIZED_PLAN_CANDIDATE_RE.match(line):
             candidates.append((line_offsets[start_line], line))
+    return candidates
+
+
+def _recovery_provenance_candidate_lines(body: str) -> list[str]:
+    """Return top-level lines that contain a recovery marker-family claim."""
+    raw_lines: list[str] = []
+    line_start = 0
+    for line_end in _COMMONMARK_LINE_END_RE.finditer(body):
+        raw_lines.append(body[line_start : line_end.end()])
+        line_start = line_end.end()
+    if line_start < len(body):
+        raw_lines.append(body[line_start:])
+
+    candidates: list[str] = []
+    for token in MarkdownIt("commonmark").parse(body):
+        if token.type != "html_block" or token.level != 0 or token.map is None:
+            continue
+        start_line, _end_line = token.map
+        if start_line >= len(raw_lines):
+            continue
+        line = raw_lines[start_line].rstrip("\r\n")
+        if line.lstrip(" ").startswith(RECOVERY_PROVENANCE_PREFIX):
+            candidates.append(line)
     return candidates
 
 
@@ -379,9 +415,10 @@ def render_recovered_requirements(
 
 def parse_recovery_provenance(body: str) -> RecoveryProvenance | None:
     """Return valid provenance only when the marker and rendered body agree."""
-    stripped = body.lstrip()
-    first_line, separator, remainder = stripped.partition("\n")
-    match = _PROVENANCE_RE.fullmatch(first_line.strip())
+    first_line, separator, remainder = body.partition("\n")
+    if first_line.endswith("\r"):
+        first_line = first_line[:-1]
+    match = _PROVENANCE_RE.fullmatch(first_line)
     if match is None or not separator:
         return None
     version = int(match.group("version"))
@@ -412,12 +449,63 @@ def parse_recovery_provenance(body: str) -> RecoveryProvenance | None:
     )
 
 
+def select_recovery_comment[T](
+    comments: Sequence[T],
+    *,
+    body_of: Callable[[T], str],
+    owned_of: Callable[[T], bool],
+) -> RecoveryCommentSelection[T] | None:
+    """Select one correct actor-owned recovery comment from a full journal.
+
+    Each top-level recovery marker claim is part of the identity protocol.
+    The selector rejects a marker with leading whitespace, a foreign claim, a
+    malformed provenance value, repeated claims in one comment, or duplicate
+    actor-owned comments. A journal with no claim returns ``None``.
+
+    Args:
+        comments: Full bounded issue-comment journal in chronological order.
+        body_of: Return the exact body for one journal entry.
+        owned_of: Return True when GitHub proves actor ownership for one entry.
+
+    Returns:
+        The one validated comment and its parsed provenance, or ``None``.
+
+    Raises:
+        RecoveryCommentIdentityError: If it is not safe to use a recovery claim.
+
+    """
+    selections: list[RecoveryCommentSelection[T]] = []
+    for comment in comments:
+        body = body_of(comment)
+        claims = _recovery_provenance_candidate_lines(body)
+        if not claims:
+            continue
+        if not body.startswith(RECOVERY_PROVENANCE_PREFIX):
+            raise RecoveryCommentIdentityError("recovery marker must start at byte zero")
+        if not owned_of(comment):
+            raise RecoveryCommentIdentityError(
+                "The recovered requirements marker is foreign, or GitHub cannot verify it"
+            )
+        if len(claims) > 1:
+            raise RecoveryCommentIdentityError(
+                "repeated recovered requirements marker in one comment"
+            )
+        provenance = parse_recovery_provenance(body)
+        if provenance is None:
+            raise RecoveryCommentIdentityError("malformed recovered requirements marker")
+        selections.append(RecoveryCommentSelection(comment, provenance))
+
+    if len(selections) > 1:
+        raise RecoveryCommentIdentityError("duplicate recovered requirements comments")
+    return selections[0] if selections else None
+
+
 def recovered_requirements_for_source(body: str, source_digest: str) -> str | None:
     """Return a verified recovered-comment payload bound to *source_digest*."""
     provenance = parse_recovery_provenance(body)
     if provenance is None or provenance.source_digest != source_digest:
         return None
-    _marker, _separator, requirements = body.lstrip().partition("\n")
+    _marker, _separator, requirements = body.partition("\n")
     return requirements.lstrip("\n") or None
 
 
@@ -448,7 +536,7 @@ def recovered_requirements_for_context(
         )
     ):
         return None
-    _marker, _separator, requirements = body.lstrip().partition("\n")
+    _marker, _separator, requirements = body.partition("\n")
     return requirements.lstrip("\n") or None
 
 

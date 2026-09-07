@@ -198,6 +198,87 @@ def test_run_agent_dispatches_codex_and_logs_session(
     )
 
 
+def test_main_normalizes_codex_alias_before_agent_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A documented Codex alias reaches the provider as an exact model ID."""
+    seen: dict[str, object] = {}
+
+    def fake_run_agent_session(*args: object, **kwargs: object) -> AgentRunResult:
+        seen.update(kwargs)
+        return AgentRunResult(stdout="codex output", stderr="", session_id=None)
+
+    monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "codex")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("stage prompt", encoding="utf-8")
+
+    assert (
+        agent_stage.main(
+            [
+                "--prompt-file",
+                str(prompt_file),
+                "--repo-root",
+                str(tmp_path),
+                "--stage",
+                "review",
+                "--output",
+                str(tmp_path / "out.txt"),
+                "--agent",
+                "codex",
+                "--model",
+                "terra:high",
+            ]
+        )
+        == 0
+    )
+
+    assert seen["model"] == "gpt-5.6-terra:high"
+
+
+@pytest.mark.parametrize(
+    ("agent", "model"),
+    [("codex", "terra-lite:high"), ("claude", "terra-lite:high")],
+)
+def test_main_rejects_unknown_fixed_provider_alias_before_agent_or_prompt_work(
+    tmp_path: Path,
+    agent: str,
+    model: str,
+) -> None:
+    """An unknown fixed-provider alias fails before authentication or prompt work."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("stage prompt", encoding="utf-8")
+
+    with (
+        patch.object(agent_stage, "resolve_agent") as resolve_agent,
+        patch.object(agent_stage, "read_prompt") as read_prompt,
+        patch.object(agent_stage, "run_agent_session") as run_agent_session,
+        pytest.raises(SystemExit) as error,
+    ):
+        agent_stage.main(
+            [
+                "--prompt-file",
+                str(prompt_file),
+                "--repo-root",
+                str(tmp_path),
+                "--stage",
+                "review",
+                "--output",
+                str(tmp_path / "out.txt"),
+                "--agent",
+                agent,
+                "--model",
+                model,
+            ]
+        )
+
+    assert error.value.code == 2
+    resolve_agent.assert_not_called()
+    read_prompt.assert_not_called()
+    run_agent_session.assert_not_called()
+
+
 def test_run_agent_dispatches_athena_skill_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

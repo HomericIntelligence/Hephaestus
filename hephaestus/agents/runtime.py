@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import errno
+import fcntl
+import hashlib
 import inspect
 import json
 import logging
 import os
-import platform
-import re
+import secrets
 import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -26,6 +29,17 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
+from hephaestus.agents.codex_isolation import (
+    CodexIsolationAdapterV1,
+    CodexIsolationError,
+    CodexIsolationPreparedV1,
+    CodexIsolationRequestV1,
+    CodexIsolationResultV1,
+    _CodexPrepareCleanupError,
+    validate_adapter,
+    validate_prepared,
+    validate_result,
+)
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -35,7 +49,6 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
-from hephaestus.agents.macos_sandbox import MacOSSandboxError, isolated_command
 from hephaestus.agents.model_selection import (
     CODEX_ROLE_MODEL_ALIASES,
     GPT_6_ASTRA,
@@ -44,6 +57,7 @@ from hephaestus.agents.model_selection import (
     AgentModelSelection,
     parse_model_selection,
     resolve_codex_model_selection,
+    validate_claude_model_reference,
     validate_codex_role_model_reference,
 )
 from hephaestus.agents.pi_plugins import (
@@ -60,9 +74,7 @@ from hephaestus.agents.pi_session import (
 )
 from hephaestus.config.child_environments import (
     build_claude_child_env,
-    build_codex_automation_env,
     build_codex_child_env,
-    build_git_child_env,
     build_pi_child_env,
     read_approved_parent_env,
 )
@@ -99,13 +111,15 @@ CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
-CODEX_AUTH_FILENAME = "auth.json"
-CODEX_ATHENA_VERSION = "0.5.0"
-CODEX_ATHENA_REVISION = "44a22b8dfab986f505a99ce52e8521f645da3e2b"
-CODEX_ATHENA_ARTIFACT_SHA256 = "2c301a67da91b1a5d87116441fc592fc39b9fb86d856fd13e1ef7697348dcac9"
+CODEX_ATHENA_MARKETPLACE_SOURCE = "https://github.com/HomericIntelligence/Athena.git"
+CODEX_ATHENA_MARKETPLACE_REF = "5df1b2f9fd8037fe0655edb36a37e0189eaab8c9"
+CODEX_ATHENA_VERSION = "0.5.1"
+CODEX_ATHENA_ARTIFACT_SHA256 = "7fbfb710a8da2c36e276276c1ff2d33ee40fe8f2365348c06c40696a9dfe0af1"
 CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena" / "athena"
-CODEX_AUTOMATION_PERMISSION_PROFILE = "hephaestus-automation"
-CODEX_MIN_AUTOMATION_VERSION = (0, 138, 0)
+CODEX_AUTH_MAX_BYTES = 1024 * 1024
+CODEX_ATHENA_MAX_BYTES = 32 * 1024 * 1024
+CODEX_PRESERVED_STATE_MAX_FILES = 100_000
+CODEX_PRESERVED_STATE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
@@ -230,246 +244,6 @@ def _codex_child_env() -> dict[str, str]:
     return build_codex_child_env()
 
 
-def requires_plan_scope_guard(agent: str) -> bool:
-    """Return whether host publication must enforce canonical plan paths."""
-    return is_codex(agent)
-
-
-def requires_fresh_agent_session(agent: str) -> bool:
-    """Return whether an agent must start a new isolated session."""
-    return is_codex(agent)
-
-
-def _verify_codex_automation_capability(executable: Path, *, cwd: Path) -> None:
-    """Prove the selected Codex CLI supports the isolated automation contract."""
-    try:
-        version_result = subprocess.run(
-            [str(executable), "--version"],
-            check=False,
-            cwd=cwd,
-            env=build_codex_child_env(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=CODEX_HELP_PROBE_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise AgentExecutionError("Codex automation capability probe failed") from exc
-    version_output = version_result.stdout or ""
-    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version_output)
-    if (
-        version_result.returncode != 0
-        or match is None
-        or tuple(int(part) for part in match.groups()) < CODEX_MIN_AUTOMATION_VERSION
-    ):
-        raise AgentExecutionError("Codex automation capability is unsupported")
-    try:
-        help_result = subprocess.run(
-            [str(executable), "exec", "--help"],
-            check=False,
-            cwd=cwd,
-            env=build_codex_child_env(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=CODEX_HELP_PROBE_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise AgentExecutionError("Codex automation capability probe failed") from exc
-    required_flags = ("--config", "--ephemeral", "--output-last-message")
-    help_text = help_result.stdout or ""
-    if help_result.returncode != 0 or any(flag not in help_text for flag in required_flags):
-        raise AgentExecutionError("Codex automation capability is unsupported")
-
-
-def _codex_outer_isolated_command(
-    command: list[str], *, cwd: Path, profile_root: Path
-) -> list[str]:
-    """Wrap one Codex command in the host read/write boundary.
-
-    Codex implementation is intentionally unavailable where Seatbelt cannot
-    prove the boundary.  The provider keeps network access for its own
-    transport; command-level network access is denied by its named profile.
-    """
-    if not command:
-        raise AgentExecutionError("Codex automation command is empty")
-    if platform.system() != "Darwin":
-        raise AgentExecutionError("Codex automation host isolation is unavailable")
-    executable = shutil.which(command[0])
-    if not executable:
-        raise AgentExecutionError("Codex automation executable is unavailable")
-    try:
-        wrapped = isolated_command(
-            command=(executable, *command[1:]),
-            read_roots=(cwd.resolve(strict=True), profile_root.resolve(strict=True)),
-            write_roots=(cwd.resolve(strict=True), profile_root.resolve(strict=True)),
-            allow_network=True,
-        )
-    except (MacOSSandboxError, OSError) as exc:
-        raise AgentExecutionError("Codex automation host isolation is unavailable") from exc
-    _verify_codex_automation_capability(Path(executable), cwd=cwd)
-    return list(wrapped)
-
-
-def _require_owner_regular_file(path: Path, *, label: str, mode: int | None = None) -> None:
-    """Reject a credential bridge that is not one owner-only regular file."""
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise AgentExecutionError(f"Codex automation requires {label}") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise AgentExecutionError(f"Codex automation requires a regular {label}")
-    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-        raise AgentExecutionError(f"Codex automation requires an owner-controlled {label}")
-    if mode is not None and stat.S_IMODE(metadata.st_mode) != mode:
-        raise AgentExecutionError(f"Codex automation requires {label} mode {mode:04o}")
-
-
-def _validate_athena_plugin_metadata(root: Path) -> None:
-    """Reject cache artifacts that advertise an additional command surface."""
-    try:
-        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-        plugin = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AgentExecutionError("Codex automation requires Athena plugin metadata") from exc
-    if not isinstance(package, dict) or not isinstance(plugin, dict):
-        raise AgentExecutionError("Codex automation Athena metadata is invalid")
-    if (
-        package.get("name") != "@homericintelligence/athena"
-        or package.get("version") != CODEX_ATHENA_VERSION
-    ):
-        raise AgentExecutionError("Codex automation Athena package is not admitted")
-    if plugin.get("name") != "athena" or plugin.get("version") != CODEX_ATHENA_VERSION:
-        raise AgentExecutionError("Codex automation Athena plugin is not admitted")
-
-    def keys(value: object) -> Iterator[str]:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if isinstance(key, str):
-                    yield key.casefold()
-                yield from keys(child)
-        elif isinstance(value, list):
-            for child in value:
-                yield from keys(child)
-
-    forbidden = {
-        "application",
-        "applications",
-        "command",
-        "commands",
-        "connector",
-        "connectors",
-        "env",
-        "environment",
-        "mcp",
-        "mcp_servers",
-    }
-    if forbidden & set(keys(plugin)):
-        raise AgentExecutionError("Codex automation Athena plugin adds an unadmitted surface")
-
-
-def _validated_athena_artifact(source_home: Path) -> Path:
-    """Return the exact Athena cache artifact admitted to Codex automation."""
-    artifact = source_home / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
-    if not artifact.is_dir() or artifact.is_symlink():
-        raise AgentExecutionError("Codex automation requires the admitted Athena artifact")
-    try:
-        revision = subprocess.run(
-            ["git", "-C", str(artifact), "rev-parse", "HEAD"],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=GIT_COMMON_DIR_PROBE_SECONDS,
-            env=build_git_child_env(),
-        ).stdout.strip()
-        digest = package_tree_digest(artifact)
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        raise AgentExecutionError("Codex automation Athena artifact cannot be verified") from exc
-    if revision != CODEX_ATHENA_REVISION or digest != CODEX_ATHENA_ARTIFACT_SHA256:
-        raise AgentExecutionError("Codex automation Athena artifact is not admitted")
-    _validate_athena_plugin_metadata(artifact)
-    return artifact
-
-
-def _materialize_codex_automation_profile(profile_root: Path) -> None:
-    """Copy only the authenticated, digest-pinned Athena Codex closure."""
-    source_home = Path(_codex_child_env()["CODEX_HOME"])
-    auth_source = source_home / CODEX_AUTH_FILENAME
-    _require_owner_regular_file(auth_source, label="auth.json bridge", mode=0o600)
-    artifact_source = _validated_athena_artifact(source_home)
-    codex_home = profile_root / "codex"
-    auth_destination = codex_home / CODEX_AUTH_FILENAME
-    shutil.copy2(auth_source, auth_destination)
-    auth_destination.chmod(0o600)
-    artifact_destination = codex_home / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
-    shutil.copytree(
-        artifact_source,
-        artifact_destination,
-        ignore=shutil.ignore_patterns(".git"),
-    )
-    try:
-        copied_digest = package_tree_digest(artifact_destination)
-    except ValueError as exc:
-        raise AgentExecutionError("Codex automation Athena copy is invalid") from exc
-    if copied_digest != CODEX_ATHENA_ARTIFACT_SHA256:
-        raise AgentExecutionError("Codex automation Athena copy changed")
-    _validate_athena_plugin_metadata(artifact_destination)
-    write_secure(
-        codex_home / "config.toml",
-        "\n".join(
-            (
-                f'default_permissions = "{CODEX_AUTOMATION_PERMISSION_PROFILE}"',
-                "",
-                f"[permissions.{CODEX_AUTOMATION_PERMISSION_PROFILE}]",
-                'extends = ":workspace"',
-                "",
-                f"[permissions.{CODEX_AUTOMATION_PERMISSION_PROFILE}.filesystem]",
-                f'{json.dumps(str(artifact_destination))} = "read"',
-                f'{json.dumps(str(auth_destination))} = "deny"',
-                "",
-                f"[permissions.{CODEX_AUTOMATION_PERMISSION_PROFILE}.network]",
-                "enabled = false",
-                "",
-                "[marketplaces.athena]",
-                'source_type = "local"',
-                f"source = {json.dumps(str(artifact_destination))}",
-                "",
-                '[plugins."athena@athena"]',
-                "enabled = true",
-                "",
-            )
-        ),
-    )
-
-
-@contextlib.contextmanager
-def _codex_automation_execution_files() -> Iterator[tuple[dict[str, str], Path]]:
-    """Create one disposable state root and output file for an automation turn.
-
-    The caller owns the context lifetime.  All mutable Codex state, including
-    the final-message file, is below the private root and is removed after the
-    provider exits.  The isolated root has no link to an operator's shared
-    Codex history or configuration.
-    """
-    with tempfile.TemporaryDirectory(prefix="hephaestus-codex-") as raw_root:
-        profile_root = Path(raw_root)
-        env = build_codex_automation_env(profile_root=profile_root)
-        for name in (
-            "HOME",
-            "CODEX_HOME",
-            "TMPDIR",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "XDG_DATA_HOME",
-        ):
-            Path(env[name]).mkdir(mode=0o700, parents=True, exist_ok=False)
-        _materialize_codex_automation_profile(profile_root)
-        yield env, profile_root / "last-message.txt"
-
-
 @dataclass(frozen=True)
 class AgentRunResult:
     """Text output plus optional provider session id."""
@@ -550,10 +324,6 @@ def agent_compaction_resume(
     execution_request: ExecutionRequest | None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Prepare a neutral resume id and provider-only compaction arguments."""
-    # A Codex automation turn always uses a fresh, disposable profile.  A
-    # resumed session would be outside that profile's verified authority.
-    if is_codex(agent):
-        return None
     if is_pi(agent):
         if session_binding is None:
             return None
@@ -809,6 +579,53 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Explicit Pi coding-agent configuration directory",
     )
+    parser.add_argument(
+        "--codex-isolation-adapter",
+        type=_codex_adapter_name,
+        default=None,
+        metavar="NAME",
+        help="Exact external Codex implementation-isolation entry point",
+    )
+    parser.add_argument(
+        "--codex-isolation-deployment-lock",
+        type=_absolute_cli_path,
+        default=None,
+        metavar="PATH",
+        help="Absolute detached Codex adapter deployment-lock path",
+    )
+    parser.add_argument(
+        "--codex-isolation-deployment-lock-sha256",
+        type=_lowercase_sha256,
+        default=None,
+        metavar="SHA256",
+        help="Expected SHA-256 digest for the detached deployment lock",
+    )
+
+
+def _codex_adapter_name(value: str) -> str:
+    """Parse one public entry-point name without command syntax."""
+    if (
+        not value
+        or any(character.isspace() for character in value)
+        or any(token in value for token in ("/", "\\", ":", ";"))
+    ):
+        raise argparse.ArgumentTypeError("Codex isolation adapter name is invalid")
+    return value
+
+
+def _absolute_cli_path(value: str) -> Path:
+    """Parse one lexical absolute path without file-system access."""
+    path = Path(value)
+    if not path.is_absolute() or "\x00" in value:
+        raise argparse.ArgumentTypeError("Codex deployment-lock path must be absolute")
+    return path
+
+
+def _lowercase_sha256(value: str) -> str:
+    """Parse one lowercase SHA-256 value."""
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise argparse.ArgumentTypeError("Codex deployment-lock digest must be lowercase SHA-256")
+    return value
 
 
 def _positive_timeout(value: str) -> int:
@@ -1048,6 +865,25 @@ def _validate_codex_model_references(model_references: Sequence[str] | None) -> 
         validate_codex_role_model_reference(reference)
 
 
+def _validate_claude_model_references(model_references: Sequence[str] | None) -> None:
+    """Validate Claude references before provider authentication."""
+    if model_references is None:
+        return
+    for reference in model_references:
+        validate_claude_model_reference(reference)
+
+
+def _validate_fixed_provider_model_references(
+    agent: str,
+    model_references: Sequence[str] | None,
+) -> None:
+    """Validate references when the selected provider is known."""
+    if agent == "claude":
+        _validate_claude_model_references(model_references)
+    elif agent == "codex":
+        _validate_codex_model_references(model_references)
+
+
 def validate_durable_model_selection(
     provider: str,
     model: str,
@@ -1084,8 +920,7 @@ def resolve_agent(
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
-        if agent == "codex":
-            _validate_codex_model_references(model_references)
+        _validate_fixed_provider_model_references(agent, model_references)
         if agent == "pi":
             _validate_pi_model_references_before_admission(
                 model_references,
@@ -1141,8 +976,7 @@ def resolve_agent(
 
     for agent_name in installed_agents:
         if is_agent_authenticated(agent_name, auth_status_timeout=auth_status_timeout):
-            if agent_name == "codex":
-                _validate_codex_model_references(model_references)
+            _validate_fixed_provider_model_references(agent_name, model_references)
             return agent_name
 
     raise RuntimeError(
@@ -1156,6 +990,11 @@ def resolve_agent(
 def is_codex(agent: str) -> bool:
     """Return True when the selected provider is Codex."""
     return agent == "codex"
+
+
+def requires_codex_implementation_isolation(agent: str) -> bool:
+    """Return true when implementation must use the Codex isolation contract."""
+    return is_codex(agent)
 
 
 def is_pi(agent: str) -> bool:
@@ -1213,6 +1052,8 @@ def normalize_provider_model_reference(agent: str, reference: str) -> str:
     if is_codex(agent):
         validate_codex_role_model_reference(reference)
         return resolve_codex_model_selection(reference).reference
+    if agent == "claude":
+        validate_claude_model_reference(reference)
     return reference
 
 
@@ -2221,6 +2062,8 @@ def _parse_codex_json_events(text: str) -> tuple[str | None, str]:
             payload = event.get("payload")
             if isinstance(payload, dict) and isinstance(payload.get("id"), str):
                 session_id = payload["id"]
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+            session_id = event["thread_id"]
         if event.get("type") == "agent_message" and isinstance(event.get("message"), str):
             messages.append(event["message"])
         payload = event.get("payload")
@@ -2297,15 +2140,9 @@ def run_codex_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
-    isolate_automation_profile: bool = False,
     _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
-    """Run a new Codex exec session and capture its UUID.
-
-    ``isolate_automation_profile`` is an internal automation boundary.  It
-    gives the provider a new disposable state root for this turn.  The caller
-    must still apply the host process boundary before it enables this option.
-    """
+    """Run a new persisted Codex exec session and capture its UUID."""
     return _run_codex_session_with_effort_fallback(
         prompt=prompt,
         cwd=cwd,
@@ -2314,9 +2151,2499 @@ def run_codex_session(
         sandbox=sandbox,
         approval=approval,
         process_tracker=process_tracker,
-        isolate_automation_profile=isolate_automation_profile,
         final_message_grace_seconds=_final_message_grace_seconds,
     )
+
+
+@dataclass(slots=True)
+class _CodexAdapterCall:
+    """Hold one host-observed adapter call and its outcome."""
+
+    started: threading.Event
+    completed: threading.Event
+    outcome: list[tuple[bool, object]]
+    started_at: float = 0.0
+    returned_at: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexTerminalReceipt:
+    """Record host-observed final destruction after one adapter call."""
+
+    call_returned_at: float
+    destroy_started_at: float
+    destroy_returned_at: float
+    terminal_observed_at: float
+    guest_boot_nonce: str
+
+
+def _start_codex_adapter_call(call: Callable[[], object]) -> _CodexAdapterCall:
+    """Start one adapter call on a host-controlled daemon thread."""
+    state = _CodexAdapterCall(threading.Event(), threading.Event(), [])
+
+    def run() -> None:
+        state.started_at = time.monotonic()
+        state.started.set()
+        try:
+            state.outcome.append((True, call()))
+        except BaseException as exc:
+            state.outcome.append((False, exc))
+        finally:
+            state.returned_at = time.monotonic()
+            state.completed.set()
+
+    threading.Thread(target=run, daemon=True, name="codex-adapter-call").start()
+    return state
+
+
+def _wait_for_codex_adapter_call(call: _CodexAdapterCall, deadline: float) -> bool:
+    """Wait for one adapter call only until an absolute host deadline."""
+    if not call.started.wait(max(0.0, deadline - time.monotonic())):
+        return False
+    return call.completed.wait(max(0.0, deadline - time.monotonic()))
+
+
+def _codex_control_deadline(request: CodexIsolationRequestV1) -> float:
+    """Return the bounded deadline for one adapter cleanup control."""
+    cleanup_budget = (
+        request.policy.term_grace_seconds
+        + request.policy.kill_grace_seconds
+        + request.policy.pipe_close_grace_seconds
+        + 2 * request.policy.inventory_quiescence_seconds
+    )
+    return min(
+        request.monotonic_deadline + cleanup_budget,
+        time.monotonic() + cleanup_budget,
+    )
+
+
+def _destroy_codex_prepared(
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    prepared: CodexIsolationPreparedV1,
+    *,
+    call_returned_at: float,
+) -> _CodexTerminalReceipt:
+    """Destroy one guest and return typed host terminal evidence."""
+    destroy_started_at = time.monotonic()
+    destroy_call = _start_codex_adapter_call(lambda: adapter.destroy(prepared))
+    if not _wait_for_codex_adapter_call(destroy_call, _codex_control_deadline(request)):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    destroyed_ok, result_or_error = destroy_call.outcome[0]
+    if not destroyed_ok or result_or_error is not None:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    receipt = _CodexTerminalReceipt(
+        call_returned_at=call_returned_at,
+        destroy_started_at=destroy_started_at,
+        destroy_returned_at=destroy_call.returned_at,
+        terminal_observed_at=time.monotonic(),
+        guest_boot_nonce=prepared.guest_boot_nonce,
+    )
+    if not (
+        receipt.call_returned_at
+        <= receipt.destroy_started_at
+        <= receipt.destroy_returned_at
+        <= receipt.terminal_observed_at
+    ):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    return receipt
+
+
+_CODEX_OPERATION_TOOLS = {
+    AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
+    AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+}
+
+
+def _codex_session_authority(
+    request: CodexIsolationRequestV1,
+) -> tuple[str, str | None, str, tuple[str, ...]]:
+    """Read the complete operation authority from one bound V1 session field."""
+    try:
+        value = json.loads(request.session)
+    except (TypeError, json.JSONDecodeError):
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    if type(value) is not dict or set(value) != {
+        "allowed_tools",
+        "lifecycle",
+        "operation",
+        "session_id",
+    }:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    allowed_tools = value["allowed_tools"]
+    lifecycle = value["lifecycle"]
+    operation = value["operation"]
+    session_id = value["session_id"]
+    if lifecycle not in {item.value for item in SessionLifecycle}:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    if session_id is not None and (type(session_id) is not str or not session_id):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    if (
+        type(operation) is not str
+        or type(allowed_tools) is not list
+        or not all(type(item) is str and item for item in allowed_tools)
+        or allowed_tools != sorted(set(allowed_tools))
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return (
+        cast(str, lifecycle),
+        session_id,
+        operation,
+        tuple(cast(list[str], allowed_tools)),
+    )
+
+
+def _validate_codex_session_authority(
+    request: CodexIsolationRequestV1,
+    execution_request: ExecutionRequest,
+) -> str | None:
+    """Require exact agreement between host authority and the frozen V1 request."""
+    if execution_request.role is not AgentRole.IMPLEMENTER:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    try:
+        resolve_policy(execution_request)
+    except ExecutionPolicyError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    lifecycle, session_id, operation, allowed_tools = _codex_session_authority(request)
+    expected_tools = _CODEX_OPERATION_TOOLS.get(execution_request.operation)
+    rebase_tools = ("Edit", "Glob", "Grep", "Read", "Write")
+    rebase_grant = (
+        execution_request.operation is AgentOperation.IMPLEMENT and allowed_tools == rebase_tools
+    )
+    if (
+        lifecycle != execution_request.lifecycle.value
+        or operation != execution_request.operation.value
+        or (allowed_tools != expected_tools and not rebase_grant)
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    operation_config = f"hephaestus_automation.operation={json.dumps(operation)}"
+    tools_config = "hephaestus_automation.allowed_tools=" + json.dumps(
+        list(allowed_tools), separators=(",", ":")
+    )
+    if request.command.count(operation_config) != 1 or request.command.count(tools_config) != 1:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    resumes = "resume" in request.command
+    if execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+        if session_id is None or not resumes or session_id not in request.command:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    elif session_id is not None or resumes:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return session_id
+
+
+def _complete_timed_out_codex_call(
+    *,
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    active_call: _CodexAdapterCall,
+    prepared: CodexIsolationPreparedV1 | None,
+) -> _CodexTerminalReceipt | None:
+    """Require a late call to finish and destroy each returned guest."""
+    cleanup_deadline = _codex_control_deadline(request)
+    if prepared is not None:
+        destroy_started_at = time.monotonic()
+        destroy_call = _start_codex_adapter_call(lambda: adapter.destroy(prepared))
+        if not _wait_for_codex_adapter_call(active_call, cleanup_deadline):
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        if not _wait_for_codex_adapter_call(destroy_call, cleanup_deadline):
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        destroyed_ok, destroyed_value = destroy_call.outcome[0]
+        if not destroyed_ok or destroyed_value is not None:
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        receipt = _CodexTerminalReceipt(
+            call_returned_at=active_call.returned_at,
+            destroy_started_at=destroy_started_at,
+            destroy_returned_at=destroy_call.returned_at,
+            terminal_observed_at=time.monotonic(),
+            guest_boot_nonce=prepared.guest_boot_nonce,
+        )
+        if (
+            receipt.destroy_started_at > receipt.destroy_returned_at
+            or receipt.call_returned_at > receipt.terminal_observed_at
+            or receipt.destroy_returned_at > receipt.terminal_observed_at
+        ):
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        return receipt
+    if not _wait_for_codex_adapter_call(active_call, cleanup_deadline):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    call_ok, value = active_call.outcome[0]
+    if not call_ok:
+        _complete_opaque_prepare_cleanup(
+            value,
+            cleanup_deadline=cleanup_deadline,
+        )
+        return None
+    late_prepared = cast(CodexIsolationPreparedV1, value)
+    return _destroy_late_codex_prepare(
+        adapter,
+        request,
+        late_prepared,
+        call_returned_at=active_call.returned_at,
+    )
+
+
+def _complete_opaque_prepare_cleanup(
+    value: object,
+    *,
+    cleanup_deadline: float,
+) -> None:
+    """Run one opaque cleanup action for an unpublishable prepare result."""
+    if not isinstance(value, _CodexPrepareCleanupError):
+        return None
+    cleanup = value.claim_cleanup()
+    if cleanup is None:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    cleanup_call = _start_codex_adapter_call(cleanup)
+    if not _wait_for_codex_adapter_call(cleanup_call, cleanup_deadline):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    cleanup_ok, cleanup_value = cleanup_call.outcome[0]
+    if not cleanup_ok or cleanup_value is not None:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    raise CodexIsolationError("codex_adapter_inventory_uncertain")
+
+
+def _destroy_late_codex_prepare(
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    late_prepared: CodexIsolationPreparedV1,
+    *,
+    call_returned_at: float,
+) -> _CodexTerminalReceipt:
+    """Destroy a late prepared guest before the host accepts its record."""
+    validation_failed = False
+    try:
+        validate_prepared(request, late_prepared)
+    except BaseException:
+        validation_failed = True
+    try:
+        receipt = _destroy_codex_prepared(
+            adapter,
+            request,
+            late_prepared,
+            call_returned_at=call_returned_at,
+        )
+    except BaseException:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+    if validation_failed:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    return receipt
+
+
+def _validate_codex_result_window(
+    result: CodexIsolationResultV1,
+    invoke_call: _CodexAdapterCall,
+) -> None:
+    """Bind all final V1 cleanup evidence to this host invocation."""
+    if (
+        result.pipe_close_timestamp < invoke_call.started_at
+        or result.pipe_close_timestamp > invoke_call.returned_at
+        or any(
+            item.monotonic_timestamp < result.pipe_close_timestamp
+            or item.monotonic_timestamp > invoke_call.returned_at
+            for item in result.inventories[-2:]
+        )
+    ):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+
+
+def _codex_authentication_path(profile: Path, run_nonce: str) -> Path:
+    """Return the external transient authentication path for one profile."""
+    return profile.parent / ".transient-auth" / run_nonce / "auth.json"
+
+
+def _codex_profile_store(profile: Path) -> Path:
+    """Return the host-only durable store for one ephemeral profile."""
+    if (
+        profile.name != "profile"
+        or profile.parent.parent.name != ".runs"
+        or len(profile.parent.name) != 64
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return profile.parent.parent.parent
+
+
+def _codex_rollout_store(profile: Path) -> Path:
+    """Return the host-only durable rollout store for one profile identity."""
+    return _codex_profile_store(profile) / "sessions"
+
+
+def _validate_codex_rollout(payload: bytes, session_id: str, worktree: Path) -> None:
+    """Validate the first metadata record of one bounded Codex rollout."""
+    try:
+        first = payload.splitlines()[0]
+        record = json.loads(first)
+        metadata = record["payload"]
+        if (
+            record.get("type") != "session_meta"
+            or type(metadata) is not dict
+            or metadata.get("id") != session_id
+            or Path(metadata.get("cwd", "")) != worktree
+        ):
+            raise ValueError
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+def _open_codex_rollout_directory(path: Path) -> int:
+    """Open one owner-only rollout directory without following its final path."""
+    descriptor = -1
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or _codex_file_fingerprint(lexical) != _codex_file_fingerprint(opened)
+        ):
+            raise OSError("invalid rollout directory")
+        return descriptor
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+def _open_codex_rollout_child_directory(
+    descriptor: int,
+    name: str,
+    *,
+    create: bool,
+) -> int:
+    """Open one bound child directory and optionally create it."""
+    if not name or name in {".", ".."} or "/" in name or os.sep in name:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+    try:
+        if create:
+            try:
+                os.mkdir(name, 0o700, dir_fd=descriptor)
+                os.fsync(descriptor)
+            except FileExistsError:
+                pass
+        lexical = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        child = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=descriptor,
+        )
+        opened = os.fstat(child)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or _codex_file_fingerprint(lexical) != _codex_file_fingerprint(opened)
+        ):
+            raise OSError("invalid rollout directory")
+        if create:
+            os.fchmod(child, 0o700)
+        return child
+    except OSError:
+        if "child" in locals():
+            os.close(child)
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+def _read_codex_rollout_file(descriptor: int, name: str) -> bytes:
+    """Read one bounded rollout through its held parent directory."""
+    child = -1
+    try:
+        lexical = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        child = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=descriptor,
+        )
+        opened = os.fstat(child)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) & 0o077
+            or opened.st_size > 64 * 1024 * 1024
+            or _codex_file_fingerprint(lexical) != _codex_file_fingerprint(opened)
+        ):
+            raise OSError("invalid rollout file")
+        payload = bytearray()
+        while chunk := os.read(child, min(1024 * 1024, 64 * 1024 * 1024 + 1 - len(payload))):
+            payload.extend(chunk)
+            if len(payload) > 64 * 1024 * 1024:
+                raise OSError("rollout file is too large")
+        final = os.fstat(child)
+        path_final = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if _codex_file_fingerprint(final) != _codex_file_fingerprint(
+            opened
+        ) or _codex_file_fingerprint(path_final) != _codex_file_fingerprint(opened):
+            raise OSError("rollout file changed")
+        return bytes(payload)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    finally:
+        if child >= 0:
+            os.close(child)
+
+
+def _bounded_codex_rollout_entries(
+    descriptor: int,
+    budget: _CodexStateScanBudget,
+) -> list[os.DirEntry[str]]:
+    """Read no more rollout entries than the shared state budget permits."""
+    remaining = CODEX_PRESERVED_STATE_MAX_FILES - budget.files
+    entries: list[os.DirEntry[str]] = []
+    try:
+        with os.scandir(descriptor) as iterator:
+            for _index in range(remaining + 1):
+                try:
+                    entries.append(next(iterator))
+                except StopIteration:
+                    break
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    if len(entries) > remaining:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+    return sorted(entries, key=lambda entry: entry.name)
+
+
+def _collect_codex_rollout_candidates(
+    descriptor: int,
+    relative: Path,
+    session_id: str,
+    budget: _CodexStateScanBudget,
+    candidates: list[tuple[Path, bytes]],
+) -> None:
+    """Collect bounded rollout candidates through one held directory tree."""
+    for entry in _bounded_codex_rollout_entries(descriptor, budget):
+        budget.files += 1
+        child_relative = relative / entry.name
+        try:
+            status = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+        except OSError:
+            raise CodexIsolationError("codex_adapter_result_invalid") from None
+        if stat.S_ISDIR(status.st_mode):
+            child = _open_codex_rollout_child_directory(descriptor, entry.name, create=False)
+            try:
+                _collect_codex_rollout_candidates(
+                    child,
+                    child_relative,
+                    session_id,
+                    budget,
+                    candidates,
+                )
+            finally:
+                os.close(child)
+            continue
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or status.st_uid != os.geteuid()
+            or stat.S_IMODE(status.st_mode) & 0o077
+        ):
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        if entry.name.endswith(".jsonl") and session_id in entry.name:
+            candidates.append((child_relative, _read_codex_rollout_file(descriptor, entry.name)))
+
+
+def _find_codex_rollout(root: Path, session_id: str) -> tuple[Path, bytes]:
+    """Find one bound owner-only rollout and return its relative path."""
+    root_descriptor = _open_codex_rollout_directory(root)
+    candidates: list[tuple[Path, bytes]] = []
+    try:
+        _collect_codex_rollout_candidates(
+            root_descriptor,
+            Path(),
+            session_id,
+            _CodexStateScanBudget(),
+            candidates,
+        )
+    finally:
+        os.close(root_descriptor)
+    if len(candidates) != 1:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+    return candidates[0]
+
+
+def _open_codex_rollout_parent(
+    root_descriptor: int,
+    relative: Path,
+) -> int:
+    """Create and open a relative rollout parent through held descriptors."""
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in relative.parts:
+            child = _open_codex_rollout_child_directory(descriptor, part, create=True)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _write_codex_rollout_file(
+    root_descriptor: int,
+    relative: Path,
+    payload: bytes,
+    *,
+    replace: bool,
+) -> None:
+    """Write one rollout through a bound destination directory."""
+    parent = _open_codex_rollout_parent(root_descriptor, relative.parent)
+    temporary = f".{relative.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    descriptor = -1
+    try:
+        if replace:
+            try:
+                existing = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if (
+                    not stat.S_ISREG(existing.st_mode)
+                    or existing.st_uid != os.geteuid()
+                    or existing.st_nlink != 1
+                    or stat.S_IMODE(existing.st_mode) & 0o077
+                ):
+                    raise OSError("invalid rollout destination")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=parent,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        if replace:
+            os.replace(temporary, relative.name, src_dir_fd=parent, dst_dir_fd=parent)
+        else:
+            os.link(
+                temporary,
+                relative.name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+                follow_symlinks=False,
+            )
+            os.unlink(temporary, dir_fd=parent)
+        os.fsync(parent)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=parent)
+        os.close(parent)
+
+
+def _import_codex_rollout(
+    profile: Path,
+    session_id: str,
+    worktree: Path,
+) -> None:
+    """Import only one validated rollout into one fresh profile."""
+    relative, payload = _find_codex_rollout(_codex_rollout_store(profile), session_id)
+    _validate_codex_rollout(payload, session_id, worktree)
+    sessions = _open_codex_rollout_directory(profile / "sessions")
+    try:
+        _write_codex_rollout_file(sessions, relative, payload, replace=False)
+    finally:
+        os.close(sessions)
+
+
+def _export_codex_rollout(
+    profile: Path,
+    session_id: str,
+    worktree: Path,
+) -> None:
+    """Publish only one validated rollout after terminal state proof."""
+    relative, payload = _find_codex_rollout(profile / "sessions", session_id)
+    _validate_codex_rollout(payload, session_id, worktree)
+    store = _codex_rollout_store(profile)
+    store_descriptor = _open_codex_rollout_directory(store.parent)
+    try:
+        sessions = _open_codex_rollout_child_directory(
+            store_descriptor,
+            store.name,
+            create=True,
+        )
+        try:
+            _write_codex_rollout_file(sessions, relative, payload, replace=True)
+        finally:
+            os.close(sessions)
+    finally:
+        os.close(store_descriptor)
+
+
+def _codex_active_receipt_path(profile: Path) -> Path:
+    """Return the host-only active receipt for one issue-cycle profile."""
+    return _codex_profile_store(profile) / ".active.json"
+
+
+def _codex_active_receipt_payload(
+    request: CodexIsolationRequestV1,
+    *,
+    status: str = "active",
+) -> bytes:
+    """Return the canonical non-secret active-request identity."""
+    return json.dumps(
+        {
+            "issue": request.issue,
+            "private_profile_path": request.private_profile_path,
+            "repository": request.repository,
+            "run_nonce": request.run_nonce,
+            "session_identity_digest": request.session_identity_digest,
+            "status": status,
+            "worktree_path": request.worktree_path,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _create_codex_active_receipt(
+    request: CodexIsolationRequestV1,
+) -> tuple[Path, tuple[int, int, int, int, int, int]]:
+    """Create one durable host-only receipt before adapter preparation."""
+    path = _codex_active_receipt_path(Path(request.private_profile_path))
+    payload = _codex_active_receipt_payload(request)
+    parent_descriptor = -1
+    descriptor = -1
+    try:
+        parent_status = path.parent.lstat()
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened_parent = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent_status.st_mode)
+            or parent_status.st_uid != os.geteuid()
+            or stat.S_IMODE(parent_status.st_mode) != 0o700
+            or (parent_status.st_dev, parent_status.st_ino)
+            != (opened_parent.st_dev, opened_parent.st_ino)
+        ):
+            raise OSError("invalid Codex receipt store")
+        try:
+            os.stat(".quarantine.json", dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        descriptor = os.open(
+            ".active.json",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o400,
+            dir_fd=parent_descriptor,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.writev(descriptor, [payload[offset:]])
+        os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+        identity = _codex_file_fingerprint(os.fstat(descriptor))
+        try:
+            os.stat(".quarantine.json", dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            os.unlink(".active.json", dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        os.fsync(parent_descriptor)
+        return path, identity
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _clear_codex_active_receipt(
+    request: CodexIsolationRequestV1,
+    path: Path,
+    identity: tuple[int, int, int, int, int, int],
+) -> None:
+    """Clear the active receipt only after terminal state proof."""
+    mode, payload = _read_codex_regular_file(path, max_bytes=16 * 1024)
+    if (
+        mode != 0o400
+        or payload != _codex_active_receipt_payload(request)
+        or _codex_file_fingerprint(path.lstat()) != identity
+    ):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    try:
+        path.unlink()
+        _fsync_codex_directory(path.parent)
+        if path.exists() or path.is_symlink():
+            raise OSError("active receipt remains")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+
+
+def _quarantine_codex_active_receipt(
+    request: CodexIsolationRequestV1,
+    path: Path,
+    identity: tuple[int, int, int, int, int, int],
+) -> Path:
+    """Replace a terminal run receipt with one cleanup-only quarantine receipt."""
+    mode, payload = _read_codex_regular_file(path, max_bytes=16 * 1024)
+    if (
+        mode != 0o400
+        or payload != _codex_active_receipt_payload(request)
+        or _codex_file_fingerprint(path.lstat()) != identity
+    ):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    quarantine = path.with_name(".quarantine.json")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            quarantine,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o400,
+        )
+        quarantine_payload = _codex_active_receipt_payload(
+            request,
+            status="terminal-state-invalid",
+        )
+        offset = 0
+        while offset < len(quarantine_payload):
+            offset += os.write(descriptor, quarantine_payload[offset:])
+        os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        path.unlink()
+        _fsync_codex_directory(path.parent)
+        if path.exists() or path.is_symlink() or not quarantine.is_file():
+            raise OSError("quarantine receipt transition failed")
+        return quarantine
+    except OSError:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _codex_profile_policy_paths(
+    profile: Path,
+    run_nonce: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the exact read-only and writable profile capability paths."""
+    read_only = (
+        str(profile / "config.toml"),
+        str(profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION),
+        str(_codex_authentication_path(profile, run_nonce)),
+    )
+    read_write = (str(profile),)
+    return read_only, read_write
+
+
+def _validate_codex_profile_policy(request: CodexIsolationRequestV1) -> Path:
+    """Require the exact non-overlapping private profile policy."""
+    profile = Path(request.private_profile_path)
+    expected_read_only, expected_read_write = _codex_profile_policy_paths(
+        profile,
+        request.run_nonce,
+    )
+    actual_read_only = set(request.policy.read_only_mounts)
+    actual_read_write = set(request.policy.read_write_mounts)
+    protected_profile_paths = tuple(Path(path) for path in expected_read_only)
+    if (
+        not set(expected_read_only).issubset(actual_read_only)
+        or not set(expected_read_write).issubset(actual_read_write)
+        or set(expected_read_only) & actual_read_write
+        or set(expected_read_write) & actual_read_only
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    for writable in map(Path, actual_read_write):
+        if any(
+            (
+                writable == protected
+                or writable in protected.parents
+                or protected in writable.parents
+            )
+            and not (writable == profile and protected.is_relative_to(profile))
+            for protected in protected_profile_paths
+        ):
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    profile_write_paths = {path for path in actual_read_write if Path(path).is_relative_to(profile)}
+    if profile_write_paths != set(expected_read_write):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return _codex_authentication_path(profile, request.run_nonce)
+
+
+def _run_admitted_codex_implementation_session(  # noqa: C901
+    *,
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    execution_request: ExecutionRequest,
+    executable_descriptor: int,
+    auth_source: Path | None = None,
+    terminal_reaper: Callable[[], None] | None = None,
+) -> AgentRunResult:
+    """Run one automation-admitted Codex implementation request."""
+    validate_adapter(adapter)
+    expected_session_id = _validate_codex_session_authority(request, execution_request)
+    expected_auth_path = _validate_codex_profile_policy(request)
+    if time.monotonic() >= request.monotonic_deadline:
+        raise CodexIsolationError("codex_adapter_timeout")
+    _verify_codex_implementation_executable(request, executable_descriptor)
+    active_receipt_path, active_receipt_identity = _create_codex_active_receipt(request)
+    prepare_call = _start_codex_adapter_call(lambda: adapter.prepare(request))
+    if not _wait_for_codex_adapter_call(prepare_call, request.monotonic_deadline):
+        _complete_timed_out_codex_call(
+            adapter=adapter,
+            request=request,
+            active_call=prepare_call,
+            prepared=None,
+        )
+        _clear_codex_active_receipt(request, active_receipt_path, active_receipt_identity)
+        raise CodexIsolationError("codex_adapter_timeout")
+    prepared_ok, prepared_or_error = prepare_call.outcome[0]
+    if not prepared_ok:
+        if isinstance(prepared_or_error, _CodexPrepareCleanupError):
+            _complete_timed_out_codex_call(
+                adapter=adapter,
+                request=request,
+                active_call=prepare_call,
+                prepared=None,
+            )
+            _clear_codex_active_receipt(request, active_receipt_path, active_receipt_identity)
+        else:
+            _clear_codex_active_receipt(request, active_receipt_path, active_receipt_identity)
+        if isinstance(prepared_or_error, CodexIsolationError):
+            raise prepared_or_error
+        raise CodexIsolationError("codex_adapter_launch_failed") from None
+    prepared = cast(CodexIsolationPreparedV1, prepared_or_error)
+    destroy_started = False
+    terminal_proved = False
+    destroy_failure: BaseException | None = None
+    auth_path: Path | None = None
+    auth_bridge: _CodexAuthenticationBridge | None = None
+    authentication = ""
+    provider_session_id: str | None = None
+    profile: Path | None = None
+    protected_snapshot: tuple[
+        tuple[str, tuple[int, int, int, int, int, int, int, int], str | None], ...
+    ] = ()
+    preserved_baseline: _CodexPreservedBaseline | None = None
+    pre_auth_cleanup_failure: BaseException | None = None
+    try:
+        validate_prepared(request, prepared)
+        if time.monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
+            raise CodexIsolationError("codex_adapter_timeout")
+        _verify_codex_implementation_executable(request, executable_descriptor)
+        transient_auth_root = Path(request.private_profile_path).parent / ".transient-auth"
+        if transient_auth_root.exists() or transient_auth_root.is_symlink():
+            _discard_codex_profile(transient_auth_root)
+        profile = _populate_codex_implementation_profile(request)
+        if expected_session_id is not None:
+            _import_codex_rollout(profile, expected_session_id, Path(request.worktree_path))
+        _validate_codex_profile_inventory(profile)
+        protected_snapshot = _codex_protected_profile_snapshot(profile)
+        preserved_baseline = _capture_codex_preserved_state(request)
+        source = auth_source or Path(_codex_child_env()["CODEX_HOME"]) / "auth.json"
+        auth_path = expected_auth_path
+        try:
+            authentication = _read_codex_authentication(source)
+            auth_bridge = _create_codex_authentication_bridge(auth_path, authentication)
+        except CodexIsolationError:
+            try:
+                transient_root = auth_path.parents[1]
+                if transient_root.exists() or transient_root.is_symlink():
+                    _discard_codex_profile(transient_root)
+            except BaseException as exc:
+                pre_auth_cleanup_failure = exc
+            raise
+        except BaseException:
+            raise CodexIsolationError("codex_adapter_initialization_failed") from None
+        if time.monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
+            raise CodexIsolationError("codex_adapter_timeout")
+        _verify_codex_implementation_executable(request, executable_descriptor)
+        invoke_call = _start_codex_adapter_call(lambda: adapter.invoke(prepared, str(auth_path)))
+        if not _wait_for_codex_adapter_call(invoke_call, request.monotonic_deadline):
+            destroy_started = True
+            try:
+                _complete_timed_out_codex_call(
+                    adapter=adapter,
+                    request=request,
+                    active_call=invoke_call,
+                    prepared=prepared,
+                )
+                terminal_proved = True
+            except BaseException as exc:
+                destroy_failure = exc
+                raise
+            raise CodexIsolationError("codex_adapter_timeout")
+        invoked_ok, result_or_error = invoke_call.outcome[0]
+        if not invoked_ok:
+            raise CodexIsolationError("codex_adapter_launch_failed") from None
+        result = cast(CodexIsolationResultV1, result_or_error)
+        validate_result(request, prepared, result)
+        _validate_codex_result_window(result, invoke_call)
+        _validate_codex_authentication_output(result.output, authentication, auth_path)
+        _verify_codex_implementation_executable(request, executable_descriptor)
+        destroy_started = True
+        try:
+            _destroy_codex_prepared(
+                adapter,
+                request,
+                prepared,
+                call_returned_at=invoke_call.returned_at,
+            )
+            terminal_proved = True
+        except BaseException as exc:
+            destroy_failure = exc
+            raise
+        provider_session_id, _message = _parse_codex_json_events(result.output)
+        if provider_session_id is None or (
+            expected_session_id is not None and provider_session_id != expected_session_id
+        ):
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        return AgentRunResult(stdout=result.output, stderr="", session_id=provider_session_id)
+    finally:
+        if not destroy_started:
+            destroy_started = True
+            try:
+                _destroy_codex_prepared(
+                    adapter,
+                    request,
+                    prepared,
+                    call_returned_at=time.monotonic(),
+                )
+                terminal_proved = True
+            except BaseException as exc:
+                destroy_failure = exc
+        if not terminal_proved and terminal_reaper is not None:
+            try:
+                terminal_reaper()
+            except BaseException as exc:
+                destroy_failure = exc
+        cleanup_failure: BaseException | None = pre_auth_cleanup_failure
+        fallback_auth_descriptor = -1
+        if auth_path is not None and auth_bridge is not None:
+            try:
+                fallback_auth_descriptor = os.dup(auth_bridge.auth_descriptor)
+            except BaseException:
+                fallback_auth_descriptor = -1
+            try:
+                _remove_codex_authentication(auth_path, auth_bridge)
+            except BaseException as exc:
+                cleanup_failure = exc
+                try:
+                    if fallback_auth_descriptor >= 0:
+                        os.ftruncate(fallback_auth_descriptor, 0)
+                        os.fsync(fallback_auth_descriptor)
+                    if terminal_proved:
+                        transient_root = auth_path.parents[1]
+                        if transient_root.exists() or transient_root.is_symlink():
+                            _discard_codex_profile(transient_root)
+                except BaseException as fallback_exc:
+                    cleanup_failure = fallback_exc
+            finally:
+                if fallback_auth_descriptor >= 0:
+                    os.close(fallback_auth_descriptor)
+        state_failure: BaseException | None = None
+        if terminal_proved and profile is not None and auth_bridge is not None:
+            try:
+                _validate_codex_preserved_state(
+                    request,
+                    protected_snapshot=protected_snapshot,
+                    authentication_identity=auth_bridge.auth_identity,
+                    authentication=authentication,
+                    baseline=preserved_baseline,
+                )
+            except BaseException as exc:
+                state_failure = exc
+        elif terminal_proved and profile is not None:
+            try:
+                _discard_codex_ephemeral_profile(profile)
+            except BaseException as exc:
+                state_failure = exc
+        if (
+            terminal_proved
+            and cleanup_failure is not None
+            and state_failure is None
+            and profile is not None
+            and (profile.exists() or profile.is_symlink())
+        ):
+            try:
+                _discard_codex_ephemeral_profile(profile)
+            except BaseException as exc:
+                state_failure = exc
+        if (
+            state_failure is None
+            and terminal_proved
+            and cleanup_failure is None
+            and destroy_failure is None
+            and profile is not None
+            and auth_bridge is not None
+        ):
+            try:
+                if provider_session_id is not None:
+                    _export_codex_rollout(
+                        profile,
+                        provider_session_id,
+                        Path(request.worktree_path),
+                    )
+                _discard_codex_ephemeral_profile(profile)
+            except BaseException as exc:
+                state_failure = exc
+        receipt_failure: BaseException | None = None
+        if terminal_proved and any(
+            failure is not None for failure in (destroy_failure, cleanup_failure, state_failure)
+        ):
+            try:
+                _quarantine_codex_active_receipt(
+                    request,
+                    active_receipt_path,
+                    active_receipt_identity,
+                )
+                receipt_failure = CodexIsolationError("codex_adapter_inventory_uncertain")
+            except BaseException as exc:
+                receipt_failure = exc
+        elif terminal_proved:
+            try:
+                _clear_codex_active_receipt(
+                    request,
+                    active_receipt_path,
+                    active_receipt_identity,
+                )
+            except BaseException as exc:
+                receipt_failure = exc
+        if receipt_failure is not None:
+            raise receipt_failure
+        if state_failure is not None:
+            raise state_failure
+        if cleanup_failure is not None:
+            raise cleanup_failure
+        if destroy_failure is not None:
+            raise destroy_failure
+
+
+def _verify_codex_implementation_executable(
+    request: CodexIsolationRequestV1,
+    executable_descriptor: int,
+) -> None:
+    """Verify the staged executable identity and digest at the host boundary."""
+    path = Path(request.executable_path)
+    try:
+        opened = _codex_file_fingerprint(os.fstat(executable_descriptor))
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(executable_descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+        path_identity = _codex_file_fingerprint(path.lstat())
+    except (CodexIsolationError, OSError, IndexError, TypeError):
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    if (
+        opened != request.executable_file_identity
+        or path_identity != request.executable_file_identity
+        or digest.hexdigest() != request.executable_digest
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+
+
+def _populate_codex_implementation_profile(  # noqa: C901
+    request: CodexIsolationRequestV1,
+) -> Path:
+    """Create the private profile after the adapter prepares its guest."""
+    profile = Path(request.private_profile_path)
+    source_home = Path(_codex_child_env()["CODEX_HOME"])
+    source = source_home / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+    files = _codex_athena_snapshot(source)
+    source_digest = _codex_athena_snapshot_digest(files)
+    if source_digest != CODEX_ATHENA_ARTIFACT_SHA256:
+        raise CodexIsolationError("codex_adapter_initialization_failed")
+    metadata = {relative.as_posix(): payload for relative, _mode, payload in files}
+    try:
+        install = json.loads(metadata[".codex-marketplace-install.json"])
+        package = json.loads(metadata["package.json"])
+    except (KeyError, UnicodeError, json.JSONDecodeError):
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    if (
+        type(install) is not dict
+        or type(package) is not dict
+        or install.get("source") != CODEX_ATHENA_MARKETPLACE_SOURCE
+        or install.get("revision") != CODEX_ATHENA_MARKETPLACE_REF
+        or package.get("version") != CODEX_ATHENA_VERSION
+    ):
+        raise CodexIsolationError("codex_adapter_initialization_failed")
+
+    destination = profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+    expected_copy = tuple(
+        (relative, 0o500 if mode & 0o100 else 0o400, payload) for relative, mode, payload in files
+    )
+    try:
+        store = _codex_profile_store(profile)
+        runs = store / ".runs"
+        if profile.parent.parent != runs:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        profile.parent.mkdir(mode=0o700)
+        profile.mkdir(mode=0o700)
+        profile.chmod(0o700)
+        destination.mkdir(parents=True, mode=0o700)
+        for relative, mode, payload in files:
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _write_codex_profile_file(target, payload, mode)
+        for directory in sorted(
+            (path for path in destination.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            directory.chmod(0o500)
+        destination.chmod(0o500)
+        if _codex_athena_snapshot(destination) != expected_copy:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        write_secure(
+            profile / "config.toml",
+            _codex_implementation_config(destination),
+        )
+        (profile / "config.toml").chmod(0o400)
+        for path in (
+            profile / "home",
+            profile / "tmp",
+            profile / "appdata",
+            profile / "localappdata",
+            profile / "xdg" / "config",
+            profile / "xdg" / "cache",
+            profile / "xdg" / "data",
+            profile / "sessions",
+        ):
+            path.mkdir(parents=True, mode=0o700)
+            path.chmod(0o700)
+        (profile / "xdg").chmod(0o700)
+        for directory in (
+            profile / "plugins" / "cache" / "athena" / "athena",
+            profile / "plugins" / "cache" / "athena",
+            profile / "plugins" / "cache",
+            profile / "plugins",
+        ):
+            directory.chmod(0o500)
+        _fsync_codex_directory(profile)
+    except BaseException as exc:
+        if profile.exists() or profile.is_symlink() or profile.parent.exists():
+            try:
+                _discard_codex_ephemeral_profile(profile)
+            except BaseException:
+                raise CodexIsolationError("codex_adapter_result_invalid") from None
+        if isinstance(exc, CodexIsolationError):
+            raise
+        if isinstance(exc, OSError):
+            raise CodexIsolationError("codex_adapter_initialization_failed") from None
+        raise
+    return profile
+
+
+def _validate_codex_resume_profile(
+    profile: Path,
+    athena: Path,
+    expected_athena: tuple[tuple[Path, int, bytes], ...],
+) -> None:
+    """Validate one issue-owned profile before a provider resume."""
+    try:
+        status = profile.lstat()
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.geteuid()
+            or stat.S_IMODE(status.st_mode) != 0o500
+            or (profile / "auth.json").exists()
+        ):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        _validate_codex_profile_inventory(profile)
+        if _codex_athena_snapshot(athena) != expected_athena:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        _mode, config = _read_codex_regular_file(profile / "config.toml", max_bytes=65536)
+        if config.decode("utf-8") != _codex_implementation_config(athena):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        _read_only, mutable = _codex_profile_policy_paths(profile, "0" * 64)
+        for path in map(Path, mutable):
+            mutable_status = path.lstat()
+            if (
+                not stat.S_ISDIR(mutable_status.st_mode)
+                or mutable_status.st_uid != os.geteuid()
+                or stat.S_IMODE(mutable_status.st_mode) != 0o700
+            ):
+                raise CodexIsolationError("codex_adapter_initialization_failed")
+    except CodexIsolationError:
+        raise
+    except (OSError, UnicodeError):
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+
+
+def _codex_file_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    """Return the fields that bind one regular-file snapshot."""
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _codex_protected_fingerprint(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    """Bind one protected object to its link and change identity."""
+    return (*_codex_file_fingerprint(metadata), metadata.st_nlink, metadata.st_ctime_ns)
+
+
+def _read_codex_regular_file(path: Path, *, max_bytes: int) -> tuple[int, bytes]:
+    """Read one owned regular file and reject path replacement."""
+    descriptor = -1
+    try:
+        initial = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or opened.st_size > max_bytes
+            or _codex_file_fingerprint(initial) != _codex_file_fingerprint(opened)
+        ):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := os.read(descriptor, min(1024 * 1024, max_bytes + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > max_bytes:
+                raise CodexIsolationError("codex_adapter_initialization_failed")
+        final = os.fstat(descriptor)
+        path_final = path.lstat()
+        if _codex_file_fingerprint(final) != _codex_file_fingerprint(
+            opened
+        ) or _codex_file_fingerprint(path_final) != _codex_file_fingerprint(opened):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        return stat.S_IMODE(opened.st_mode), b"".join(chunks)
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _codex_athena_snapshot(root: Path) -> tuple[tuple[Path, int, bytes], ...]:
+    """Return a bounded immutable snapshot of the admitted Athena package."""
+    try:
+        root_status = root.lstat()
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or root_status.st_uid != os.geteuid()
+        or stat.S_IMODE(root_status.st_mode) & 0o022
+    ):
+        raise CodexIsolationError("codex_adapter_initialization_failed")
+    files: list[tuple[Path, int, bytes]] = []
+    total = 0
+    try:
+        paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+        for path in paths:
+            relative = path.relative_to(root)
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                raise CodexIsolationError("codex_adapter_initialization_failed")
+            if ".git" in relative.parts or "__pycache__" in relative.parts:
+                continue
+            if path.suffix in {".pyc", ".pyo"}:
+                continue
+            if stat.S_ISDIR(status.st_mode):
+                if status.st_uid != os.geteuid() or stat.S_IMODE(status.st_mode) & 0o022:
+                    raise CodexIsolationError("codex_adapter_initialization_failed")
+                continue
+            mode, payload = _read_codex_regular_file(
+                path,
+                max_bytes=CODEX_ATHENA_MAX_BYTES - total,
+            )
+            total += len(payload)
+            files.append((relative, mode, payload))
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    return tuple(files)
+
+
+def _codex_athena_snapshot_digest(files: tuple[tuple[Path, int, bytes], ...]) -> str:
+    """Return the digest of one ordered Athena package snapshot."""
+    digest = hashlib.sha256()
+    for relative, mode, payload in files:
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(str(mode).encode())
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _codex_athena_artifact_digest(root: Path) -> str:
+    """Return the digest of one validated Athena package tree."""
+    return _codex_athena_snapshot_digest(_codex_athena_snapshot(root))
+
+
+def _write_codex_profile_file(path: Path, payload: bytes, source_mode: int) -> None:
+    """Write one private profile file without path replacement."""
+    descriptor = -1
+    mode = 0o500 if source_mode & 0o100 else 0o400
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            mode,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _write_codex_mutable_file(path: Path, payload: bytes) -> None:
+    """Write one owner-only mutable file without following a path."""
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _codex_implementation_config(
+    athena_path: Path,
+) -> str:
+    """Return the operation-invariant configuration for one private profile."""
+    return "\n".join(
+        (
+            f"sqlite_home = {json.dumps(str(athena_path.parents[4] / 'xdg' / 'data'))}",
+            f"log_dir = {json.dumps(str(athena_path.parents[4] / 'xdg' / 'data' / 'logs'))}",
+            'default_permissions = "hephaestus-automation"',
+            "",
+            "[features]",
+            "shell_snapshot = false",
+            "",
+            "[marketplaces.athena]",
+            'source_type = "git"',
+            f"source = {json.dumps(CODEX_ATHENA_MARKETPLACE_SOURCE)}",
+            f"ref = {json.dumps(CODEX_ATHENA_MARKETPLACE_REF)}",
+            "",
+            '[plugins."athena@athena"]',
+            "enabled = true",
+            "",
+            "[permissions.hephaestus-automation]",
+            'extends = ":workspace"',
+            "",
+            "[permissions.hephaestus-automation.filesystem]",
+            '":minimal" = "read"',
+            f'{json.dumps(str(athena_path))} = "read"',
+            "",
+            "[permissions.hephaestus-automation.network]",
+            "enabled = false",
+            "",
+        )
+    )
+
+
+def _fsync_codex_directory(path: Path) -> None:
+    """Make one private-profile directory update durable."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_codex_authentication(source: Path) -> str:
+    """Read one trusted authentication file through a held descriptor."""
+    try:
+        _mode, payload = _read_codex_regular_file(source, max_bytes=CODEX_AUTH_MAX_BYTES)
+        document = json.loads(payload)
+        if type(document) is not dict:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        return payload.decode("utf-8")
+    except CodexIsolationError:
+        raise
+    except (UnicodeError, json.JSONDecodeError):
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+
+
+def _validate_codex_authentication_output(
+    output: str,
+    authentication: str,
+    auth_path: Path,
+) -> None:
+    """Reject output that contains a value from authentication state."""
+    encoded = output.encode("utf-8")
+    private_paths = (str(auth_path).encode(), str(auth_path.parent).encode())
+    patterns = (*_codex_authentication_patterns(authentication), *private_paths)
+    if any(value in encoded for value in patterns):
+        raise CodexIsolationError("codex_adapter_result_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexAuthenticationBridge:
+    """Hold each descriptor and identity for one per-run authentication bridge."""
+
+    auth_descriptor: int
+    run_descriptor: int
+    auth_identity: tuple[int, int, int, int, int, int]
+    profiles_descriptor: int
+    root_descriptor: int
+    run_identity: tuple[int, int, int, int, int, int]
+    run_name: str
+
+
+def _create_codex_authentication_bridge(
+    auth_path: Path,
+    payload: str,
+) -> _CodexAuthenticationBridge:
+    """Create authentication with held file and parent descriptors."""
+    profiles_descriptor = -1
+    root_descriptor = -1
+    run_descriptor = -1
+    auth_descriptor = -1
+    try:
+        profiles_descriptor = os.open(
+            auth_path.parents[2],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(auth_path.parents[1].name, 0o700, dir_fd=profiles_descriptor)
+        root_descriptor = os.open(
+            auth_path.parents[1].name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=profiles_descriptor,
+        )
+        root_status = os.fstat(root_descriptor)
+        if root_status.st_uid != os.geteuid() or stat.S_IMODE(root_status.st_mode) != 0o700:
+            raise OSError("invalid transient authentication root")
+        os.mkdir(auth_path.parent.name, 0o700, dir_fd=root_descriptor)
+        run_descriptor = os.open(
+            auth_path.parent.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=root_descriptor,
+        )
+        run_status = os.fstat(run_descriptor)
+        run_path_status = os.stat(
+            auth_path.parent.name,
+            dir_fd=root_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            run_status.st_uid != os.geteuid()
+            or stat.S_IMODE(run_status.st_mode) != 0o700
+            or _codex_file_fingerprint(run_status) != _codex_file_fingerprint(run_path_status)
+        ):
+            raise OSError("invalid transient authentication run directory")
+        auth_descriptor = os.open(
+            auth_path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=run_descriptor,
+        )
+        data = payload.encode("utf-8")
+        offset = 0
+        while offset < len(data):
+            offset += os.write(auth_descriptor, data[offset:])
+        os.fchmod(auth_descriptor, 0o600)
+        os.fsync(auth_descriptor)
+        identity = _codex_file_fingerprint(os.fstat(auth_descriptor))
+        path_identity = _codex_file_fingerprint(
+            os.stat(auth_path.name, dir_fd=run_descriptor, follow_symlinks=False)
+        )
+        if path_identity != identity:
+            raise OSError("authentication path identity changed")
+        os.fsync(run_descriptor)
+        os.fsync(root_descriptor)
+        run_identity = _codex_file_fingerprint(os.fstat(run_descriptor))
+        bridge = _CodexAuthenticationBridge(
+            auth_descriptor=auth_descriptor,
+            run_descriptor=run_descriptor,
+            auth_identity=identity,
+            profiles_descriptor=profiles_descriptor,
+            root_descriptor=root_descriptor,
+            run_identity=run_identity,
+            run_name=auth_path.parent.name,
+        )
+        profiles_descriptor = -1
+        return bridge
+    except BaseException as exc:
+        cleanup_ok = _remove_partial_codex_authentication(
+            auth_path,
+            auth_descriptor,
+            run_descriptor,
+            root_descriptor,
+            profiles_descriptor,
+        )
+        profiles_descriptor = -1
+        if not cleanup_ok:
+            raise CodexIsolationError("codex_adapter_result_invalid") from None
+        if isinstance(exc, CodexIsolationError):
+            raise
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    finally:
+        if profiles_descriptor >= 0:
+            os.close(profiles_descriptor)
+
+
+def _remove_partial_codex_authentication(  # noqa: C901
+    auth_path: Path,
+    auth_descriptor: int,
+    run_descriptor: int,
+    root_descriptor: int,
+    profiles_descriptor: int,
+) -> bool:
+    """Remove a partially created bridge and return true only with absence proof."""
+    failed = False
+    if auth_descriptor >= 0:
+        try:
+            os.ftruncate(auth_descriptor, 0)
+            os.fsync(auth_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            os.close(auth_descriptor)
+        except BaseException:
+            failed = True
+    if run_descriptor < 0:
+        if root_descriptor >= 0:
+            try:
+                os.rmdir(auth_path.parent.name, dir_fd=root_descriptor)
+                os.fsync(root_descriptor)
+            except FileNotFoundError:
+                pass
+            except BaseException:
+                failed = True
+            try:
+                os.close(root_descriptor)
+            except BaseException:
+                failed = True
+        if profiles_descriptor >= 0:
+            try:
+                os.close(profiles_descriptor)
+            except BaseException:
+                failed = True
+        return not failed
+    try:
+        os.unlink(auth_path.name, dir_fd=run_descriptor)
+    except FileNotFoundError:
+        pass
+    except BaseException:
+        failed = True
+    try:
+        os.fsync(run_descriptor)
+    except BaseException:
+        failed = True
+    try:
+        os.stat(auth_path.name, dir_fd=run_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    except BaseException:
+        failed = True
+    else:
+        failed = True
+    try:
+        os.close(run_descriptor)
+    except BaseException:
+        failed = True
+    if root_descriptor >= 0:
+        try:
+            os.rmdir(auth_path.parent.name, dir_fd=root_descriptor)
+            os.fsync(root_descriptor)
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            failed = True
+        try:
+            os.close(root_descriptor)
+        except BaseException:
+            failed = True
+    if profiles_descriptor >= 0:
+        try:
+            os.rmdir(auth_path.parents[1].name, dir_fd=profiles_descriptor)
+            os.fsync(profiles_descriptor)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                failed = True
+        try:
+            os.close(profiles_descriptor)
+        except BaseException:
+            failed = True
+    return not failed
+
+
+def _clear_codex_authentication_directory(descriptor: int) -> bool:
+    """Remove all unexpected per-run authentication entries without following links."""
+    failed = False
+    try:
+        entries = list(os.scandir(descriptor))
+    except BaseException:
+        return False
+    for entry in entries:
+        failed = True
+        try:
+            status = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(status.st_mode):
+                child = os.open(
+                    entry.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    _clear_codex_authentication_directory(child)
+                finally:
+                    os.close(child)
+                os.rmdir(entry.name, dir_fd=descriptor)
+            else:
+                os.unlink(entry.name, dir_fd=descriptor)
+        except BaseException:
+            continue
+    try:
+        os.fsync(descriptor)
+    except BaseException:
+        failed = True
+    return not failed
+
+
+def _remove_codex_directory_contents(descriptor: int) -> None:
+    """Remove a job-owned directory tree through held descriptors."""
+    try:
+        entries = list(os.scandir(descriptor))
+        for entry in entries:
+            status = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(status.st_mode) and not stat.S_ISLNK(status.st_mode):
+                child = os.open(
+                    entry.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    _remove_codex_directory_contents(child)
+                finally:
+                    os.close(child)
+                os.rmdir(entry.name, dir_fd=descriptor)
+            else:
+                os.unlink(entry.name, dir_fd=descriptor)
+        os.fsync(descriptor)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+def _remove_codex_authentication(  # noqa: C901
+    auth_path: Path,
+    bridge: _CodexAuthenticationBridge,
+) -> None:
+    """Remove and prove absence of one complete per-run authentication bridge."""
+    failed = False
+    try:
+        try:
+            current = os.stat(
+                auth_path.name,
+                dir_fd=bridge.run_descriptor,
+                follow_symlinks=False,
+            )
+            if _codex_file_fingerprint(current) != bridge.auth_identity:
+                failed = True
+            if _codex_file_fingerprint(os.fstat(bridge.run_descriptor)) != bridge.run_identity:
+                failed = True
+        except BaseException:
+            failed = True
+        try:
+            os.ftruncate(bridge.auth_descriptor, 0)
+            os.fsync(bridge.auth_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            os.unlink(auth_path.name, dir_fd=bridge.run_descriptor)
+            os.fsync(bridge.run_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            os.stat(auth_path.name, dir_fd=bridge.run_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            failed = True
+        else:
+            failed = True
+        if not _clear_codex_authentication_directory(bridge.run_descriptor):
+            failed = True
+    finally:
+        try:
+            os.close(bridge.auth_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            os.close(bridge.run_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            os.rmdir(bridge.run_name, dir_fd=bridge.root_descriptor)
+            os.fsync(bridge.root_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            os.stat(bridge.run_name, dir_fd=bridge.root_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            failed = True
+        else:
+            failed = True
+        root_is_empty = False
+        try:
+            root_is_empty = not any(os.scandir(bridge.root_descriptor))
+        except BaseException:
+            failed = True
+        try:
+            os.close(bridge.root_descriptor)
+        except BaseException:
+            failed = True
+        if root_is_empty:
+            try:
+                os.rmdir(".transient-auth", dir_fd=bridge.profiles_descriptor)
+                os.fsync(bridge.profiles_descriptor)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                    failed = True
+        try:
+            os.close(bridge.profiles_descriptor)
+        except BaseException:
+            failed = True
+    if failed:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+def _codex_protected_profile_snapshot(
+    profile: Path,
+) -> tuple[tuple[str, tuple[int, int, int, int, int, int, int, int], str | None], ...]:
+    """Capture immutable configuration and Athena identities and bytes."""
+    athena = profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+    protected = [profile / "config.toml", athena, *athena.rglob("*")]
+    snapshot: list[tuple[str, tuple[int, int, int, int, int, int, int, int], str | None]] = []
+    try:
+        for path in sorted(protected, key=lambda item: str(item.relative_to(profile))):
+            status = path.lstat()
+            relative = str(path.relative_to(profile))
+            if stat.S_ISDIR(status.st_mode):
+                if stat.S_IMODE(status.st_mode) != 0o500:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                digest = None
+            elif stat.S_ISREG(status.st_mode):
+                if stat.S_IMODE(status.st_mode) not in {0o400, 0o500} or status.st_nlink != 1:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                _mode, payload = _read_codex_regular_file(
+                    path,
+                    max_bytes=CODEX_ATHENA_MAX_BYTES,
+                )
+                digest = hashlib.sha256(payload).hexdigest()
+            else:
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            snapshot.append((relative, _codex_protected_fingerprint(status), digest))
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    return tuple(snapshot)
+
+
+def _codex_authentication_patterns(authentication: str) -> tuple[bytes, ...]:
+    """Return the full authentication payload and all scalar secret values."""
+    patterns = {authentication.encode("utf-8")}
+    try:
+        document = json.loads(authentication)
+    except json.JSONDecodeError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+    def collect(value: object, *, key: str = "") -> None:
+        normalized = key.lower().replace("-", "_")
+        credential_key = any(
+            marker in normalized
+            for marker in ("token", "secret", "password", "credential", "api_key")
+        )
+        if isinstance(value, str) and len(value.encode("utf-8")) >= 8 and credential_key:
+            patterns.add(value.encode("utf-8"))
+        elif isinstance(value, dict):
+            for nested_key, nested in value.items():
+                collect(nested, key=str(nested_key))
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested, key=key)
+
+    collect(document)
+    return tuple(sorted(patterns, key=len, reverse=True))
+
+
+def _validate_codex_profile_inventory(profile: Path) -> None:
+    """Require the exact sealed profile topology after one invocation."""
+    expected_children = {
+        profile: {
+            "appdata",
+            "config.toml",
+            "home",
+            "localappdata",
+            "plugins",
+            "sessions",
+            "tmp",
+            "xdg",
+        },
+        profile / "plugins": {"cache"},
+        profile / "plugins" / "cache": {"athena"},
+        profile / "plugins" / "cache" / "athena": {"athena"},
+        profile / "plugins" / "cache" / "athena" / "athena": {CODEX_ATHENA_VERSION},
+        profile / "xdg": {"cache", "config", "data"},
+    }
+    try:
+        for directory, expected in expected_children.items():
+            status = directory.lstat()
+            expected_mode = 0o700 if directory in {profile, profile / "xdg"} else 0o500
+            if (
+                not stat.S_ISDIR(status.st_mode)
+                or status.st_uid != os.geteuid()
+                or stat.S_IMODE(status.st_mode) != expected_mode
+            ):
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            actual = {entry.name for entry in os.scandir(directory)}
+            if actual != expected:
+                raise CodexIsolationError("codex_adapter_result_invalid")
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+@dataclass
+class _CodexStateScanBudget:
+    """Track the bounded retained-state scan."""
+
+    files: int = 0
+    bytes: int = 0
+    path_bytes: int = 0
+
+
+_CodexPreservedIdentity = tuple[str, tuple[int, int, int, int, int, int, int, int], bytes]
+_CodexPreservedBaseline = dict[str, dict[str, _CodexPreservedIdentity]]
+
+
+def _bounded_codex_directory_entries(
+    descriptor: int,
+    budget: _CodexStateScanBudget,
+) -> list[os.DirEntry[str]]:
+    """Read no more than the remaining entry budget plus one sentinel."""
+    remaining = CODEX_PRESERVED_STATE_MAX_FILES - budget.files
+    if remaining < 0:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+    entries: list[os.DirEntry[str]] = []
+    try:
+        with os.scandir(descriptor) as iterator:
+            for _index in range(remaining + 1):
+                try:
+                    entries.append(next(iterator))
+                except StopIteration:
+                    break
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    if len(entries) > remaining:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+    return sorted(entries, key=lambda item: item.name)
+
+
+def _codex_xattr_items(list_xattrs: Any, get_xattr: Any) -> tuple[tuple[bytes, bytes], ...]:
+    """Collect bounded attribute names and values through selected call seams."""
+    size = list_xattrs(None, 0)
+    if size < 0:
+        error = ctypes.get_errno()
+        if error in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+            return ()
+        raise OSError(error, "cannot list extended attributes")
+    if size > 64 * 1024:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+    if size == 0:
+        return ()
+    names_buffer = ctypes.create_string_buffer(size)
+    received = list_xattrs(names_buffer, size)
+    if received != size:
+        raise CodexIsolationError("codex_adapter_result_invalid")
+    result: list[tuple[bytes, bytes]] = []
+    canonical_size = 0
+    for name in sorted(filter(None, names_buffer.raw[:size].split(b"\0"))):
+        value_size = get_xattr(name, None, 0)
+        canonical_size += len(name) + value_size + 2
+        if value_size < 0 or canonical_size > 64 * 1024:
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        value_buffer = ctypes.create_string_buffer(value_size)
+        value_received = get_xattr(name, value_buffer, value_size)
+        if value_received != value_size:
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        result.append((name, value_buffer.raw[:value_size]))
+    return tuple(result)
+
+
+def _codex_canonical_xattrs(list_xattrs: Any, get_xattr: Any) -> bytes:
+    """Collect bounded canonical attributes through two selected call seams."""
+    result = bytearray()
+    for name, value in _codex_xattr_items(list_xattrs, get_xattr):
+        result.extend(name)
+        result.extend(b"\0")
+        result.extend(value)
+        result.extend(b"\0")
+    return bytes(result)
+
+
+def _remove_codex_descriptor_xattrs(descriptor: int, patterns: tuple[bytes, ...]) -> bool:
+    """Remove credential attributes through one held directory descriptor."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        items = _codex_xattr_items(
+            lambda buffer, size: library.flistxattr(descriptor, buffer, size, 0),
+            lambda name, buffer, size: library.fgetxattr(
+                descriptor,
+                name,
+                buffer,
+                size,
+                0,
+                0,
+            ),
+        )
+    else:
+        items = _codex_xattr_items(
+            lambda buffer, size: library.flistxattr(descriptor, buffer, size),
+            lambda name, buffer, size: library.fgetxattr(descriptor, name, buffer, size),
+        )
+    removed = False
+    for name, value in items:
+        if not any(pattern in name or pattern in value for pattern in patterns):
+            continue
+        result = (
+            library.fremovexattr(descriptor, name, 0)
+            if sys.platform == "darwin"
+            else library.fremovexattr(descriptor, name)
+        )
+        if result != 0:
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        removed = True
+    if removed:
+        os.fsync(descriptor)
+        remaining = _codex_descriptor_xattrs(descriptor)
+        if any(pattern in remaining for pattern in patterns):
+            raise CodexIsolationError("codex_adapter_result_invalid")
+    return removed
+
+
+def _codex_descriptor_xattrs(descriptor: int) -> bytes:
+    """Return bounded attributes for one held regular file or directory."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        return _codex_canonical_xattrs(
+            lambda buffer, size: library.flistxattr(descriptor, buffer, size, 0),
+            lambda name, buffer, size: library.fgetxattr(
+                descriptor,
+                name,
+                buffer,
+                size,
+                0,
+                0,
+            ),
+        )
+    return _codex_canonical_xattrs(
+        lambda buffer, size: library.flistxattr(descriptor, buffer, size),
+        lambda name, buffer, size: library.fgetxattr(descriptor, name, buffer, size),
+    )
+
+
+def _codex_symlink_xattrs(descriptor: int, name: str) -> bytes:
+    """Return bounded no-follow attributes for one child symlink."""
+    if sys.platform == "darwin":
+        parent = fcntl.fcntl(descriptor, fcntl.F_GETPATH, b"\0" * 1024).split(b"\0", 1)[0]
+        path = parent + b"/" + os.fsencode(name)
+    else:
+        path = os.fsencode(f"/proc/self/fd/{descriptor}/{name}")
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        return _codex_canonical_xattrs(
+            lambda buffer, size: library.listxattr(path, buffer, size, 0x0001),
+            lambda attr, buffer, size: library.getxattr(
+                path,
+                attr,
+                buffer,
+                size,
+                0,
+                0x0001,
+            ),
+        )
+    return _codex_canonical_xattrs(
+        lambda buffer, size: library.llistxattr(path, buffer, size),
+        lambda attr, buffer, size: library.lgetxattr(path, attr, buffer, size),
+    )
+
+
+def _codex_preserved_identity(
+    descriptor: int,
+    entry: os.DirEntry[str],
+) -> _CodexPreservedIdentity:
+    """Return bounded metadata for one persisted entry without following it."""
+    status = entry.stat(follow_symlinks=False)
+    if stat.S_ISDIR(status.st_mode):
+        kind = "directory"
+        flags = os.O_RDONLY | os.O_DIRECTORY
+    elif stat.S_ISREG(status.st_mode):
+        kind = "regular"
+        flags = os.O_RDONLY
+    elif stat.S_ISLNK(status.st_mode):
+        kind = "symlink"
+        attributes = _codex_symlink_xattrs(descriptor, entry.name)
+        target = os.fsencode(os.readlink(entry.name, dir_fd=descriptor))
+        final = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+        if _codex_protected_fingerprint(final) != _codex_protected_fingerprint(status):
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        payload = b"target\0" + target + b"\0xattrs\0" + attributes
+        return kind, _codex_protected_fingerprint(final), payload
+    else:
+        kind = "special"
+        return kind, _codex_protected_fingerprint(status), b""
+    child = os.open(
+        entry.name,
+        flags | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=descriptor,
+    )
+    try:
+        target = _codex_descriptor_xattrs(child)
+    finally:
+        os.close(child)
+    return kind, _codex_protected_fingerprint(status), target
+
+
+def _capture_codex_preserved_directory(
+    descriptor: int,
+    *,
+    relative: Path = Path(),
+    budget: _CodexStateScanBudget,
+) -> dict[str, _CodexPreservedIdentity]:
+    """Capture one bounded metadata inventory without reading file contents."""
+    captured: dict[str, _CodexPreservedIdentity] = {}
+    try:
+        entries = _bounded_codex_directory_entries(descriptor, budget)
+        for entry in entries:
+            budget.files += 1
+            child_relative = relative / entry.name
+            relative_bytes = len(os.fsencode(str(child_relative)))
+            budget.path_bytes += relative_bytes
+            if (
+                budget.files > CODEX_PRESERVED_STATE_MAX_FILES
+                or relative_bytes > 4096
+                or budget.path_bytes > 32 * 1024 * 1024
+                or len(child_relative.parts) > 128
+            ):
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            identity = _codex_preserved_identity(descriptor, entry)
+            budget.bytes += len(identity[2])
+            if budget.bytes > CODEX_PRESERVED_STATE_MAX_BYTES:
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            captured[str(child_relative)] = identity
+            if identity[0] == "directory":
+                child = os.open(
+                    entry.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    if _codex_protected_fingerprint(os.fstat(child)) != identity[1]:
+                        raise CodexIsolationError("codex_adapter_result_invalid")
+                    captured.update(
+                        _capture_codex_preserved_directory(
+                            child,
+                            relative=child_relative,
+                            budget=budget,
+                        )
+                    )
+                finally:
+                    os.close(child)
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    return captured
+
+
+def _capture_codex_preserved_state(request: CodexIsolationRequestV1) -> _CodexPreservedBaseline:
+    """Capture all persisted metadata before authentication becomes visible."""
+    profile = Path(request.private_profile_path)
+    _read_only, mutable = _codex_profile_policy_paths(profile, request.run_nonce)
+    roots = [Path(request.worktree_path), *map(Path, mutable)]
+    baseline: _CodexPreservedBaseline = {}
+    budget = _CodexStateScanBudget()
+    for index, root in enumerate(roots):
+        initial = root.lstat()
+        if (
+            not stat.S_ISDIR(initial.st_mode)
+            or initial.st_uid != os.geteuid()
+            or (index and stat.S_IMODE(initial.st_mode) != 0o700)
+        ):
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        descriptor = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if _codex_protected_fingerprint(opened) != _codex_protected_fingerprint(initial):
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            root_xattrs = _codex_descriptor_xattrs(descriptor)
+            budget.bytes += len(root_xattrs)
+            if budget.bytes > CODEX_PRESERVED_STATE_MAX_BYTES:
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            captured = _capture_codex_preserved_directory(
+                descriptor,
+                budget=budget,
+            )
+            captured[""] = (
+                "directory",
+                _codex_protected_fingerprint(opened),
+                root_xattrs,
+            )
+            baseline[str(root)] = captured
+        finally:
+            os.close(descriptor)
+    return baseline
+
+
+def _scan_codex_preserved_directory(  # noqa: C901
+    descriptor: int,
+    *,
+    authentication_identity: tuple[int, int],
+    patterns: tuple[bytes, ...],
+    budget: _CodexStateScanBudget,
+    remove_contamination: bool,
+    baseline: dict[str, _CodexPreservedIdentity] | None = None,
+    relative: Path = Path(),
+) -> bool:
+    """Scan one held directory without following child links."""
+    removed = False
+    try:
+        entries = _bounded_codex_directory_entries(descriptor, budget)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    for entry in entries:
+        budget.files += 1
+        if budget.files > CODEX_PRESERVED_STATE_MAX_FILES:
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        try:
+            status = entry.stat(follow_symlinks=False)
+            child_relative = relative / entry.name
+            relative_bytes = len(os.fsencode(str(child_relative)))
+            budget.path_bytes += relative_bytes
+            if (
+                relative_bytes > 4096
+                or budget.path_bytes > 32 * 1024 * 1024
+                or len(child_relative.parts) > 128
+            ):
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            current_identity = _codex_preserved_identity(descriptor, entry)
+            changed = baseline is None or baseline.get(str(child_relative)) != current_identity
+            if changed:
+                budget.bytes += len(current_identity[2])
+                if budget.bytes > CODEX_PRESERVED_STATE_MAX_BYTES:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+            name_contaminated = any(pattern in os.fsencode(entry.name) for pattern in patterns)
+            if name_contaminated:
+                if not remove_contamination:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                if stat.S_ISDIR(status.st_mode) and not stat.S_ISLNK(status.st_mode):
+                    child = os.open(
+                        entry.name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=descriptor,
+                    )
+                    try:
+                        _remove_codex_directory_contents(child)
+                    finally:
+                        os.close(child)
+                    os.rmdir(entry.name, dir_fd=descriptor)
+                else:
+                    os.unlink(entry.name, dir_fd=descriptor)
+                os.fsync(descriptor)
+                removed = True
+                continue
+            metadata_contaminated = changed and any(
+                pattern in current_identity[2] for pattern in patterns
+            )
+            if metadata_contaminated and stat.S_ISDIR(status.st_mode):
+                if not remove_contamination:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                child = os.open(
+                    entry.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    _remove_codex_directory_contents(child)
+                finally:
+                    os.close(child)
+                os.rmdir(entry.name, dir_fd=descriptor)
+                os.fsync(descriptor)
+                removed = True
+                continue
+            if stat.S_ISDIR(status.st_mode):
+                child = os.open(
+                    entry.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    if _codex_file_fingerprint(os.fstat(child)) != _codex_file_fingerprint(status):
+                        raise CodexIsolationError("codex_adapter_result_invalid")
+                    removed = (
+                        _scan_codex_preserved_directory(
+                            child,
+                            authentication_identity=authentication_identity,
+                            patterns=patterns,
+                            budget=budget,
+                            remove_contamination=remove_contamination,
+                            baseline=baseline,
+                            relative=child_relative,
+                        )
+                        or removed
+                    )
+                finally:
+                    os.close(child)
+                continue
+            if stat.S_ISLNK(status.st_mode):
+                if not remove_contamination:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                if not changed:
+                    continue
+                os.unlink(entry.name, dir_fd=descriptor)
+                os.fsync(descriptor)
+                removed = True
+                continue
+            if not stat.S_ISREG(status.st_mode):
+                if not changed and remove_contamination:
+                    continue
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            contaminated = (
+                status.st_dev,
+                status.st_ino,
+            ) == authentication_identity or metadata_contaminated
+            if not changed and not contaminated:
+                continue
+            budget.bytes += status.st_size
+            if budget.bytes > CODEX_PRESERVED_STATE_MAX_BYTES:
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            child = os.open(
+                entry.name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=descriptor,
+            )
+            try:
+                opened = os.fstat(child)
+                if _codex_file_fingerprint(opened) != _codex_file_fingerprint(status):
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                overlap = max((len(pattern) for pattern in patterns), default=1) - 1
+                tail = b""
+                offset = 0
+                while chunk := os.pread(child, 1024 * 1024, offset):
+                    candidate = tail + chunk
+                    if any(pattern in candidate for pattern in patterns):
+                        contaminated = True
+                    tail = candidate[-overlap:] if overlap else b""
+                    offset += len(chunk)
+                if _codex_file_fingerprint(os.fstat(child)) != _codex_file_fingerprint(opened):
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+            finally:
+                os.close(child)
+            if contaminated:
+                if not remove_contamination:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                os.unlink(entry.name, dir_fd=descriptor)
+                os.fsync(descriptor)
+                try:
+                    os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                removed = True
+        except CodexIsolationError:
+            raise
+        except (OSError, UnicodeError):
+            raise CodexIsolationError("codex_adapter_result_invalid") from None
+    return removed
+
+
+def _validate_codex_preserved_state(
+    request: CodexIsolationRequestV1,
+    *,
+    protected_snapshot: tuple[
+        tuple[str, tuple[int, int, int, int, int, int, int, int], str | None], ...
+    ],
+    authentication_identity: tuple[int, int, int, int, int, int],
+    authentication: str,
+    baseline: _CodexPreservedBaseline | None = None,
+) -> None:
+    """Prove that protected and retained state contains no authentication."""
+    profile = Path(request.private_profile_path)
+    try:
+        _read_only, mutable = _codex_profile_policy_paths(profile, request.run_nonce)
+        worktree = Path(request.worktree_path)
+        roots = [(worktree, True), *[(Path(path), False) for path in mutable]]
+        patterns = _codex_authentication_patterns(authentication)
+        budget = _CodexStateScanBudget()
+        contamination_removed = False
+        for root, remove_contamination in roots:
+            root_status = root.lstat()
+            if (
+                not stat.S_ISDIR(root_status.st_mode)
+                or root_status.st_uid != os.geteuid()
+                or (not remove_contamination and stat.S_IMODE(root_status.st_mode) != 0o700)
+            ):
+                raise CodexIsolationError("codex_adapter_result_invalid")
+            descriptor = os.open(
+                root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                opened_root = os.fstat(descriptor)
+                if _codex_file_fingerprint(opened_root) != _codex_file_fingerprint(root_status):
+                    raise CodexIsolationError("codex_adapter_result_invalid")
+                root_xattrs = _codex_descriptor_xattrs(descriptor)
+                root_identity: _CodexPreservedIdentity = (
+                    "directory",
+                    _codex_protected_fingerprint(opened_root),
+                    root_xattrs,
+                )
+                root_baseline = None if baseline is None else baseline.get(str(root), {}).get("")
+                if root_baseline != root_identity:
+                    budget.bytes += len(root_xattrs)
+                    if budget.bytes > CODEX_PRESERVED_STATE_MAX_BYTES:
+                        raise CodexIsolationError("codex_adapter_result_invalid")
+                    if any(pattern in root_xattrs for pattern in patterns):
+                        if remove_contamination:
+                            contamination_removed = (
+                                _remove_codex_descriptor_xattrs(descriptor, patterns)
+                                or contamination_removed
+                            )
+                        else:
+                            raise CodexIsolationError("codex_adapter_result_invalid")
+                contamination_removed = (
+                    _scan_codex_preserved_directory(
+                        descriptor,
+                        authentication_identity=authentication_identity[:2],
+                        patterns=patterns,
+                        budget=budget,
+                        remove_contamination=remove_contamination,
+                        baseline=None if baseline is None else baseline.get(str(root), {}),
+                    )
+                    or contamination_removed
+                )
+            finally:
+                os.close(descriptor)
+        if _codex_protected_profile_snapshot(profile) != protected_snapshot:
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        if contamination_removed:
+            raise CodexIsolationError("codex_adapter_result_invalid")
+    except BaseException:
+        if profile.exists() or profile.is_symlink():
+            _discard_codex_ephemeral_profile(profile)
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+def _discard_codex_profile(profile: Path) -> None:
+    """Delete an invalid sealed profile without following links."""
+    try:
+        status = profile.lstat()
+        if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.geteuid():
+            raise OSError("invalid profile root")
+        for root, directories, _files in os.walk(profile, topdown=True, followlinks=False):
+            root_path = Path(root)
+            root_status = root_path.lstat()
+            if not stat.S_ISDIR(root_status.st_mode) or root_status.st_uid != os.geteuid():
+                raise OSError("invalid profile directory")
+            root_path.chmod(0o700)
+            for name in directories:
+                child = root_path / name
+                child_status = child.lstat()
+                if stat.S_ISLNK(child_status.st_mode):
+                    continue
+                if not stat.S_ISDIR(child_status.st_mode) or child_status.st_uid != os.geteuid():
+                    raise OSError("invalid profile directory")
+        shutil.rmtree(profile)
+        _fsync_codex_directory(profile.parent)
+        if profile.exists() or profile.is_symlink():
+            raise OSError("profile remains")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
+def _discard_codex_ephemeral_profile(profile: Path) -> None:
+    """Delete one fresh profile and its per-run directory."""
+    if profile.exists() or profile.is_symlink():
+        _discard_codex_profile(profile)
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            profile.parent.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        with contextlib.suppress(FileNotFoundError):
+            os.rmdir(profile.parent.name, dir_fd=descriptor)
+        os.fsync(descriptor)
+        try:
+            os.stat(profile.parent.name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise OSError("ephemeral run directory remains")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def resume_codex_session(
@@ -2355,7 +4682,6 @@ def _run_codex_session_with_effort_fallback(
     approval: str,
     resume_id: str | None = None,
     process_tracker: ProcessTracker | None = None,
-    isolate_automation_profile: bool = False,
     final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Run Codex and retry one rejected explicit effort with its default."""
@@ -2368,7 +4694,7 @@ def _run_codex_session_with_effort_fallback(
         cmd = _codex_base_cmd(
             cwd=cwd,
             model=selected_model,
-            sandbox=None if isolate_automation_profile else sandbox,
+            sandbox=sandbox,
             approval=approval,
             resume_id=resume_id,
         )
@@ -2381,7 +4707,6 @@ def _run_codex_session_with_effort_fallback(
             cwd=cwd,
             timeout=min(float(timeout), remaining),
             process_tracker=process_tracker,
-            isolate_automation_profile=isolate_automation_profile,
             final_message_grace_seconds=final_message_grace_seconds,
         )
 
@@ -2406,27 +4731,12 @@ def _run_codex_command(
     cwd: Path,
     timeout: float,
     process_tracker: ProcessTracker | None = None,
-    isolate_automation_profile: bool = False,
     final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Execute Codex with JSON events and return final text plus session id."""
-    output_path: Path
-    with contextlib.ExitStack() as resources:
-        if isolate_automation_profile:
-            env, output_path = resources.enter_context(_codex_automation_execution_files())
-            cmd.append("--ephemeral")
-            cmd = _codex_outer_isolated_command(
-                cmd,
-                cwd=cwd,
-                profile_root=Path(env["CODEX_HOME"]).parent,
-            )
-        else:
-            output_file = resources.enter_context(
-                tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt")
-            )
-            env = _codex_child_env()
-            output_path = Path(output_file.name)
-        cmd.extend(["--output-last-message", str(output_path), "-"])
+    with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt") as output_file:
+        cmd.extend(["--output-last-message", output_file.name, "-"])
+        env = _codex_child_env()
         for key in CODEX_PARENT_CONTEXT_ENV_VARS:
             env.pop(key, None)
         try:
@@ -2436,14 +4746,14 @@ def _run_codex_command(
                 prompt=prompt,
                 timeout=timeout,
                 env=env,
-                output_path=output_path,
+                output_path=Path(output_file.name),
                 process_tracker=process_tracker,
                 final_message_grace_seconds=final_message_grace_seconds,
             )
         except subprocess.CalledProcessError as exc:
             stdout = _coerce_timeout_output(exc.stdout)
             stderr = _coerce_timeout_output(exc.stderr)
-            final_message = _read_text_file(output_path).strip()
+            final_message = _read_text_file(Path(output_file.name)).strip()
             effort_diagnostic = None if final_message else _codex_reasoning_effort_failure(stdout)
             if effort_diagnostic is not None:
                 raise _CodexReasoningEffortRejectedError(
@@ -2454,7 +4764,7 @@ def _run_codex_command(
                 raise AgentExecutionError(diagnostic) from exc
             raise
         except subprocess.TimeoutExpired as e:
-            last_message = output_path.read_text(encoding="utf-8").strip()
+            last_message = Path(output_file.name).read_text(encoding="utf-8").strip()
             stdout_text = _coerce_timeout_output(e.stdout)
             stderr_text = _coerce_timeout_output(e.stderr)
             diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)
@@ -2468,7 +4778,7 @@ def _run_codex_command(
                 stderr=stderr_text or f"Codex wrapper timed out after {timeout}s",
                 session_id=session_id,
             )
-        last_message = output_path.read_text(encoding="utf-8")
+        last_message = Path(output_file.name).read_text(encoding="utf-8")
 
     effort_diagnostic = (
         None if last_message.strip() else _codex_reasoning_effort_failure(stdout_text)
@@ -3162,6 +5472,21 @@ def _require_pi_request(execution_request: ExecutionRequest | None) -> Execution
     return resolve_policy(execution_request)
 
 
+def validate_agent_execution_support(
+    agent: str,
+    execution_request: ExecutionRequest | None,
+) -> None:
+    """Fail when a provider cannot enforce the requested operation boundary."""
+    if (
+        execution_request is not None
+        and execution_request.operation is AgentOperation.REMEDIATION_REPLY
+        and agent not in {"claude", "pi"}
+    ):
+        raise AgentExecutionError(
+            f"{agent} has no enforceable no-tool execution mode for remediation reply"
+        )
+
+
 def _require_pi_execution_policy(
     execution_request: ExecutionRequest | None,
     *,
@@ -3329,6 +5654,11 @@ def _redact_pi_exception_output(
     return None
 
 
+def _is_codex_implementation_request(request: ExecutionRequest | None) -> bool:
+    """Return true for one Codex implementation execution request."""
+    return request is not None and request.role is AgentRole.IMPLEMENTER
+
+
 def run_agent_text(
     agent: str,
     prompt: str,
@@ -3359,6 +5689,8 @@ def run_agent_text(
         pi_thinking = pi_selection.reasoning_effort
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
+        if _is_codex_implementation_request(execution_request):
+            raise CodexIsolationError("codex_adapter_not_selected")
         return run_codex_text(
             prompt,
             cwd=cwd,
@@ -3435,15 +5767,9 @@ def run_agent_session(
                 "Pi start-new or one-shot execution must not receive a session binding"
             )
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
-    if (
-        is_codex(agent)
-        and execution_request is not None
-        and execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
-    ):
-        raise ExecutionPolicyError(
-            "Codex automation does not support session resume without a bound session receipt"
-        )
     if is_codex(agent):
+        if _is_codex_implementation_request(execution_request):
+            raise CodexIsolationError("codex_adapter_not_selected")
         return run_codex_session(
             prompt,
             cwd=cwd,
@@ -3452,7 +5778,6 @@ def run_agent_session(
             sandbox=sandbox,
             approval=approval,
             process_tracker=process_tracker,
-            isolate_automation_profile=True,
         )
     if is_opencode(agent):
         return run_opencode_session(
@@ -3543,8 +5868,17 @@ def resume_agent_session(
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        raise ExecutionPolicyError(
-            "Codex automation does not support session resume without a bound session receipt"
+        if _is_codex_implementation_request(execution_request):
+            raise CodexIsolationError("codex_adapter_not_selected")
+        return resume_codex_session(
+            session_id,
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            process_tracker=process_tracker,
         )
     if is_opencode(agent):
         return resume_opencode_session(

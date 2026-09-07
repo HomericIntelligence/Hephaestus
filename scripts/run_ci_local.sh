@@ -450,10 +450,13 @@ resolve_git_metadata_mount() {
 # filesystem (tmpfs), which their verification requires; the default overlay
 # filesystem of the container is not ACL-verifiable.
 
-run_in_container() {
+_run_in_container() {
+    local codex_fixture_root="$1"
+    shift
     local cmd=("$@")
     local engine_flags=()
     local candidate_mount=()
+    local codex_fixture_mount=()
 
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
         engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
@@ -469,15 +472,38 @@ run_in_container() {
         candidate_mount+=(--volume "${CANDIDATE_TREE}:/candidate:ro")
     fi
 
+    if [ -n "${codex_fixture_root}" ]; then
+        # Use the installed tools and mounted source without an editable rebuild.
+        codex_fixture_mount+=(
+            --network=none
+            --env UV_NO_SYNC=1
+            --env PYTHONPATH=/workspace
+            --volume "${codex_fixture_root}:/codex-sigstore/rust-v0.153.4:ro"
+            --volume "${codex_fixture_root}:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro"
+            --env "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4"
+        )
+    fi
+
     "${CONTAINER_ENGINE}" run --rm \
         "${engine_flags[@]}" \
         "${GIT_METADATA_MOUNT[@]}" \
         "${candidate_mount[@]}" \
         --tmpfs /tmp:rw,size=4g,mode=1777 \
         --volume "${PROJECT_ROOT}:/workspace:Z" \
+        "${codex_fixture_mount[@]}" \
         --workdir /workspace \
         "${CI_IMAGE}" \
         "${cmd[@]}"
+}
+
+run_in_container() {
+    _run_in_container "" "$@"
+}
+
+run_in_container_with_codex_fixture() {
+    local fixture_root="${PROJECT_ROOT}/build/test-fixtures/codex-sigstore/rust-v0.153.4"
+
+    _run_in_container "${fixture_root}" "$@"
 }
 
 # ============================================================================
@@ -525,10 +551,21 @@ run_cli() {
 
 run_build() {
     log_step "Reproducible artifact and package lifecycle validation"
-    run_in_container uv run pytest tests/integration \
+    if ! zstd --version >/dev/null 2>&1; then
+        log_error "Host zstd is required for the build subset."
+        return 1
+    fi
+    python3 "${PROJECT_ROOT}/scripts/provision_codex_sigstore_fixture.py" \
+        --root "${PROJECT_ROOT}/build/test-fixtures/codex-sigstore/rust-v0.153.4" || return 1
+    run_in_container env UV_NO_SYNC=1 PYTHONPATH=/workspace \
+        uv run pytest tests/integration \
         --override-ini="addopts=" \
         --basetemp=build/pytest-artifacts \
-        -v --strict-markers -m artifact
+        -v --strict-markers -m "artifact and not codex_release_artifact" || return 1
+    run_in_container_with_codex_fixture uv run pytest tests/integration \
+        --override-ini="addopts=" \
+        --basetemp=build/pytest-codex-artifacts \
+        -v --strict-markers -m codex_release_artifact
 }
 
 run_audit() {

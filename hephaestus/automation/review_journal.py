@@ -249,10 +249,13 @@ def normalize_issue_comments(
         if raw_database_id is None:
             raw_database_id = raw.get("id")
         if raw_database_id is not None:
-            try:
-                database_id = int(raw_database_id)
-            except (TypeError, ValueError) as exc:
-                raise CommentJournalReadError(f"comment {index} database id was invalid") from exc
+            if (
+                not isinstance(raw_database_id, int)
+                or isinstance(raw_database_id, bool)
+                or raw_database_id <= 0
+            ):
+                raise CommentJournalReadError(f"comment {index} database id was not correct")
+            database_id = raw_database_id
 
         normalized.append(
             IssueComment(

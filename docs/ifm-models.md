@@ -43,6 +43,14 @@ model. Both forms use `xhigh` when no effort is present. For example:
 --reviewer-model gpt-6-astra:future-effort
 ```
 
+Codex also accepts capability aliases. For example, these options select the
+same model and effort:
+
+```text
+--reviewer-model terra:high
+--reviewer-model gpt-5.6-terra:high
+```
+
 ## OpenCode
 
 Add an operator-local custom provider to `opencode.json`. Use the provider ID

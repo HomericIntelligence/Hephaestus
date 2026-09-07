@@ -249,15 +249,15 @@ jobs:
         # because the integration and artifact markers are registered in pyproject.toml.
         # uv sync installed every [project.scripts] binary, so the CLI
         # entry-point checks must never skip here (#2173).
-        # Artifact tests repeat reproducibility, complete-manifest, RECORD,
-        # clean-install, upgrade, and uninstall checks before publication.
+        # The required PR build lane owns the network-free Codex release fixture.
+        # This release lane keeps the other package-artifact checks.
         run: >-
           uv run pytest tests/integration
           --require-cli
           --override-ini="addopts="
           --basetemp=build/pytest-release-integration
           -v --strict-markers
-          -m "not nightly"
+          -m "not nightly and not codex_release_artifact"
 
   type-check:
     runs-on: ubuntu-24.04

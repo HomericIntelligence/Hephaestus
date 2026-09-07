@@ -325,7 +325,6 @@ class FakeStageGitHub(FakeGitHub):
             if self.reviews.get(pr_number)
             else []
         )
-        current_pr_state = dict(self._pr_state) if isinstance(self._pr_state, dict) else {}
         threads: list[dict[str, Any]] = []
         cursor = 0
         for count, author, severity in (
@@ -339,11 +338,9 @@ class FakeStageGitHub(FakeGitHub):
                     posted[cursor] if cursor < len(posted) else f"live-thread-{pr_number}-{cursor}"
                 )
                 cursor += 1
-                origin_author = "reviewer" if author else "hephaestus[bot]"
                 threads.append(
                     {
                         "id": thread_id,
-                        "isResolved": False,
                         "path": posted_comment.get("path") or "a.py",
                         "line": posted_comment.get("line") or cursor,
                         "side": "RIGHT",
@@ -352,23 +349,14 @@ class FakeStageGitHub(FakeGitHub):
                             f"<!-- hephaestus-severity: {severity} -->\n"
                             f"{posted_comment.get('body') or 'finding'}"
                         ),
-                        "author": origin_author,
-                        "author_type": "User",
-                        "author_association": "MEMBER",
-                        "authors": [origin_author],
+                        "author": "reviewer" if author else "hephaestus[bot]",
+                        "authors": ["reviewer" if author else "hephaestus[bot]"],
                         "review_id": f"review-{pr_number}-{cursor}",
-                        "pr_state": current_pr_state,
                         "comments": [
                             {
                                 "id": f"comment-{thread_id}",
-                                "author": origin_author,
-                                "author_type": "User",
-                                "author_association": "MEMBER",
+                                "author": "reviewer" if author else "hephaestus[bot]",
                                 "body": posted_comment.get("body") or "finding",
-                                "review_id": f"review-{pr_number}-{cursor}",
-                                "review_state": "COMMENTED",
-                                "review_commit_sha": current_pr_state.get("headRefOid", ""),
-                                "viewer_did_author": not author,
                             },
                             *self._thread_replies.get(thread_id, []),
                         ],
@@ -517,9 +505,10 @@ class FakeStageGitHub(FakeGitHub):
         replies: dict[str, str],
         batch_nonce: str,
         progress: ImplementationReplyProgress | None = None,
+        recover_pending_review: bool = False,
     ) -> ImplementationThreadReplyResult:
         """Record head-gated implementation replies for stage tests."""
-        del expected_head_sha, batch_nonce, progress
+        del expected_head_sha, batch_nonce, progress, recover_pending_review
         by_id = {
             str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads
         }
@@ -862,6 +851,8 @@ def make_work_item() -> Callable[..., WorkItem]:
         payload: dict[str, Any] | None = None,
     ) -> WorkItem:
         item = WorkItem(repo=repo, kind=kind, issue=issue, pr=pr, stage=stage, state=state)
+        if state == "COMMIT_PUSH_WAIT":
+            item.payload.update({"issue_title": "A task", "issue_body": ""})
         if labels:
             item.labels_cache = dict.fromkeys(labels, True)
         if payload:

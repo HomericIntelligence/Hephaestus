@@ -210,10 +210,10 @@ def test_green_exact_head_checks_allow_merge_without_operator_review(
     assert len(github.merge_attempts) == 1
 
 
-def test_queue_admission_polls_without_repeating_the_mutation(
+def test_reconstructed_item_accepts_reconciled_queue_admission_without_replay(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A verified queue entry changes later cycles into read-only waits."""
+    """A reconstructed reviewed item accepts readback and then only polls."""
     queued = ConditionalMergeResult(
         status=200,
         body={"merged": False, "queue_entry_id": "MQE_node"},
@@ -227,6 +227,7 @@ def test_queue_admission_polls_without_repeating_the_mutation(
     )
     ctx = make_ctx(github=github)
     item = _reviewed_item(make_work_item)
+    assert "merge_queue_admitted_head_sha" not in item.payload
     stage = MergeWaitStage()
 
     first = _complete_merge_cycle(stage, item, ctx)
@@ -236,6 +237,26 @@ def test_queue_admission_polls_without_repeating_the_mutation(
     assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert github.merge_attempts == [(12, "a" * 40)]
     assert item.payload["merge_queue_admitted_head_sha"] == "a" * 40
+
+
+def test_failed_queue_reconciliation_is_terminal_without_mutation_replay(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A malformed readback cannot enter the retry route or record admission."""
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr()],
+        merge_results=[ConditionalMergeResult(status=None, body=None, malformed=True)],
+        merge_queue_method="SQUASH",
+        strict_update_enforced=False,
+    )
+    item = _reviewed_item(make_work_item)
+
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_result_malformed")
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert "retry_delay_s" not in item.payload
+    assert "merge_queue_admitted_head_sha" not in item.payload
 
 
 def test_failed_exact_head_checks_block_merge_without_operator_review(

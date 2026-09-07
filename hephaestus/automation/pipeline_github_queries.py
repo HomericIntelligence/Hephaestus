@@ -5,6 +5,7 @@ import subprocess
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
+from .remediation_recovery import REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES
 from .review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -12,6 +13,8 @@ from .review_journal import (
     discover_plan_from_comments,
     normalize_issue_comments,
 )
+
+_THREAD_PAGE_MAX = 100
 
 
 class PipelineGitHubQueries(_PipelineGitHubHost):
@@ -143,13 +146,53 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         owner, name = self._owner_name()
         spec = github_api.pipeline_unresolved_threads_page_query(owner, name, pr_number)
 
-        def read_thread_ids() -> tuple[str, ...]:
-            """Read one complete unresolved-thread traversal without hydrating it."""
-            thread_ids: list[str] = []
+        def read_pr_identity() -> tuple[str, int, str, str, str, str, str, str]:
+            """Read one complete immutable PR identity."""
+            state = self.gh_pr_state(pr_number)
+            if not isinstance(state, dict):
+                raise RuntimeError("could not verify PR identity during thread traversal")
+            pr_id = state.get("id")
+            lifecycle = state.get("state")
+            base_sha = state.get("baseRefOid")
+            head_sha = state.get("headRefOid")
+            base_name = state.get("baseRefName")
+            auto_merge = state.get("autoMergeRequest")
+            if (
+                not isinstance(pr_id, str)
+                or not pr_id
+                or lifecycle != "OPEN"
+                or not isinstance(base_sha, str)
+                or not base_sha
+                or not isinstance(head_sha, str)
+                or not head_sha
+                or not isinstance(base_name, str)
+                or not base_name
+                or (auto_merge is not None and not isinstance(auto_merge, dict))
+            ):
+                raise RuntimeError("could not verify PR identity during thread traversal")
+            return (
+                f"{owner}/{name}".casefold(),
+                pr_number,
+                pr_id,
+                lifecycle,
+                base_sha,
+                head_sha,
+                base_name,
+                json.dumps(auto_merge, sort_keys=True, separators=(",", ":")),
+            )
+
+        def read_thread_ids() -> tuple[tuple[str, bool], ...]:  # noqa: C901
+            """Read one complete all-thread traversal without hydrating it."""
+            thread_ids: list[tuple[str, bool]] = []
+            thread_id_bytes = 0
             seen: set[str] = set()
             seen_cursors: set[str] = set()
             after: str | None = None
+            page_count = 0
             while True:
+                if page_count >= _THREAD_PAGE_MAX:
+                    raise RuntimeError("could not fetch all PR review threads")
+                page_count += 1
                 fields: dict[str, int | str] = {"number": int(pr_number)}
                 if after is not None:
                     fields["after"] = after
@@ -170,8 +213,12 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                     ):
                         raise RuntimeError("could not fetch all PR review threads")
                     seen.add(thread_id)
-                    if not is_resolved:
-                        thread_ids.append(thread_id)
+                    thread_id_bytes += len(thread_id.encode("utf-8")) + 1
+                    if thread_id_bytes > REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES:
+                        raise RuntimeError("could not fetch all PR review threads")
+                    thread_ids.append((thread_id, is_resolved))
+                    if len(thread_ids) > 10_000:
+                        raise RuntimeError("could not fetch all PR review threads")
                 page_info = review_threads.get("pageInfo")
                 if not isinstance(page_info, dict) or not isinstance(
                     page_info.get("hasNextPage"), bool
@@ -189,63 +236,102 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 seen_cursors.add(next_cursor)
                 after = next_cursor
 
-        first_ids = read_thread_ids()
-        if first_ids != read_thread_ids():
+        def read_complete_snapshot() -> tuple[  # noqa: C901
+            tuple[str, int, str, str, str, str, str, str],
+            str,
+        ]:
+            """Hydrate one complete all-thread traversal under one PR identity."""
+            before = read_pr_identity()
+            threads: list[dict[str, Any]] = []
+            snapshot_bytes = 2
+            for thread_id, listed_resolved in read_thread_ids():
+                # A review-thread list deliberately does not request a bounded
+                # nested comments connection. Fetch the complete, paginated
+                # node snapshot instead.
+                snapshot = self._review_thread_snapshot(pr_number, thread_id)
+                if snapshot is None:
+                    raise RuntimeError(
+                        f"could not fetch all comments for PR review thread {thread_id}"
+                    )
+                if snapshot.get("isResolved") is not listed_resolved:
+                    raise RuntimeError("could not stabilize all PR review threads")
+                comments = snapshot.get("comments")
+                if (
+                    not isinstance(comments, list)
+                    or self._thread_comment_snapshot(snapshot) is None
+                ):
+                    raise RuntimeError(
+                        f"could not fetch all comments for PR review thread {thread_id}"
+                    )
+                first_comment = comments[0]
+                authors: list[str] = []
+                review_body = ""
+                review_commit_sha = ""
+                for comment in comments:
+                    if not isinstance(comment, dict):
+                        raise RuntimeError(
+                            f"could not fetch all comments for PR review thread {thread_id}"
+                        )
+                    author = comment.get("author")
+                    if not isinstance(author, str):
+                        raise RuntimeError(
+                            f"could not fetch all comments for PR review thread {thread_id}"
+                        )
+                    if author:
+                        authors.append(author)
+                    if not review_body:
+                        review_body = str(comment.get("review_body") or "")
+                        review_commit_sha = str(comment.get("review_commit_sha") or "")
+                normalized = {
+                    "id": thread_id,
+                    "isResolved": listed_resolved,
+                    "path": snapshot.get("path", ""),
+                    "line": snapshot.get("line"),
+                    "side": snapshot.get("side") or "RIGHT",
+                    "body": first_comment.get("body", ""),
+                    "author": authors[0] if authors else "",
+                    "author_type": comments[0].get("author_type", "") if comments else "",
+                    "authors": authors,
+                    "comments": [dict(comment) for comment in comments],
+                    "review_id": comments[0].get("review_id", "") if comments else "",
+                    "review_body": review_body,
+                    "review_commit_sha": review_commit_sha,
+                    "pr_node_id": snapshot.get("pr_node_id"),
+                    "pr_state": snapshot.get("pr_state"),
+                }
+                snapshot_bytes += (
+                    len(
+                        json.dumps(
+                            normalized,
+                            allow_nan=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    )
+                    + 1
+                )
+                if snapshot_bytes > REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES:
+                    raise RuntimeError("complete PR review thread snapshot is too large")
+                threads.append(normalized)
+            after = read_pr_identity()
+            if before != after:
+                raise RuntimeError("could not stabilize PR identity during thread traversal")
+            canonical = json.dumps(
+                sorted(threads, key=lambda thread: str(thread["id"])),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if len(canonical.encode("utf-8")) > REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES:
+                raise RuntimeError("complete PR review thread snapshot is too large")
+            return before, canonical
+
+        first = read_complete_snapshot()
+        second = read_complete_snapshot()
+        if first != second or read_pr_identity() != second[0]:
             raise RuntimeError("could not stabilize all PR review threads")
-        threads: list[dict[str, Any]] = []
-        for thread_id in first_ids:
-            # A review-thread list deliberately does not request a bounded
-            # nested comments connection.  Fetch the complete, paginated
-            # node snapshot instead: all turns must reach the implementer
-            # and reviewer, including long-lived conversations.
-            snapshot = self._review_thread_snapshot(pr_number, thread_id)
-            if snapshot is None:
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            if snapshot.get("isResolved") is True:
-                # The thread was closed between the list and node reads.
-                continue
-            comments = snapshot.get("comments")
-            if not isinstance(comments, list) or self._thread_comment_snapshot(snapshot) is None:
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            first_comment = comments[0]
-            authors: list[str] = []
-            review_body = ""
-            review_commit_sha = ""
-            for comment in comments:
-                if not isinstance(comment, dict):
-                    raise RuntimeError(
-                        f"could not fetch all comments for PR review thread {thread_id}"
-                    )
-                author = comment.get("author")
-                if not isinstance(author, str):
-                    raise RuntimeError(
-                        f"could not fetch all comments for PR review thread {thread_id}"
-                    )
-                if author:
-                    authors.append(author)
-                if not review_body:
-                    review_body = str(comment.get("review_body") or "")
-                    review_commit_sha = str(comment.get("review_commit_sha") or "")
-            thread = {
-                "id": thread_id,
-                "path": snapshot.get("path", ""),
-                "line": snapshot.get("line"),
-                "side": snapshot.get("side") or "RIGHT",
-                "body": first_comment.get("body", ""),
-                "author": authors[0] if authors else "",
-                "author_type": comments[0].get("author_type", "") if comments else "",
-                "author_association": (
-                    comments[0].get("author_association", "") if comments else ""
-                ),
-                "authors": authors,
-                "comments": [dict(comment) for comment in comments],
-                "review_id": comments[0].get("review_id", "") if comments else "",
-                "review_body": review_body,
-                "review_commit_sha": review_commit_sha,
-                "pr_state": snapshot.get("pr_state"),
-            }
-            threads.append(thread)
-        return threads
+        stable_threads = json.loads(second[1])
+        return [thread for thread in stable_threads if thread["isResolved"] is False]
 
     def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
         """Strictly fetch the bounded chronological issue-comment journal."""
@@ -256,7 +342,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             issue_number,
             owner=owner,
             name=name,
-            call=gh_call,
+            call=self._deadline_gh_call,
         )
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:

@@ -36,6 +36,7 @@ class AgentOperation(StrEnum):
     COMPACT = "compact"
     PLAN_REVIEW = "plan_review"
     IMPLEMENT_INSPECT = "implement_inspect"
+    REMEDIATION_REPLY = "remediation_reply"
     IMPLEMENT = "implement"
     TEST_FIX = "test_fix"
     ADDRESS_REVIEW = "address_review"
@@ -164,6 +165,16 @@ _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
         frozenset({SessionLifecycle.START_NEW, SessionLifecycle.RESUME_REQUIRED}),
         FilesystemMode.CHECKOUT_RO,
         _READ,
+        frozenset(),
+        False,
+        NetworkMode.PROVIDER_RELAY,
+    ),
+    (AgentRole.IMPLEMENTER, AgentOperation.REMEDIATION_REPLY): ExecutionPolicy(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.REMEDIATION_REPLY,
+        frozenset({SessionLifecycle.ONE_SHOT}),
+        FilesystemMode.SESSION_ONLY,
+        frozenset(),
         frozenset(),
         False,
         NetworkMode.PROVIDER_RELAY,

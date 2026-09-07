@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import subprocess
+import threading
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -18,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -46,6 +49,7 @@ from hephaestus.automation.pipeline.jobs import (
     JobHandle,
     JobResult,
 )
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import (
     Disposition,
     PipelineScope,
@@ -60,7 +64,9 @@ from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_RESERVATION_KEY,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -81,6 +87,35 @@ def _agent_job(repo: str = "repo-a", issue: int = 1) -> AgentJob:
         timeout_s=10,
         descr="stub agent job",
     )
+
+
+def _git(path: Path, *args: str) -> str:
+    """Run one test Git command and return its standard output."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _writer_repository(tmp_path: Path) -> tuple[Path, str]:
+    """Create one local repository and bare origin for writer handoff tests."""
+    repo = tmp_path / "writer-repository"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    revision = _git(repo, "rev-parse", "HEAD")
+    remote = tmp_path / "writer-remote.git"
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "--set-upstream", "origin", "main")
+    return repo, revision
 
 
 class StubStage:
@@ -124,7 +159,6 @@ def make_coordinator(
     loops: int = 1,
     max_workers: int = 1,
     parallel_repos: int = 1,
-    agent: str = "claude",
     dry_run: bool = False,
     serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
@@ -140,7 +174,6 @@ def make_coordinator(
         loops=loops,
         max_workers=max_workers,
         parallel_repos=parallel_repos,
-        agent=agent,
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         enable_learn=enable_learn,
@@ -1632,6 +1665,181 @@ class TestImplementationAdmission:
         assert item.state == "IMPLEMENT_WAIT"
         assert item.result is None
 
+    def test_restarted_direct_writer_reaches_implementation_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real direct-writer restart reaches the implementation request."""
+        repo, revision = _writer_repository(tmp_path)
+        first_branch = f"7-auto-impl-direct-{'a' * 32}"
+        second_branch = f"7-auto-impl-direct-{'b' * 32}"
+        completion_q: CompletionQueue = queue.Queue()
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        first_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="org/repo-a",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": first_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": revision,
+                "direct_worktree_nonce": "a" * 32,
+            },
+        )
+        second_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="org/repo-a",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": second_branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": revision,
+                "direct_worktree_nonce": "b" * 32,
+            },
+        )
+        try:
+            with patch.object(
+                worker,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
+            ):
+                assert worker._git_create_worktree(first_job).ok is True
+                restarted_result = worker._git_create_worktree(second_job)
+        finally:
+            worker.shutdown(mark_interrupted=False)
+
+        assert restarted_result.ok is True
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            serialize_file_overlap=False,
+        )
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=7,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=second_branch,
+            payload={
+                DIRECT_SCOPE_BASE_SHA_KEY: revision,
+                "issue_title": "Recover the direct writer",
+                "issue_body": "Continue after a clean restart.",
+            },
+        )
+        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        worktree_handle = JobHandle(job=second_job, on_done_state="DIRTY_DECISION_WAIT")
+        coordinator.in_flight[worktree_handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+
+        coordinator._handle_completion(worktree_handle, restarted_result)
+
+        advice_handle, advice_result = coordinator.completion_q.get_nowait()
+        assert isinstance(advice_handle.job, AthenaSkillJob)
+        coordinator._handle_completion(advice_handle, advice_result)
+
+        implementation_handle = next(iter(coordinator.in_flight))
+        assert isinstance(implementation_handle.job, AgentJob)
+        assert implementation_handle.job.descr == "implement"
+        assert implementation_handle.job.issue == 7
+        assert implementation_handle.job.cwd == Path(str(restarted_result.value["path"]))
+        assert item.payload["_impl_source_revision"] == revision
+        assert item.state == "IMPLEMENT_WAIT"
+
+    def test_restarted_adopted_writer_reaches_implementation_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real adopted-writer restart reaches the implementation request."""
+        repo, revision = _writer_repository(tmp_path)
+        branch = "7-adopted"
+        _git(repo, "switch", "-c", branch)
+        _git(repo, "push", "--set-upstream", "origin", branch)
+        _git(repo, "switch", "main")
+        completion_q: CompletionQueue = queue.Queue()
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            expected_repository="org/repo-a",
+            kwargs={
+                "issue_number": 7,
+                "branch_name": branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "sync_to_remote": True,
+                "pr_number": 7,
+                "implementation_adoption_head": revision,
+            },
+        )
+        try:
+            with (
+                patch.object(
+                    worker,
+                    "_authenticated_remote_git_configuration",
+                    return_value=({}, ("-c", "credential.helper=")),
+                ),
+                patch.object(worker, "_sync_worktree_to_remote_branch"),
+            ):
+                assert worker._git_create_worktree(job).ok is True
+                restarted_result = worker._git_create_worktree(job)
+        finally:
+            worker.shutdown(mark_interrupted=False)
+
+        assert restarted_result.ok is True
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            serialize_file_overlap=False,
+        )
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=7,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=branch,
+            payload={
+                "issue_title": "Recover the adopted writer",
+                "issue_body": "Continue after a clean adopted restart.",
+            },
+        )
+        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        worktree_handle = JobHandle(job=job, on_done_state="DIRTY_DECISION_WAIT")
+        coordinator.in_flight[worktree_handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+
+        coordinator._handle_completion(worktree_handle, restarted_result)
+
+        advice_handle, advice_result = coordinator.completion_q.get_nowait()
+        assert isinstance(advice_handle.job, AthenaSkillJob)
+        coordinator._handle_completion(advice_handle, advice_result)
+
+        implementation_handle = next(iter(coordinator.in_flight))
+        assert isinstance(implementation_handle.job, AgentJob)
+        assert implementation_handle.job.descr == "implement"
+        assert implementation_handle.job.issue == 7
+        assert implementation_handle.job.cwd == Path(str(restarted_result.value["path"]))
+        assert item.payload["_impl_source_revision"] == revision
+        assert item.state == "IMPLEMENT_WAIT"
+
     def test_relative_writer_path_matches_an_absolute_git_holder(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2518,39 +2726,6 @@ class TestImplementationAdmission:
         assert id(item) not in coordinator._implementation_file_claims
         assert "_implementation_file_claims" not in item.payload
 
-    def test_capture_claims_when_overlap_serialization_is_disabled(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A Codex publication guard receives plan claims in serial execution."""
-        coordinator, _pool, _ = make_coordinator(
-            tmp_path, monkeypatch, max_workers=1, agent="codex"
-        )
-        item = _issue_item(21, StageName.IMPLEMENTATION)
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"allowed.py"},
-        )
-
-        claims = coordinator._capture_implementation_file_claims(item)
-
-        assert claims == {(("org", "repo-a"), "allowed.py")}
-
-    def test_codex_claim_capture_rejects_an_empty_plan_manifest(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Codex must not start a writer turn without an approved file set."""
-        coordinator, _pool, _ = make_coordinator(
-            tmp_path, monkeypatch, max_workers=1, agent="codex"
-        )
-        item = _issue_item(21, StageName.IMPLEMENTATION)
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: set(),
-        )
-
-        with pytest.raises(RuntimeError, match="approved plan manifest"):
-            coordinator._capture_implementation_file_claims(item)
-
     def test_reviewed_pr_realized_diff_blocks_overlapping_direct_issue(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3195,6 +3370,34 @@ class TestImplementationAdmission:
 
 class TestDurableEventLog:
     """Optional JSONL event log mirrors the coordinator's in-memory event log."""
+
+    def test_run_start_records_bounded_executable_provenance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The first run event identifies the package and exact source revision."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path / "secret-checkout",
+            event_log_path=event_log_path,
+            package_version="1.2.3",
+            source_revision="a" * 40,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        coordinator.run()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        run_start = records[0]
+        assert run_start["event"] == "run_start"
+        assert run_start["fields"][0]["package_version"] == "1.2.3"
+        assert run_start["fields"][0]["source_revision"] == "a" * 40
+        assert "secret-checkout" not in json.dumps(run_start)
 
     def test_observability_tick_zeroes_previous_circuit_breaker_state(self, tmp_path: Path) -> None:
         """A transition leaves exactly one active state gauge for each breaker."""
@@ -3996,6 +4199,30 @@ class TestPipelineScopeWiring:
         )
 
         assert coordinator._stage_config.force is True
+
+    def test_codex_isolation_inputs_are_propagated_to_stage_context(self, tmp_path: Path) -> None:
+        """The stage receives each typed Codex isolation input."""
+        lock_path = (tmp_path / "deployment-lock.json").absolute()
+        digest = "c" * 64
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[1],
+            loops=1,
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            codex_isolation_adapter="production",
+            codex_isolation_deployment_lock=lock_path,
+            codex_isolation_deployment_lock_sha256=digest,
+        )
+
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._stage_config.codex_isolation_adapter == "production"
+        assert coordinator._stage_config.codex_isolation_deployment_lock == lock_path
+        assert coordinator._stage_config.codex_isolation_deployment_lock_sha256 == digest
 
     def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
         """--force must NOT pull a PRE-scope stage forward into the scope.

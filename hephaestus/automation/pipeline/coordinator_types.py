@@ -227,6 +227,8 @@ class PipelineConfig:
     # source state out of the durable configuration and makes reseeds restart
     # discovery from GitHub, which remains the sole routing authority.
     repo_source_factory: Callable[[], Iterator[str]] | None = None
+    package_version: str = "unknown"
+    source_revision: str | None = None
     issues: list[int] = field(default_factory=list)
     prs: list[int] = field(default_factory=list)
     loops: int = 1
@@ -242,6 +244,9 @@ class PipelineConfig:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    codex_isolation_adapter: str | None = None
+    codex_isolation_deployment_lock: Path | None = None
+    codex_isolation_deployment_lock_sha256: str | None = None
     model: str = ""
     planner_model: str = ""
     reviewer_model: str = ""

@@ -74,29 +74,6 @@ def test_pi_builder_uses_only_explicit_directory_and_temporary_paths(
     assert environment["PI_SKIP_VERSION_CHECK"] == "1"
 
 
-def test_codex_automation_builder_uses_only_job_owned_state_roots(
-    platform_env: dict[str, str], tmp_path: Path
-) -> None:
-    """Codex implementation does not inherit operator state directories."""
-    builder = getattr(child_environments, "build_codex_automation_env", None)
-
-    assert callable(builder)
-    environment = builder(profile_root=tmp_path / "job-profile")
-
-    root = tmp_path / "job-profile"
-    assert environment["HOME"] == str(root / "home")
-    assert environment["CODEX_HOME"] == str(root / "codex")
-    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {str(root / "tmp")}
-    assert environment["USERPROFILE"] == str(root / "home")
-    assert environment["APPDATA"] == str(root / "appdata")
-    assert environment["LOCALAPPDATA"] == str(root / "localappdata")
-    assert environment["XDG_CONFIG_HOME"] == str(root / "xdg-config")
-    assert environment["XDG_CACHE_HOME"] == str(root / "xdg-cache")
-    assert environment["XDG_DATA_HOME"] == str(root / "xdg-data")
-    assert environment["HOME"] != platform_env["HOME"]
-    assert environment["TMPDIR"] != platform_env["TMPDIR"]
-
-
 def test_auth_and_signing_bridges_are_boundary_specific(
     monkeypatch: pytest.MonkeyPatch,
     platform_env: dict[str, str],
@@ -168,3 +145,112 @@ def test_correlation_id_is_explicit_validated_and_non_mutating() -> None:
     assert source == {"PATH": os.defpath}
     with pytest.raises(ValueError, match="non-empty token"):
         child_environments.with_correlation_id(source, "bad\0trace")
+
+
+def test_codex_implementation_environment_uses_only_receipt_git_values(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """The implementation child gets the exact receipt-owned Git environment."""
+    monkeypatch.setenv("GIT_DIR", "/poison/git")
+    worktree = tmp_path / "worktree"
+    fixed = {
+        "GIT_DIR": str(tmp_path / "git-dir"),
+        "GIT_WORK_TREE": str(worktree),
+        "GIT_INDEX_FILE": str(tmp_path / "index"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+
+    environment = child_environments.build_codex_implementation_child_env(
+        codex_home=tmp_path / "private-codex",
+        fixed_git_environment=fixed,
+    )
+
+    assert environment["CODEX_HOME"] == str(tmp_path / "private-codex")
+    assert {name: environment[name] for name in fixed} == fixed
+
+
+def test_codex_implementation_environment_replaces_ambient_private_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """The implementation child uses only profile-owned private directories."""
+    private = tmp_path / "private-codex"
+    poisoned = str(tmp_path / "operator-state")
+    for name in (
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+    ):
+        monkeypatch.setenv(name, poisoned)
+    fixed = {
+        "GIT_DIR": str(tmp_path / "git-dir"),
+        "GIT_WORK_TREE": str(tmp_path / "worktree"),
+        "GIT_INDEX_FILE": str(tmp_path / "index"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+
+    environment = child_environments.build_codex_implementation_child_env(
+        codex_home=private,
+        fixed_git_environment=fixed,
+    )
+
+    assert environment["HOME"] == str(private / "home")
+    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {str(private / "tmp")}
+    assert environment["USERPROFILE"] == str(private / "home")
+    assert environment["APPDATA"] == str(private / "appdata")
+    assert environment["LOCALAPPDATA"] == str(private / "localappdata")
+    assert environment["XDG_CONFIG_HOME"] == str(private / "xdg" / "config")
+    assert environment["XDG_CACHE_HOME"] == str(private / "xdg" / "cache")
+    assert environment["XDG_DATA_HOME"] == str(private / "xdg" / "data")
+    assert poisoned not in environment.values()
+
+
+def test_codex_implementation_environment_rejects_incomplete_git_receipt(
+    platform_env: dict[str, str], tmp_path: Path
+) -> None:
+    """The child environment rejects a partial Git authority set."""
+    with pytest.raises(ValueError, match="fixed Git environment"):
+        child_environments.build_codex_implementation_child_env(
+            codex_home=tmp_path / "private-codex",
+            fixed_git_environment={"GIT_DIR": str(tmp_path / "git-dir")},
+        )
+
+
+def test_codex_implementation_environment_rejects_enabled_replace_objects(
+    platform_env: dict[str, str], tmp_path: Path
+) -> None:
+    """The child environment rejects enabled Git replacement objects."""
+    fixed = {
+        "GIT_DIR": str(tmp_path / "git-dir"),
+        "GIT_WORK_TREE": str(tmp_path / "worktree"),
+        "GIT_INDEX_FILE": str(tmp_path / "index"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "0",
+    }
+
+    with pytest.raises(ValueError, match="invalid value"):
+        child_environments.build_codex_implementation_child_env(
+            codex_home=tmp_path / "private-codex",
+            fixed_git_environment=fixed,
+        )

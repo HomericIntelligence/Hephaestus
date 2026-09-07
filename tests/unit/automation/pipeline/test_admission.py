@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.admission import (
     _parse_planned_files,
     _select_non_overlapping,
     order_for_implementation,
+    parse_publication_scope_files,
 )
 from hephaestus.automation.review_journal import render_current_plan
 
@@ -70,41 +71,78 @@ class TestParsePlannedFiles:
         )
         assert _parse_planned_files(body) == {"hephaestus/automation/ci_driver.py"}
 
-    def test_parse_planned_files_captures_safe_bare_filenames(self) -> None:
-        """A safe top-level path remains part of the approved manifest."""
+    def test_parse_planned_files_bare_filenames_not_captured(self) -> None:
+        """Bare filenames without directory (e.g., `pyproject.toml`) are NOT captured."""
         body = "# Implementation Plan\n\n## Files to Modify\n\n- `pyproject.toml`\n"
-        assert _parse_planned_files(body) == {"pyproject.toml"}
+        assert _parse_planned_files(body) == set()
+
+    def test_publication_scope_captures_top_level_files(self) -> None:
+        """The publication allowlist includes top-level planned files."""
+        body = "## Files to Modify\n\n- `pyproject.toml`\n- `uv.lock`\n"
+
+        assert parse_publication_scope_files(body) == {"pyproject.toml", "uv.lock"}
 
     def test_parse_planned_files_case_insensitive_heading(self) -> None:
         """## Files to Modify/Create headings are case-insensitive."""
         body = "# Implementation Plan\n\n## FILES TO MODIFY\n\n- `hephaestus/automation/test.py`\n"
         assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
 
-    @pytest.mark.parametrize(
-        "path",
-        (
-            "/etc/passwd",
-            "../outside.py",
-            "hephaestus/../outside.py",
-            ":(glob)hephaestus/**/*.py",
-            "hephaestus/*.py",
-            "hephaestus\\runtime.py",
-        ),
-    )
-    def test_parse_planned_files_rejects_unsafe_manifest_entries(self, path: str) -> None:
-        """Traversal, pathspec, glob, and platform-escape syntax has no authority."""
-        body = f"# Implementation Plan\n\n## Files to Modify\n\n- `{path}`\n"
-        assert _parse_planned_files(body) == set()
 
-    def test_parse_planned_files_ignores_backticks_in_explanatory_prose(self) -> None:
-        """Only declared list entries and file subheadings create modification authority."""
+class TestPublicationScopeFiles:
+    """Read complete file declarations from the accepted plan."""
+
+    @pytest.mark.parametrize("heading", ["Files to Modify", "Files to Create", "File Changes"])
+    def test_complete_safe_paths(self, heading: str) -> None:
+        paths = {
+            "src/main.py",
+            ".github/workflows/test.yml",
+            ".pre-commit-config.yaml",
+            "justfile",
+            "docs/My Guide",
+            "bin/run",
+        }
+        body = f"## {heading}\n" + "\n".join(f"- `{path}`" for path in paths)
+        assert parse_publication_scope_files(body) == paths
+
+    @pytest.mark.parametrize(
+        "path", ["../outside", "/absolute", "./local", "a/../b", "bad\\path", "bad\x00path", ""]
+    )
+    def test_invalid_declaration_rejects_complete_manifest(self, path: str) -> None:
+        body = f"## Files to Modify\n- `src/main.py`\n- `{path}`\n"
+        assert parse_publication_scope_files(body) == set()
+
+    def test_file_subheading_ignores_prose_and_other_sections(self) -> None:
         body = (
-            "# Implementation Plan\n\n"
-            "## Files to Modify\n\n"
-            "Use `hephaestus/automation/unapproved.py` only as an example.\n"
-            "- `hephaestus/automation/approved.py`\n"
+            "## Files to Modify\n### `src/main.py`\n"
+            "Replace the call at `src/main.py:142` with `os.replace`.\n"
+            "## Verification\n### Files to Modify\n- `unrelated/file.py`\n"
         )
-        assert _parse_planned_files(body) == {"hephaestus/automation/approved.py"}
+        assert parse_publication_scope_files(body) == {"src/main.py"}
+
+    @pytest.mark.parametrize("fence", ["```", "~~~~"])
+    def test_fenced_examples_do_not_declare_files(self, fence: str) -> None:
+        body = (
+            f"{fence}markdown\n## Files to Modify\n- `example/file.py`\n{fence}\n"
+            "## Files to Modify\n- `src/main.py`\n"
+            f"{fence}\n- `other/example.py`\n{fence}\n"
+        )
+        assert parse_publication_scope_files(body) == {"src/main.py"}
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "|`.github/workflows/test.yml`|Update.|",
+            "-\t`.github/workflows/test.yml`",
+            "1.\t`.github/workflows/test.yml`",
+        ],
+    )
+    def test_markdown_declaration_spacing(self, entry: str) -> None:
+        body = f"## Files to Modify\n- `src/main.py`\n{entry}\n"
+        assert parse_publication_scope_files(body) == {"src/main.py", ".github/workflows/test.yml"}
+
+    def test_heading_suffix_does_not_grant_scope(self) -> None:
+        body = "## Files to Modify Examples\n- `example/file.py`\n"
+        assert parse_publication_scope_files(body) == set()
 
 
 class TestCoordinatorCapOwnership:

@@ -1,6 +1,7 @@
 """Tests for git utility functions."""
 
 import inspect
+import os
 import subprocess
 import sys
 from collections.abc import Generator
@@ -12,6 +13,7 @@ import pytest
 
 import hephaestus.automation.git_runtime as git_runtime
 from hephaestus.automation import git_utils
+from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.git_utils import (
     DetachedHeadPushError,
     DetachedHeadPushRemoteHeadChangedError,
@@ -105,64 +107,29 @@ class TestIssueAutoImplBranchName:
 class TestCommitIfChanges:
     """Tests for commit_if_changes."""
 
-    def test_dirty_tree_imports_real_commit_helper_on_demand(self) -> None:
-        """A cold git-utils import loads the real commit module only on use."""
+    def test_import_does_not_load_github_product_modules(self) -> None:
+        """A cold Git utility import does not load PR or GitHub modules."""
         code = r"""
-import builtins
 import sys
-from pathlib import Path
-from unittest.mock import Mock, patch
+import hephaestus.automation.git_utils
 
-import hephaestus.automation.git_utils as git_utils
-
-if "hephaestus.automation.pr_manager" in sys.modules:
-    raise SystemExit("pr_manager was imported before commit_if_changes")
-
-calls = []
-def fake_commit_changes(*args, **kwargs):
-    calls.append((args, kwargs))
-
-real_import = builtins.__import__
-def import_hook(name, globals=None, locals=None, fromlist=(), level=0):
-    module = real_import(name, globals, locals, fromlist, level)
-    if (
-        level == 1
-        and name == "pr_manager"
-        and globals is not None
-        and globals.get("__package__") == "hephaestus.automation"
+for module in sys.modules:
+    if module == "hephaestus.automation.pr_manager" or module.startswith(
+        "hephaestus.automation.github_api"
     ):
-        module.commit_changes = fake_commit_changes
-        assert "hephaestus.automation.pr_manager" in sys.modules
-    return module
-
-builtins.__import__ = import_hook
-try:
-    with patch.object(git_utils, "run", return_value=Mock(stdout=" M fixed.py\n")):
-        assert git_utils.commit_if_changes(123, Path("/tmp/worktree"), "codex") is True
-finally:
-    builtins.__import__ = real_import
-
-assert calls == [((123, Path("/tmp/worktree"), "codex"), {
-    "allowed_paths": None,
-    "git_message_timeout": 1200,
-})]
+        raise SystemExit(f"forbidden product module loaded: {module}")
 """
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
 
         assert result.returncode == 0, result.stderr + result.stdout
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_dirty_tree_commits_with_selected_agent(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
         git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
 
-        assert commit_if_changes(123, tmp_path, "codex") is True
+        assert commit_if_changes(123, tmp_path, "codex", issue_title="Test issue") is True
 
         git_utils_mocks.run.assert_called_once_with(
             ["git", "status", "--porcelain"],
@@ -170,16 +137,123 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
             capture_output=True,
         )
         mock_commit.assert_called_once_with(
-            123, tmp_path, "codex", allowed_paths=None, git_message_timeout=1200
+            CommitIssueMetadata(123, "Test issue", ""),
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
+    def test_dirty_tree_returns_the_requested_commit_receipt(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A recovery caller receives the exact commit helper SHA."""
+        child = "b" * 40
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
+        mock_commit.return_value = child
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "codex",
+                expected_tree_sha="c" * 40,
+                return_commit_sha=True,
+                issue_title="Test issue",
+            )
+            == child
+        )
+
+        mock_commit.assert_called_once_with(
+            CommitIssueMetadata(123, "Test issue", ""),
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            expected_tree_sha="c" * 40,
+            return_commit_sha=True,
+            git_message_timeout=1200,
+        )
+
+    @patch("hephaestus.automation.git_utils._commit_changes")
+    def test_inspected_manifest_bypasses_live_status_and_forwards_exact_paths(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A host inspection receipt is the exact input to the commit helper."""
+        git_env = {"GIT_CONFIG_NOSYSTEM": "1"}
+        add_paths = ("src/add.py",)
+        update_paths = ("src/delete.py",)
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "codex",
+                git_env=git_env,
+                expected_add_paths=add_paths,
+                expected_update_paths=update_paths,
+                disable_hooks=True,
+                issue_title="Test issue",
+            )
+            is True
+        )
+
+        git_utils_mocks.run.assert_not_called()
+        mock_commit.assert_called_once_with(
+            CommitIssueMetadata(123, "Test issue", ""),
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            git_message_timeout=1200,
+            git_env=git_env,
+            expected_add_paths=add_paths,
+            expected_update_paths=update_paths,
+            disable_hooks=True,
+        )
+
+    @patch("hephaestus.automation.git_utils._commit_changes")
+    def test_live_status_and_commit_helper_share_the_git_environment(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Ordinary inspection uses the same isolated Git environment."""
+        git_env = {"GIT_CONFIG_NOSYSTEM": "1"}
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "codex",
+                git_env=git_env,
+                issue_title="Test issue",
+            )
+            is True
+        )
+
+        git_utils_mocks.run.assert_called_once_with(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+            env=git_env,
+        )
+        mock_commit.assert_called_once_with(
+            CommitIssueMetadata(123, "Test issue", ""),
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            git_message_timeout=1200,
+            git_env=git_env,
+        )
+
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_dirty_tree_threads_timeout_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
         git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
 
-        assert commit_if_changes(123, tmp_path, "codex", timeout=42) is True
+        assert (
+            commit_if_changes(123, tmp_path, "codex", timeout=42, issue_title="Test issue") is True
+        )
 
         git_utils_mocks.run.assert_called_once_with(
             ["git", "status", "--porcelain"],
@@ -188,7 +262,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
             timeout=42,
         )
         mock_commit.assert_called_once_with(
-            123,
+            CommitIssueMetadata(123, "Test issue", ""),
             tmp_path,
             "codex",
             allowed_paths=None,
@@ -196,17 +270,26 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_dirty_tree_threads_configured_agent_model_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
         """The GitJob model override reaches the commit-message helper unchanged."""
         git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\\n")
 
-        assert commit_if_changes(123, tmp_path, "codex", agent_model="sol:medium") is True
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "codex",
+                agent_model="sol:medium",
+                issue_title="Test issue",
+            )
+            is True
+        )
 
         mock_commit.assert_called_once_with(
-            123,
+            CommitIssueMetadata(123, "Test issue", ""),
             tmp_path,
             "codex",
             allowed_paths=None,
@@ -214,7 +297,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_dirty_tree_threads_pi_directory_to_commit_helper(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -222,10 +305,19 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
         git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\\n")
         pi_dir = tmp_path / "pi-agent"
 
-        assert commit_if_changes(123, tmp_path, "pi", pi_dir=pi_dir) is True
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "pi",
+                pi_dir=pi_dir,
+                issue_title="Test issue",
+            )
+            is True
+        )
 
         mock_commit.assert_called_once_with(
-            123,
+            CommitIssueMetadata(123, "Test issue", ""),
             tmp_path,
             "pi",
             allowed_paths=None,
@@ -233,7 +325,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
             pi_dir=pi_dir,
         )
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_dirty_tree_forwards_allowed_paths(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -245,19 +337,20 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
                 tmp_path,
                 "codex",
                 allowed_paths=("fixed.py",),
+                issue_title="Test issue",
             )
             is True
         )
 
         mock_commit.assert_called_once_with(
-            123,
+            CommitIssueMetadata(123, "Test issue", ""),
             tmp_path,
             "codex",
             allowed_paths=("fixed.py",),
             git_message_timeout=1200,
         )
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_clean_tree_returns_false_without_commit(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -267,7 +360,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
 
         mock_commit.assert_not_called()
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_clean_tree_does_not_request_signing_environment(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -281,6 +374,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
                 tmp_path,
                 "claude",
                 signing_env_factory=signing_factory,
+                issue_title="Test issue",
             )
             is False
         )
@@ -288,7 +382,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
         signing_factory.assert_not_called()
         mock_commit.assert_not_called()
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_dirty_tree_resolves_signing_environment_before_commit(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -303,13 +397,14 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
                 tmp_path,
                 "claude",
                 signing_env_factory=signing_factory,
+                issue_title="Test issue",
             )
             is True
         )
 
         signing_factory.assert_called_once_with()
         mock_commit.assert_called_once_with(
-            123,
+            CommitIssueMetadata(123, "Test issue", ""),
             tmp_path,
             "claude",
             allowed_paths=None,
@@ -317,14 +412,26 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
             signing_env=signing_env,
         )
 
-    @patch("hephaestus.automation.pr_manager.commit_changes")
+    @patch("hephaestus.automation.git_utils._commit_changes")
     def test_commit_runtime_error_returns_false(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
         git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
         mock_commit.side_effect = RuntimeError("nothing commit-safe")
 
-        assert commit_if_changes(123, tmp_path, "claude") is False
+        assert commit_if_changes(123, tmp_path, "claude", issue_title="Test issue") is False
+
+    @patch("hephaestus.automation.git_utils._commit_changes")
+    def test_dirty_tree_rejects_missing_issue_metadata_before_commit(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A Git worker cannot invent issue metadata after it starts."""
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
+
+        with pytest.raises(ValueError, match="issue title is unavailable"):
+            commit_if_changes(123, tmp_path, "codex")
+
+        mock_commit.assert_not_called()
 
 
 class TestPushBranch:
@@ -371,10 +478,10 @@ class TestPushBranch:
 class TestDirectScopeBranchReservation:
     """Atomic server-side ownership checks for direct-scope implementation branches."""
 
-    def test_reserve_requires_remote_branch_to_be_absent_and_bypasses_hooks(
+    def test_reserve_requires_remote_branch_to_be_absent_and_disables_hooks(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
-        """The metadata-only ownership claim is the sole hook-bypassing push."""
+        """The metadata-only ownership claim disables hooks with ``--no-verify``."""
         pin = "a" * 40
 
         reserve_remote_branch_if_absent("2452-auto-impl", pin, tmp_path, timeout=42)
@@ -608,9 +715,10 @@ class TestDirectScopeBranchReservation:
 class TestPushDetachedHead:
     """Tests for publishing direct PR-review commits from a detached checkout."""
 
-    def test_pushes_head_to_branch_with_the_reviewed_head_lease(
+    def test_ordinary_push_retains_hooks_and_uses_the_reviewed_head_lease(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
+        """An ordinary implementation push has no hook-bypass option."""
         reviewed_head = "a" * 40
 
         push_head_to_branch("123-auto-impl", reviewed_head, tmp_path, timeout=42)
@@ -646,11 +754,38 @@ class TestPushDetachedHead:
             f"{source_sha}:refs/heads/123-auto-impl"
         )
 
+    def test_recovery_push_disables_hooks_for_one_command(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A validated recovery push bypasses repository hooks only once."""
+        reviewed_head = "a" * 40
+
+        push_head_to_branch(
+            "123-auto-impl",
+            reviewed_head,
+            tmp_path,
+            disable_hooks=True,
+        )
+
+        git_utils_mocks.run.assert_called_once_with(
+            [
+                "git",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "push",
+                f"--force-with-lease=refs/heads/123-auto-impl:{reviewed_head}",
+                "origin",
+                "HEAD:refs/heads/123-auto-impl",
+            ],
+            cwd=tmp_path,
+        )
+
     def test_push_and_probe_use_supplied_authenticated_transport(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
         """The lease push and its authoritative remote probe share trusted transport."""
         expected_head = "a" * 40
+        remote = "https://github.com/test/repo.git"
         env = {"GIT_TERMINAL_PROMPT": "0"}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         git_utils_mocks.run.side_effect = [
@@ -665,6 +800,7 @@ class TestPushDetachedHead:
                 tmp_path,
                 env=env,
                 remote_config=remote_config,
+                remote=remote,
             )
 
         assert [call.args[0] for call in git_utils_mocks.run.call_args_list] == [
@@ -673,7 +809,7 @@ class TestPushDetachedHead:
                 *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/123-auto-impl:{expected_head}",
-                "origin",
+                remote,
                 "HEAD:refs/heads/123-auto-impl",
             ],
             [
@@ -681,7 +817,7 @@ class TestPushDetachedHead:
                 *remote_config,
                 "ls-remote",
                 "--refs",
-                "origin",
+                remote,
                 "refs/heads/123-auto-impl",
             ],
         ]

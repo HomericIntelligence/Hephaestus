@@ -891,6 +891,35 @@ class TestMain:
         assert reviewer_class.call_args.args[0].reviewer_model == ""
         assert reviewer_class.call_args.args[0].fallback_model == ""
 
+    def test_unknown_claude_alias_stops_before_terminal_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An invalid Claude alias produces a CLI error before review work."""
+        from hephaestus.automation import plan_reviewer
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "plan-reviewer",
+                "--issues",
+                "1",
+                "--agent",
+                "claude",
+                "--reviewer-model",
+                "terra-lite",
+            ],
+        )
+        with (
+            patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated,
+            patch.object(plan_reviewer, "terminal_guard") as terminal,
+            pytest.raises(SystemExit) as error,
+        ):
+            plan_reviewer.main()
+
+        assert error.value.code == 2
+        authenticated.assert_not_called()
+        terminal.assert_not_called()
+
     def test_success_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

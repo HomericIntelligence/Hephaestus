@@ -492,7 +492,7 @@ class TestStepWatchdog:
         )
 
         with file_lock(
-            manager._lane_lock_path(2983, SourceLane.IMPLEMENTATION),
+            manager._lane_lock_path(2983, SourceLane.REVIEW),
             require_exclusive=True,
         ):
             with caplog.at_level("WARNING"):

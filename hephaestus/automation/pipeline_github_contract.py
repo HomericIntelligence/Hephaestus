@@ -2,7 +2,9 @@
 
 from typing import TYPE_CHECKING
 
-from .github_api.graphql import GraphQLMutationSpec, GraphQLQuerySpec
+from .github_api.graphql import GraphQLSpec
+
+type _S = int | str
 
 if TYPE_CHECKING:
     import subprocess
@@ -10,8 +12,9 @@ if TYPE_CHECKING:
     from typing import Any, Protocol
 
     from hephaestus.automation.arming_state import ArmingStateStore
+    from hephaestus.automation.operation_deadlines import OperationDeadlineHost
 
-    class _PipelineGitHubHost(Protocol):
+    class _PipelineGitHubHost(OperationDeadlineHost, Protocol):
         """State and cross-collaborator methods supplied by ``PipelineGitHub``."""
 
         org: str
@@ -34,14 +37,10 @@ if TYPE_CHECKING:
         def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool:
             pass
 
-        def _graphql[T](
-            self,
-            spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
-            **fields: int | str,
-        ) -> T:
+        def _graphql[T](self, spec: GraphQLSpec[T], **fields: int | str) -> T:
             pass
 
-        def _graphql_with_timeout[T](self, spec: GraphQLMutationSpec[T], timeout: float) -> T:
+        def _graphql_with_timeout[T](self, spec: GraphQLSpec[T], timeout: float, **fields: _S) -> T:
             pass
 
         def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -102,6 +101,9 @@ if TYPE_CHECKING:
             pass
 
         def _review_thread_snapshot(self, pr_number: int, thread_id: str) -> dict[str, Any] | None:
+            pass
+
+        def _implementation_reply_lock_path(self, pr_number: int) -> Path:
             pass
 
         def upsert_issue_comment(

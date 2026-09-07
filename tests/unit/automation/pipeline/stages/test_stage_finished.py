@@ -213,7 +213,220 @@ class TestCleanup:
             "expected_branch": "42-fix",
             "expected_head": "a" * 40,
         }
-        assert result.on_done_state == "DONE"
+        assert result.on_done_state == "CLEANUP"
+
+    def test_worktree_cleanup_retries_twice_then_preserves_primary_result(
+        self,
+        stage: FinishedStage,
+        ledger: list[ItemResult],
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """Cleanup failure is separate from the previously recorded primary result."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="RECORD")
+        item.branch = "42-fix"
+        primary = item.result
+        assert stage.step(item, ctx) == Continue(next_state="CLEANUP")
+        item.state = "CLEANUP"
+
+        first = stage.step(item, ctx)
+        assert isinstance(first, JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="active receipt remains"), ctx)
+
+        second = stage.step(item, ctx)
+        assert isinstance(second, JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="active receipt remains"), ctx)
+
+        terminal = stage.step(item, ctx)
+        assert terminal == Continue(next_state="DONE")
+        assert preserved == [("repo-a", 42, "/wt/issue-42")]
+        assert item.result is primary
+        assert ledger == [primary]
+        assert item.payload["_learning_cleanup_succeeded"] is False
+        assert item.payload["_learning_cleanup_error"] == "active receipt remains"
+
+    def test_worktree_cleanup_failure_preserves_failed_primary_result(
+        self,
+        stage: FinishedStage,
+        ledger: list[ItemResult],
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """Cleanup evidence does not replace an earlier failed primary result."""
+        ctx = make_ctx()
+        item = _item(
+            passed=False,
+            reason="implementation failed",
+            worktree="/wt/issue-42",
+            state="RECORD",
+        )
+        item.payload["_direct_scope_local_branch_cleanup"] = {
+            "branch": "42-fix",
+            "base_sha": "a" * 40,
+        }
+        item.branch = "42-fix"
+        primary = item.result
+        assert stage.step(item, ctx) == Continue(next_state="CLEANUP")
+        item.state = "CLEANUP"
+
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="cleanup failed"), ctx)
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="cleanup failed"), ctx)
+
+        assert item.result is primary
+        assert ledger == [primary]
+        assert preserved == [("repo-a", 42, "/wt/issue-42")]
+
+    def test_cleanup_exhaustion_records_durable_post_processing_failure(
+        self,
+        stage: FinishedStage,
+        ledger: list[ItemResult],
+        make_ctx: Any,
+    ) -> None:
+        """Cleanup exhaustion writes journal evidence without changing the result."""
+        completions: list[tuple[str, bool, str]] = []
+        ctx = make_ctx(
+            learning_journal=SimpleNamespace(
+                load=lambda key: {"status": "succeeded"},
+                finish_cleanup=lambda key, *, succeeded, error: completions.append(
+                    (key, succeeded, error)
+                ),
+            )
+        )
+        item = _item(passed=True, worktree="/wt/issue-42", state="RECORD")
+        primary = item.result
+        assert primary is not None
+        item.post_processing = PostProcessingRecord(
+            result=primary,
+            resume_stage=StageName.FINISHED,
+            intent_keys=("post_merge:repo-a:42:142",),
+            cleanup_payload={},
+        )
+        assert stage.step(item, ctx) == Continue(next_state="CLEANUP")
+        item.state = "CLEANUP"
+
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="first failure"), ctx)
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="second failure"), ctx)
+
+        assert completions == [("post_merge:repo-a:42:142", False, "second failure")]
+        assert item.result is primary
+        assert ledger == [primary]
+
+    def test_successful_worktree_cleanup_reaches_done_without_a_second_request(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """A successful retry transition does not submit duplicate cleanup."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        assert stage.step(item, ctx) == Continue(next_state="DONE")
+
+    def test_successful_cleanup_retry_does_not_record_a_terminal_failure(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """A recovered cleanup attempt records the final successful state."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="temporary failure"), ctx)
+        assert "_learning_cleanup_succeeded" not in item.payload
+        assert "_learning_cleanup_error" not in item.payload
+
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        assert stage.step(item, ctx) == Continue(next_state="DONE")
+        assert "_learning_cleanup_succeeded" not in item.payload
+        assert "_learning_cleanup_error" not in item.payload
+
+    def test_progressive_cleanup_can_finish_after_more_than_two_batches(
+        self,
+        stage: FinishedStage,
+        make_ctx: Any,
+    ) -> None:
+        """Bounded forward progress does not consume the failure retry cap."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+
+        for _batch in range(3):
+            assert isinstance(stage.step(item, ctx), JobRequest)
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=False,
+                    value={"cleanup_progress": True},
+                    error="Codex session root cleanup limit exceeded",
+                ),
+                ctx,
+            )
+
+        assert item.payload["_worktree_cleanup_progress_batches"] == 3
+        assert item.payload.get("_worktree_cleanup_attempts", 0) == 0
+        assert "_worktree_cleanup_exhausted" not in item.payload
+        assert isinstance(stage.step(item, ctx), JobRequest)
+
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        assert stage.step(item, ctx) == Continue(next_state="DONE")
+        assert "_learning_cleanup_succeeded" not in item.payload
+        assert "_learning_cleanup_error" not in item.payload
+
+    def test_worktree_cleanup_retry_count_survives_stage_reconstruction(
+        self,
+        ledger: list[ItemResult],
+        preserved: list[tuple[str, int, str]],
+        recovery_preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """Restarted terminal cleanup honors the stored attempt cap."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="RECORD")
+        first_stage = FinishedStage(ledger, preserved, recovery_preserved)
+        assert first_stage.step(item, ctx) == Continue(next_state="CLEANUP")
+        item.state = "CLEANUP"
+
+        assert isinstance(first_stage.step(item, ctx), JobRequest)
+        first_stage.on_job_done(item, JobResult(ok=False, error="first failure"), ctx)
+
+        restarted = FinishedStage(ledger, preserved, recovery_preserved)
+        assert isinstance(restarted.step(item, ctx), JobRequest)
+        restarted.on_job_done(item, JobResult(ok=False, error="second failure"), ctx)
+
+        assert restarted.step(item, ctx) == Continue(next_state="DONE")
+        assert item.payload["_worktree_cleanup_attempts"] == 2
+        assert item.result is not None and item.result.passed is True
+        assert ledger == [item.result]
+
+    def test_cleanup_failure_survives_bounded_ledger_detail_eviction(
+        self,
+        stage: FinishedStage,
+        ledger: list[ItemResult],
+        make_ctx: Any,
+    ) -> None:
+        """A trimmed detail entry does not hide the item's terminal failure."""
+        ctx = make_ctx()
+        item = _item(passed=True, worktree="/wt/issue-42", state="RECORD")
+        assert stage.step(item, ctx) == Continue(next_state="CLEANUP")
+        item.state = "CLEANUP"
+        ledger.clear()
+
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="first failure"), ctx)
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="second failure"), ctx)
+
+        assert item.result is not None and item.result.passed is True
+        assert item.result.reason == "ok"
+        assert ledger == []
 
     def test_pending_learning_preserves_worktree_before_cleanup(
         self,
@@ -533,10 +746,14 @@ class TestCleanup:
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
         }
+        ctx = make_ctx()
 
-        result = stage.step(item, make_ctx())
+        result = stage.step(item, ctx)
         assert isinstance(result, JobRequest)
-        stage.on_job_done(item, JobResult(ok=False, error="worktree contains changes"), make_ctx())
+        stage.on_job_done(item, JobResult(ok=False, error="worktree contains changes"), ctx)
+        retry = stage.step(item, ctx)
+        assert isinstance(retry, JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, error="worktree contains changes"), ctx)
 
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
 
@@ -608,7 +825,7 @@ class TestCleanup:
 
 
 class TestTerminal:
-    """DONE is terminal; job failures are logged, never fatal."""
+    """DONE is terminal and unmatched job failures remain visible."""
 
     def test_done_emits_terminal_pass(self, stage: FinishedStage, make_ctx: Any) -> None:
         result = stage.step(_item(state="DONE"), make_ctx())

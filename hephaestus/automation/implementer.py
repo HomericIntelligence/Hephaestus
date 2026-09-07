@@ -587,6 +587,9 @@ def main() -> int:
         disable_pi_automation=args.disable_pi_automation,
         auth_status_timeout=args.auth_status_timeout,
         pi_dir=args.pi_dir,
+        codex_isolation_adapter=args.codex_isolation_adapter,
+        codex_isolation_deployment_lock=args.codex_isolation_deployment_lock,
+        codex_isolation_deployment_lock_sha256=args.codex_isolation_deployment_lock_sha256,
         model=args.model,
         implementer_model=implementer_model(
             args.implementer_model or args.model or None, agent=agent

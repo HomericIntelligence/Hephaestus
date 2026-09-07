@@ -88,3 +88,14 @@ def test_notice_documents_every_runtime_dependency() -> None:
         f"{[_dist_name(s) for s in missing]} "
         "(declared in pyproject.toml [project].dependencies)"
     )
+
+
+def test_notice_documents_the_sigstore_automation_dependency() -> None:
+    """NOTICE must state the license of the shipped Sigstore extra."""
+    repo_root = Path(__file__).resolve().parents[3]
+    with (repo_root / "pyproject.toml").open("rb") as stream:
+        automation = tomllib.load(stream)["project"]["optional-dependencies"]["automation"]
+    notice = (repo_root / "NOTICE").read_text(encoding="utf-8")
+
+    assert any(_dist_name(spec) == "sigstore" for spec in automation)
+    assert re.search(r"^\s*sigstore\s+Apache-2\.0\s*$", notice, re.MULTILINE)

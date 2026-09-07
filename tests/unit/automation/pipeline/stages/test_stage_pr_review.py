@@ -186,6 +186,7 @@ def test_pr_review_post_dispatches_without_inline_github_calls(
     assert isinstance(result, JobRequest)
     assert isinstance(result.job, GitHubJob)
     assert isinstance(result.job.request, ReconcilePrReviewRequest)
+    assert result.job.request.deadline_s > time.monotonic()
     assert result.job.request.reviewed_head_sha == "a" * 40
     assert result.job.request.findings.thaw() == []
     assert elapsed < 0.25
@@ -251,6 +252,11 @@ def test_pr_review_recovery_handoff_dispatches_without_inline_github_calls(
     assert isinstance(result.job, GitHubJob)
     assert isinstance(result.job.request, DeliverReplyHandoffRequest)
     assert result.job.request.handoff.thaw() == item.payload["pending_implementation_reply_handoff"]
+    assert result.job.request.deadline_s is not None
+    assert result.job.request.deadline_s > started
+    retried = stage.step(item, ctx)
+    assert isinstance(retried, JobRequest)
+    assert retried.job.request == result.job.request
     assert elapsed < 0.25
 
 
@@ -416,7 +422,6 @@ class TestExplicitPrReviewRetry:
                 self.live_threads = [
                     {
                         "id": f"inherited-{index}",
-                        "isResolved": False,
                         "path": f"inherited-{index}.py",
                         "line": index,
                         "side": "RIGHT",
@@ -429,15 +434,9 @@ class TestExplicitPrReviewRetry:
                             {
                                 "id": f"inherited-comment-{index}",
                                 "author": "reviewer",
-                                "author_type": "User",
-                                "author_association": "MEMBER",
                                 "body": f"inherited finding {index}",
-                                "review_id": f"inherited-review-{index}",
-                                "review_state": "COMMENTED",
-                                "review_commit_sha": "b" * 40,
                             }
                         ],
-                        "pr_state": {"state": "OPEN", "headRefOid": "b" * 40},
                     }
                     for index in (1, 2)
                 ]
@@ -460,19 +459,6 @@ class TestExplicitPrReviewRetry:
                     expected_head_sha=expected_head_sha,
                     review_diff=review_diff,
                 )
-                for receipt in receipts:
-                    receipt["isResolved"] = False
-                    receipt["pr_state"] = {
-                        "state": "OPEN",
-                        "headRefOid": expected_head_sha,
-                    }
-                    receipt["comments"][0].update(
-                        {
-                            "viewer_did_author": True,
-                            "review_state": "COMMENTED",
-                            "review_commit_sha": expected_head_sha,
-                        }
-                    )
                 self.live_threads.extend(dict(receipt) for receipt in receipts)
                 return receipts
 
@@ -3547,7 +3533,6 @@ class TestReviewThreadLifecycle:
         participants = authors or ["hephaestus[bot]"]
         return {
             "id": thread_id,
-            "isResolved": False,
             "path": "a.py",
             "line": line,
             "side": "RIGHT",
@@ -3559,18 +3544,13 @@ class TestReviewThreadLifecycle:
                 {
                     "id": f"comment-{thread_id}-{index}",
                     "author": author,
-                    "author_type": "User",
-                    "author_association": "MEMBER",
                     "body": body,
                     "review_id": f"review-{thread_id}",
-                    "review_state": "COMMENTED",
-                    "review_commit_sha": "a" * 40,
                 }
                 for index, author in enumerate(participants)
             ],
             "review_id": f"review-{thread_id}",
-            "created_head_sha": "a" * 40,
-            "pr_state": {"state": "OPEN", "headRefOid": "a" * 40},
+            "created_head_sha": "b" * 40,
         }
 
     def test_reviewer_decisions_are_limited_to_host_replied_threads(self) -> None:
@@ -3932,7 +3912,7 @@ class TestReviewThreadLifecycle:
             }
         )
 
-        normalized = _normalize_remediation_threads([thread], reviewed_head_sha="a" * 40)
+        normalized = _normalize_remediation_threads([thread])
 
         assert len(normalized) == 1
         assert "guard None first" in normalized[0]["body"]
@@ -3957,19 +3937,10 @@ class TestReviewThreadLifecycle:
             }
         )
 
-        normalized = _normalize_remediation_threads([thread], reviewed_head_sha="a" * 40)
+        normalized = _normalize_remediation_threads([thread])
 
         assert _scope_retraction_paths(normalized) == ("out-of-scope.py",)
         assert normalized[0]["body"].count("hephaestus-scope-retraction-paths:") == 1
-
-    def test_remediation_rejects_a_foreign_or_stale_finding(self) -> None:
-        """Only a trusted finding from the exact reviewed head can add edit scope."""
-        foreign = self._thread("foreign", 3, "fix this")
-        foreign["comments"][0]["author_association"] = "NONE"
-        stale = self._thread("stale", 4, "fix this")
-        stale["comments"][0]["review_commit_sha"] = "b" * 40
-
-        assert _normalize_remediation_threads([foreign, stale], reviewed_head_sha="a" * 40) == []
 
     def test_partial_reconciliation_restarts_fresh_review_without_stale_receipts(
         self, make_ctx: Any, make_work_item: Any
@@ -4077,10 +4048,10 @@ class TestReviewThreadLifecycle:
             make_ctx(github=BlockedReconciliationGitHub(unresolved=[(2, 0)])),
         ) == Continue(next_state="REVIEW_WAIT")
 
-    def test_unaddressed_external_bot_thread_cannot_expand_remediation_scope(
+    def test_unaddressed_external_bot_thread_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A foreign bot finding remains open but cannot direct the writer."""
+        """An exact bot finding is routed to the implementation/reviewer cycle."""
         bot = self._thread("bot-1", 3, "fix this")
         bot.update(
             {
@@ -4109,9 +4080,16 @@ class TestReviewThreadLifecycle:
 
         stage = PrReviewStage()
         assert _complete_github_job(stage, item, make_ctx(github=BotGitHub())) == Continue(
-            next_state="EVAL"
+            next_state="ADDRESS_WAIT"
         )
-        assert "remediation_threads" not in item.payload
+        assert item.payload["remediation_threads"] == [
+            {
+                "thread_id": "bot-1",
+                "path": "a.py",
+                "line": 3,
+                "body": "<!-- hephaestus-severity: major -->\nfix this",
+            }
+        ]
 
     def test_validation_reads_all_open_threads_after_restart(
         self, make_ctx: Any, make_work_item: Any
@@ -4466,10 +4444,10 @@ class TestReviewThreadLifecycle:
         assert result == Continue(next_state="EVAL")
         assert github.posted == []
 
-    def test_changed_open_thread_cannot_expand_remediation_scope(
+    def test_changed_open_thread_is_sent_back_to_implementation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A changed thread remains open but cannot direct a writer retry."""
+        """A changed thread remains open for a fresh implementation reply."""
 
         class ChangedReceiptGitHub(FakeStageGitHub):
             def __init__(self, live: list[dict[str, Any]]) -> None:
@@ -4532,9 +4510,9 @@ class TestReviewThreadLifecycle:
 
         result = _complete_github_job(PrReviewStage(), item, make_ctx(github=github))
 
-        assert result == Continue(next_state="EVAL")
+        assert result == Continue(next_state="ADDRESS_WAIT")
         assert github.posted == []
-        assert "remediation_threads" not in item.payload
+        assert item.payload["remediation_threads"][0]["thread_id"] == "thread-1"
 
     def test_replaced_validation_receipt_restarts_validation_without_reconciliation(
         self, make_ctx: Any, make_work_item: Any
@@ -7259,6 +7237,7 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> Any:
                 self.reply_attempts += 1
                 if self.reply_attempts == 1:
@@ -7271,6 +7250,7 @@ class TestRealCommitGate:
                     "threads": threads,
                     "replies": replies,
                     "batch_nonce": batch_nonce,
+                    "recover_pending_review": recover_pending_review,
                 }
                 if progress is not None:
                     kwargs["progress"] = progress
@@ -7374,6 +7354,7 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
                 del progress
                 self.reply_attempts += 1
@@ -7383,6 +7364,7 @@ class TestRealCommitGate:
                     threads=threads,
                     replies=replies,
                     batch_nonce=batch_nonce,
+                    recover_pending_review=recover_pending_review,
                 )
 
         stage = PrReviewStage()
@@ -7448,6 +7430,7 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
                 del progress
                 self.reply_attempts += 1
@@ -7457,6 +7440,7 @@ class TestRealCommitGate:
                     threads=threads,
                     replies=replies,
                     batch_nonce=batch_nonce,
+                    recover_pending_review=recover_pending_review,
                 )
 
         stage = PrReviewStage()
@@ -7513,8 +7497,17 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, replies, batch_nonce, progress
+                del (
+                    pr_number,
+                    expected_head_sha,
+                    threads,
+                    replies,
+                    batch_nonce,
+                    progress,
+                    recover_pending_review,
+                )
                 # The reply may already be visible, but a reviewer comment
                 # raced the post-read.  This is a factual stale handoff, not
                 # a transport ambiguity that can be replayed.
@@ -7571,8 +7564,16 @@ class TestRealCommitGate:
                 replies: dict[str, str],
                 batch_nonce: str,
                 progress: object = None,
+                recover_pending_review: bool = False,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, batch_nonce, progress
+                del (
+                    pr_number,
+                    expected_head_sha,
+                    threads,
+                    batch_nonce,
+                    progress,
+                    recover_pending_review,
+                )
                 self.reply_batches.append(tuple(sorted(replies)))
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=("stale-thread",),
