@@ -8,6 +8,7 @@ generic ``AgentJob`` dispatch.
 from __future__ import annotations
 
 import json
+import platform
 import re
 import subprocess
 import tempfile
@@ -26,6 +27,10 @@ from hephaestus.automation.comment_identity import (
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDeliveryRequest
+from hephaestus.automation.mnemosyne_validator_dependencies import (
+    prepare_dependencies,
+    run_learning_subprocess,
+)
 from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
 from hephaestus.automation.review_journal import (
     IssueComment,
@@ -36,15 +41,22 @@ from hephaestus.automation.review_journal import (
     plan_fingerprint,
 )
 from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
-from hephaestus.config.child_environments import build_git_child_env, read_approved_parent_env
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess, slugify
 
 MAX_ARTIFACT_BYTES = 65_536
 MAX_SOURCE_FIELD_CHARS = 16_384
-VALIDATOR_ARGV = ("uv", "run", "--offline", "--frozen", "python", "scripts/validate_plugins.py")
+VALIDATOR_ARGV = (
+    "uv",
+    "run",
+    "--offline",
+    "--frozen",
+    "--no-sync",
+    "python",
+    "scripts/validate_plugins.py",
+)
 VALIDATOR_TIMEOUT_S = 120
-MAX_VALIDATOR_DIAGNOSTIC_CHARS = 1_000
 _REQUIRED_PLAN_SECTIONS = (
     "Objective",
     "Approach",
@@ -53,14 +65,6 @@ _REQUIRED_PLAN_SECTIONS = (
 )
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
-_SECRET_DIAGNOSTIC_PATTERNS = (
-    re.compile(r"\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{12,}\b", re.IGNORECASE),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
-    re.compile(
-        r"(?i)\b(?:token|secret|password|api[_-]?key|authorization)\s*"
-        r"(?:=|:)\s*(?:bearer\s+)?[^\s]+"
-    ),
-)
 
 
 class LearningSource(Protocol):
@@ -722,48 +726,86 @@ class MnemosynePluginValidator:
     def __init__(
         self,
         *,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = run_subprocess,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = run_learning_subprocess,
     ) -> None:
         """Initialize the subprocess seam."""
         self._runner = runner
 
     def validate(self, path: Path) -> tuple[str, ...]:
-        """Run the fixed no-network validator command without a shell.
-
-        The uv cache lives in a host-owned temporary directory so the
-        prepared worktree gains no untracked cache entries: the delivery
-        diff allows only generated ``skills/*.md`` artifacts.
-        """
-        with tempfile.TemporaryDirectory(prefix="hephaestus-uv-cache-") as cache_dir:
-            env = read_approved_parent_env()
-            env.update({"UV_CACHE_DIR": str(Path(cache_dir))})
-            result = self._runner(
-                list(VALIDATOR_ARGV),
-                cwd=path,
-                timeout=VALIDATOR_TIMEOUT_S,
-                check=False,
-                log_on_error=False,
-                env=env,
-                track_process_group=True,
-            )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            detail = _safe_validator_diagnostic(detail)
-            raise LearnDeliveryError(
-                f"Mnemosyne plugin validation failed: {detail or result.returncode}"
-            )
-        return (" ".join(VALIDATOR_ARGV),)
-
-
-def _safe_validator_diagnostic(detail: str) -> str:
-    """Redact and bound untrusted validator output before it becomes durable state."""
-    sanitized = _CONTROL_RE.sub("", detail)
-    for pattern in _SECRET_DIAGNOSTIC_PATTERNS:
-        sanitized = pattern.sub("<redacted>", sanitized)
-    if len(sanitized) <= MAX_VALIDATOR_DIAGNOSTIC_CHARS:
-        return sanitized
-    half = MAX_VALIDATOR_DIAGNOSTIC_CHARS // 2
-    return sanitized[:half] + "…" + sanitized[-half:]
+        """Run the fixed validator with prepared dependencies and no network."""
+        path = path.resolve()
+        with prepare_dependencies(path, self._runner) as prepared:
+            sandbox = Path("/usr/bin/sandbox-exec")
+            if platform.system() != "Darwin" or not sandbox.is_file():
+                raise LearnDeliveryError("learning validation boundary is unavailable")
+            with tempfile.TemporaryDirectory(prefix="hephaestus-learning-check-") as temporary:
+                scratch = Path(temporary).resolve()
+                env = {
+                    "PATH": str(prepared.environment / "bin") + ":/usr/bin:/bin",
+                    "HOME": str(scratch),
+                    "TMPDIR": str(scratch),
+                    "UV_CACHE_DIR": str(scratch / "cache"),
+                    "UV_PROJECT_ENVIRONMENT": str(prepared.environment),
+                    "UV_PYTHON_DOWNLOADS": "never",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                }
+                read_roots = (
+                    path,
+                    prepared.root,
+                    prepared.runtime,
+                    prepared.uv.parent,
+                    Path("/usr"),
+                    Path("/System"),
+                    Path("/Library/Apple"),
+                    Path("/dev"),
+                )
+                reads = " ".join(
+                    f"(subpath {json.dumps(str(root.resolve()))})" for root in read_roots
+                )
+                profile = (
+                    '(version 1)(deny default)(import "system.sb")(allow process*)'
+                    "(allow signal (target same-sandbox))(allow file-read-metadata)"
+                    f"(allow file-read* {reads} (subpath {json.dumps(str(scratch))}))"
+                    f"(allow file-write* (subpath {json.dumps(str(scratch))}))"
+                    '(allow file-write* (literal "/dev/null"))(deny network*)'
+                )
+                prepared.verify(path)
+                try:
+                    probe = self._runner(
+                        [str(sandbox), "-p", profile, "/usr/bin/true"],
+                        cwd=path,
+                        timeout=10,
+                        check=False,
+                        log_on_error=False,
+                        env=env,
+                        track_process_group=True,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    raise LearnDeliveryError("learning validation boundary failed") from None
+                if probe.returncode != 0:
+                    raise LearnDeliveryError("learning validation boundary failed")
+                argv = [str(prepared.uv), *VALIDATOR_ARGV[1:]]
+                argv[-2] = str(prepared.environment / "bin/python")
+                try:
+                    result = self._runner(
+                        [str(sandbox), "-p", profile, *argv],
+                        cwd=path,
+                        timeout=VALIDATOR_TIMEOUT_S,
+                        check=False,
+                        log_on_error=False,
+                        env=env,
+                        track_process_group=True,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise LearnDeliveryError("learning plugin validation timed out") from None
+                except OSError:
+                    raise LearnDeliveryError(
+                        "learning validation boundary could not start"
+                    ) from None
+                if result.returncode != 0:
+                    raise LearnDeliveryError("learning plugin validation failed")
+                prepared.verify(path)
+        return (" ".join(argv),)
 
 
 class MnemosyneLearningPreparationService:

@@ -26,7 +26,19 @@ The provider-neutral preparation service renders at most one flat
 `skills/*.md` artifact, capped at 65,536 bytes. It normalizes and quotes
 untrusted source text, prepares a deterministic isolated worktree from the
 Mnemosyne binding (or a live retry PR head), and runs the fixed offline
-Mnemosyne validator under a restricted environment. Its output is the existing
+Mnemosyne validator under a restricted environment. The host first binds
+`uv.lock`, `pyproject.toml`, and the optional Python version file to the source
+commit. It synchronizes the frozen default dependency groups in a separate
+clean tree, with a private environment and cache. The root package is installed
+without editable paths. An immutable local manifest binds the inputs and
+prepared artifact digests. No dependency files are added to the delivery tree.
+
+The fixed validator uses `uv run --offline --frozen --no-sync` only after
+preparation and verification succeed. The macOS `sandbox-exec` boundary denies
+network access to the validator and its descendants. It permits source reads
+and private scratch writes. The host rejects unavailable boundaries. Errors
+retain a stable category and a validated locked package cause when available;
+they do not retain raw process output. Its output is the existing
 `LearnDeliveryRequest`; that schema remains the closed compatibility surface
 for explicit callers.
 
