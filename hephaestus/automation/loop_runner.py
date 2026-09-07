@@ -793,8 +793,24 @@ def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) ->
 # ---------------------------------------------------------------------------
 
 
-def _setup_logging(verbose: bool, log_format: str = "text") -> None:
-    configure_cli_logging(verbose=verbose, log_format=log_format)
+def _setup_logging(
+    verbose: bool,
+    log_format: str = "text",
+    *,
+    quiet: bool = False,
+    log_file: str | None = None,
+) -> None:
+    try:
+        configure_cli_logging(
+            verbose=verbose,
+            log_format=log_format,
+            quiet=quiet,
+            log_file=log_file,
+        )
+    except OSError as exc:
+        raise SystemExit(
+            f"Cannot open log file {log_file!r}: {exc}. Check the parent directory and permissions."
+        ) from exc
 
 
 def _resolve_org_and_repos(
@@ -1089,7 +1105,12 @@ def main(argv: list[str] | None = None) -> int:
     """Console-script entry point. Returns the process exit code."""
     args = _parse_args(argv)
     configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose, args.log_format)
+    _setup_logging(
+        args.verbose,
+        args.log_format,
+        quiet=args.quiet,
+        log_file=args.log_file,
+    )
     try:
         agent = resolve_agent(
             args.agent,
