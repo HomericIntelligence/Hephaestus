@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
     from hephaestus.automation.pipeline.routing import PipelineScope
 
+from hephaestus._version_lookup import get_version
 from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
@@ -77,6 +78,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
+from hephaestus.utils.git import _is_full_commit_sha, run_git
 from hephaestus.utils.helpers import get_repo_root
 
 LOG = logging.getLogger(__name__)
@@ -98,6 +100,24 @@ ALL_POST_LOOP_STAGES: tuple[str, ...] = ("drive-green",)
 ALL_SELECTABLE: tuple[str, ...] = ALL_PHASES + ALL_POST_LOOP_STAGES
 
 LOOP_DEFAULT_MAX_WORKERS = 6
+
+
+def _source_revision(source_root: Path | None = None) -> str | None:
+    """Return the exact revision of an editable source checkout, if available."""
+    source_root = source_root or Path(__file__).resolve().parents[2]
+    if not (source_root / ".git").exists():
+        return None
+    try:
+        revision = run_git(
+            ["rev-parse", "--verify", "HEAD"],
+            cwd=source_root,
+            timeout=10,
+            log_on_error=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return revision if _is_full_commit_sha(revision) else None
+
 
 # DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
 # tests that patch this module-level name continue to work. See #704: the
@@ -895,6 +915,8 @@ def _build_pipeline_config(
     return PipelineConfig(
         org=org,
         repos=repos,
+        package_version=get_version(),
+        source_revision=_source_revision(),
         repo_source_factory=repo_source_factory,
         issues=cfg.issues,
         reset_plan_review_sessions=(

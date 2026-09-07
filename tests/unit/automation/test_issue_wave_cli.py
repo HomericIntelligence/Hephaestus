@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from hephaestus.automation import loop_runner
 from hephaestus.automation.loop_runner import (
     LoopConfig,
     _build_pipeline_config,
     _parse_args,
+    _source_revision,
 )
 
 
@@ -50,3 +54,31 @@ def test_pipeline_config_carries_issue_limit_without_shifting_legacy_fields(
     pipeline = _build_pipeline_config(args, cfg, "acme", ["hephaestus"])
     assert pipeline.issue_limit == 4
     assert pipeline.repo_source_factory is None
+
+
+def test_source_revision_reads_exact_checkout_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editable checkout binds the event provenance to its full commit."""
+    (tmp_path / ".git").mkdir()
+    run_git = Mock(return_value=subprocess.CompletedProcess([], 0, "a" * 40 + "\n", ""))
+    monkeypatch.setattr(loop_runner, "run_git", run_git)
+
+    assert _source_revision(tmp_path) == "a" * 40
+    run_git.assert_called_once_with(
+        ["rev-parse", "--verify", "HEAD"],
+        cwd=tmp_path,
+        timeout=10,
+        log_on_error=False,
+    )
+
+
+def test_source_revision_is_unavailable_without_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wheel installation does not infer a revision from a parent checkout."""
+    run_git = Mock()
+    monkeypatch.setattr(loop_runner, "run_git", run_git)
+
+    assert _source_revision(tmp_path) is None
+    run_git.assert_not_called()
