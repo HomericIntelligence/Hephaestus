@@ -61,6 +61,12 @@ def test_publish_lease_failure_has_specific_durable_error_class() -> None:
             "host_verification",
             id="host-verification",
         ),
+        pytest.param(
+            "source_workspace_ownership_unavailable: "
+            "implementation writer branch is an unowned existing branch",
+            "source_workspace_ownership_unavailable",
+            id="source-workspace-ownership-unavailable",
+        ),
         pytest.param("rc=75", "process_exit", id="subprocess-exit"),
         pytest.param(
             "mechanical rebase hit conflicts; resolution required",
@@ -92,6 +98,7 @@ def test_specific_worker_error_class_precedes_generic_failure_kind() -> None:
 @pytest.mark.parametrize(
     "error",
     [
+        "source_workspace_ownership_unavailable secret-token-value",
         "unexpected failure",
         "provider returned secret-token-value",
         "checkout /private/operator/path is dirty",
