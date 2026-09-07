@@ -230,7 +230,7 @@ def test_enqueue_already_queued_is_an_outcome_unknown_error() -> None:
         "errors": [
             {
                 "type": "UNPROCESSABLE",
-                "message": "Pull request is already in the queue",
+                "message": "UNPROCESSABLE: Pull request is already in the queue",
             }
         ],
     }
@@ -245,10 +245,32 @@ def test_enqueue_already_queued_is_an_outcome_unknown_error() -> None:
         ),
         pytest.raises(
             GraphQLMutationOutcomeUnknownError,
-            match=r"^Pull request is already in the queue$",
+            match=r"^UNPROCESSABLE: Pull request is already in the queue$",
         ),
     ):
         run_graphql(spec)
+
+
+def test_enqueue_already_queued_transport_error_is_an_outcome_unknown_error() -> None:
+    """The transport classifier preserves GitHub's exact queue error text."""
+    spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(
+                stdout="",
+                returncode=1,
+                stderr="UNPROCESSABLE: Pull request is already in the queue",
+            ),
+        ),
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+        pytest.raises(GraphQLMutationOutcomeUnknownError) as raised,
+    ):
+        run_graphql(spec)
+    assert str(raised.value).strip() == "UNPROCESSABLE: Pull request is already in the queue"
 
 
 def test_pull_request_queue_entry_query_binds_identity_and_head() -> None:

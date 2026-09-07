@@ -15,7 +15,12 @@ from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
 
-_ALREADY_QUEUED = "pull request is already in the queue"
+_ALREADY_QUEUED = "unprocessable: pull request is already in the queue"
+
+
+def _is_already_queued_error(error: GraphQLMutationOutcomeUnknownError) -> bool:
+    """Return whether GitHub returned the exact already-queued error."""
+    return str(error).strip().casefold() == _ALREADY_QUEUED
 
 
 class PipelineGitHubMutations(PipelineGitHubIssueComments):
@@ -67,10 +72,8 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
             )
         except GraphQLMutationOutcomeUnknownError as exc:
             logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
-            if str(exc).strip().casefold() == _ALREADY_QUEUED:
-                reconciled = self._existing_queue_result(
-                    pr_number, pull_request_id, reviewed_sha
-                )
+            if _is_already_queued_error(exc):
+                reconciled = self._existing_queue_result(pr_number, pull_request_id, reviewed_sha)
                 if reconciled is not None:
                     return reconciled
             return ConditionalMergeResult(status=None, body=None, malformed=True)
@@ -79,12 +82,6 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
             return ConditionalMergeResult(status=None, body=None, transport_error=True)
         except (GraphQLDeterministicError, GraphQLResponseError) as exc:
             logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
-            if str(exc).strip().casefold() == _ALREADY_QUEUED:
-                reconciled = self._existing_queue_result(
-                    pr_number, pull_request_id, reviewed_sha
-                )
-                if reconciled is not None:
-                    return reconciled
             return ConditionalMergeResult(status=None, body=None, malformed=True)
         return ConditionalMergeResult(
             status=200,

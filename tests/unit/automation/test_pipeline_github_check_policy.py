@@ -1372,7 +1372,7 @@ def test_required_queue_reconciles_an_existing_exact_head_entry(
         "_graphql_with_timeout",
         MagicMock(
             side_effect=github_api_mod.GraphQLMutationOutcomeUnknownError(
-                "Pull request is already in the queue",
+                "UNPROCESSABLE: Pull request is already in the queue",
                 intent=github_api_mod.GraphQLMutationIntent(
                     operation="enqueuePullRequest",
                     client_mutation_id="correlation",
@@ -1425,7 +1425,7 @@ def test_required_queue_rejects_an_existing_entry_after_head_drift(
         "_graphql_with_timeout",
         MagicMock(
             side_effect=github_api_mod.GraphQLMutationOutcomeUnknownError(
-                "Pull request is already in the queue",
+                "UNPROCESSABLE: Pull request is already in the queue",
                 intent=github_api_mod.GraphQLMutationIntent(
                     operation="enqueuePullRequest",
                     client_mutation_id="correlation",
