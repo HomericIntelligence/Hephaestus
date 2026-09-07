@@ -4148,17 +4148,26 @@ class WorkerPool:
             kwargs["implementation_writer_handoff"] = implementation_writer_handoff
         if (
             implementation_source_lane
-            and base_sha is not None
             and source_manager is not None
             and implementation_writer_handoff is not None
+            and (base_sha is not None or adopting_implementation_writer)
         ):
             try:
-                source_manager.authorize_direct_implementation_writer_transition(
-                    cast(int, kwargs["issue_number"]),
-                    branch=branch_name,
-                    base_sha=base_sha,
-                    handoff=implementation_writer_handoff,
-                )
+                item_number = cast(int, kwargs["issue_number"])
+                if adopting_implementation_writer:
+                    source_manager.authorize_adopted_implementation_writer_transition(
+                        item_number,
+                        branch=branch_name,
+                        expected_head=cast(str, implementation_adoption_head),
+                        handoff=implementation_writer_handoff,
+                    )
+                else:
+                    source_manager.authorize_direct_implementation_writer_transition(
+                        item_number,
+                        branch=branch_name,
+                        base_sha=cast(str, base_sha),
+                        handoff=implementation_writer_handoff,
+                    )
             except SourceWorkspaceError as exc:
                 return self._creation_receipt_failure(
                     base_dir=base_dir,
@@ -4477,15 +4486,27 @@ class WorkerPool:
                         raise SourceWorkspaceError(
                             "implementation writer authority manager is missing"
                         )
-                    writer_authority = (
-                        worktree_manager.mint_adopted_implementation_writer_authority(
-                            issue_number=implementation_item_number,
-                            branch_name=branch_name,
-                            worktree_path=worktree_path,
-                            expected_head=implementation_adoption_head,
-                            timeout=timeout_s,
+                    if implementation_writer_handoff is None:
+                        writer_authority = (
+                            worktree_manager.mint_adopted_implementation_writer_authority(
+                                issue_number=implementation_item_number,
+                                branch_name=branch_name,
+                                worktree_path=worktree_path,
+                                expected_head=implementation_adoption_head,
+                                timeout=timeout_s,
+                            )
                         )
-                    )
+                    else:
+                        writer_authority = (
+                            worktree_manager.mint_adopted_implementation_writer_authority(
+                                issue_number=implementation_item_number,
+                                branch_name=branch_name,
+                                worktree_path=worktree_path,
+                                expected_head=implementation_adoption_head,
+                                timeout=timeout_s,
+                                implementation_writer_handoff=implementation_writer_handoff,
+                            )
+                        )
             if source_lane == "impl" and not dirty:
                 if writer_authority is None:
                     raise SourceWorkspaceError("implementation writer authority is missing")
