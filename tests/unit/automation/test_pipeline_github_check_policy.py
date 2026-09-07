@@ -16,6 +16,7 @@ import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
 import hephaestus.automation.pipeline_github_mutations as mutations_mod
 import hephaestus.automation.pipeline_github_required_checks as required_checks_mod
+import hephaestus.automation.pipeline_github_transport as transport_mod
 from hephaestus.automation.pipeline_github_check_policy import (
     EffectiveMergePolicy,
     RequiredCheck,
@@ -1413,6 +1414,114 @@ def test_required_queue_reconciles_an_existing_exact_head_entry(
     assert result.queued is True
     assert result.body == {"merged": False, "queue_entry_id": "MQE_node"}
     assert readback_mock.call_args.kwargs == {"number": 7}
+
+
+def test_required_queue_reconciles_bare_unprocessable_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare UNPROCESSABLE response requires exact-head queue readback."""
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    call_mock = MagicMock(
+        side_effect=[
+            _response(
+                {
+                    "data": {"enqueuePullRequest": None},
+                    "errors": [
+                        {
+                            "type": "UNPROCESSABLE",
+                            "message": "Pull request is already in the queue",
+                        }
+                    ],
+                }
+            ),
+            _response(
+                {
+                    "data": {
+                        "repository": {
+                            "owner": {"login": "org"},
+                            "name": "repo",
+                            "pullRequest": {
+                                "id": "PR_node",
+                                "number": 7,
+                                "state": "OPEN",
+                                "headRefOid": "a" * 40,
+                                "mergeQueueEntry": {
+                                    "id": "MQE_node",
+                                    "state": "AWAITING_CHECKS",
+                                },
+                            },
+                        }
+                    }
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+    policy = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(RequiredCheck("required-ci", 15368),),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(15556494,),
+        strict_update_enforced=False,
+        merge_queue_method="SQUASH",
+    )
+
+    result = adapter.merge_pr_if_head(
+        7,
+        "a" * 40,
+        policy=policy,
+        pull_request_id="PR_node",
+        deadline_s=time.monotonic() + 2.0,
+        cancellation=threading.Event(),
+    )
+
+    assert result.queued is True
+    assert result.body == {"merged": False, "queue_entry_id": "MQE_node"}
+    assert call_mock.call_count == 2
+
+
+def test_required_queue_rejects_bare_message_for_another_error_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another error type cannot start queue readback."""
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    call_mock = MagicMock(
+        return_value=_response(
+            {
+                "data": {"enqueuePullRequest": None},
+                "errors": [
+                    {
+                        "type": "FORBIDDEN",
+                        "message": "Pull request is already in the queue",
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+    policy = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(RequiredCheck("required-ci", 15368),),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(15556494,),
+        strict_update_enforced=False,
+        merge_queue_method="SQUASH",
+    )
+
+    result = adapter.merge_pr_if_head(
+        7,
+        "a" * 40,
+        policy=policy,
+        pull_request_id="PR_node",
+        deadline_s=time.monotonic() + 2.0,
+        cancellation=threading.Event(),
+    )
+
+    assert result.malformed is True
+    assert result.queued is False
+    call_mock.assert_called_once()
 
 
 def test_required_queue_rejects_an_existing_entry_after_head_drift(

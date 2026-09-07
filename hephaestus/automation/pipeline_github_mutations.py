@@ -15,12 +15,16 @@ from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
 
-_ALREADY_QUEUED = "unprocessable: pull request is already in the queue"
+_ALREADY_QUEUED_MESSAGE = "pull request is already in the queue"
+_ALREADY_QUEUED_TRANSPORT = f"unprocessable: {_ALREADY_QUEUED_MESSAGE}"
 
 
 def _is_already_queued_error(error: GraphQLMutationOutcomeUnknownError) -> bool:
     """Return whether GitHub returned the exact already-queued error."""
-    return str(error).strip().casefold() == _ALREADY_QUEUED
+    message = str(error).strip().casefold()
+    return message == _ALREADY_QUEUED_TRANSPORT or (
+        message == _ALREADY_QUEUED_MESSAGE and error.graphql_error_type == "UNPROCESSABLE"
+    )
 
 
 class PipelineGitHubMutations(PipelineGitHubIssueComments):

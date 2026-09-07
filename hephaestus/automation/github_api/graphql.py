@@ -81,10 +81,17 @@ class GraphQLMutationIntent:
 class GraphQLMutationOutcomeUnknownError(GraphQLResponseError):
     """A mutation may have reached GitHub, so it must not be replayed."""
 
-    def __init__(self, message: str, *, intent: GraphQLMutationIntent) -> None:
-        """Store the sanitized intent that must not be replayed."""
+    def __init__(
+        self,
+        message: str,
+        *,
+        intent: GraphQLMutationIntent,
+        graphql_error_type: str | None = None,
+    ) -> None:
+        """Store the sanitized intent and the GraphQL error type."""
         super().__init__(message)
         self.intent = intent
+        self.graphql_error_type = graphql_error_type
 
 
 class ReviewCommentNotEditableError(GraphQLMutationOutcomeUnknownError):
@@ -251,9 +258,16 @@ def _rate_limit_evidence(text: str) -> int | None:
 
 
 def _mutation_unknown[T](
-    message: str, prepared: _PreparedGraphQLMutation[T]
+    message: str,
+    prepared: _PreparedGraphQLMutation[T],
+    *,
+    graphql_error_type: str | None = None,
 ) -> GraphQLMutationOutcomeUnknownError:
-    return GraphQLMutationOutcomeUnknownError(message, intent=prepared.intent)
+    return GraphQLMutationOutcomeUnknownError(
+        message,
+        intent=prepared.intent,
+        graphql_error_type=graphql_error_type,
+    )
 
 
 def _require_prepared[T](
@@ -418,7 +432,12 @@ def _parse_envelope[T](  # noqa: C901
         message = "; ".join(messages)
         if prepared is None:
             raise GraphQLDeterministicError(message)
-        raise _mutation_unknown(message, prepared)
+        error_type = errors[0].get("type") if len(errors) == 1 else None
+        raise _mutation_unknown(
+            message,
+            prepared,
+            graphql_error_type=error_type if isinstance(error_type, str) else None,
+        )
 
     data = envelope.get("data")
     if not isinstance(data, dict):
