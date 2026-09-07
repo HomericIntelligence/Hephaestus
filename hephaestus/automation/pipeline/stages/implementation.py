@@ -119,7 +119,11 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     issue_auto_impl_branch_name,
 )
-from hephaestus.automation.source_worktree import SourceWorkspaceRecoveryKind
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceRecoveryKind,
+    SourceWorkspaceTerminalReference,
+)
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_IMPLEMENTATION_GO,
@@ -1322,6 +1326,10 @@ class ImplementationStage(Stage):
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult:
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
+        if item.payload.get("source_workspace_preserve") is True:
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "source_workspace_terminal: Preserve the writer."
+            )
         issue = _issue_number(item)
         inspection = item.payload.pop("remediation_writer_inspection_receipt", None)
         if inspection is not None:
@@ -3120,6 +3128,30 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            result_value = result.value if isinstance(result.value, dict) else {}
+            if result_value.get("failure_kind") == "source_workspace_terminal":
+                item.payload["source_workspace_preserve"] = True
+                try:
+                    reference = SourceWorkspaceTerminalReference.from_dict(
+                        result_value.get("source_workspace_terminal")
+                    )
+                    item.payload["source_workspace_terminal"] = reference.to_dict()
+                except SourceWorkspaceError:
+                    item.payload["source_workspace_terminal"] = None
+                path = result_value.get("path")
+                if isinstance(path, str) and path:
+                    item.worktree = path
+                reservation = result_value.get("direct_scope_reservation")
+                if (
+                    isinstance(reservation, dict)
+                    and set(reservation) == {"branch", "base_sha"}
+                    and isinstance(reservation.get("branch"), str)
+                    and is_full_commit_sha(reservation.get("base_sha"))
+                    and reservation.get("branch") == item.branch
+                    and reservation.get("base_sha") == item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+                ):
+                    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = dict(reservation)
+                return
             if (result.error or "").startswith("source_workspace_ownership_unavailable:"):
                 item.payload["source_workspace_ownership_unavailable"] = True
                 item.payload["source_workspace_ownership_error"] = redact_diagnostic_text(

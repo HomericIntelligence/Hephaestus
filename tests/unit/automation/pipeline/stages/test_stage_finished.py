@@ -26,6 +26,7 @@ from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import finished as finished_module
 from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.finished import FinishedStage
+from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_RESERVATION_KEY
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
     ItemResult,
@@ -865,3 +866,82 @@ class TestTerminal:
             stage.on_job_done(_item(state="CLEANUP"), JobResult(ok=True), make_ctx())
 
         assert caplog.records == []
+
+
+def test_invalid_terminal_reference_preserves_reservation_and_records_failure(
+    stage: FinishedStage, ledger: list[ItemResult], make_ctx: Any
+) -> None:
+    """Missing terminal evidence cannot release a reserved branch."""
+    item = _item(state="RECORD", passed=True)
+    item.branch = "reserved"
+    item.payload.update(
+        source_workspace_preserve=True,
+        source_workspace_terminal=None,
+    )
+    reservation = {"branch": "reserved", "base_sha": "a" * 40}
+    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = reservation
+    stage.step(item, make_ctx())
+    assert not ledger[0].passed
+    assert ledger[0].reason.startswith("source_workspace_recovery_receipt_invalid:")
+    item.state = "CLEANUP"
+    result = stage.step(item, make_ctx())
+    assert isinstance(result, Continue)
+    assert result.next_state == "DONE"
+    assert "_direct_scope_reservation_release_attempted" not in item.payload
+    assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
+
+
+@pytest.mark.parametrize("failure", ["none", "read", "constructor"])
+def test_terminal_wave_and_ledger_use_same_validated_result(
+    tmp_path: Path, stage: FinishedStage, ledger: list[ItemResult], make_ctx: Any, failure: str
+) -> None:
+    """Both stores receive the result from the manager evidence check."""
+    from hephaestus.automation.source_worktree import (
+        SourceWorkspaceError,
+        SourceWorkspaceTerminalView,
+    )
+
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission("a" * 40, 1), [42])
+    item = _item(state="RECORD")
+    item.repo = "hephaestus"
+    item.branch = "42-auto"
+    reservation = {"branch": "42-auto", "base_sha": "a" * 40}
+    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = reservation
+    item.payload[WAVE_LEASE_PAYLOAD] = lease
+    item.payload["source_workspace_preserve"] = True
+    item.payload["source_workspace_terminal"] = {
+        "identity": "42-impl-terminal.json",
+        "content_sha256": "b" * 64,
+    }
+    ctx = make_ctx(org="acme", paths=SimpleNamespace(repo_root=tmp_path))
+    view = SourceWorkspaceTerminalView(
+        phase="successor_created",
+        outcome="incomplete",
+        cause="source_workspace_transition_incomplete",
+        action="Retry the same request.",
+        path=tmp_path / "absent-writer",
+        requested_branch="42-auto",
+        requested_base_sha="a" * 40,
+    )
+    with patch.object(finished_module, "SourceWorkspaceManager") as manager:
+        read = manager.return_value.read_terminal_failure
+        if failure == "none":
+            read.return_value = view
+        elif failure == "constructor":
+            manager.side_effect = RuntimeError("cannot resolve Git metadata lock path")
+        else:
+            read.side_effect = SourceWorkspaceError("changed source bytes")
+        stage.step(item, ctx)
+    checkpoint = store.load()
+    assert checkpoint is not None
+    outcome = checkpoint.current_wave.outcomes[0]
+    assert outcome.reason == ledger[0].reason
+    assert outcome.passed is ledger[0].passed is False
+    expected = view.cause if failure == "none" else "source_workspace_recovery_receipt_invalid"
+    assert outcome.reason.startswith(expected + ":")
+    item.state = "CLEANUP"
+    result = stage.step(item, ctx)
+    assert isinstance(result, Continue) and result.next_state == "DONE"
+    assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
+    assert "_direct_scope_reservation_release_attempted" not in item.payload

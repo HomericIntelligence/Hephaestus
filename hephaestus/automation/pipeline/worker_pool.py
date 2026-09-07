@@ -146,6 +146,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
     SourceWorkspaceRecovery,
+    SourceWorkspaceTerminalError,
 )
 from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
@@ -6451,7 +6452,38 @@ class WorkerPool:
                 recovered = self._recover_prepared_remediation_worktree(job, repo_root)
                 if recovered is not None:
                     return recovered
-                return self._git_create_worktree_with_handoff(job, source_manager, handoff)
+                result = self._git_create_worktree_with_handoff(job, source_manager, handoff)
+                value = result.value if isinstance(result.value, dict) else {}
+                reservation = value.get("direct_scope_reservation")
+                if not result.ok and (
+                    isinstance(reservation, dict)
+                    or (result.error or "").startswith("source_workspace_ownership_unavailable:")
+                ):
+                    raise SourceWorkspaceTerminalError(
+                        result.error or "writer creation failed",
+                        requested_branch=reservation.get("branch")
+                        if isinstance(reservation, dict)
+                        else None,
+                        requested_base_sha=reservation.get("base_sha")
+                        if isinstance(reservation, dict)
+                        else None,
+                    )
+                return result
+        except SourceWorkspaceTerminalError as exc:
+            value = {
+                "failure_kind": "source_workspace_terminal",
+                "source_workspace_preserve": True,
+                "source_workspace_terminal": exc.terminal_reference.to_dict()
+                if exc.terminal_reference is not None
+                else None,
+                "path": str(exc.path) if exc.path is not None else "",
+            }
+            if exc.requested_branch is not None and exc.requested_base_sha is not None:
+                value["direct_scope_reservation"] = {
+                    "branch": exc.requested_branch,
+                    "base_sha": exc.requested_base_sha,
+                }
+            return JobResult(ok=False, error="source_workspace_terminal", value=value)
         except SourceWorkspaceError as exc:
             return JobResult(
                 ok=False,
@@ -6936,7 +6968,7 @@ class WorkerPool:
                 branch_name=branch_name,
                 base_sha=base_sha,
             )
-        return self._finalize_created_worktree(
+        result = self._finalize_created_worktree(
             created=created,
             base_sha=base_sha,
             branch_name=branch_name,
@@ -6954,6 +6986,13 @@ class WorkerPool:
             implementation_writer_handoff=implementation_writer_handoff,
             timeout_s=job.timeout_s,
         )
+        if not result.ok and base_sha is not None and implementation_writer_handoff is not None:
+            raise SourceWorkspaceTerminalError(
+                result.error or "writer preparation failed",
+                requested_branch=branch_name,
+                requested_base_sha=base_sha,
+            )
+        return result
 
     def _create_managed_worktree(
         self,
@@ -6970,7 +7009,13 @@ class WorkerPool:
         """Create a worktree and preserve typed writer-receipt failures."""
         try:
             return manager.create_worktree(**kwargs, timeout=timeout_s)
-        except (RemoteGitRefreshError, subprocess.CalledProcessError):
+        except (RemoteGitRefreshError, subprocess.CalledProcessError) as exc:
+            if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
+                raise SourceWorkspaceTerminalError(
+                    "worktree remote refresh failed",
+                    requested_branch=branch_name,
+                    requested_base_sha=base_sha,
+                ) from exc
             if bool(kwargs.get("refresh_base", False)):
                 return JobResult(
                     ok=False,
@@ -6987,6 +7032,12 @@ class WorkerPool:
                 base_sha=base_sha,
             )
         except Exception as exc:
+            if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
+                raise SourceWorkspaceTerminalError(
+                    "worktree creation failed",
+                    requested_branch=branch_name,
+                    requested_base_sha=base_sha,
+                ) from exc
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
                     branch_name=branch_name,
@@ -7141,6 +7192,10 @@ class WorkerPool:
                 f"worktree {worktree_path} escaped resolved repo root {repo_root} "
                 f"for job.repo={repo!r}"
             )
+            if base_sha is not None and implementation_writer_handoff is not None:
+                raise SourceWorkspaceTerminalError(
+                    error, requested_branch=branch_name, requested_base_sha=base_sha
+                )
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
                     branch_name=branch_name,
@@ -7251,6 +7306,12 @@ class WorkerPool:
                     handoff=implementation_writer_handoff,
                 )
         except Exception as exc:
+            if base_sha is not None and implementation_writer_handoff is not None:
+                raise SourceWorkspaceTerminalError(
+                    "worktree post-create preparation failed",
+                    requested_branch=branch_name,
+                    requested_base_sha=base_sha,
+                ) from exc
             if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)):
                 return self._creation_receipt_failure(
                     base_dir=worktree_path.parent,
