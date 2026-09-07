@@ -5604,6 +5604,7 @@ class TestCommitPushAndPrCreate:
         assert isinstance(result.job, GitJob)
         assert result.job.op == "commit_push"
         assert result.job.kwargs == {
+            "source_lane": "impl",
             "issue_number": 1,
             "issue_title": "Keep commit metadata closed",
             "issue_body": "Do not fetch issue data from a Git worker.",

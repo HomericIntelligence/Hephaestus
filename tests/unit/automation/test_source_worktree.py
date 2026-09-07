@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +48,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeCreationReceiptError,
     WorktreeManager,
 )
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 
@@ -2628,3 +2629,173 @@ def test_writer_transition_recovery_rejects_a_foreign_registered_checkout(
     assert receipt is not None
     assert receipt.revision == first
     assert _git(predecessor.cwd, "rev-parse", "HEAD") == second
+
+
+@pytest.mark.parametrize("failure", [None, "remote", "receipt", "branch", "dirty", "write"])
+def test_writer_publication_advances_receipt_and_permits_reuse(
+    tmp_path: Path, failure: str | None
+) -> None:
+    """A controlled published commit permits the next writer acquisition."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktrees = WorktreeManager(repo_root=repo, base_dir=manager.base_dir, base_branch=second)
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = worktrees.create_worktree(
+            9, "writer-branch", source_lane="impl", implementation_writer_handoff=handoff
+        )
+        original = manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+            authority=worktrees.implementation_writer_authority(writer),
+            handoff=handoff,
+        )
+    remote = tmp_path / "remote.git"
+    _git(repo, "init", "--bare", str(remote))
+    _git(writer, "remote", "add", "origin", str(remote))
+    _git(writer, "push", "origin", "writer-branch")
+    (writer / "tracked.txt").write_text("implementation\n", encoding="utf-8")
+    with manager.implementation_publication(9, branch="writer-branch", path=writer) as advance:
+        _git(writer, "commit", "-am", "implementation")
+        head = _git(writer, "rev-parse", "HEAD")
+        _git(writer, "push", "origin", "writer-branch")
+        remote_head = _git(writer, "ls-remote", "origin", "refs/heads/writer-branch").split()[0]
+        original_receipt = manager._require_receipt(9, SourceLane.IMPLEMENTATION)
+        if failure == "remote":
+            remote_head = second
+        elif failure == "receipt":
+            manager._write_receipt(replace(original_receipt, generation=100))
+        elif failure == "branch":
+            _git(writer, "switch", "-c", "changed-branch")
+        elif failure == "dirty":
+            (writer / "tracked.txt").write_text("later edit\n", encoding="utf-8")
+        if failure:
+            with (
+                patch.object(manager, "_write_receipt", side_effect=OSError("write failed"))
+                if failure == "write"
+                else nullcontext()
+            ):
+                with pytest.raises((SourceWorkspaceError, OSError)):
+                    advance(head, remote_head)
+            assert _git(writer, "rev-parse", "HEAD") == head
+            assert (
+                manager._require_receipt(9, SourceLane.IMPLEMENTATION).revision == original.revision
+            )
+            return
+        updated = advance(head, remote_head)
+    assert updated.revision == head
+    assert updated.generation == original.generation + 1
+    with pytest.raises(SourceWorkspaceError, match="authority expired"):
+        advance(head, remote_head)
+    manager.add_obligation(9, SourceLane.IMPLEMENTATION, "review")
+    with manager.implementation_publication(9, branch="writer-branch", path=writer) as no_op:
+        unchanged = no_op(head, remote_head)
+    assert unchanged.generation == updated.generation
+    assert manager._require_receipt(9, SourceLane.IMPLEMENTATION).obligations == ("review",)
+    rebound = manager.prepare(9, SourceLane.IMPLEMENTATION, head, branch="writer-branch")
+    with manager.acquire(rebound):
+        assert (writer / "tracked.txt").read_text(encoding="utf-8") == "implementation\n"
+
+
+def test_worker_publication_records_head_before_review_reuse(tmp_path: Path) -> None:
+    """The worker records its commit before a later review remediation."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(
+        repo, repository="example/project", base_dir=repo / "build" / ".worktrees"
+    )
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=CompletionQueue(),
+        lock_dir=tmp_path / "locks",
+    )
+    job = GitJob(
+        repo="example/project",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 9,
+            "branch_name": "writer-branch",
+            "repo_root": str(repo),
+            "source_lane": "impl",
+            "base_sha": second,
+        },
+    )
+    remote = tmp_path / "remote.git"
+    _git(repo, "init", "--bare", str(remote))
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "origin", "main")
+    with patch.object(
+        pool,
+        "_authenticated_remote_git_configuration",
+        return_value=(build_git_child_env(), ("-c", "protocol.file.allow=always")),
+    ):
+        created = pool._git_create_worktree(job)
+    assert created.ok, created.error
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(writer, "push", "origin", "writer-branch")
+    (writer / "tracked.txt").write_text("implementation\n", encoding="utf-8")
+
+    def commit(*args: Any, **kwargs: Any) -> bool:
+        with (
+            pytest.raises(LockUnavailableError),
+            file_lock(
+                manager._lane_lock_path(9, SourceLane.IMPLEMENTATION),
+                blocking=False,
+                require_exclusive=True,
+            ),
+        ):
+            pass
+        _git(writer, "commit", "-am", "implementation")
+        return True
+
+    publish = GitJob(
+        repo="example/project",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 9,
+            "branch": "writer-branch",
+            "repo_root": str(repo),
+            "worktree_path": str(writer),
+            "source_lane": "impl",
+            "agent": "codex",
+            "allowed_paths": ("tracked.txt",),
+            "scope_history_base_sha": second,
+        },
+    )
+    with (
+        patch.object(pool, "_commit_if_changes_with_controlled_signing", side_effect=commit),
+        patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=(build_git_child_env(), ("-c", "protocol.file.allow=always")),
+        ),
+    ):
+        result = pool._git_commit_push(publish)
+    assert result.ok, result.error
+    head = _git(writer, "rev-parse", "HEAD")
+    assert manager._require_receipt(9, SourceLane.IMPLEMENTATION).revision == head
+    rebound = manager.prepare(9, SourceLane.IMPLEMENTATION, head, branch="writer-branch")
+    with manager.acquire(rebound):
+        assert _git(writer, "rev-parse", "HEAD") == head
+
+
+def test_writer_publication_failure_preserves_ownership_error_class(tmp_path: Path) -> None:
+    """An invalid publication request keeps the ownership failure prefix."""
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=CompletionQueue(),
+        lock_dir=tmp_path / "locks",
+    )
+    result = pool._git_commit_push(
+        GitJob(
+            repo="example/project",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={"source_lane": "impl"},
+        )
+    )
+    assert not result.ok
+    assert result.error == "source_workspace_ownership_unavailable: publication binding invalid"

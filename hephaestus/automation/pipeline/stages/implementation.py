@@ -726,6 +726,8 @@ def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
             "implementation_reply_writer_identity_invalid",
         )
     kwargs.update(recovery_kwargs)
+    if not recovery_kwargs:
+        kwargs["source_lane"] = SourceLane.IMPLEMENTATION.value
     remediation_kwargs = _remediation_commit_push_kwargs(item, ctx)
     if remediation_kwargs is None:
         return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
