@@ -1050,6 +1050,7 @@ jobs:
           -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/codex-sigstore/rust-v0.153.4:ro"
           -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro"
           -e HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4
+          -e UV_NO_SYNC=1 -e PYTHONPATH=/workspace
           --userns=keep-id:uid=1000,gid=1000
           hephaestus-ci:local uv run pytest tests/integration
           --override-ini="addopts=" --basetemp=build/pytest-artifacts

@@ -576,6 +576,8 @@ def test_build_matches_required_artifact_lane(tmp_path: Path) -> None:
     ) in log
     assert "scripts/provision_codex_sigstore_fixture.py" in log
     assert "--network=none" in log
+    assert "--env UV_NO_SYNC=1" in log
+    assert "--env PYTHONPATH=/workspace" in log
     assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in log
     assert (
         "build/test-fixtures/codex-sigstore/rust-v0.153.4:/codex-sigstore/rust-v0.153.4:ro" in log

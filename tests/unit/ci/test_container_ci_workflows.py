@@ -83,6 +83,8 @@ def test_build_artifact_step_uses_provisioned_fixture_without_network() -> None:
     assert provision_definition["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
     assert "build/test-fixtures/codex-sigstore/rust-v0.153.4" in provision
     assert "--network=none" in validation
+    assert "-e UV_NO_SYNC=1" in validation
+    assert "-e PYTHONPATH=/workspace" in validation
     assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in validation
     assert (
         "build/test-fixtures/codex-sigstore/rust-v0.153.4:"

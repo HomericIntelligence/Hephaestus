@@ -9,6 +9,7 @@ must stay off the coordinator thread), so :class:`AgentJob` carries a
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,6 +93,17 @@ class AgentJob:
     # output parsing, closing the restart window for durable conversations.
     session_checkpoint: Callable[[str, AgentSessionBinding | None], None] | None = None
     descr: str = ""
+    deadline_s: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate an optional operation-wide monotonic deadline."""
+        if self.deadline_s is not None and (
+            isinstance(self.deadline_s, bool)
+            or not isinstance(self.deadline_s, (int, float))
+            or not math.isfinite(self.deadline_s)
+            or self.deadline_s <= 0
+        ):
+            raise ValueError("deadline_s must be a finite positive monotonic time")
 
 
 def validate_job_workspace(job: AgentJob) -> Path:

@@ -8,17 +8,21 @@ Provides helpers for:
 """
 
 import logging
+import os
 import subprocess
 from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
 import hephaestus.automation.git_runtime as _git_runtime
+from hephaestus.automation.commit_runtime import (
+    CommitIssueMetadata,
+    CommitMessageAgent,
+    commit_changes as _commit_changes,
+)
 from hephaestus.constants import agent_git_timeout
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.retry import retry_with_backoff
-
-from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_impl_branch_name
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,8 @@ get_repo_slug = _git_runtime.get_repo_slug
 issue_ref = _git_runtime.issue_ref
 pr_ref = _git_runtime.pr_ref
 run = _git_runtime.run
+operation_deadline = _git_runtime.operation_deadline
+remaining_operation_timeout = _git_runtime.remaining_operation_timeout
 
 
 class DetachedHeadPushError(RuntimeError):
@@ -101,7 +107,75 @@ def _timeout_kw(timeout: int | None) -> dict[str, Any]:
 
 def issue_auto_impl_branch_name(issue_number: int | str) -> str:
     """Return the canonical branch name for an issue implementation PR."""
-    return _session_issue_auto_impl_branch_name(issue_number)
+    return f"{issue_number}-auto-impl"
+
+
+def _has_pending_commit_input(
+    worktree_path: Path,
+    *,
+    timeout: int | None,
+    git_env: dict[str, str] | None,
+    manifest_supplied: bool,
+) -> bool:
+    """Return whether commit work exists without reading an inspected manifest again."""
+    if manifest_supplied:
+        return True
+    status_kwargs: dict[str, Any] = {
+        "capture_output": True,
+        **_timeout_kw(timeout),
+    }
+    if git_env is not None:
+        status_kwargs["env"] = git_env
+    result = run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree_path,
+        **status_kwargs,
+    )
+    return bool(result.stdout.strip())
+
+
+def _commit_helper_kwargs(
+    *,
+    allowed_paths: Collection[str] | None,
+    expected_tree_sha: str | None,
+    return_commit_sha: bool,
+    agent_model: str | None,
+    pi_dir: Path | None,
+    timeout: int | None,
+    git_message_timeout: int,
+    signing_env_factory: Callable[[], dict[str, str]] | None,
+    git_env: dict[str, str] | None,
+    manifest_supplied: bool,
+    expected_add_paths: tuple[str, ...] | None,
+    expected_update_paths: tuple[str, ...] | None,
+    disable_hooks: bool,
+    claude_message_agent: CommitMessageAgent | None,
+) -> dict[str, Any]:
+    """Build arguments for the product-layer commit helper."""
+    kwargs: dict[str, Any] = {
+        "allowed_paths": allowed_paths,
+        "git_message_timeout": git_message_timeout,
+    }
+    optional = {
+        "expected_tree_sha": expected_tree_sha,
+        "agent_model": agent_model,
+        "pi_dir": pi_dir,
+        "git_timeout": timeout,
+        "git_env": git_env,
+    }
+    kwargs.update({key: value for key, value in optional.items() if value is not None})
+    if return_commit_sha:
+        kwargs["return_commit_sha"] = True
+    if signing_env_factory is not None:
+        kwargs["signing_env"] = signing_env_factory()
+    if manifest_supplied:
+        kwargs["expected_add_paths"] = expected_add_paths
+        kwargs["expected_update_paths"] = expected_update_paths
+    if disable_hooks:
+        kwargs["disable_hooks"] = True
+    if claude_message_agent is not None:
+        kwargs["claude_message_agent"] = claude_message_agent
+    return kwargs
 
 
 def commit_if_changes(
@@ -113,10 +187,19 @@ def commit_if_changes(
     pi_dir: Path | None = None,
     committed_log_message: str = "Committed changes for issue #%s",
     allowed_paths: Collection[str] | None = None,
+    expected_tree_sha: str | None = None,
+    return_commit_sha: bool = False,
     timeout: int | None = None,
     git_message_timeout: int = 1200,
     signing_env_factory: Callable[[], dict[str, str]] | None = None,
-) -> bool:
+    git_env: dict[str, str] | None = None,
+    expected_add_paths: tuple[str, ...] | None = None,
+    expected_update_paths: tuple[str, ...] | None = None,
+    disable_hooks: bool = False,
+    issue_title: str = "",
+    issue_body: str = "",
+    claude_message_agent: CommitMessageAgent | None = None,
+) -> bool | str:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
     Args:
@@ -129,47 +212,67 @@ def commit_if_changes(
         committed_log_message: ``logging`` format string for a successful commit.
         allowed_paths: Optional exact path allowlist forwarded to the commit
             helper. When set, only those porcelain paths may be staged.
+        expected_tree_sha: Optional immutable tree required after staging.
+        return_commit_sha: Return the exact commit SHA instead of ``True``.
         timeout: Optional timeout in seconds for local git commands.
         signing_env_factory: Optional lazy provider for the controlled Git
             signing environment. It is invoked only after a dirty check.
+        git_env: Optional isolated environment for Git inspection and staging.
+        expected_add_paths: Bounded inspected paths to add without re-enumeration.
+        expected_update_paths: Bounded inspected paths to update without re-enumeration.
+        disable_hooks: Disable commit hooks for a host-validated recovery commit.
+        issue_title: Issue title captured before the Git job was enqueued.
+        issue_body: Issue body captured before the Git job was enqueued.
+        claude_message_agent: Host-owned Claude commit-message adapter.
 
     Returns:
-        True if a commit was created, otherwise False.
+        The exact commit SHA when ``return_commit_sha`` is true. Otherwise,
+        return ``True`` when a commit was created or ``False`` for a no-op.
 
     """
-    result = run(
-        ["git", "status", "--porcelain"],
-        cwd=worktree_path,
-        capture_output=True,
-        **_timeout_kw(timeout),
-    )
-    if not result.stdout.strip():
+    manifest_supplied = expected_add_paths is not None or expected_update_paths is not None
+    if not _has_pending_commit_input(
+        worktree_path,
+        timeout=timeout,
+        git_env=git_env,
+        manifest_supplied=manifest_supplied,
+    ):
         logger.info("No changes to commit for issue #%s", issue_number)
         return False
 
-    try:
-        # Import on demand to keep the product-layer commit implementation out
-        # of the neutral Git utility import path without hidden registration
-        # state or an import-order dependency.
-        from .pr_manager import commit_changes
+    if not isinstance(issue_title, str) or not issue_title.strip():
+        raise ValueError("commit issue title is unavailable")
+    if not isinstance(issue_body, str):
+        raise ValueError("commit issue body is unavailable")
 
-        commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}
-        if agent_model is not None:
-            commit_kwargs["agent_model"] = agent_model
-        if pi_dir is not None:
-            commit_kwargs["pi_dir"] = pi_dir
-        if timeout is not None:
-            commit_kwargs["git_timeout"] = timeout
-        commit_kwargs["git_message_timeout"] = git_message_timeout
-        if signing_env_factory is not None:
-            commit_kwargs["signing_env"] = signing_env_factory()
-        commit_changes(
-            issue_number,
+    try:
+        commit_kwargs = _commit_helper_kwargs(
+            allowed_paths=allowed_paths,
+            expected_tree_sha=expected_tree_sha,
+            return_commit_sha=return_commit_sha,
+            agent_model=agent_model,
+            pi_dir=pi_dir,
+            timeout=timeout,
+            git_message_timeout=git_message_timeout,
+            signing_env_factory=signing_env_factory,
+            git_env=git_env,
+            manifest_supplied=manifest_supplied,
+            expected_add_paths=expected_add_paths,
+            expected_update_paths=expected_update_paths,
+            disable_hooks=disable_hooks,
+            claude_message_agent=claude_message_agent,
+        )
+        committed_sha = _commit_changes(
+            CommitIssueMetadata(issue_number, issue_title, issue_body),
             worktree_path,
             agent,
             **commit_kwargs,
         )
         logger.info(committed_log_message, issue_number)
+        if return_commit_sha:
+            if not isinstance(committed_sha, str):
+                raise RuntimeError("Commit helper did not return the committed revision")
+            return committed_sha
         return True
     except SigningEnvironmentUnavailableError:
         raise
@@ -509,6 +612,8 @@ def push_head_to_branch(
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
     revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
+    disable_hooks: bool = False,
+    remote: str = "origin",
 ) -> None:
     """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
 
@@ -517,25 +622,33 @@ def push_head_to_branch(
     detached ``HEAD`` rather than on the local branch ref. The explicit lease
     permits an address agent to rebase onto current main while refusing to
     overwrite a PR head that changed after its reviewed-head proof.
+
+    Set ``disable_hooks`` only for a host-validated recovery commit. This adds
+    one command-scope null hook path before the lease-protected push.
+
+    Set ``remote`` to a literal trusted URL when mutable repository remote
+    configuration must not select the destination.
     """
     source_ref = source_sha or "HEAD"
     run_kwargs = _timeout_kw(timeout)
     if env is not None:
         run_kwargs["env"] = env
     try:
+        command_config = ("-c", f"core.hooksPath={os.devnull}") if disable_hooks else ()
         run(
             [
                 "git",
+                *command_config,
                 *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
-                "origin",
+                remote,
                 f"{source_ref}:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
             **run_kwargs,
         )
-        logger.info("Published detached HEAD to origin/%s", branch_name)
+        logger.info("Published detached HEAD to the trusted remote branch %s", branch_name)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         # The rejected push can be a local pre-push-hook failure, transport
         # failure, or a server-side lease rejection.  Never infer which from
@@ -553,7 +666,7 @@ def push_head_to_branch(
                     *remote_config,
                     "ls-remote",
                     "--refs",
-                    "origin",
+                    remote,
                     f"refs/heads/{branch_name}",
                 ],
                 cwd=worktree_path,

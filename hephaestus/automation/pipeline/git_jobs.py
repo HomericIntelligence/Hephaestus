@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +20,9 @@ GIT_OPS: frozenset[str] = frozenset(
         "continue_rebase",
         "push",
         "commit_push",
+        "prepare_remediation_recovery",
+        "publish_remediation_recovery",
+        "verify_remediation_journal",
         "release_branch_reservation",
     }
 )
@@ -47,11 +51,19 @@ class GitJob:
     # Pipeline scheduling uses a repository-local key.  Authenticated Git
     # transport validates a separate canonical OWNER/REPOSITORY identity.
     expected_repository: str | None = None
+    deadline_s: float | None = None
 
     def __post_init__(self) -> None:
         """Reject an operation outside the closed Git vocabulary."""
         if self.op not in GIT_OPS:
             raise ValueError(f"unknown git op {self.op!r}; expected one of {sorted(GIT_OPS)}")
+        if self.deadline_s is not None and (
+            isinstance(self.deadline_s, bool)
+            or not isinstance(self.deadline_s, (int, float))
+            or not math.isfinite(self.deadline_s)
+            or self.deadline_s <= 0
+        ):
+            raise ValueError("deadline_s must be a finite positive monotonic time")
 
     @property
     def transport_repository(self) -> str:

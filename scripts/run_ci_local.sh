@@ -473,8 +473,11 @@ _run_in_container() {
     fi
 
     if [ -n "${codex_fixture_root}" ]; then
+        # Use the installed tools and mounted source without an editable rebuild.
         codex_fixture_mount+=(
             --network=none
+            --env UV_NO_SYNC=1
+            --env PYTHONPATH=/workspace
             --volume "${codex_fixture_root}:/codex-sigstore/rust-v0.153.4:ro"
             --volume "${codex_fixture_root}:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro"
             --env "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4"

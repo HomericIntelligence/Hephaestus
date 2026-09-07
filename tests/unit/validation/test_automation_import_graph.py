@@ -9,8 +9,22 @@ from pathlib import Path
 import pytest
 
 _AUTOMATION_ROOT = Path(__file__).resolve().parents[3] / "hephaestus" / "automation"
+_HEPHAESTUS_ROOT = _AUTOMATION_ROOT.parent
 _AUTOMATION_PREFIX = "hephaestus.automation"
 _COMPONENT_PACKAGES = frozenset({"hephaestus.automation.github_api"})
+_WORKER_COMMIT_ENTRYPOINTS = frozenset(
+    {
+        "_git_commit_push",
+        "_git_publish_remediation_recovery",
+        "_git_verify_remediation_journal",
+    }
+)
+_COMMIT_FORBIDDEN_PREFIXES = (
+    "hephaestus.automation.pr_manager",
+    "hephaestus.automation.github_api",
+    "hephaestus.automation.pipeline_github",
+    "hephaestus.github",
+)
 
 
 def _component(module: str) -> str:
@@ -56,7 +70,7 @@ def _visit_runtime_imports(node: ast.AST) -> Iterator[ast.Import | ast.ImportFro
         yield from _visit_runtime_imports(descendant)
 
 
-def _module_names(root: Path) -> set[str]:
+def _module_names(root: Path, *, prefix: str = _AUTOMATION_PREFIX) -> set[str]:
     """Return automation module names represented by Python files below *root*."""
     modules: set[str] = set()
     for path in root.rglob("*.py"):
@@ -64,7 +78,7 @@ def _module_names(root: Path) -> set[str]:
         parts = list(relative.with_suffix("").parts)
         if parts[-1] == "__init__":
             parts.pop()
-        name = ".".join((_AUTOMATION_PREFIX, *parts))
+        name = ".".join((prefix, *parts))
         modules.add(name)
     return modules
 
@@ -109,16 +123,21 @@ def _lazy_export_targets(tree: ast.Module) -> Iterator[str]:
                 yield item.value
 
 
-def _module_path(root: Path, module: str) -> Path:
+def _module_path(root: Path, module: str, *, prefix: str = _AUTOMATION_PREFIX) -> Path:
     """Resolve an automation module name to its Python source path."""
-    relative_name = module.removeprefix(f"{_AUTOMATION_PREFIX}.")
+    relative_name = module.removeprefix(f"{prefix}.")
     if relative_name == module:
         return root / "__init__.py"
     path = root.joinpath(*relative_name.split("."))
     return path / "__init__.py" if path.is_dir() else path.with_suffix(".py")
 
 
-def _runtime_package_initializers(root: Path, modules: set[str]) -> set[str]:
+def _runtime_package_initializers(
+    root: Path,
+    modules: set[str],
+    *,
+    prefix: str = _AUTOMATION_PREFIX,
+) -> set[str]:
     """Return package modules whose initializers perform runtime imports.
 
     Lazy-export-only initializers are modeled through their explicit export
@@ -127,21 +146,18 @@ def _runtime_package_initializers(root: Path, modules: set[str]) -> set[str]:
     """
     initializers: set[str] = set()
     for module in modules:
-        path = _module_path(root, module)
+        path = _module_path(root, module, prefix=prefix)
         if path.name != "__init__.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         if any(
             (
                 isinstance(node, ast.Import)
-                and any(alias.name.startswith(_AUTOMATION_PREFIX) for alias in node.names)
+                and any(alias.name.startswith(prefix) for alias in node.names)
             )
             or (
                 isinstance(node, ast.ImportFrom)
-                and (
-                    node.level > 0
-                    or (node.module is not None and node.module.startswith(_AUTOMATION_PREFIX))
-                )
+                and (node.level > 0 or (node.module is not None and node.module.startswith(prefix)))
             )
             for node in _visit_runtime_imports(tree)
         ):
@@ -185,14 +201,18 @@ def _runtime_import_targets(
                 yield child
 
 
-def _build_import_graph(root: Path) -> dict[str, set[str]]:
+def _build_import_graph(
+    root: Path,
+    *,
+    prefix: str = _AUTOMATION_PREFIX,
+) -> dict[str, set[str]]:
     """Build the normalized runtime module graph rooted at *root*."""
-    modules = _module_names(root)
-    runtime_package_initializers = _runtime_package_initializers(root, modules)
+    modules = _module_names(root, prefix=prefix)
+    runtime_package_initializers = _runtime_package_initializers(root, modules, prefix=prefix)
     graph: dict[str, set[str]] = {}
 
     def add_edge(source: str, target: str) -> None:
-        if not target.startswith(f"{_AUTOMATION_PREFIX}.") and target != _AUTOMATION_PREFIX:
+        if not target.startswith(f"{prefix}.") and target != prefix:
             return
         normalized_source = _component(source)
         normalized_target = _component(target)
@@ -205,7 +225,7 @@ def _build_import_graph(root: Path) -> dict[str, set[str]]:
     for module in modules:
         normalized_module = _component(module)
         graph.setdefault(normalized_module, set())
-        path = _module_path(root, module)
+        path = _module_path(root, module, prefix=prefix)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for target in _runtime_import_targets(
             module,
@@ -308,6 +328,118 @@ def test_automation_runtime_import_graph_is_acyclic() -> None:
     """The runtime automation graph must contain no strongly connected component."""
     graph = _build_import_graph(_AUTOMATION_ROOT)
     assert _strongly_connected_components(graph) == []
+
+
+def test_worker_commit_dependency_closure_excludes_github_product_modules() -> None:
+    """The worker commit seam cannot reach GitHub or PR orchestration modules."""
+    graph = _build_import_graph(_HEPHAESTUS_ROOT, prefix="hephaestus")
+    start = "hephaestus.automation.git_utils"
+    reachable: set[str] = set()
+    pending = [start]
+    while pending:
+        module = pending.pop()
+        if module in reachable:
+            continue
+        reachable.add(module)
+        pending.extend(graph.get(module, ()))
+
+    forbidden = {
+        module
+        for module in reachable
+        if module == "hephaestus.automation.pr_manager"
+        or module == "hephaestus.github"
+        or module.startswith("hephaestus.github.")
+        or module.startswith("hephaestus.automation.github_api")
+        or module.startswith("hephaestus.automation.pipeline_github")
+    }
+    assert not forbidden, (
+        f"the worker commit dependency closure reaches product GitHub modules: {sorted(forbidden)}"
+    )
+
+
+def _worker_commit_forbidden_references(  # noqa: C901
+    source: str, graph: dict[str, set[str]]
+) -> set[str]:
+    """Return forbidden modules reachable from worker commit entry points."""
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    aliases: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            aliases.update(
+                {alias.asname or alias.name.split(".")[0]: alias.name for alias in node.names}
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                candidate = f"{node.module}.{alias.name}"
+                aliases[alias.asname or alias.name] = (
+                    candidate
+                    if candidate in graph
+                    or any(
+                        candidate == prefix or candidate.startswith(f"{prefix}.")
+                        for prefix in _COMMIT_FORBIDDEN_PREFIXES
+                    )
+                    else node.module
+                )
+    external: set[str] = set()
+    pending = list(_WORKER_COMMIT_ENTRYPOINTS & functions.keys())
+    visited: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        for walk_node in ast.walk(functions[name]):
+            if isinstance(walk_node, (ast.Import, ast.ImportFrom)):
+                external.update(alias.name for alias in walk_node.names) if isinstance(
+                    walk_node, ast.Import
+                ) else external.add(walk_node.module or "")
+            if not isinstance(walk_node, ast.Call):
+                continue
+            if isinstance(walk_node.func, ast.Name):
+                if walk_node.func.id in functions:
+                    pending.append(walk_node.func.id)
+                elif walk_node.func.id in aliases:
+                    external.add(aliases[walk_node.func.id])
+            elif isinstance(walk_node.func, ast.Attribute) and isinstance(
+                walk_node.func.value, ast.Name
+            ):
+                if walk_node.func.value.id in {"self", "cls"} and walk_node.func.attr in functions:
+                    pending.append(walk_node.func.attr)
+                elif walk_node.func.value.id in aliases:
+                    external.add(aliases[walk_node.func.value.id])
+    return {
+        module
+        for module in external
+        if any(
+            module == prefix or module.startswith(f"{prefix}.")
+            for prefix in _COMMIT_FORBIDDEN_PREFIXES
+        )
+    }
+
+
+def test_worker_commit_call_path_excludes_github_product_modules() -> None:
+    """Worker commit entry points and local callees stay on neutral modules."""
+    graph = _build_import_graph(_HEPHAESTUS_ROOT, prefix="hephaestus")
+    worker = _AUTOMATION_ROOT / "pipeline" / "worker_pool.py"
+    assert _worker_commit_forbidden_references(worker.read_text(), graph) == set()
+
+
+def test_worker_commit_call_path_guard_detects_local_bypass() -> None:
+    """A local worker helper cannot bypass the neutral commit seam."""
+    source = """
+from hephaestus.automation import pr_manager
+class WorkerPool:
+    def _git_commit_push(self):
+        self._commit_directly()
+    def _commit_directly(self):
+        pr_manager.commit_changes()
+"""
+    assert _worker_commit_forbidden_references(source, {}) == {"hephaestus.automation.pr_manager"}
 
 
 def test_strongly_connected_components_reports_self_loops() -> None:

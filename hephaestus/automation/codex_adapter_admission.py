@@ -1793,7 +1793,10 @@ class CapabilityObject:
         if target in {subprocess.Popen, subprocess.run}:
             return close_value(call_subprocess_api(target, args, kwargs))
         target_module = getattr(target, "__module__", "")
-        if target_module in {"pathlib", "shutil"}:
+        if (
+            isinstance(target_module, str)
+            and target_module.partition(".")[0] in {"pathlib", "shutil"}
+        ):
             return close_value(call_path_api(target, args, kwargs))
         return close_value(
             target(*close_callback_payload(args), **close_callback_payload(kwargs))
@@ -2678,18 +2681,30 @@ class _IsolatedAdapter:
 
     def prepare(self, request: object) -> object:
         """Prepare one isolated adapter request."""
+        from hephaestus.agents.codex_isolation import (
+            CodexIsolationRequestV1,
+            _CodexPrepareCleanupError,
+        )
+
         policy = getattr(request, "policy", None)
         max_output_bytes = getattr(policy, "max_output_bytes", 4096)
         _invocation_frame_limit(max_output_bytes)
         request_deadline = getattr(request, "monotonic_deadline", None)
         if not isinstance(request_deadline, (int, float)):
             request_deadline = time.monotonic() + _ISOLATED_ADAPTER_CONTROL_SECONDS
-        reply = self._process.request("prepare", request, deadline=float(request_deadline))
+        transport_deadline = float(request_deadline)
+        if type(request) is CodexIsolationRequestV1:
+            # Keep terminal control available after the unchanged execution deadline.
+            transport_deadline += (
+                request.policy.term_grace_seconds
+                + request.policy.kill_grace_seconds
+                + request.policy.pipe_close_grace_seconds
+                + 2 * request.policy.inventory_quiescence_seconds
+            )
+        reply = self._process.request("prepare", request, deadline=transport_deadline)
         cleanup_handle = reply.get("cleanup_handle")
         if type(cleanup_handle) is not str:
             raise CodexAdapterAdmissionError("isolated adapter result is invalid")
-        from hephaestus.agents.codex_isolation import _CodexPrepareCleanupError
-
         if reply.get("ok") is not True:
             raise _CodexPrepareCleanupError(lambda: self._destroy_handle(cleanup_handle))
         try:
@@ -2701,13 +2716,13 @@ class _IsolatedAdapter:
                 prepared,
                 cleanup_handle,
                 max_output_bytes,
-                float(request_deadline),
+                transport_deadline,
             )
         return prepared
 
     def invoke(self, prepared: object, auth_path: str) -> object:
         """Invoke one prepared isolated adapter request."""
-        cleanup_handle, max_output_bytes, request_deadline = self._claim_prepared_handle(
+        cleanup_handle, max_output_bytes, transport_deadline = self._claim_prepared_handle(
             prepared,
             remove=False,
         )
@@ -2716,7 +2731,7 @@ class _IsolatedAdapter:
                 "invoke_prepared",
                 auth_path,
                 cleanup_handle=cleanup_handle,
-                deadline=request_deadline,
+                deadline=transport_deadline,
                 max_frame_bytes=_invocation_frame_limit(max_output_bytes),
                 max_output_bytes=max_output_bytes,
             ).get("value")

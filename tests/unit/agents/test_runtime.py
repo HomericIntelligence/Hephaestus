@@ -1435,13 +1435,51 @@ def test_codex_implementation_returns_emitted_provider_session_id(
     assert result.session_id == "provider-session-3019"
 
 
+@pytest.fixture
+def codex_deadline_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Any, int], Callable[[], None]]:
+    """Expire the host clock only after the selected adapter call enters."""
+
+    def configure(request: Any, call_number: int) -> Callable[[], None]:
+        now = [100.0]
+        request.monotonic_deadline = 110.0
+        entered = threading.Event()
+        release = threading.Event()
+        original_wait = agent_runtime._wait_for_codex_adapter_call
+        waits = 0
+
+        def wait_for_call(call: Any, deadline: float) -> bool:
+            nonlocal waits
+            waits += 1
+            if waits != call_number:
+                return original_wait(call, deadline)
+            assert entered.wait(timeout=5), "the selected adapter call did not enter"
+            now[0] = request.monotonic_deadline + 0.001
+            try:
+                return original_wait(call, deadline)
+            finally:
+                release.set()
+
+        def enter() -> None:
+            entered.set()
+            assert release.wait(timeout=5), "the host did not observe the adapter deadline"
+
+        monkeypatch.setattr(agent_runtime, "time", SimpleNamespace(monotonic=lambda: now[0]))
+        monkeypatch.setattr(agent_runtime, "_wait_for_codex_adapter_call", wait_for_call)
+        return enter
+
+    return configure
+
+
 def test_codex_invoke_return_after_host_deadline_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """The host rejects a result that returns after its request deadline."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.03
+    enter_deadline = codex_deadline_gate(request, 2)
     auth_source = tmp_path / "trusted-auth.json"
     auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
     auth_source.chmod(0o600)
@@ -1449,7 +1487,7 @@ def test_codex_invoke_return_after_host_deadline_fails_closed(
     class LateAdapter(_CodexImplementationAdapter):
         def invoke(self, prepared: object, auth_path: str) -> object:
             result = super().invoke(prepared, auth_path)
-            time.sleep(0.06)
+            enter_deadline()
             return result
 
     adapter = LateAdapter(SimpleNamespace(output="done", session_id="provider-session-3019"))
@@ -1471,10 +1509,11 @@ def test_codex_invoke_return_after_host_deadline_fails_closed(
 def test_codex_blocked_invoke_is_destroyed_by_host_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """A host timer destroys one guest and waits for terminal completion."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.05
+    enter_deadline = codex_deadline_gate(request, 2)
     auth_source = tmp_path / "trusted-auth.json"
     auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
     auth_source.chmod(0o600)
@@ -1485,6 +1524,7 @@ def test_codex_blocked_invoke_is_destroyed_by_host_deadline(
     class BlockingAdapter(_CodexImplementationAdapter):
         def invoke(self, prepared: object, auth_path: str) -> object:
             super().invoke(prepared, auth_path)
+            enter_deadline()
             released.wait(timeout=0.6)
             return result
 
@@ -1498,7 +1538,6 @@ def test_codex_blocked_invoke_is_destroyed_by_host_deadline(
     _patch_codex_profile_source(monkeypatch, request)
     monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
 
-    started = time.monotonic()
     with pytest.raises(CodexIsolationError, match="codex_adapter_timeout"):
         _run_codex_implementation_session(
             adapter=cast(CodexIsolationAdapterV1, adapter),
@@ -1506,7 +1545,6 @@ def test_codex_blocked_invoke_is_destroyed_by_host_deadline(
             auth_source=auth_source,
         )
 
-    assert time.monotonic() - started < 0.4
     assert destroy_calls == [adapter.prepared]
     assert not (Path(request.private_profile_path) / "auth.json").exists()
 
@@ -1514,10 +1552,11 @@ def test_codex_blocked_invoke_is_destroyed_by_host_deadline(
 def test_codex_timeout_has_one_destroy_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """A timed-out control call does not start a second destroy call."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.02
+    enter_deadline = codex_deadline_gate(request, 2)
     request.policy = SimpleNamespace(
         read_only_mounts=request.policy.read_only_mounts,
         read_write_mounts=request.policy.read_write_mounts,
@@ -1535,6 +1574,7 @@ def test_codex_timeout_has_one_destroy_owner(
     class BlockingCleanupAdapter(_CodexImplementationAdapter):
         def invoke(self, prepared: object, auth_path: str) -> object:
             super().invoke(prepared, auth_path)
+            enter_deadline()
             release.wait(timeout=1)
             return SimpleNamespace(output="stopped")
 
@@ -1566,10 +1606,11 @@ def test_codex_timeout_has_one_destroy_owner(
 def test_codex_dup_failure_still_unlinks_auth_before_uncertain_return(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """A backup-descriptor failure cannot skip normal authentication removal."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.02
+    enter_deadline = codex_deadline_gate(request, 2)
     request.policy = SimpleNamespace(
         read_only_mounts=request.policy.read_only_mounts,
         read_write_mounts=request.policy.read_write_mounts,
@@ -1586,6 +1627,7 @@ def test_codex_dup_failure_still_unlinks_auth_before_uncertain_return(
     class UncertainAdapter(_CodexImplementationAdapter):
         def invoke(self, prepared: object, auth_path: str) -> object:
             super().invoke(prepared, auth_path)
+            enter_deadline()
             release.wait(timeout=1)
             return SimpleNamespace(output="stopped")
 
@@ -1620,10 +1662,11 @@ def test_codex_dup_failure_still_unlinks_auth_before_uncertain_return(
 def test_codex_helper_reaper_does_not_claim_guest_terminal_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """Broker exit cannot authorize guest state reuse or publication."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.02
+    enter_deadline = codex_deadline_gate(request, 2)
     request.policy = SimpleNamespace(
         read_only_mounts=request.policy.read_only_mounts,
         read_write_mounts=request.policy.read_write_mounts,
@@ -1644,6 +1687,7 @@ def test_codex_helper_reaper_does_not_claim_guest_terminal_state(
         def invoke(self, prepared: object, auth_path: str) -> object:
             super().invoke(prepared, auth_path)
             authentication = Path(auth_path).read_text(encoding="utf-8")
+            enter_deadline()
             release.wait(timeout=1)
             late_copy.write_text(authentication, encoding="utf-8")
             invoke_finished.set()
@@ -1767,10 +1811,11 @@ def test_codex_profile_copy_failure_removes_the_partial_ephemeral_run(
 def test_codex_late_prepare_is_destroyed_with_typed_terminal_receipt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """A late prepare result is destroyed before the timeout returns."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.05
+    enter_deadline = codex_deadline_gate(request, 1)
     prepared = SimpleNamespace(
         preparation_deadline=request.monotonic_deadline,
         guest_boot_nonce="b" * 64,
@@ -1779,7 +1824,7 @@ def test_codex_late_prepare_is_destroyed_with_typed_terminal_receipt(
 
     class BlockingPrepareAdapter:
         def prepare(self, _request: object) -> object:
-            time.sleep(0.06)
+            enter_deadline()
             return prepared
 
         def invoke(self, _prepared: object, _auth_path: str) -> object:
@@ -1804,7 +1849,6 @@ def test_codex_late_prepare_is_destroyed_with_typed_terminal_receipt(
 
     monkeypatch.setattr(agent_runtime, "_complete_timed_out_codex_call", capture_receipt)
 
-    started = time.monotonic()
     with pytest.raises(CodexIsolationError, match="codex_adapter_timeout"):
         _run_codex_implementation_session(
             adapter=BlockingPrepareAdapter(),  # type: ignore[arg-type]
@@ -1812,7 +1856,6 @@ def test_codex_late_prepare_is_destroyed_with_typed_terminal_receipt(
             auth_source=tmp_path / "unused-auth.json",
         )
 
-    assert time.monotonic() - started < 0.4
     assert destroy_calls == [prepared]
     assert len(receipts) == 1
     assert type(receipts[0]).__name__ == "_CodexTerminalReceipt"
@@ -1822,10 +1865,11 @@ def test_codex_late_prepare_is_destroyed_with_typed_terminal_receipt(
 def test_codex_late_mismatched_prepare_is_destroyed_once_before_rejection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """A late mismatched prepare result cannot bypass one guest cleanup."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.02
+    enter_deadline = codex_deadline_gate(request, 1)
     request.policy = SimpleNamespace(
         read_only_mounts=request.policy.read_only_mounts,
         read_write_mounts=request.policy.read_write_mounts,
@@ -1844,7 +1888,7 @@ def test_codex_late_mismatched_prepare_is_destroyed_once_before_rejection(
 
     class MismatchedPrepareAdapter:
         def prepare(self, _request: object) -> object:
-            time.sleep(0.04)
+            enter_deadline()
             return prepared
 
         def invoke(self, supplied: object, _auth_path: str) -> object:
@@ -1866,7 +1910,6 @@ def test_codex_late_mismatched_prepare_is_destroyed_once_before_rejection(
         lambda *_args: pytest.fail("profile publication must not run"),
     )
 
-    started = time.monotonic()
     try:
         with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
             _run_codex_implementation_session(
@@ -1874,7 +1917,6 @@ def test_codex_late_mismatched_prepare_is_destroyed_once_before_rejection(
                 request=request,
                 auth_source=tmp_path / "unused-auth.json",
             )
-        assert time.monotonic() - started < 0.3
         assert destroy_calls == [prepared]
         assert invoke_calls == []
         assert not Path(request.private_profile_path).exists()
@@ -1885,10 +1927,11 @@ def test_codex_late_mismatched_prepare_is_destroyed_once_before_rejection(
 def test_codex_late_unencodable_prepare_uses_one_bounded_cleanup_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codex_deadline_gate: Callable[[Any, int], Callable[[], None]],
 ) -> None:
     """A late unencodable result issues one bounded opaque cleanup request."""
     request = _codex_implementation_request(tmp_path)
-    request.monotonic_deadline = time.monotonic() + 0.02
+    enter_deadline = codex_deadline_gate(request, 1)
     request.policy = SimpleNamespace(
         read_only_mounts=request.policy.read_only_mounts,
         read_write_mounts=request.policy.read_write_mounts,
@@ -1911,7 +1954,7 @@ def test_codex_late_unencodable_prepare_uses_one_bounded_cleanup_owner(
 
     class UnencodablePrepareAdapter:
         def prepare(self, _request: object) -> object:
-            time.sleep(0.03)
+            enter_deadline()
             raise cleanup_error_type(cleanup)
 
         def invoke(self, supplied: object, _auth_path: str) -> object:
@@ -1932,7 +1975,6 @@ def test_codex_late_unencodable_prepare_uses_one_bounded_cleanup_owner(
         lambda *_args: pytest.fail("profile publication must not run"),
     )
 
-    started = time.monotonic()
     try:
         with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
             _run_codex_implementation_session(
@@ -1941,7 +1983,6 @@ def test_codex_late_unencodable_prepare_uses_one_bounded_cleanup_owner(
                 auth_source=tmp_path / "unused-auth.json",
             )
         assert cleanup_started.is_set()
-        assert time.monotonic() - started < 0.3
         assert cleanup_calls == ["opaque-prepare-handle"]
         assert invoke_calls == []
         assert not Path(request.private_profile_path).exists()

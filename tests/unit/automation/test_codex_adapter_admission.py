@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1231,7 +1232,7 @@ def test_each_isolated_adapter_request_has_an_absolute_deadline(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
-    """Each adapter operation terminates the process after its one deadline."""
+    """Each adapter operation enforces its terminal transport deadline."""
     module = _module()
     monkeypatch.setattr(module, "_ISOLATED_ADAPTER_CONTROL_SECONDS", 0.05, raising=False)
     prepare = "        while True: pass" if operation == "prepare" else "        return request"
@@ -1252,7 +1253,16 @@ def test_each_isolated_adapter_request_has_an_absolute_deadline(
         files={"example_adapter/__init__.py": source.encode()},
     )
     adapter = module._default_importer(tree, "example_adapter", "factory")()
-    request = _isolation_request(tmp_path, max_output_bytes=32, deadline_seconds=0.15)
+    request = cast(Any, _isolation_request(tmp_path, max_output_bytes=32, deadline_seconds=0.15))
+    policy = replace(
+        request.policy,
+        term_grace_seconds=0.01,
+        kill_grace_seconds=0.01,
+        pipe_close_grace_seconds=0.01,
+        inventory_quiescence_seconds=0.005,
+    )
+    protocol = importlib.import_module("hephaestus.agents.codex_isolation")
+    request = replace(request, policy=policy, policy_digest=protocol.canonical_sha256(policy))
     started = time.monotonic()
 
     with pytest.raises(module.CodexAdapterAdmissionError, match="deadline"):
@@ -2233,6 +2243,64 @@ def test_late_unencodable_isolated_prepare_has_one_host_cleanup_control(
     assert controls.count("prepare") == 1
     assert controls.count("destroy_prepared") == 1
     assert "invoke_prepared" not in controls
+
+
+@pytest.mark.parametrize("late_operation", ["prepare", "invoke_prepared"])
+def test_isolated_adapter_retains_control_after_provider_deadline(
+    tmp_path: Path,
+    late_operation: str,
+) -> None:
+    """The transport permits terminal cleanup after the provider deadline."""
+    module = _module()
+    request = cast(Any, _isolation_request(tmp_path, max_output_bytes=32))
+    provider_deadline = request.monotonic_deadline
+    transport_deadline = provider_deadline + (
+        request.policy.term_grace_seconds
+        + request.policy.kill_grace_seconds
+        + request.policy.pipe_close_grace_seconds
+        + 2 * request.policy.inventory_quiescence_seconds
+    )
+    operations: list[str] = []
+
+    class Transport:
+        def request(self, operation: str, *arguments: object, **kwargs: Any) -> dict[str, Any]:
+            operations.append(operation)
+            if operation in {"prepare", "invoke_prepared"}:
+                assert kwargs["deadline"] == transport_deadline
+            if operation == late_operation:
+                # The provider stops at its deadline; its terminal reply arrives later.
+                observed_reply_time = provider_deadline + 0.001
+                if kwargs["deadline"] <= observed_reply_time:
+                    raise module.CodexAdapterAdmissionError("transport expired before cleanup")
+            if operation == "prepare":
+                assert arguments == (request,)
+                return {
+                    "ok": True,
+                    "cleanup_handle": "held-guest",
+                    "value": module._encode_adapter_value(request),
+                }
+            if operation == "invoke_prepared":
+                assert kwargs["cleanup_handle"] == "held-guest"
+                return {"ok": True, "value": module._encode_adapter_value(request)}
+            assert operation == "destroy_prepared"
+            assert kwargs["cleanup_handle"] == "held-guest"
+            return {"ok": True, "value": module._encode_adapter_value(None)}
+
+        def close(self) -> None:
+            pass
+
+    adapter = module._IsolatedAdapter(
+        Transport(),
+        adapter_distribution="example-adapter",
+        adapter_version="1.0.0",
+        installed_tree_sha256="a" * 64,
+    )
+    prepared = adapter.prepare(request)
+    result = adapter.invoke(prepared, "/private/auth.json")
+    adapter.destroy(prepared)
+
+    assert result.monotonic_deadline == provider_deadline
+    assert operations == ["prepare", "invoke_prepared", "destroy_prepared"]
 
 
 def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(tmp_path: Path) -> None:
