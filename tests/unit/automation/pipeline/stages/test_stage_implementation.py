@@ -6774,3 +6774,40 @@ class TestWriterPublicationRefresh:
             Disposition.FINISH_FAIL, "commit_push_refresh_invalid"
         )
         assert ctx.github.mutation_log == []
+
+
+@pytest.mark.parametrize(
+    "reference", [None, {"identity": "1-impl-terminal.json", "content_sha256": "a" * 64}]
+)
+def test_terminal_writer_failure_stops_without_git_retry(
+    make_ctx: Any, make_work_item: Any, reference: object
+) -> None:
+    """Invalid transport still preserves the writer and stops implementation."""
+    stage = ImplementationStage()
+    item = make_work_item(issue=1, state="WORKTREE_WAIT")
+    ctx = make_ctx()
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=False,
+            error="source_workspace_terminal",
+            value={
+                "failure_kind": "source_workspace_terminal",
+                "source_workspace_terminal": reference,
+                "path": "/missing/writer",
+            },
+        ),
+        ctx,
+    )
+    item.payload["remediation_writer_inspection_receipt"] = {
+        "outcome": "failed",
+        "failure_kind": "git_error",
+    }
+    item.state = "DIRTY_DECISION_WAIT"
+    outcome = stage.step(item, ctx)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition == Disposition.FINISH_FAIL
+    assert item.payload["source_workspace_preserve"] is True
+    assert item.payload["source_workspace_terminal"] == reference
+    assert item.worktree == "/missing/writer"
+    assert not item.payload.get("git_error_retries")

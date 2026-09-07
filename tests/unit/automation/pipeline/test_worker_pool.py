@@ -7216,9 +7216,10 @@ class TestGitOps:
                 failed = pool._git_create_worktree(job)
 
             assert failed.ok is False
-            assert failed.error == (
-                "source_workspace_ownership_unavailable: simulated process stop before recovery"
-            )
+            assert failed.error == "source_workspace_terminal"
+            assert isinstance(failed.value, dict)
+            assert failed.value["source_workspace_preserve"] is True
+            assert failed.value["source_workspace_terminal"] is not None
             pending = SourceWorkspaceManager(repo, repository="Hephaestus")
             assert (pending.state_dir / "7-impl-transition.json").is_file()
             old_receipt = pending._read_receipt(7, SourceLane.IMPLEMENTATION)
@@ -7363,8 +7364,8 @@ class TestGitOps:
         assert first_result.ok is True
         assert second_result.ok is False
         assert second_result.error is not None
-        assert second_result.error.startswith("source_workspace_ownership_unavailable: ")
-        assert "branch does not match its receipt" in second_result.error
+        assert second_result.error == "source_workspace_terminal"
+        assert second_result.error == "source_workspace_terminal"
         assert _git(writer_path, "symbolic-ref", "--short", "HEAD") == "unrelated-writer"
 
     @pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift"])
@@ -7423,29 +7424,16 @@ class TestGitOps:
 
         assert result.ok is False
         assert result.error is not None
-        assert result.error.startswith("source_workspace_ownership_unavailable: ")
+        assert result.error == "source_workspace_terminal"
         assert isinstance(result.value, dict)
         assert result.value["path"] == str(predecessor.cwd)
-        assert result.value[WORKTREE_MATERIALIZED_KEY] is True
-        assert result.value["failure_kind"] == "source_workspace_ownership"
+        assert result.value["source_workspace_preserve"] is True
+        assert result.value["failure_kind"] == "source_workspace_terminal"
         assert result.value["direct_scope_reservation"] == {
             "branch": branch,
             "base_sha": base_revision,
         }
-        recovery = result.value["source_workspace_recovery"]
-        assert isinstance(recovery, dict)
-        assert (
-            recovery["kind"]
-            == {
-                "dirty": "dirty_worktree",
-                "attached": "branch_mismatch",
-                "revision-drift": "revision_drift",
-            }[mutation]
-        )
-        assert recovery["item_number"] == 7
-        assert recovery["path"] == str(predecessor.cwd)
-        assert recovery["receipt_path"].endswith("7-impl.json")
-        assert recovery["manual_action"]
+        assert result.value["source_workspace_terminal"] is not None
         preserved = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
         assert preserved is not None
         assert preserved.revision == predecessor_revision
@@ -7520,15 +7508,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == (
-            "source_workspace_ownership_unavailable: "
-            "implementation writer direct transition evidence is invalid"
-        )
-        assert result.value == {
-            "path": str(predecessor.cwd),
-            WORKTREE_MATERIALIZED_KEY: True,
-            "direct_scope_reservation": {"branch": branch, "base_sha": base_revision},
-        }
+        assert result.error == "source_workspace_terminal"
+        assert isinstance(result.value, dict)
+        assert result.value["source_workspace_preserve"] is True
         preserved = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
         assert preserved is not None
         assert preserved.path == predecessor.cwd
@@ -7537,9 +7519,9 @@ class TestGitOps:
         assert preserved.detached is True
         assert preserved.branch is None
         assert predecessor.cwd.exists()
-        assert _git(predecessor.cwd, "rev-parse", "HEAD") == predecessor_revision
-        assert _git(predecessor.cwd, "branch", "--show-current") == ""
-        assert not (source_manager.state_dir / "7-impl-transition.json").exists()
+        assert _git(predecessor.cwd, "rev-parse", "HEAD") == base_revision
+        assert _git(predecessor.cwd, "branch", "--show-current") == branch
+        assert (source_manager.state_dir / "7-impl-transition.json").exists()
 
     def test_implementation_source_lane_rejects_unmaterialized_writer(
         self,
@@ -7575,13 +7557,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == (
-            "source_workspace_ownership_unavailable: implementation writer was not materialized"
-        )
-        assert result.value == {
-            "path": str(tmp_path / "build" / ".worktrees" / "auto-7-impl"),
-            WORKTREE_MATERIALIZED_KEY: False,
-        }
+        assert result.error == "source_workspace_terminal"
+        assert isinstance(result.value, dict)
+        assert result.value["source_workspace_preserve"] is True
 
     def test_implementation_source_lane_rejects_missing_clean_writer_path(
         self,
@@ -8164,14 +8142,11 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         worktree_manager.create_worktree.assert_not_called()
-        assert result.error == "source_workspace_ownership_unavailable: source workspace is dirty"
-        assert result.value == {
-            "path": str(writer_path),
-            WORKTREE_MATERIALIZED_KEY: False,
-            "failure_kind": "source_workspace_ownership",
-            "source_workspace_recovery": recovery.to_dict(),
-            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pin},
-        }
+        assert result.error == "source_workspace_terminal"
+        assert isinstance(result.value, dict)
+        assert result.value["source_workspace_preserve"] is True
+        assert result.value["source_workspace_terminal"] is None
+        assert result.value["direct_scope_reservation"] == {"branch": "7-auto", "base_sha": pin}
 
     def test_direct_writer_change_after_authorization_returns_typed_recovery(
         self,
@@ -8262,30 +8237,15 @@ class TestGitOps:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        receipt_path = repo / ".git" / "hephaestus-source-workspaces" / "7-impl.json"
         assert result.ok is False
-        assert result.error == (
-            "source_workspace_ownership_unavailable: implementation writer predecessor "
-            "changed after authorization"
-        )
-        assert result.value == {
-            "path": str(predecessor.cwd),
-            WORKTREE_MATERIALIZED_KEY: True,
-            "failure_kind": "source_workspace_ownership",
-            "source_workspace_recovery": {
-                "kind": "unproven_predecessor",
-                "item_number": 7,
-                "path": str(predecessor.cwd),
-                "receipt_path": str(receipt_path),
-                "manual_action": (
-                    f"Preserve {predecessor.cwd}; its checkout changed after authorization. "
-                    "Inspect it before cleanup, then rerun issue #7."
-                ),
-            },
-            "direct_scope_reservation": {
-                "branch": "writer-branch",
-                "base_sha": second,
-            },
+        assert result.error == "source_workspace_terminal"
+        assert isinstance(result.value, dict)
+        assert result.value["path"] == str(predecessor.cwd)
+        assert result.value["source_workspace_preserve"] is True
+        assert result.value["source_workspace_terminal"] is not None
+        assert result.value["direct_scope_reservation"] == {
+            "branch": "writer-branch",
+            "base_sha": second,
         }
         assert predecessor.cwd.exists()
 
@@ -8322,11 +8282,10 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_ownership_unavailable: mismatch"
-        assert result.value == {
-            "path": str(writer_path),
-            WORKTREE_MATERIALIZED_KEY: True,
-        }
+        assert result.error == "source_workspace_terminal"
+        assert isinstance(result.value, dict)
+        assert result.value["source_workspace_preserve"] is True
+        assert result.value["source_workspace_terminal"] is None
 
     def test_adopted_writer_head_drift_prevents_authority_mint_and_claim(
         self,
@@ -8450,14 +8409,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == (
-            "source_workspace_ownership_unavailable: "
-            "deterministic implementation worktree has no creation receipt"
-        )
-        assert result.value == {
-            "path": str(writer_path),
-            WORKTREE_MATERIALIZED_KEY: True,
-        }
+        assert result.error == "source_workspace_terminal"
+        assert isinstance(result.value, dict)
+        assert result.value["source_workspace_preserve"] is True
 
     def test_create_implementation_source_lane_returns_typed_receipt_write_failure(
         self,
@@ -8489,11 +8443,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.error == "source_workspace_ownership_unavailable: disk full"
-        assert result.value == {
-            "path": str(writer_path),
-            WORKTREE_MATERIALIZED_KEY: True,
-        }
+        assert result.error == "source_workspace_terminal"
+        assert isinstance(result.value, dict)
+        assert result.value["source_workspace_preserve"] is True
 
     def test_direct_writer_receipt_failure_keeps_remote_reservation(
         self,
@@ -8526,11 +8478,8 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.value == {
-            "path": str(tmp_path / "build" / ".worktrees" / "auto-7-impl"),
-            WORKTREE_MATERIALIZED_KEY: False,
-            "direct_scope_reservation": {"branch": "7-auto", "base_sha": pin},
-        }
+        assert isinstance(result.value, dict)
+        assert result.value["source_workspace_preserve"] is True
 
     def test_create_isolated_worktree_syncs_only_detached_checkout(
         self,
@@ -15336,3 +15285,154 @@ def test_commit_push_refreshes_stale_writer_and_publishes_signed_descendant(
     commit_text = _git(repo, "cat-file", "commit", head)
     assert "gpgsig -----BEGIN SSH SIGNATURE-----" in commit_text
     assert "Signed-off-by: Test User <test@example.invalid>" in commit_text
+
+
+def test_direct_writer_creation_failure_does_not_rollback_reservation(pool: WorkerPool) -> None:
+    """A failed direct writer stays inside the preservation handoff."""
+    from hephaestus.automation.source_worktree import SourceWorkspaceTerminalError
+
+    manager = MagicMock()
+    manager.create_worktree.side_effect = RuntimeError("creation stopped")
+    with (
+        patch.object(pool, "_rollback_direct_scope_reservation") as rollback,
+        pytest.raises(SourceWorkspaceTerminalError) as raised,
+    ):
+        pool._create_managed_worktree(
+            manager=manager,
+            kwargs={"source_lane": "impl", "implementation_writer_handoff": object()},
+            base_dir=Path("/unused/build/.worktrees"),
+            base_sha="a" * 40,
+            branch_name="7-auto",
+            repo_root=Path("/unused"),
+            expected_repo="test/repo",
+            timeout_s=60,
+        )
+    rollback.assert_not_called()
+    assert raised.value.requested_branch == "7-auto"
+    assert raised.value.requested_base_sha == "a" * 40
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "none",
+        "phase",
+        "source_bytes",
+        "source_missing",
+        "terminal_cause",
+        "O_NOFOLLOW",
+        "O_NONBLOCK",
+    ],
+)
+def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
+    pool: WorkerPool, tmp_path: Path, mutation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real handoff failure stays preserved after terminal evidence changes."""
+    from types import SimpleNamespace
+
+    from hephaestus.automation.issue_waves import WAVE_LEASE_PAYLOAD, IssueWaveStore
+    from hephaestus.automation.pipeline.stages.base import Continue
+    from hephaestus.automation.pipeline.stages.finished import FinishedStage
+    from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+    from hephaestus.automation.pipeline.stages.repo import (
+        DIRECT_SCOPE_BASE_SHA_KEY,
+        DIRECT_SCOPE_RESERVATION_KEY,
+    )
+    from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+
+    repo, predecessor_sha, target_sha = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+    _git(repo, "reset", "--hard", predecessor_sha)
+    predecessor = manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor_sha)
+    _git(repo, "reset", "--hard", target_sha)
+    branch = "7-auto-impl-direct-" + "f" * 32
+    job = GitJob(
+        repo="Hephaestus",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 7,
+            "branch_name": branch,
+            "repo_root": str(repo),
+            "source_lane": "impl",
+            "base_sha": target_sha,
+            "direct_worktree_nonce": "f" * 32,
+        },
+    )
+    with (
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        patch.object(pool, "_prepare_direct_scope_worktree", return_value=(target_sha, branch)),
+        patch.object(WorktreeManager, "_add_worktree_for_branch", side_effect=RuntimeError("stop")),
+        patch.object(pool, "_rollback_direct_scope_reservation") as rollback,
+    ):
+        failure = pool._git_create_worktree(job)
+    rollback.assert_not_called()
+    assert not failure.ok
+    assert isinstance(failure.value, dict)
+    assert failure.value["source_workspace_terminal"] is not None
+    journal_path = manager.state_dir / "7-impl-transition.json"
+    source_path = manager.state_dir / "7-impl.json"
+    terminal_path = manager.state_dir / "7-impl-terminal.json"
+    if mutation == "phase":
+        journal = json.loads(journal_path.read_text())
+        journal["phase"] = "receipt_pending"
+        journal_path.write_text(json.dumps(journal))
+    elif mutation == "source_bytes":
+        source_path.write_bytes(source_path.read_bytes() + b"\n")
+    elif mutation == "source_missing":
+        source_path.unlink()
+    elif mutation == "terminal_cause":
+        terminal = json.loads(terminal_path.read_text())
+        terminal["cause"] = "source_workspace_legacy_unproven"
+        terminal_path.write_text(json.dumps(terminal))
+    store = IssueWaveStore(repo, "acme", "Hephaestus")
+    lease = store.seal_selection(store.plan_admission(target_sha, 1), [7])
+    item = WorkItem(
+        repo="Hephaestus",
+        issue=7,
+        kind=ItemKind.ISSUE,
+        stage=StageName.IMPLEMENTATION,
+        state="WORKTREE_WAIT",
+        branch=branch,
+    )
+    item.payload[WAVE_LEASE_PAYLOAD] = lease
+    item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = target_sha
+    reservation = {"branch": branch, "base_sha": target_sha}
+    ctx = MagicMock()
+    ctx.org = "acme"
+    ctx.paths = SimpleNamespace(repo_root=repo)
+    ImplementationStage().on_job_done(item, failure, ctx)
+    assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
+    item.stage = StageName.FINISHED
+    item.state = "RECORD"
+    item.result = ItemResult(passed=False, reason="pending terminal check", final_stage=item.stage)
+    ledger: list[ItemResult] = []
+    preserved: list[tuple[str, int, str]] = []
+    finished = FinishedStage(ledger, preserved, [])
+    if mutation in {"O_NOFOLLOW", "O_NONBLOCK"}:
+        import os
+
+        from hephaestus.automation import source_worktree
+
+        monkeypatch.setattr(
+            source_worktree,
+            "os",
+            SimpleNamespace(**{k: v for k, v in vars(os).items() if k != mutation}),
+        )
+    finished.step(item, ctx)
+    checkpoint = store.load()
+    assert checkpoint is not None
+    assert checkpoint.current_wave.outcomes[0].reason == ledger[0].reason
+    expected = (
+        "source_workspace_transition_incomplete"
+        if mutation == "none"
+        else "source_workspace_recovery_receipt_invalid"
+    )
+    assert ledger[0].reason.startswith(expected + ":")
+    item.state = "CLEANUP"
+    cleanup = finished.step(item, ctx)
+    assert isinstance(cleanup, Continue) and cleanup.next_state == "DONE"
+    assert not item.payload.get("_direct_scope_reservation_release_attempted")
+    assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
+    assert journal_path.exists()
+    assert ("Hephaestus", 7, str(predecessor.cwd)) in preserved

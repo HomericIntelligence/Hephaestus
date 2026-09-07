@@ -6,10 +6,11 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -82,6 +83,131 @@ class SourceWorkspaceError(RuntimeError):
         """Initialize the error and its optional operator recovery record."""
         super().__init__(message)
         self.recovery = recovery
+
+
+@dataclass(frozen=True, slots=True)
+class SourceWorkspaceTerminalReference:
+    """Identify a failure snapshot without granting writer authority."""
+
+    identity: str
+    content_sha256: str
+
+    def to_dict(self) -> dict[str, str]:
+        """Return the bounded transport fields."""
+        return {"identity": self.identity, "content_sha256": self.content_sha256}
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        """Reject malformed terminal references."""
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"identity", "content_sha256"}
+            or not isinstance(value["identity"], str)
+            or re.fullmatch(r"[1-9][0-9]*-impl-terminal\.json", value["identity"]) is None
+            or not _terminal_digest_valid(value["content_sha256"])
+        ):
+            raise SourceWorkspaceError("source workspace terminal reference is invalid")
+        return cls(value["identity"], value["content_sha256"])
+
+
+@dataclass(frozen=True, slots=True)
+class SourceWorkspaceTerminalView:
+    """Return the verified terminal result and preservation action."""
+
+    phase: str
+    outcome: str
+    cause: str
+    action: str
+    path: Path
+    requested_branch: str | None
+    requested_base_sha: str | None
+    reservation_disposition: str = "preserve"
+
+
+class SourceWorkspaceTerminalError(SourceWorkspaceError):
+    """Carry a creation failure through the locked terminal capture."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        requested_branch: str | None = None,
+        requested_base_sha: str | None = None,
+        recovery: SourceWorkspaceRecovery | None = None,
+    ) -> None:
+        """Keep the request and failure without granting recovery authority."""
+        super().__init__(message, recovery=recovery)
+        self.requested_branch = requested_branch
+        self.requested_base_sha = requested_base_sha
+        self.terminal_reference: SourceWorkspaceTerminalReference | None = None
+        self.path: Path | None = None
+        self.preserve = True
+
+
+def _terminal_digest_valid(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _terminal_json_digest(value: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _terminal_json_object(data: bytes) -> dict[str, Any]:
+    def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate terminal evidence key")
+            result[key] = value
+        return result
+
+    result = json.loads(data.decode("utf-8"), object_pairs_hook=unique_pairs)
+    if not isinstance(result, dict):
+        raise ValueError("terminal evidence must be an object")
+    return result
+
+
+def _terminal_read_bytes(path: Path) -> bytes:
+    """Read one bounded regular file without following links."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if (
+        not isinstance(nofollow, int)
+        or not nofollow
+        or not isinstance(nonblock, int)
+        or not nonblock
+    ):
+        raise SourceWorkspaceError("secure source workspace evidence reads are unavailable")
+    if path.parent.is_symlink() or path.parent.resolve() != path.parent:
+        raise SourceWorkspaceError("source workspace evidence directory is invalid")
+    descriptor = os.open(path, os.O_RDONLY | nofollow | nonblock)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 65536:
+            raise SourceWorkspaceError("source workspace evidence file is invalid")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 65537 - size)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > 65536:
+                raise SourceWorkspaceError("source workspace evidence is too large")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = path.lstat()
+
+        def identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise SourceWorkspaceError("source workspace evidence changed during read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 class SourceWorkspacePreparationCause(StrEnum):
@@ -497,12 +623,24 @@ class SourceWorkspaceManager:
             item_number,
             self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
         ) as handoff:
-            self._reconcile_writer_transition(item_number, finalize_exact_successor=True)
             try:
+                self._reconcile_writer_transition(item_number, finalize_exact_successor=True)
                 yield handoff
-            except BaseException:
-                with suppress(SourceWorkspaceError):
-                    self._reconcile_writer_transition(item_number, finalize_exact_successor=False)
+            except BaseException as exc:
+                terminal = exc if isinstance(exc, SourceWorkspaceTerminalError) else None
+                journal_path = self._transition_path(item_number)
+                if terminal is None and (journal_path.exists() or journal_path.is_symlink()):
+                    terminal = SourceWorkspaceTerminalError(str(exc))
+                if terminal is not None:
+                    terminal.path = self.path_for(item_number, SourceLane.IMPLEMENTATION)
+                    try:
+                        terminal.terminal_reference = self._capture_terminal_failure(
+                            item_number, terminal
+                        )
+                    except (OSError, ValueError, SourceWorkspaceError):
+                        terminal.terminal_reference = None
+                    if terminal is not exc:
+                        raise terminal from exc
                 raise
             else:
                 self._reconcile_writer_transition(item_number, finalize_exact_successor=False)
@@ -1474,6 +1612,279 @@ class SourceWorkspaceManager:
             detached=receipt.detached,
         )
 
+    def _terminal_path(self, item_number: int) -> Path:
+        return self.state_dir / f"{item_number}-impl-terminal.json"
+
+    def _capture_terminal_failure(
+        self, item_number: int, failure: SourceWorkspaceTerminalError
+    ) -> SourceWorkspaceTerminalReference:
+        """Capture the final failure while the handoff holds the lane lock."""
+        lane = SourceLane.IMPLEMENTATION
+        path = self.path_for(item_number, lane)
+        branch, base = failure.requested_branch, failure.requested_base_sha
+        pair_valid = self._terminal_request_valid(branch, base)
+        if not pair_valid:
+            branch, base = None, None
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "repository": self.repository,
+            "repository_identity": self.repository_identity,
+            "ownership_key": self.ownership_key(item_number, lane),
+            "item_number": item_number,
+            "lane": lane.value,
+            "path": str(path),
+            "transition_identity": None,
+            "transition_journal_digest": None,
+            "transition_content_sha256": None,
+            "phase": "unproven_legacy",
+            "source_receipt_sha256": None,
+            "requested_branch": branch,
+            "requested_base_sha": base,
+            "reservation_disposition": "preserve",
+            "outcome": "manual_recovery_required",
+            "cause": "source_workspace_recovery_receipt_invalid",
+            "action": f"Preserve {path} and its records. Obtain valid ownership evidence.",
+        }
+        source_receipt: SourceWorkspaceReceipt | None = None
+        try:
+            source_bytes = _terminal_read_bytes(self._receipt_path(item_number, lane))
+            payload["source_receipt_sha256"] = hashlib.sha256(source_bytes).hexdigest()
+            source_payload = _terminal_json_object(source_bytes)
+            source_receipt = SourceWorkspaceReceipt.from_dict(source_payload)
+            if _terminal_json_digest(source_payload) != _terminal_json_digest(
+                source_receipt.to_dict()
+            ):
+                raise SourceWorkspaceError("source workspace receipt field types are invalid")
+            self._reject_foreign_owner(source_receipt, item_number, lane)
+        except (OSError, ValueError, SourceWorkspaceError):
+            source_receipt = None
+        try:
+            journal = self._read_writer_transition(item_number)
+            if journal is not None:
+                payload.update(
+                    transition_identity=self._transition_path(item_number).name,
+                    transition_journal_digest=journal.journal_digest,
+                    transition_content_sha256=_terminal_json_digest(journal.to_dict()),
+                    phase=journal.phase,
+                )
+                if (
+                    pair_valid
+                    and source_receipt in (journal.predecessor, journal.successor)
+                    and journal.successor.branch is not None
+                    and branch == journal.successor.branch
+                    and base == journal.successor.revision
+                ):
+                    payload.update(
+                        outcome="incomplete",
+                        cause="source_workspace_transition_incomplete",
+                        action=self._terminal_phase_action(
+                            journal.successor.branch, journal.successor.revision, journal.phase
+                        ),
+                    )
+            elif pair_valid:
+                receipt = source_receipt
+                if receipt is not None and path.exists():
+                    observed_branch = self._head_branch(path)
+                    observed_revision = self._head_revision(path)
+                    expected_branch = None if receipt.detached else f"refs/heads/{receipt.branch}"
+                    if observed_branch != expected_branch or observed_revision != receipt.revision:
+                        payload.update(
+                            cause="source_workspace_legacy_unproven",
+                            action=(
+                                f"Preserve {path} and {self._receipt_path(item_number, lane)}. "
+                                f"The recorded branch/revision is "
+                                f"{expected_branch!r}/{receipt.revision}; "
+                                f"the observed branch/revision is "
+                                f"{observed_branch!r}/{observed_revision}. "
+                                "The transition proof is missing. Obtain the ownership record or "
+                                "separately reviewed operator recovery."
+                            ),
+                        )
+        except (OSError, ValueError, SourceWorkspaceError, subprocess.SubprocessError):
+            pass
+        payload["terminal_content_sha256"] = _terminal_json_digest(payload)
+        target = self._terminal_path(item_number)
+        if (
+            self.state_dir.is_symlink()
+            or self.state_dir.resolve() != self.state_dir
+            or target.is_symlink()
+        ):
+            raise SourceWorkspaceError("source workspace terminal path is invalid")
+        write_secure(target, json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        self._fsync_state_dir()
+        reference = SourceWorkspaceTerminalReference(
+            target.name, str(payload["terminal_content_sha256"])
+        )
+        self._read_terminal_failure(item_number, reference)
+        return reference
+
+    @staticmethod
+    def _terminal_request_valid(branch: object, base: object) -> bool:
+        if not isinstance(branch, str) or not branch or len(branch) > 255:
+            return False
+        if (
+            branch.startswith(("-", "/", "."))
+            or branch.endswith(("/", "."))
+            or any(
+                part.startswith(".") or part.endswith(".lock") or not part
+                for part in branch.split("/")
+            )
+            or any(token in branch for token in ("..", "@{", "//"))
+            or branch == "@"
+            or re.search(r"[\x00-\x20\x7f~^:?*\[\\]", branch)
+        ):
+            return False
+        return (
+            isinstance(base, str)
+            and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base) is not None
+        )
+
+    @staticmethod
+    def _terminal_phase_action(branch: str, base: str, phase: str) -> str:
+        meanings = {
+            "prepared": "authorization is durable",
+            "predecessor_removing": "predecessor removal is pending",
+            "successor_creating": "writer creation is pending",
+            "successor_created": "authority creation is pending",
+            "authority_minted": "writer claim is pending",
+            "receipt_pending": "source receipt write/readback is pending",
+        }
+        return (
+            f"Preserve all state. Retry the same request {branch} at {base} through the source "
+            f"manager only. Durable phase {phase}: {meanings[phase]}."
+        )
+
+    def read_terminal_failure(
+        self, item_number: int, reference: SourceWorkspaceTerminalReference
+    ) -> SourceWorkspaceTerminalView:
+        """Verify the terminal snapshot and its exact source and journal content."""
+        try:
+            with file_lock(self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION)):
+                return self._read_terminal_failure(item_number, reference)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise SourceWorkspaceError("source workspace terminal evidence is invalid") from exc
+
+    def _read_terminal_failure(  # noqa: C901
+        self, item_number: int, reference: SourceWorkspaceTerminalReference
+    ) -> SourceWorkspaceTerminalView:
+        if not isinstance(reference, SourceWorkspaceTerminalReference):
+            raise SourceWorkspaceError("source workspace terminal reference is invalid")
+        SourceWorkspaceTerminalReference.from_dict(reference.to_dict())
+        if reference.identity != self._terminal_path(item_number).name:
+            raise SourceWorkspaceError("source workspace terminal identity changed")
+        payload = _terminal_json_object(_terminal_read_bytes(self._terminal_path(item_number)))
+        fields = {
+            "schema_version",
+            "repository",
+            "repository_identity",
+            "ownership_key",
+            "item_number",
+            "lane",
+            "path",
+            "transition_identity",
+            "transition_journal_digest",
+            "transition_content_sha256",
+            "phase",
+            "source_receipt_sha256",
+            "requested_branch",
+            "requested_base_sha",
+            "reservation_disposition",
+            "outcome",
+            "cause",
+            "action",
+            "terminal_content_sha256",
+        }
+        if set(payload) != fields:
+            raise SourceWorkspaceError("source workspace terminal schema is invalid")
+        digest = payload.pop("terminal_content_sha256")
+        if (
+            not _terminal_digest_valid(digest)
+            or digest != reference.content_sha256
+            or digest != _terminal_json_digest(payload)
+        ):
+            raise SourceWorkspaceError("source workspace terminal content changed")
+        lane = SourceLane.IMPLEMENTATION
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["schema_version"] != 1
+            or type(payload["item_number"]) is not int
+            or payload["item_number"] != item_number
+            or payload["repository"] != self.repository
+            or payload["repository_identity"] != self.repository_identity
+            or payload["ownership_key"] != self.ownership_key(item_number, lane)
+            or payload["lane"] != lane.value
+            or payload["path"] != str(self.path_for(item_number, lane))
+            or Path(payload["path"]).resolve() != Path(payload["path"])
+            or payload["reservation_disposition"] != "preserve"
+        ):
+            raise SourceWorkspaceError("source workspace terminal ownership is invalid")
+        branch, base = payload["requested_branch"], payload["requested_base_sha"]
+        if (branch is not None or base is not None) and not self._terminal_request_valid(
+            branch, base
+        ):
+            raise SourceWorkspaceError("source workspace terminal request is invalid")
+        phase, cause, outcome, action = (
+            payload[key] for key in ("phase", "cause", "outcome", "action")
+        )
+        if (
+            not isinstance(phase, str)
+            or phase not in _TRANSITION_PHASES | {"unproven_legacy"}
+            or not isinstance(cause, str)
+            or cause
+            not in {
+                "source_workspace_transition_incomplete",
+                "source_workspace_legacy_unproven",
+                "source_workspace_recovery_receipt_invalid",
+            }
+            or not isinstance(action, str)
+            or not action
+            or len(action) > 8192
+            or not isinstance(outcome, str)
+            or outcome not in {"incomplete", "manual_recovery_required"}
+            or (outcome == "incomplete") != (cause == "source_workspace_transition_incomplete")
+            or (cause == "source_workspace_legacy_unproven" and phase != "unproven_legacy")
+        ):
+            raise SourceWorkspaceError("source workspace terminal result is invalid")
+        identity = payload["transition_identity"]
+        if identity is not None:
+            if identity != self._transition_path(item_number).name:
+                raise SourceWorkspaceError("source workspace terminal journal identity changed")
+            journal = self._read_writer_transition(item_number)
+            if (
+                journal is None
+                or phase != journal.phase
+                or payload["transition_journal_digest"] != journal.journal_digest
+                or payload["transition_content_sha256"] != _terminal_json_digest(journal.to_dict())
+                or not _terminal_digest_valid(payload["transition_content_sha256"])
+                or not _terminal_digest_valid(payload["transition_journal_digest"])
+            ):
+                raise SourceWorkspaceError("source workspace terminal journal changed")
+            if cause == "source_workspace_transition_incomplete" and (
+                branch != journal.successor.branch
+                or base != journal.successor.revision
+                or action != self._terminal_phase_action(branch, base, phase)
+            ):
+                raise SourceWorkspaceError("source workspace terminal request changed")
+        elif (
+            payload["transition_journal_digest"] is not None
+            or payload["transition_content_sha256"] is not None
+            or phase != "unproven_legacy"
+            or cause == "source_workspace_transition_incomplete"
+        ):
+            raise SourceWorkspaceError("source workspace terminal journal proof is missing")
+        source_digest = payload["source_receipt_sha256"]
+        if (
+            not _terminal_digest_valid(source_digest)
+            or hashlib.sha256(
+                _terminal_read_bytes(self._receipt_path(item_number, lane))
+            ).hexdigest()
+            != source_digest
+        ):
+            raise SourceWorkspaceError("source workspace terminal source receipt changed")
+        return SourceWorkspaceTerminalView(
+            phase, outcome, cause, action, Path(payload["path"]), branch, base
+        )
+
     def _transition_path(self, item_number: int) -> Path:
         """Return the private implementation transition journal path."""
         return self.state_dir / f"{item_number}-impl-transition.json"
@@ -1483,13 +1894,15 @@ class SourceWorkspaceManager:
     ) -> _ImplementationWriterTransitionJournal | None:
         """Read and validate one pending implementation transition."""
         path = self._transition_path(item_number)
+        if path.is_symlink():
+            raise SourceWorkspaceError(f"refusing invalid source workspace transition: {path}")
         if not path.exists():
             return None
-        if path.is_symlink() or not path.is_file():
+        if not path.is_file():
             raise SourceWorkspaceError(f"refusing invalid source workspace transition: {path}")
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            payload = _terminal_json_object(_terminal_read_bytes(path))
+        except (OSError, ValueError) as exc:
             raise SourceWorkspaceError(f"cannot read source workspace transition: {path}") from exc
         if not isinstance(payload, dict):
             raise SourceWorkspaceError("source workspace transition must be an object")

@@ -36,6 +36,11 @@ from hephaestus.automation.issue_waves import (
     WaveLease,
 )
 from hephaestus.automation.pipeline.work_item import ItemResult, PreservedWorktree
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspaceTerminalReference,
+)
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -122,6 +127,10 @@ class FinishedStage(Stage):
             return Continue(next_state="RECORD")
 
         if item.state == "RECORD":
+            if item.payload.get("source_workspace_preserve") is True and not item.payload.get(
+                "_recorded", False
+            ):
+                self._resolve_source_terminal(item, ctx)
             if item.result is None:  # defensive: router always sets it
                 item.result = ItemResult(
                     passed=False, reason="internal: no result recorded", final_stage=item.stage
@@ -209,6 +218,31 @@ class FinishedStage(Stage):
             item.payload.pop("_learning_cleanup_succeeded", None)
             item.payload.pop("_learning_cleanup_error", None)
 
+    @staticmethod
+    def _resolve_source_terminal(item: WorkItem, ctx: StageContext) -> None:
+        """Validate terminal evidence before either outcome store is changed."""
+        reason = (
+            "source_workspace_recovery_receipt_invalid: "
+            "Preserve all state. Obtain valid ownership evidence before retry "
+            "through the source manager."
+        )
+        try:
+            reference = SourceWorkspaceTerminalReference.from_dict(
+                item.payload.get("source_workspace_terminal")
+            )
+            if item.issue is None:
+                raise SourceWorkspaceError("terminal issue number is missing")
+            root = Path(str(ctx.paths.repo_root))
+            manager = SourceWorkspaceManager(
+                root, repository=item.repo, base_dir=root / "build" / ".worktrees"
+            )
+            terminal = manager.read_terminal_failure(item.issue, reference)
+            reason = f"{terminal.cause}: {terminal.action}"
+            item.worktree = str(terminal.path)
+        except (RuntimeError, OSError, ValueError):
+            pass
+        item.result = ItemResult(passed=False, reason=reason, final_stage=item.stage)
+
     def _cleanup(  # noqa: C901 - cleanup validates independent durable receipts
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult:
@@ -216,6 +250,12 @@ class FinishedStage(Stage):
         recovery_worktrees = self._record_recovery_worktrees(item, ctx)
         if item.worktree and not self._learning_is_terminal(item, ctx):
             return self._preserve_pending_learning_worktree(item)
+        if item.payload.get("source_workspace_preserve") is True:
+            if item.worktree:
+                entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+                if entry not in self._preserved:
+                    self._preserved.append(entry)
+            return Continue(next_state="DONE")
         reservation = item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
         if not item.payload.get("_direct_scope_reservation_release_attempted", False):
             if isinstance(reservation, dict):
