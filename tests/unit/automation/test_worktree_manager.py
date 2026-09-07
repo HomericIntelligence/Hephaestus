@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import worktree_manager as worktree_manager_module
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
@@ -109,6 +110,58 @@ class TestWorktreeManager:
                 text=True,
             )
             assert status.stdout == ""
+
+    def test_linked_worktree_recovery_uses_source_receipt_path(self, tmp_path: Path) -> None:
+        """A linked-worktree recovery record uses the shared receipt path."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (("user.name", "Test User"), ("user.email", "test@example.com")):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "linked", str(linked)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        source_manager = SourceWorkspaceManager(
+            linked,
+            repository="test/repo",
+            base_dir=tmp_path / "worktrees",
+        )
+        manager = WorktreeManager(
+            repo_root=linked,
+            base_dir=source_manager.base_dir,
+        )
+
+        recovery = manager._implementation_writer_recovery(
+            issue_number=9,
+            worktree_path=source_manager.path_for(9, SourceLane.IMPLEMENTATION),
+        )
+
+        assert recovery["receipt_path"] == str(
+            source_manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+        )
 
     def test_initialization_default_base_dir(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test initialization with default base directory."""
@@ -1466,14 +1519,14 @@ class TestWorktreeManager:
         manager = WorktreeManager()
 
         mock_result = Mock()
-        mock_result.stdout = """worktree /repo
-HEAD abc123
-branch refs/heads/main
-
-worktree /repo/build/.worktrees/issue-123
-HEAD def456
-branch refs/heads/123-feature
-"""
+        mock_result.stdout = (
+            "worktree /repo\0"
+            "HEAD abc123\0"
+            "branch refs/heads/main\0\0"
+            "worktree /repo/build/.worktrees/issue\n123\0"
+            "HEAD def456\0"
+            "branch refs/heads/123-feature\0\0"
+        )
         worktree_mocks.run.return_value = mock_result
 
         worktrees = manager.list_worktrees()
@@ -1481,8 +1534,15 @@ branch refs/heads/123-feature
         assert len(worktrees) == 2
         assert worktrees[0]["path"] == "/repo"
         assert worktrees[0]["branch"] == "refs/heads/main"
-        assert worktrees[1]["path"] == "/repo/build/.worktrees/issue-123"
+        assert worktrees[1]["path"] == "/repo/build/.worktrees/issue\n123"
         assert worktrees[1]["branch"] == "refs/heads/123-feature"
+        assert worktree_mocks.run.call_args.args[0] == [
+            "git",
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ]
 
     def test_ensure_branch_deleted(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test deleting branch from local and remote."""

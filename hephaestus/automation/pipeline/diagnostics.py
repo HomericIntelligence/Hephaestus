@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+from hephaestus.automation.source_worktree import SourceWorkspaceRecoveryKind
 from hephaestus.diagnostics import bounded_git_diagnostic
 
 _REDACTION = "<redacted>"
@@ -100,4 +101,35 @@ def redact_bounded_diagnostic_tails(
         key: redact_diagnostic_text(bounded_git_diagnostic(tail, limit=limit))
         for key, tail in (("stdout_tail", stdout_tail), ("stderr_tail", stderr_tail))
         if tail
+    }
+
+
+def bounded_source_workspace_recovery(value: object) -> dict[str, object] | None:
+    """Return safe, bounded fields for a source-workspace recovery event."""
+    keys = {"kind", "item_number", "path", "receipt_path", "manual_action"}
+    if not isinstance(value, dict) or set(value) != keys:
+        return None
+    kind = value.get("kind")
+    item_number = value.get("item_number")
+    path = value.get("path")
+    receipt_path = value.get("receipt_path")
+    manual_action = value.get("manual_action")
+    if (
+        not isinstance(kind, str)
+        or kind not in {recovery_kind.value for recovery_kind in SourceWorkspaceRecoveryKind}
+        or isinstance(item_number, bool)
+        or not isinstance(item_number, int)
+        or not isinstance(path, str)
+        or not path
+        or not isinstance(receipt_path, str)
+        or not isinstance(manual_action, str)
+        or not manual_action
+    ):
+        return None
+    return {
+        "kind": kind,
+        "item_number": item_number,
+        "path": redact_diagnostic_text(path)[:500],
+        "receipt_path": redact_diagnostic_text(receipt_path)[:500],
+        "manual_action": redact_diagnostic_text(manual_action)[:2000],
     }
