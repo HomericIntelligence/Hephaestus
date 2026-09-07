@@ -47,10 +47,18 @@ from hephaestus.agents.codex_isolation import (
     CodexIsolationRequestV1,
     StagedLinuxExecutable,
     canonical_sha256,
+    close_staged_linux_executable,
     new_run_nonce,
     stage_linux_executable,
 )
-from hephaestus.agents.execution_policy import AgentRole, ExecutionPolicyError, resolve_policy
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionPolicyError,
+    FilesystemMode,
+    SessionLifecycle,
+    resolve_policy,
+)
 from hephaestus.agents.model_selection import resolve_codex_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
@@ -1955,7 +1963,14 @@ def _codex_git_boundary(cwd: Path) -> Iterator[codex_worktree_boundary.CodexWork
 
 
 def _codex_implementation_command(
-    *, executable: Path, worktree: Path, model: str, session_id: str | None
+    *,
+    executable: Path,
+    worktree: Path,
+    model: str,
+    session_id: str | None,
+    sandbox: str,
+    operation: AgentOperation,
+    allowed_tools: tuple[str, ...],
 ) -> tuple[str, ...]:
     """Build one exact guest command from frozen worker inputs."""
     command = [str(executable), "exec"]
@@ -1970,7 +1985,7 @@ def _codex_implementation_command(
         command.extend(
             (
                 "-c",
-                'sandbox_mode="workspace-write"',
+                f"sandbox_mode={json.dumps(sandbox)}",
                 "-c",
                 'approval_policy="never"',
             )
@@ -1981,13 +1996,98 @@ def _codex_implementation_command(
                 "--cd",
                 str(worktree),
                 "--sandbox",
-                "workspace-write",
+                sandbox,
                 "--ask-for-approval",
                 "never",
             )
         )
-    command.extend(("--json", "-"))
+    command.extend(
+        (
+            "-c",
+            f"hephaestus_automation.operation={json.dumps(operation.value)}",
+            "-c",
+            "hephaestus_automation.allowed_tools="
+            + json.dumps(list(allowed_tools), separators=(",", ":")),
+            "--json",
+            "-",
+        )
+    )
     return tuple(command)
+
+
+_CODEX_TOOL_CAPABILITIES = {
+    "Bash": "bash",
+    "Edit": "edit",
+    "Glob": "find",
+    "Grep": "grep",
+    "Read": "read",
+    "Write": "write",
+}
+_CODEX_NON_APPLICABLE_TOOLS = {
+    AgentOperation.ADDRESS_REVIEW: frozenset({"Skill", "Task"}),
+}
+_CODEX_OPERATION_TOOLS = {
+    AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
+    AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+}
+
+
+def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], bool]:
+    """Resolve and validate the operation-specific Codex grants."""
+    execution = job.execution_request
+    if execution is None or execution.role is not AgentRole.IMPLEMENTER:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    try:
+        operation_policy = resolve_policy(execution)
+    except ExecutionPolicyError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    workspace_write = operation_policy.filesystem is FilesystemMode.WORKTREE_RW
+    sandbox = "workspace-write" if workspace_write else "read-only"
+    if job.sandbox != sandbox:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    expected_tools = _CODEX_OPERATION_TOOLS.get(execution.operation)
+    if expected_tools is None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    declared_tools = {
+        value.strip()
+        for value in (job.allowed_tools or ",".join(expected_tools)).split(",")
+        if value.strip()
+    }
+    non_applicable = _CODEX_NON_APPLICABLE_TOOLS.get(execution.operation, frozenset())
+    allowed_tools = tuple(sorted(declared_tools - non_applicable))
+    capabilities = {_CODEX_TOOL_CAPABILITIES.get(value, "") for value in allowed_tools}
+    if (
+        allowed_tools != expected_tools
+        or "" in capabilities
+        or not capabilities <= operation_policy.builtins
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return sandbox, allowed_tools, workspace_write
+
+
+def _codex_private_profile(job: AgentJob, build_root: Path) -> Path:
+    """Return one durable profile that is bound to the issue and cycle."""
+    logical_session = job.session_key or job.session_agent
+    if not logical_session:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    identity = canonical_sha256(
+        (job.repo, int(job.issue), logical_session, str(job.cwd.resolve(strict=True)), job.model)
+    )
+    profiles = build_root / Path(DEFAULT_STATE_DIR).name / "codex-sessions"
+    try:
+        profiles.mkdir(mode=0o700, parents=True, exist_ok=True)
+        profiles.chmod(0o700)
+        canonical_profiles = profiles.resolve(strict=True)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+    if not canonical_profiles.is_relative_to(build_root):
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    profile = canonical_profiles / identity
+    if profile.is_symlink():
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    return profile
 
 
 def _initialize_codex_adapter(
@@ -2013,6 +2113,22 @@ def _initialize_codex_adapter(
     except BaseException:
         raise CodexIsolationError("codex_adapter_initialization_failed") from None
     return cast(CodexIsolationAdapterV1, adapter)
+
+
+@contextmanager
+def _owned_codex_adapter(
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+) -> Iterator[CodexIsolationAdapterV1]:
+    """Close one admitted helper on all initialization and execution paths."""
+    adapter: CodexIsolationAdapterV1 | None = None
+    try:
+        adapter = _initialize_codex_adapter(admission)
+        yield adapter
+    finally:
+        owner = adapter if adapter is not None else admission.factory
+        close_adapter = getattr(owner, "_close", None)
+        if callable(close_adapter):
+            close_adapter()
 
 
 def _validate_staged_codex_executable(executable: StagedLinuxExecutable) -> None:
@@ -2063,6 +2179,10 @@ def _codex_implementation_request(
 ) -> CodexIsolationRequestV1:
     """Build the complete frozen request for one admitted adapter."""
     lock = admission.lock
+    execution = job.execution_request
+    if execution is None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    sandbox, allowed_tools, workspace_write = _codex_implementation_grants(job)
     if executable.digest != lock.extracted_elf_sha256:
         raise CodexIsolationError("codex_adapter_request_mismatch")
     fixed_git_environment = dict(git_receipt.fixed_environment)
@@ -2074,20 +2194,45 @@ def _codex_implementation_request(
             ).items()
         )
     )
-    session_id = (
-        job.resume_binding.session_id if job.resume_binding is not None else job.resume_session_id
+    if execution.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+        if job.resume_binding is not None:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+        session_id = job.resume_session_id
+        if not session_id:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    elif job.resume_binding is not None or job.resume_session_id is not None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    else:
+        session_id = None
+    session = json.dumps(
+        {
+            "allowed_tools": list(allowed_tools),
+            "lifecycle": execution.lifecycle.value,
+            "operation": execution.operation.value,
+            "session_id": session_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
-    session = session_id or job.session_key or job.session_agent or job.agent
     command = _codex_implementation_command(
         executable=executable.path,
         worktree=worktree,
         model=job.model,
         session_id=session_id,
+        sandbox=sandbox,
+        operation=execution.operation,
+        allowed_tools=allowed_tools,
     )
+    read_only_mounts = {*git_receipt.read_only_paths, str(executable.path)}
+    read_write_mounts = {str(private_profile)}
+    if workspace_write:
+        read_write_mounts.update(git_receipt.read_write_paths)
+    else:
+        read_only_mounts.update(git_receipt.read_write_paths)
     policy = CodexExecutionPolicyV1(
         schema_version=1,
-        read_only_mounts=tuple(sorted({*git_receipt.read_only_paths, str(executable.path)})),
-        read_write_mounts=tuple(sorted({*git_receipt.read_write_paths, str(private_profile)})),
+        read_only_mounts=tuple(sorted(read_only_mounts)),
+        read_write_mounts=tuple(sorted(read_write_mounts)),
         protected_overlay_mounts=tuple(sorted(git_receipt.protected_paths)),
         provider_relay=_CODEX_IMPLEMENTATION_PROVIDER_RELAY,
         command_network="deny",
@@ -2617,50 +2762,59 @@ class WorkerPool:
                     )
                 except codex_adapter_admission.CodexAdapterAdmissionError:
                     raise CodexIsolationError("codex_adapter_initialization_failed") from None
-                adapter = _initialize_codex_adapter(admission)
-                build_root = cwd / "build"
-                if build_root.is_symlink():
-                    raise CodexIsolationError("codex_adapter_protocol_mismatch")
-                try:
-                    build_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    canonical_build_root = build_root.resolve(strict=True)
-                except OSError:
-                    raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
-                if not canonical_build_root.is_relative_to(cwd):
-                    raise CodexIsolationError("codex_adapter_protocol_mismatch")
-                with tempfile.TemporaryDirectory(
-                    prefix="codex-implementation-",
-                    dir=canonical_build_root,
-                ) as temporary:
-                    job_root = Path(temporary)
-                    job_root.chmod(0o700)
-                    executable = stage_linux_executable(
-                        Path(admission.lock.extracted_elf_path),
-                        job_root,
-                    )
-                    with plugin_skills_context(job.plugin_skills_dir):
-                        prompt = job.prompt_builder(**job.prompt_kwargs)
-                    request = _codex_implementation_request(
-                        job=job,
-                        worktree=cwd,
-                        prompt=prompt,
-                        private_profile=job_root / "codex-home",
-                        admission=admission,
-                        git_receipt=boundary.receipt,
-                        executable=executable,
-                    )
-                    boundary.verify_before_launch()
-                    _validate_staged_codex_executable(executable)
+                with _owned_codex_adapter(admission) as adapter:
+                    build_root = cwd / "build"
+                    if build_root.is_symlink():
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
                     try:
-                        return agent_runtime.run_codex_implementation_session(
-                            adapter=adapter,
-                            request=request,
+                        build_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        canonical_build_root = build_root.resolve(strict=True)
+                    except OSError:
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+                    if not canonical_build_root.is_relative_to(cwd):
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                    private_profile = _codex_private_profile(job, canonical_build_root)
+                    with tempfile.TemporaryDirectory(
+                        prefix="codex-implementation-",
+                        dir=canonical_build_root,
+                    ) as temporary:
+                        job_root = Path(temporary)
+                        job_root.chmod(0o700)
+                        executable = stage_linux_executable(
+                            Path(admission.lock.extracted_elf_path),
+                            job_root,
                         )
-                    finally:
                         try:
+                            with plugin_skills_context(job.plugin_skills_dir):
+                                prompt = job.prompt_builder(**job.prompt_kwargs)
+                            request = _codex_implementation_request(
+                                job=job,
+                                worktree=cwd,
+                                prompt=prompt,
+                                private_profile=private_profile,
+                                admission=admission,
+                                git_receipt=boundary.receipt,
+                                executable=executable,
+                            )
+                            boundary.verify_before_launch()
                             _validate_staged_codex_executable(executable)
+                            try:
+                                execution_request = job.execution_request
+                                if execution_request is None:
+                                    raise CodexIsolationError("codex_adapter_request_mismatch")
+                                return agent_runtime._run_admitted_codex_implementation_session(
+                                    adapter=adapter,
+                                    request=request,
+                                    execution_request=execution_request,
+                                    executable_descriptor=executable.descriptor,
+                                )
+                            finally:
+                                try:
+                                    _validate_staged_codex_executable(executable)
+                                finally:
+                                    boundary.verify_after_return()
                         finally:
-                            boundary.verify_after_return()
+                            close_staged_linux_executable(executable)
 
     def _run_agent(  # noqa: C901 - provider and session dispatch are one atomic boundary
         self, job: AgentJob

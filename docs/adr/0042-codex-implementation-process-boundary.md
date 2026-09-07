@@ -21,13 +21,34 @@ deployment evidence.
 
 ## Decision
 
-Hephaestus supplies version 1 frozen request, policy, Git receipt, prepared
-result, descendant inventory, and final result records. Canonical SHA-256
-digests and a new host nonce bind each implementation request. The adapter has
-two phases. `prepare(request)` starts the pinned guest without authentication
-and proves the exact Linux Codex executable. After the host validates that
-record, `invoke(prepared, auth_path)` uses the same guest, token, and executable
-identity. The host validates the final result before it accepts output.
+Hephaestus uses only the accepted version 1 field sets for the request, the
+prepared result, and the final result. These record fields are distinct from
+the three adapter operations: `prepare`, `invoke`, and `destroy`. Automation
+requires a version 1 deployment lock and adapter. It does not change or replace
+a version 1 field.
+
+The existing request fields bind the operation authority. The command and
+policy bind the sandbox, tool grant, network rule, and file-system mounts. The
+session field contains canonical JSON that binds the lifecycle and the optional
+provider session ID. The host also validates these values against its frozen
+execution request. A resume operation is not valid without the same provider
+session ID. The private profile and durable session record keep that ID for the
+next operation.
+
+Canonical SHA-256 digests and a new host nonce bind each implementation request.
+`prepare(request)` starts the pinned guest without authentication and proves the
+exact Linux Codex executable. After the host validates that record,
+`invoke(prepared, auth_path)` uses the same guest, token, and executable
+identity. The adapter output contains the actual Codex provider session ID. The
+host validates the final result and this ID before it accepts output.
+
+The host sets a deadline outside each adapter call. If `invoke` does not stop,
+the host calls `destroy(prepared)` through a separate control request. It waits
+for the invoke and destroy calls to stop. It records a typed internal terminal
+receipt after both calls stop. If `prepare` returns after its deadline, the host
+validates and destroys the late prepared guest. An incomplete stop is a stable
+failure. The isolated helper can process the terminal control request while an
+invoke request is active.
 
 Only the Codex implementation role uses this contract. Planning, review,
 learning, and public direct Codex calls keep their current behavior. The base
@@ -40,16 +61,36 @@ The automation product layer admits the deployment before it imports adapter
 code. It verifies the retained wheel, installed tree, signed guest image,
 Codex 0.153.4 AArch64 Linux artifact, Sigstore bundle, trusted root, and Rekor
 evidence against one owner-controlled detached lock. Runtime verification is
-offline. Sigstore is an automation-only dependency and does not enter the base
-library import surface.
+offline. It verifies the real retained Codex release bundle and Rekor proof
+against the retained production trusted root. It accepts the release's legacy
+bundle only after it constructs the current Sigstore bundle from the locked
+certificate, signature, log entry, proof, and checkpoint. Sigstore is an
+automation-only dependency and does not enter the base library import surface.
+The importer keeps the verified module bytes in memory. It runs the adapter in
+an isolated Python helper with a closed module finder and a standard-library
+path. The helper gives adapter modules guarded `importlib`, `builtins`, and
+`sys` views. It also rejects a direct source loader and a changed module path.
+Adapter code cannot select an ambient package during module import, factory
+execution, or an adapter operation. The worker closes the helper on every
+initialization and execution result.
+
+The required artifact lane uses a host-owned offline fixture store. A tracked
+manifest fixes the official GitHub asset IDs, names, sizes, and SHA-256
+digests. The lane provisions the archive, bundle, and extracted ELF before it
+starts the test container. The repository retains only the small bundle,
+trusted root, Rekor key, checkpoint, proof, and manifest. The test container
+has no network and mounts the provisioned fixture read-only. A missing fixture
+is a test failure. The test changes one byte in each retained object and
+requires admission to fail before adapter import.
 
 The worker holds no-follow descriptors for the linked-worktree `.git` pointer,
 Git directories, index, repository configuration, and worktree configuration.
 It rejects links, path escape, includes, hooks, and file-system monitors. The
-guest gets fixed Git environment values. The worktree is read-write, but the
-`.git` pointer and all Git metadata are operating-system read-only. The worker
-compares path and descriptor identities before launch and after return. It
-also compares bound content digests after return.
+guest gets fixed Git environment values. The operation policy selects a
+read-only or read-write worktree mount. The `.git` pointer and all Git metadata
+are operating-system read-only for each operation. The worker compares path and
+descriptor identities before launch and after return. It also compares bound
+content digests after return.
 
 The host copies only the locked `aarch64-unknown-linux-musl` ELF bytes through
 a held descriptor to an owner-only staged file. It creates a private profile
@@ -65,7 +106,10 @@ separate the writable worktree from protected Git metadata. A provider-only
 relay gives Codex its pinned transport. The Linux command sandbox denies
 command network access. A delegated cgroup v2 leaf and a forced virtual-machine
 stop own all descendants. The adapter must return two consecutive complete and
-empty descendant inventories after bounded TERM, KILL, and pipe cleanup.
+empty descendant inventories after bounded TERM, KILL, and pipe cleanup. The
+host accepts these inventories only when their timestamps are in its observed
+invoke interval and after the pipe-close timestamp. The final destroy call must
+confirm that the virtual machine stopped.
 
 The stable failure codes are `codex_adapter_not_selected`,
 `codex_adapter_not_installed`, `codex_adapter_ambiguous`,

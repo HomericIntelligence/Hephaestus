@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -28,7 +29,10 @@ from typing import Any, Literal, Protocol, cast
 from hephaestus.agents.codex_isolation import (
     CodexIsolationAdapterV1,
     CodexIsolationError,
+    CodexIsolationPreparedV1,
     CodexIsolationRequestV1,
+    CodexIsolationResultV1,
+    _CodexPrepareCleanupError,
     validate_adapter,
     validate_prepared,
     validate_result,
@@ -2053,6 +2057,8 @@ def _parse_codex_json_events(text: str) -> tuple[str | None, str]:
             payload = event.get("payload")
             if isinstance(payload, dict) and isinstance(payload.get("id"), str):
                 session_id = payload["id"]
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+            session_id = event["thread_id"]
         if event.get("type") == "agent_message" and isinstance(event.get("message"), str):
             messages.append(event["message"])
         payload = event.get("payload")
@@ -2144,128 +2150,432 @@ def run_codex_session(
     )
 
 
-def run_codex_implementation_session(
+@dataclass(slots=True)
+class _CodexAdapterCall:
+    """Hold one host-observed adapter call and its outcome."""
+
+    started: threading.Event
+    completed: threading.Event
+    outcome: list[tuple[bool, object]]
+    started_at: float = 0.0
+    returned_at: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexTerminalReceipt:
+    """Record host-observed final destruction after one adapter call."""
+
+    call_returned_at: float
+    destroy_started_at: float
+    destroy_returned_at: float
+    terminal_observed_at: float
+    guest_boot_nonce: str
+
+
+def _start_codex_adapter_call(call: Callable[[], object]) -> _CodexAdapterCall:
+    """Start one adapter call on a host-controlled daemon thread."""
+    state = _CodexAdapterCall(threading.Event(), threading.Event(), [])
+
+    def run() -> None:
+        state.started_at = time.monotonic()
+        state.started.set()
+        try:
+            state.outcome.append((True, call()))
+        except BaseException as exc:
+            state.outcome.append((False, exc))
+        finally:
+            state.returned_at = time.monotonic()
+            state.completed.set()
+
+    threading.Thread(target=run, daemon=True, name="codex-adapter-call").start()
+    return state
+
+
+def _wait_for_codex_adapter_call(call: _CodexAdapterCall, deadline: float) -> bool:
+    """Wait for one adapter call only until an absolute host deadline."""
+    if not call.started.wait(max(0.0, deadline - time.monotonic())):
+        return False
+    return call.completed.wait(max(0.0, deadline - time.monotonic()))
+
+
+def _codex_control_deadline(request: CodexIsolationRequestV1) -> float:
+    """Return the bounded deadline for one adapter cleanup control."""
+    cleanup_budget = (
+        request.policy.term_grace_seconds
+        + request.policy.kill_grace_seconds
+        + request.policy.pipe_close_grace_seconds
+        + 2 * request.policy.inventory_quiescence_seconds
+    )
+    return min(
+        request.monotonic_deadline + cleanup_budget,
+        time.monotonic() + cleanup_budget,
+    )
+
+
+def _destroy_codex_prepared(
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    prepared: CodexIsolationPreparedV1,
+    *,
+    call_returned_at: float,
+) -> _CodexTerminalReceipt:
+    """Destroy one guest and return typed host terminal evidence."""
+    destroy_started_at = time.monotonic()
+    destroy_call = _start_codex_adapter_call(lambda: adapter.destroy(prepared))
+    if not _wait_for_codex_adapter_call(destroy_call, _codex_control_deadline(request)):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    destroyed_ok, result_or_error = destroy_call.outcome[0]
+    if not destroyed_ok or result_or_error is not None:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    receipt = _CodexTerminalReceipt(
+        call_returned_at=call_returned_at,
+        destroy_started_at=destroy_started_at,
+        destroy_returned_at=destroy_call.returned_at,
+        terminal_observed_at=time.monotonic(),
+        guest_boot_nonce=prepared.guest_boot_nonce,
+    )
+    if not (
+        receipt.call_returned_at
+        <= receipt.destroy_started_at
+        <= receipt.destroy_returned_at
+        <= receipt.terminal_observed_at
+    ):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    return receipt
+
+
+_CODEX_OPERATION_TOOLS = {
+    AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
+    AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+}
+
+
+def _codex_session_authority(
+    request: CodexIsolationRequestV1,
+) -> tuple[str, str | None, str, tuple[str, ...]]:
+    """Read the complete operation authority from one bound V1 session field."""
+    try:
+        value = json.loads(request.session)
+    except (TypeError, json.JSONDecodeError):
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    if type(value) is not dict or set(value) != {
+        "allowed_tools",
+        "lifecycle",
+        "operation",
+        "session_id",
+    }:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    allowed_tools = value["allowed_tools"]
+    lifecycle = value["lifecycle"]
+    operation = value["operation"]
+    session_id = value["session_id"]
+    if lifecycle not in {item.value for item in SessionLifecycle}:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    if session_id is not None and (type(session_id) is not str or not session_id):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    if (
+        type(operation) is not str
+        or type(allowed_tools) is not list
+        or not all(type(item) is str and item for item in allowed_tools)
+        or allowed_tools != sorted(set(allowed_tools))
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return (
+        cast(str, lifecycle),
+        session_id,
+        operation,
+        tuple(cast(list[str], allowed_tools)),
+    )
+
+
+def _validate_codex_session_authority(
+    request: CodexIsolationRequestV1,
+    execution_request: ExecutionRequest,
+) -> str | None:
+    """Require exact agreement between host authority and the frozen V1 request."""
+    if execution_request.role is not AgentRole.IMPLEMENTER:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    try:
+        resolve_policy(execution_request)
+    except ExecutionPolicyError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    lifecycle, session_id, operation, allowed_tools = _codex_session_authority(request)
+    expected_tools = _CODEX_OPERATION_TOOLS.get(execution_request.operation)
+    if (
+        lifecycle != execution_request.lifecycle.value
+        or operation != execution_request.operation.value
+        or allowed_tools != expected_tools
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    operation_config = f"hephaestus_automation.operation={json.dumps(operation)}"
+    tools_config = "hephaestus_automation.allowed_tools=" + json.dumps(
+        list(allowed_tools), separators=(",", ":")
+    )
+    if request.command.count(operation_config) != 1 or request.command.count(tools_config) != 1:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    resumes = "resume" in request.command
+    if execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+        if session_id is None or not resumes or session_id not in request.command:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    elif session_id is not None or resumes:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return session_id
+
+
+def _complete_timed_out_codex_call(
     *,
     adapter: CodexIsolationAdapterV1,
     request: CodexIsolationRequestV1,
+    active_call: _CodexAdapterCall,
+    prepared: CodexIsolationPreparedV1 | None,
+) -> _CodexTerminalReceipt | None:
+    """Require a late call to finish and destroy each returned guest."""
+    cleanup_deadline = _codex_control_deadline(request)
+    if prepared is not None:
+        destroy_started_at = time.monotonic()
+        destroy_call = _start_codex_adapter_call(lambda: adapter.destroy(prepared))
+        if not _wait_for_codex_adapter_call(active_call, cleanup_deadline):
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        if not _wait_for_codex_adapter_call(destroy_call, cleanup_deadline):
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        destroyed_ok, destroyed_value = destroy_call.outcome[0]
+        if not destroyed_ok or destroyed_value is not None:
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        receipt = _CodexTerminalReceipt(
+            call_returned_at=active_call.returned_at,
+            destroy_started_at=destroy_started_at,
+            destroy_returned_at=destroy_call.returned_at,
+            terminal_observed_at=time.monotonic(),
+            guest_boot_nonce=prepared.guest_boot_nonce,
+        )
+        if (
+            receipt.destroy_started_at > receipt.destroy_returned_at
+            or receipt.call_returned_at > receipt.terminal_observed_at
+            or receipt.destroy_returned_at > receipt.terminal_observed_at
+        ):
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        return receipt
+    if not _wait_for_codex_adapter_call(active_call, cleanup_deadline):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    call_ok, value = active_call.outcome[0]
+    if not call_ok:
+        _complete_opaque_prepare_cleanup(
+            value,
+            cleanup_deadline=cleanup_deadline,
+        )
+        return None
+    late_prepared = cast(CodexIsolationPreparedV1, value)
+    return _destroy_late_codex_prepare(
+        adapter,
+        request,
+        late_prepared,
+        call_returned_at=active_call.returned_at,
+    )
+
+
+def _complete_opaque_prepare_cleanup(
+    value: object,
+    *,
+    cleanup_deadline: float,
+) -> None:
+    """Run one opaque cleanup action for an unpublishable prepare result."""
+    if not isinstance(value, _CodexPrepareCleanupError):
+        return None
+    cleanup = value.claim_cleanup()
+    if cleanup is None:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    cleanup_call = _start_codex_adapter_call(cleanup)
+    if not _wait_for_codex_adapter_call(cleanup_call, cleanup_deadline):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    cleanup_ok, cleanup_value = cleanup_call.outcome[0]
+    if not cleanup_ok or cleanup_value is not None:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    raise CodexIsolationError("codex_adapter_inventory_uncertain")
+
+
+def _destroy_late_codex_prepare(
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    late_prepared: CodexIsolationPreparedV1,
+    *,
+    call_returned_at: float,
+) -> _CodexTerminalReceipt:
+    """Destroy a late prepared guest before the host accepts its record."""
+    validation_failed = False
+    try:
+        validate_prepared(request, late_prepared)
+    except BaseException:
+        validation_failed = True
+    try:
+        receipt = _destroy_codex_prepared(
+            adapter,
+            request,
+            late_prepared,
+            call_returned_at=call_returned_at,
+        )
+    except BaseException:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+    if validation_failed:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    return receipt
+
+
+def _validate_codex_result_window(
+    result: CodexIsolationResultV1,
+    invoke_call: _CodexAdapterCall,
+) -> None:
+    """Bind all final V1 cleanup evidence to this host invocation."""
+    if (
+        result.pipe_close_timestamp < invoke_call.started_at
+        or result.pipe_close_timestamp > invoke_call.returned_at
+        or any(
+            item.monotonic_timestamp < result.pipe_close_timestamp
+            or item.monotonic_timestamp > invoke_call.returned_at
+            for item in result.inventories[-2:]
+        )
+    ):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+
+
+def _run_admitted_codex_implementation_session(  # noqa: C901
+    *,
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    execution_request: ExecutionRequest,
+    executable_descriptor: int,
     auth_source: Path | None = None,
 ) -> AgentRunResult:
-    """Run one Codex implementation through an admitted isolation adapter."""
+    """Run one automation-admitted Codex implementation request."""
     validate_adapter(adapter)
-    try:
-        prepared = adapter.prepare(request)
-    except CodexIsolationError:
-        raise
-    except BaseException:
+    expected_session_id = _validate_codex_session_authority(request, execution_request)
+    if time.monotonic() >= request.monotonic_deadline:
+        raise CodexIsolationError("codex_adapter_timeout")
+    _verify_codex_implementation_executable(request, executable_descriptor)
+    prepare_call = _start_codex_adapter_call(lambda: adapter.prepare(request))
+    if not _wait_for_codex_adapter_call(prepare_call, request.monotonic_deadline):
+        _complete_timed_out_codex_call(
+            adapter=adapter,
+            request=request,
+            active_call=prepare_call,
+            prepared=None,
+        )
+        raise CodexIsolationError("codex_adapter_timeout")
+    prepared_ok, prepared_or_error = prepare_call.outcome[0]
+    if not prepared_ok:
+        if isinstance(prepared_or_error, _CodexPrepareCleanupError):
+            _complete_timed_out_codex_call(
+                adapter=adapter,
+                request=request,
+                active_call=prepare_call,
+                prepared=None,
+            )
+        if isinstance(prepared_or_error, CodexIsolationError):
+            raise prepared_or_error
         raise CodexIsolationError("codex_adapter_launch_failed") from None
-    invoke_started = False
+    prepared = cast(CodexIsolationPreparedV1, prepared_or_error)
+    destroy_owned = False
     auth_path: Path | None = None
     auth_bridge: tuple[int, int, tuple[int, int, int, int, int, int]] | None = None
     authentication = ""
     try:
         validate_prepared(request, prepared)
-        _check_codex_preparation_deadline(request, prepared)
-        _verify_codex_implementation_executable(request)
+        if time.monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
+            raise CodexIsolationError("codex_adapter_timeout")
+        _verify_codex_implementation_executable(request, executable_descriptor)
         profile = _populate_codex_implementation_profile(request)
         source = auth_source or Path(_codex_child_env()["CODEX_HOME"]) / "auth.json"
         auth_path = profile / "auth.json"
         try:
             authentication = _read_codex_authentication(source)
-            auth_bridge = _create_codex_authentication_bridge(
-                auth_path,
-                authentication,
-            )
+            auth_bridge = _create_codex_authentication_bridge(auth_path, authentication)
         except CodexIsolationError:
             raise
         except BaseException:
             raise CodexIsolationError("codex_adapter_initialization_failed") from None
-        _check_codex_preparation_deadline(request, prepared)
-        _verify_codex_implementation_executable(request)
-        invoke_started = True
-        try:
-            result = adapter.invoke(prepared, str(auth_path))
-        except CodexIsolationError:
-            raise
-        except BaseException:
+        if time.monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
+            raise CodexIsolationError("codex_adapter_timeout")
+        _verify_codex_implementation_executable(request, executable_descriptor)
+        invoke_call = _start_codex_adapter_call(lambda: adapter.invoke(prepared, str(auth_path)))
+        if not _wait_for_codex_adapter_call(invoke_call, request.monotonic_deadline):
+            destroy_owned = True
+            _complete_timed_out_codex_call(
+                adapter=adapter,
+                request=request,
+                active_call=invoke_call,
+                prepared=prepared,
+            )
+            raise CodexIsolationError("codex_adapter_timeout")
+        invoked_ok, result_or_error = invoke_call.outcome[0]
+        if not invoked_ok:
             raise CodexIsolationError("codex_adapter_launch_failed") from None
+        result = cast(CodexIsolationResultV1, result_or_error)
         validate_result(request, prepared, result)
+        _validate_codex_result_window(result, invoke_call)
         _validate_codex_authentication_output(result.output, authentication)
-        _verify_codex_implementation_executable(request)
-        return AgentRunResult(
-            stdout=result.output,
-            stderr="",
-            session_id=request.session,
+        _verify_codex_implementation_executable(request, executable_descriptor)
+        destroy_owned = True
+        _destroy_codex_prepared(
+            adapter,
+            request,
+            prepared,
+            call_returned_at=invoke_call.returned_at,
         )
+        session_id, _message = _parse_codex_json_events(result.output)
+        if session_id is None or (
+            expected_session_id is not None and session_id != expected_session_id
+        ):
+            raise CodexIsolationError("codex_adapter_result_invalid")
+        return AgentRunResult(stdout=result.output, stderr="", session_id=session_id)
     finally:
-        _finish_codex_implementation_session(
-            adapter=adapter,
-            prepared=prepared,
-            invoke_started=invoke_started,
-            auth_path=auth_path,
-            auth_bridge=auth_bridge,
-        )
+        cleanup_failure: BaseException | None = None
+        if auth_path is not None and auth_bridge is not None:
+            try:
+                _remove_codex_authentication(auth_path, *auth_bridge)
+            except BaseException as exc:
+                cleanup_failure = exc
+        destroy_failure: BaseException | None = None
+        if not destroy_owned:
+            destroy_owned = True
+            try:
+                _destroy_codex_prepared(
+                    adapter,
+                    request,
+                    prepared,
+                    call_returned_at=time.monotonic(),
+                )
+            except BaseException as exc:
+                destroy_failure = exc
+        if cleanup_failure is not None:
+            raise cleanup_failure
+        if destroy_failure is not None:
+            raise destroy_failure
 
 
-def _finish_codex_implementation_session(
-    *,
-    adapter: CodexIsolationAdapterV1,
-    prepared: object,
-    invoke_started: bool,
-    auth_path: Path | None,
-    auth_bridge: tuple[int, int, tuple[int, int, int, int, int, int]] | None,
+def _verify_codex_implementation_executable(
+    request: CodexIsolationRequestV1,
+    executable_descriptor: int,
 ) -> None:
-    """Remove authentication and destroy one guest that did not start."""
-    cleanup_failure: BaseException | None = None
-    if auth_path is not None and auth_bridge is not None:
-        try:
-            _remove_codex_authentication(auth_path, *auth_bridge)
-        except BaseException as exc:
-            cleanup_failure = exc
-    destroy_failure: BaseException | None = None
-    if not invoke_started:
-        try:
-            _destroy_codex_prepared(adapter, prepared)
-        except BaseException as exc:
-            destroy_failure = exc
-    if cleanup_failure is not None:
-        raise cleanup_failure
-    if destroy_failure is not None:
-        raise destroy_failure
-
-
-def _check_codex_preparation_deadline(request: CodexIsolationRequestV1, prepared: Any) -> None:
-    """Fail if the host cannot start invocation before the bound deadline."""
-    if time.monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
-        raise CodexIsolationError("codex_adapter_timeout")
-
-
-def _destroy_codex_prepared(adapter: CodexIsolationAdapterV1, prepared: Any) -> None:
-    """Destroy one prepared guest when the host does not invoke it."""
-    destroy = getattr(adapter, "destroy", None)
-    if not callable(destroy):
-        raise CodexIsolationError("codex_adapter_inventory_uncertain")
-    try:
-        destroy(prepared)
-    except BaseException:
-        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
-
-
-def _verify_codex_implementation_executable(request: CodexIsolationRequestV1) -> None:
     """Verify the staged executable identity and digest at the host boundary."""
     path = Path(request.executable_path)
     try:
-        initial = _codex_file_fingerprint(path.lstat())
-        _mode, payload = _read_codex_regular_file(
-            path,
-            max_bytes=request.executable_file_identity[4],
-        )
-        final = _codex_file_fingerprint(path.lstat())
+        opened = _codex_file_fingerprint(os.fstat(executable_descriptor))
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(executable_descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+        path_identity = _codex_file_fingerprint(path.lstat())
     except (CodexIsolationError, OSError, IndexError, TypeError):
         raise CodexIsolationError("codex_adapter_request_mismatch") from None
     if (
-        initial != request.executable_file_identity
-        or final != request.executable_file_identity
-        or hashlib.sha256(payload).hexdigest() != request.executable_digest
+        opened != request.executable_file_identity
+        or path_identity != request.executable_file_identity
+        or digest.hexdigest() != request.executable_digest
     ):
         raise CodexIsolationError("codex_adapter_request_mismatch")
 
@@ -2294,24 +2604,37 @@ def _populate_codex_implementation_profile(request: CodexIsolationRequestV1) -> 
         raise CodexIsolationError("codex_adapter_initialization_failed")
 
     profile = Path(request.private_profile_path)
+    destination = profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+    expected_copy = tuple(
+        (relative, 0o700 if mode & 0o100 else 0o600, payload) for relative, mode, payload in files
+    )
+    lifecycle, _session_id, _operation, _allowed_tools = _codex_session_authority(request)
+    if lifecycle == SessionLifecycle.RESUME_REQUIRED.value:
+        _validate_codex_resume_profile(
+            profile,
+            destination,
+            expected_copy,
+        )
+        return profile
     try:
         profile.mkdir(mode=0o700)
         profile.chmod(0o700)
-        destination = profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
         destination.mkdir(parents=True, mode=0o700)
         for relative, mode, payload in files:
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             _write_codex_profile_file(target, payload, mode)
-        expected_copy = tuple(
-            (relative, 0o700 if mode & 0o100 else 0o600, payload)
-            for relative, mode, payload in files
-        )
         if _codex_athena_snapshot(destination) != expected_copy:
             raise CodexIsolationError("codex_adapter_initialization_failed")
-        write_secure(profile / "config.toml", _codex_implementation_config(destination))
+        write_secure(
+            profile / "config.toml",
+            _codex_implementation_config(destination),
+        )
         for path in (
+            profile / "home",
             profile / "tmp",
+            profile / "appdata",
+            profile / "localappdata",
             profile / "xdg" / "config",
             profile / "xdg" / "cache",
             profile / "xdg" / "data",
@@ -2323,6 +2646,47 @@ def _populate_codex_implementation_profile(request: CodexIsolationRequestV1) -> 
     except OSError:
         raise CodexIsolationError("codex_adapter_initialization_failed") from None
     return profile
+
+
+def _validate_codex_resume_profile(
+    profile: Path,
+    athena: Path,
+    expected_athena: tuple[tuple[Path, int, bytes], ...],
+) -> None:
+    """Validate one issue-owned profile before a provider resume."""
+    try:
+        status = profile.lstat()
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.geteuid()
+            or stat.S_IMODE(status.st_mode) & 0o077
+            or (profile / "auth.json").exists()
+        ):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        allowed = {
+            "appdata",
+            "config.toml",
+            "home",
+            "localappdata",
+            "plugins",
+            "sessions",
+            "tmp",
+            "xdg",
+        }
+        if {path.name for path in profile.iterdir()} - allowed:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        if _codex_athena_snapshot(athena) != expected_athena:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        _mode, config = _read_codex_regular_file(profile / "config.toml", max_bytes=65536)
+        if config.decode("utf-8") != _codex_implementation_config(athena):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        sessions = profile / "sessions"
+        if sessions.exists():
+            _codex_athena_snapshot(sessions)
+    except CodexIsolationError:
+        raise
+    except (OSError, UnicodeError):
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
 
 
 def _codex_file_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -2460,8 +2824,10 @@ def _write_codex_profile_file(path: Path, payload: bytes, source_mode: int) -> N
             os.close(descriptor)
 
 
-def _codex_implementation_config(athena_path: Path) -> str:
-    """Return the private profile configuration for the one admitted plugin."""
+def _codex_implementation_config(
+    athena_path: Path,
+) -> str:
+    """Return the operation-invariant configuration for one private profile."""
     return "\n".join(
         (
             "[marketplaces.athena]",
@@ -3660,21 +4026,6 @@ def _is_codex_implementation_request(request: ExecutionRequest | None) -> bool:
     return request is not None and request.role is AgentRole.IMPLEMENTER
 
 
-def _codex_implementation_inputs(
-    execution_request: ExecutionRequest | None,
-    adapter: CodexIsolationAdapterV1 | None,
-    request: CodexIsolationRequestV1 | None,
-) -> tuple[CodexIsolationAdapterV1, CodexIsolationRequestV1] | None:
-    """Return complete isolation inputs or fail before host state is read."""
-    if not _is_codex_implementation_request(execution_request):
-        return None
-    if adapter is None:
-        raise CodexIsolationError("codex_adapter_not_selected")
-    if request is None:
-        raise CodexIsolationError("codex_adapter_protocol_mismatch")
-    return adapter, request
-
-
 def run_agent_text(
     agent: str,
     prompt: str,
@@ -3758,8 +4109,6 @@ def run_agent_session(
     resume_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
     pi_dir: Path | None = None,
-    codex_isolation_adapter: CodexIsolationAdapterV1 | None = None,
-    codex_isolation_request: CodexIsolationRequestV1 | None = None,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     pi_thinking = ""
@@ -3786,16 +4135,8 @@ def run_agent_session(
             )
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        isolation = _codex_implementation_inputs(
-            execution_request,
-            codex_isolation_adapter,
-            codex_isolation_request,
-        )
-        if isolation is not None:
-            return run_codex_implementation_session(
-                adapter=isolation[0],
-                request=isolation[1],
-            )
+        if _is_codex_implementation_request(execution_request):
+            raise CodexIsolationError("codex_adapter_not_selected")
         return run_codex_session(
             prompt,
             cwd=cwd,
@@ -3869,8 +4210,6 @@ def resume_agent_session(
     resume_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
     pi_dir: Path | None = None,
-    codex_isolation_adapter: CodexIsolationAdapterV1 | None = None,
-    codex_isolation_request: CodexIsolationRequestV1 | None = None,
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     pi_thinking = ""
@@ -3896,16 +4235,8 @@ def resume_agent_session(
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        isolation = _codex_implementation_inputs(
-            execution_request,
-            codex_isolation_adapter,
-            codex_isolation_request,
-        )
-        if isolation is not None:
-            return run_codex_implementation_session(
-                adapter=isolation[0],
-                request=isolation[1],
-            )
+        if _is_codex_implementation_request(execution_request):
+            raise CodexIsolationError("codex_adapter_not_selected")
         return resume_codex_session(
             session_id,
             prompt,

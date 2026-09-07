@@ -192,6 +192,14 @@ from .repo import (
     is_full_commit_sha,
 )
 
+
+def _implementer_session_lifecycle(item: WorkItem) -> SessionLifecycle:
+    """Resume when either provider session store has an implementer identity."""
+    if AGENT_IMPLEMENTER in item.session_bindings or AGENT_IMPLEMENTER in item.session_ids:
+        return SessionLifecycle.RESUME_REQUIRED
+    return SessionLifecycle.START_NEW
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -1017,11 +1025,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT_INSPECT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                (_implementer_session_lifecycle(item)),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1078,11 +1082,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT_INSPECT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                (_implementer_session_lifecycle(item)),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1452,11 +1452,7 @@ class ImplementationStage(Stage):
                 execution_request=ExecutionRequest(
                     AgentRole.IMPLEMENTER,
                     AgentOperation.ADDRESS_REVIEW,
-                    (
-                        SessionLifecycle.RESUME_REQUIRED
-                        if AGENT_IMPLEMENTER in item.session_bindings
-                        else SessionLifecycle.START_NEW
-                    ),
+                    (_implementer_session_lifecycle(item)),
                 ),
                 resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
                 prompt_kwargs={
@@ -1509,11 +1505,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                (_implementer_session_lifecycle(item)),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1579,11 +1571,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                (_implementer_session_lifecycle(item)),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={

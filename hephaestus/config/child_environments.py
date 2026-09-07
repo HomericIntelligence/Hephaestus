@@ -99,6 +99,21 @@ def build_codex_implementation_child_env(
         if not validate_environment_value(spec, value):
             raise ValueError("fixed Git environment contains an invalid value")
     env = build_codex_child_env(codex_home=codex_home)
+    private = Path(env["CODEX_HOME"])
+    env.update(
+        {
+            "HOME": _absolute_path(private / "home"),
+            "TMPDIR": _absolute_path(private / "tmp"),
+            "TMP": _absolute_path(private / "tmp"),
+            "TEMP": _absolute_path(private / "tmp"),
+            "USERPROFILE": _absolute_path(private / "home"),
+            "APPDATA": _absolute_path(private / "appdata"),
+            "LOCALAPPDATA": _absolute_path(private / "localappdata"),
+            "XDG_CONFIG_HOME": _absolute_path(private / "xdg" / "config"),
+            "XDG_CACHE_HOME": _absolute_path(private / "xdg" / "cache"),
+            "XDG_DATA_HOME": _absolute_path(private / "xdg" / "data"),
+        }
+    )
     env.update(fixed_git_environment)
     return env
 

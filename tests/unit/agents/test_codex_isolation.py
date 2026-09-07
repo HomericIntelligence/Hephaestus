@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
-import json
 import os
-import shutil
 import stat
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -211,17 +208,134 @@ def _linux_elf(payload: bytes = b"locked") -> bytes:
     return bytes(header) + payload
 
 
-def test_missing_adapter_fails_before_profile_probe_or_process(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A missing selection fails before entry-point discovery."""
+def test_missing_adapter_fails_before_profile_probe_or_process(tmp_path: Path) -> None:
+    """A missing selection stops implementation before a host side effect."""
+    from hephaestus.agents import runtime
+    from hephaestus.agents.codex_isolation import CodexIsolationError
+    from hephaestus.agents.execution_policy import (
+        AgentOperation,
+        AgentRole,
+        ExecutionRequest,
+        SessionLifecycle,
+    )
+
+    request = ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
+    with (
+        patch("hephaestus.agents.runtime._codex_child_env") as profile,
+        patch("hephaestus.agents.runtime.run_codex_session") as process,
+        pytest.raises(CodexIsolationError, match="codex_adapter_not_selected"),
+    ):
+        runtime.run_agent_session(
+            "codex",
+            "implement",
+            cwd=tmp_path,
+            timeout=30,
+            execution_request=request,
+        )
+
+    profile.assert_not_called()
+    process.assert_not_called()
+
+
+def test_version_1_wire_and_adapter_contract_stays_frozen() -> None:
+    """Production keeps the accepted version-1 contract exact."""
     iso = _module()
-    monkeypatch.setattr(iso.metadata, "entry_points", pytest.fail)
 
-    with pytest.raises(iso.CodexIsolationError) as error:
-        iso.load_adapter_factory(None)
+    assert tuple(field.name for field in dataclasses.fields(iso.CodexIsolationRequestV1)) == (
+        "schema_version",
+        "run_nonce",
+        "entry_point_name",
+        "adapter_api_version",
+        "package_version",
+        "deployment_lock_digest",
+        "wheel_digest",
+        "installed_tree_digest",
+        "command",
+        "command_digest",
+        "executable_platform",
+        "executable_target",
+        "executable_release",
+        "executable_asset_name",
+        "executable_path",
+        "executable_digest",
+        "executable_file_identity",
+        "guest_image_digest",
+        "environment",
+        "environment_digest",
+        "prompt",
+        "prompt_digest",
+        "worktree_path",
+        "private_profile_path",
+        "policy",
+        "policy_digest",
+        "git_receipt",
+        "git_receipt_digest",
+        "repository",
+        "issue",
+        "role",
+        "worktree_identity",
+        "model",
+        "session",
+        "session_identity_digest",
+        "monotonic_deadline",
+    )
+    assert tuple(field.name for field in dataclasses.fields(iso.CodexIsolationPreparedV1)) == (
+        "schema_version",
+        "request_nonce",
+        "request_digest",
+        "guest_boot_nonce",
+        "guest_image_digest",
+        "adapter_package_digest",
+        "executable_digest",
+        "elf_platform",
+        "elf_target",
+        "version_output",
+        "guest_file_identity",
+        "invocation_token",
+        "preparation_deadline",
+    )
+    assert tuple(field.name for field in dataclasses.fields(iso.CodexIsolationResultV1)) == (
+        "schema_version",
+        "adapter_identity",
+        "adapter_version",
+        "request_nonce",
+        "request_digest",
+        "guest_boot_nonce",
+        "prepared_record_digest",
+        "exit_status",
+        "output",
+        "error_code",
+        "term_sent",
+        "term_timestamp",
+        "kill_sent",
+        "kill_timestamp",
+        "pipes_closed",
+        "pipe_close_timestamp",
+        "inventories",
+        "policy_digest",
+        "executable_digest",
+        "git_receipt_digest",
+        "session_identity_digest",
+    )
+    assert {
+        name
+        for name, value in vars(iso.CodexIsolationAdapterV1).items()
+        if callable(value) and not name.startswith("_")
+    } == {"prepare", "invoke", "destroy"}
 
-    assert error.value.code == "codex_adapter_not_selected"
+
+def test_protocol_exports_no_unadmitted_loader_or_invocation_helper() -> None:
+    """The public protocol cannot bypass automation-owned admission."""
+    iso = _module()
+
+    assert not hasattr(iso, "load_adapter_factory")
+    assert not hasattr(iso, "prepare_and_invoke")
+    assert not hasattr(iso, "_load_adapter_factory")
+    assert not hasattr(iso, "_prepare_and_invoke")
 
 
 def test_request_v1_rejects_missing_unknown_and_mutable_fields(tmp_path: Path) -> None:
@@ -372,6 +486,27 @@ def test_executable_staging_runs_only_descriptor_bound_bytes(
     assert staged.digest == _digest(original)
     assert stat.S_IMODE(staged.path.stat().st_mode) == 0o500
     assert source.read_bytes() == replacement
+    iso.close_staged_linux_executable(staged)
+
+
+def test_staged_executable_descriptor_survives_path_swap(tmp_path: Path) -> None:
+    """The held descriptor stays bound when the staged path is replaced."""
+    iso = _module()
+    source = tmp_path / "source-codex"
+    source.write_bytes(_linux_elf(b"trusted"))
+    source.chmod(0o500)
+    job_root = tmp_path / "job"
+    job_root.mkdir(mode=0o700)
+
+    staged = iso.stage_linux_executable(source, job_root)
+    original = os.fstat(staged.descriptor)
+    staged.path.unlink()
+    staged.path.write_bytes(_linux_elf(b"replacement"))
+    staged.path.chmod(0o500)
+
+    assert os.fstat(staged.descriptor).st_ino == original.st_ino
+    assert _digest(os.pread(staged.descriptor, original.st_size, 0)) == staged.digest
+    iso.close_staged_linux_executable(staged)
 
 
 def test_darwin_codex_artifact_is_rejected_for_linux_guest(tmp_path: Path) -> None:
@@ -393,7 +528,7 @@ def test_darwin_codex_artifact_is_rejected_for_linux_guest(tmp_path: Path) -> No
 def test_prepare_runs_version_without_auth_and_invoke_uses_same_guest_bytes(
     tmp_path: Path,
 ) -> None:
-    """Both phases bind one guest boot and one executable digest."""
+    """Both V1 phases bind one guest boot and one executable digest."""
     iso = _module()
     request = _request(tmp_path)
     prepared = _prepared(request)
@@ -412,13 +547,47 @@ def test_prepare_runs_version_without_auth_and_invoke_uses_same_guest_bytes(
         def destroy(self, supplied_prepared: Any) -> None:
             calls.append(("destroy", supplied_prepared))
 
+    adapter = Adapter()
+    actual_prepared = adapter.prepare(request)
+    iso.validate_prepared(request, actual_prepared)
     auth_path = str((tmp_path / "auth.json").resolve())
-    actual = iso.prepare_and_invoke(Adapter(), request, auth_path, monotonic=lambda: 700.0)
+    actual = adapter.invoke(actual_prepared, auth_path)
+    iso.validate_result(request, actual_prepared, actual)
+    adapter.destroy(actual_prepared)
 
     assert actual is result
-    assert calls == [("prepare", request), ("invoke", (prepared, auth_path))]
+    assert calls == [
+        ("prepare", request),
+        ("invoke", (prepared, auth_path)),
+        ("destroy", prepared),
+    ]
     assert prepared.guest_boot_nonce == result.guest_boot_nonce
     assert prepared.executable_digest == result.executable_digest
+
+
+@pytest.mark.parametrize("name", ("$(touch owned)", "`touch owned`", "name;command", "name value"))
+def test_adapter_command_substitution_is_rejected(name: str, tmp_path: Path) -> None:
+    """The production admission path rejects command text before lock access."""
+    from hephaestus.automation import codex_adapter_admission
+
+    with pytest.raises(
+        codex_adapter_admission.CodexAdapterAdmissionError,
+        match="adapter selection is invalid",
+    ):
+        codex_adapter_admission.admit_codex_adapter(
+            lock_path=tmp_path / "missing-lock.json",
+            expected_sha256="a" * 64,
+            selected_entry_point=name,
+        )
+
+
+def test_installed_wheel_entry_point_loads_in_fresh_process(tmp_path: Path) -> None:
+    """The exact production admission path loads one installed wheel."""
+    from tests.unit.automation import test_codex_adapter_admission
+
+    test_codex_adapter_admission.test_public_admission_loads_verified_installed_bytes_in_a_fresh_process(
+        tmp_path
+    )
 
 
 def test_protocol_rejects_noncanonical_values_and_wrong_versions(tmp_path: Path) -> None:
@@ -437,45 +606,6 @@ def test_protocol_rejects_noncanonical_values_and_wrong_versions(tmp_path: Path)
         dataclasses.replace(_git_receipt(tmp_path), fixed_environment=[])
     with pytest.raises(ValueError):
         _request(tmp_path, executable_platform="darwin")
-
-
-def test_prepare_and_invoke_maps_failures_and_destroys_expired_guest(tmp_path: Path) -> None:
-    """The two-phase helper maps exceptions and destroys an expired guest."""
-    iso = _module()
-    request = _request(tmp_path)
-    prepared = _prepared(request)
-    auth_path = str((tmp_path / "auth.json").resolve())
-
-    class PrepareFailure:
-        def prepare(self, supplied_request: Any) -> Any:
-            raise KeyboardInterrupt
-
-        def invoke(self, supplied_prepared: Any, auth_path: str) -> Any:
-            raise AssertionError("invoke must not run")
-
-        def destroy(self, supplied_prepared: Any) -> None:
-            raise AssertionError("destroy must not run without a prepared guest")
-
-    with pytest.raises(iso.CodexIsolationError) as prepare_error:
-        iso.prepare_and_invoke(PrepareFailure(), request, auth_path)
-    assert prepare_error.value.code == "codex_adapter_launch_failed"
-
-    destroyed: list[Any] = []
-
-    class Expired:
-        def prepare(self, supplied_request: Any) -> Any:
-            return prepared
-
-        def invoke(self, supplied_prepared: Any, auth_path: str) -> Any:
-            raise AssertionError("invoke must not run after the deadline")
-
-        def destroy(self, supplied_prepared: Any) -> None:
-            destroyed.append(supplied_prepared)
-
-    with pytest.raises(iso.CodexIsolationError) as timeout_error:
-        iso.prepare_and_invoke(Expired(), request, auth_path, monotonic=lambda: 850.0)
-    assert timeout_error.value.code == "codex_adapter_timeout"
-    assert destroyed == [prepared]
 
 
 def test_result_rejects_output_pipe_and_incomplete_inventory(tmp_path: Path) -> None:
@@ -500,239 +630,3 @@ def test_result_rejects_output_pipe_and_incomplete_inventory(tmp_path: Path) -> 
         with pytest.raises(iso.CodexIsolationError) as error:
             iso.validate_result(request, prepared, _result(request, prepared, **changes))
         assert error.value.code == code
-
-
-def test_load_adapter_factory_maps_discovery_and_factory_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Adapter discovery maps each boundary failure to one stable code."""
-    iso = _module()
-
-    class Factory:
-        codex_isolation_api_version = 1
-
-        def __call__(self) -> object:
-            return object()
-
-    class EntryPoint:
-        def __init__(self, value: object) -> None:
-            self.value = value
-
-        def load(self) -> object:
-            if isinstance(self.value, BaseException):
-                raise self.value
-            return self.value
-
-    def raises(**kwargs: str) -> tuple[object, ...]:
-        raise RuntimeError
-
-    monkeypatch.setattr(iso.metadata, "entry_points", raises)
-    with pytest.raises(iso.CodexIsolationError) as error:
-        iso.load_adapter_factory("production-v1")
-    assert error.value.code == "codex_adapter_initialization_failed"
-
-    cases = (
-        ((), "codex_adapter_not_installed"),
-        ((EntryPoint(Factory()), EntryPoint(Factory())), "codex_adapter_ambiguous"),
-        ((EntryPoint(RuntimeError()),), "codex_adapter_initialization_failed"),
-        ((EntryPoint("not-callable"),), "codex_adapter_initialization_failed"),
-        ((EntryPoint(lambda: object()),), "codex_adapter_protocol_mismatch"),
-    )
-    for candidates, code in cases:
-        monkeypatch.setattr(
-            iso.metadata,
-            "entry_points",
-            lambda candidates=candidates, **kwargs: candidates,
-        )
-        with pytest.raises(iso.CodexIsolationError) as error:
-            iso.load_adapter_factory("production-v1")
-        assert error.value.code == code
-
-    factory = Factory()
-    monkeypatch.setattr(iso.metadata, "entry_points", lambda **kwargs: (EntryPoint(factory),))
-    assert iso.load_adapter_factory("production-v1") is factory
-
-
-@pytest.mark.parametrize("name", ("$(touch owned)", "`touch owned`", "name;command", "name value"))
-def test_adapter_command_substitution_is_rejected(
-    name: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Adapter selection rejects all command text before discovery."""
-    iso = _module()
-    monkeypatch.setattr(iso.metadata, "entry_points", pytest.fail)
-
-    with pytest.raises(iso.CodexIsolationError) as error:
-        iso.load_adapter_factory(name)
-
-    assert error.value.code == "codex_adapter_not_selected"
-
-
-def _build_and_install_fixture(
-    root: Path,
-    *,
-    distribution: str,
-    module: str,
-    entry_point: str | None,
-    api_version: int = 1,
-    factory_expression: str = "create_adapter",
-) -> Path:
-    source = root / f"src-{distribution}"
-    source.mkdir()
-    (source / "pyproject.toml").write_text(
-        "\n".join(
-            (
-                "[build-system]",
-                'requires = ["setuptools"]',
-                'build-backend = "setuptools.build_meta"',
-                "",
-                "[project]",
-                f'name = "{distribution}"',
-                'version = "1.0.0"',
-                *(
-                    (
-                        "",
-                        '[project.entry-points."hephaestus.codex_isolation_adapters"]',
-                        f'{entry_point} = "{module}:{factory_expression}"',
-                    )
-                    if entry_point is not None
-                    else ()
-                ),
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (source / f"{module}.py").write_text(
-        "\n".join(
-            (
-                "def create_adapter():",
-                "    return {'factory': 'ok'}",
-                f"create_adapter.codex_isolation_api_version = {api_version}",
-                "invalid_factory = 'not-callable'",
-                "",
-            )
-        ),
-        encoding="utf-8",
-    )
-    dist = source / "dist"
-    subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(dist)],
-        cwd=source,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    target = root / "installed"
-    target.mkdir(exist_ok=True)
-    wheel = next(dist.glob("*.whl"))
-    subprocess.run(
-        [
-            shutil.which("uv") or "uv",
-            "pip",
-            "install",
-            "--target",
-            str(target),
-            "--no-deps",
-            str(wheel),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return target
-
-
-def _run_loader_process(target: Path, name: str) -> dict[str, str]:
-    repository = Path(__file__).resolve().parents[3]
-    code = """
-import json
-from hephaestus.agents.codex_isolation import CodexIsolationError, load_adapter_factory
-try:
-    factory = load_adapter_factory(NAME)
-    print(json.dumps({'outcome': 'ok', 'value': factory()['factory']}))
-except CodexIsolationError as exc:
-    print(json.dumps({'outcome': 'error', 'value': exc.code}))
-"""
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = os.pathsep.join((str(target), str(repository)))
-    completed = subprocess.run(
-        [sys.executable, "-c", code.replace("NAME", repr(name))],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    return json.loads(completed.stdout)
-
-
-def test_installed_wheel_entry_point_loads_in_fresh_process(tmp_path: Path) -> None:
-    """Fresh processes negotiate only one exact installed version-1 factory."""
-    success = tmp_path / "success"
-    success.mkdir()
-    target = _build_and_install_fixture(
-        success,
-        distribution="codex-adapter-success",
-        module="adapter_success",
-        entry_point="production-v1",
-    )
-    assert _run_loader_process(target, "production-v1") == {"outcome": "ok", "value": "ok"}
-
-    missing = tmp_path / "missing"
-    missing.mkdir()
-    target = _build_and_install_fixture(
-        missing,
-        distribution="codex-adapter-missing",
-        module="adapter_missing",
-        entry_point=None,
-    )
-    assert _run_loader_process(target, "production-v1") == {
-        "outcome": "error",
-        "value": "codex_adapter_not_installed",
-    }
-
-    duplicate = tmp_path / "duplicate"
-    duplicate.mkdir()
-    target = _build_and_install_fixture(
-        duplicate,
-        distribution="codex-adapter-one",
-        module="adapter_one",
-        entry_point="production-v1",
-    )
-    _build_and_install_fixture(
-        duplicate,
-        distribution="codex-adapter-two",
-        module="adapter_two",
-        entry_point="production-v1",
-    )
-    assert _run_loader_process(target, "production-v1") == {
-        "outcome": "error",
-        "value": "codex_adapter_ambiguous",
-    }
-
-    wrong = tmp_path / "wrong"
-    wrong.mkdir()
-    target = _build_and_install_fixture(
-        wrong,
-        distribution="codex-adapter-wrong",
-        module="adapter_wrong",
-        entry_point="production-v1",
-        api_version=2,
-    )
-    assert _run_loader_process(target, "production-v1") == {
-        "outcome": "error",
-        "value": "codex_adapter_protocol_mismatch",
-    }
-
-    invalid = tmp_path / "invalid"
-    invalid.mkdir()
-    target = _build_and_install_fixture(
-        invalid,
-        distribution="codex-adapter-invalid",
-        module="adapter_invalid",
-        entry_point="production-v1",
-        factory_expression="invalid_factory",
-    )
-    assert _run_loader_process(target, "production-v1") == {
-        "outcome": "error",
-        "value": "codex_adapter_initialization_failed",
-    }

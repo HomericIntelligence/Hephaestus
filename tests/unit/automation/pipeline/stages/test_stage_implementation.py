@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
@@ -61,7 +62,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
-from hephaestus.automation.pipeline.worker_pool import WorkerPool
+from hephaestus.automation.pipeline.worker_pool import WorkerPool, _codex_implementation_grants
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.review_journal import PlanDiscoveryResult
 from hephaestus.automation.state_labels import (
@@ -3143,6 +3144,10 @@ class TestImplementBudget:
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert result.job.prompt_builder is get_address_review_prompt
         assert result.job.allowed_tools == "Read,Write,Edit,Glob,Grep,Bash,Task,Skill"
+        sandbox, codex_tools, workspace_write = _codex_implementation_grants(result.job)
+        assert sandbox == "workspace-write"
+        assert codex_tools == ("Bash", "Edit", "Glob", "Grep", "Read", "Write")
+        assert workspace_write
         assert result.job.parse is _parse_addressed_block
         assert json.loads(result.job.prompt_kwargs["threads_json"]) == [
             {"thread_id": "thread-1", "path": "a.py", "line": 3, "body": "fix it"}
@@ -3207,6 +3212,10 @@ class TestImplementBudget:
         assert result.on_done_state == "TEST_WAIT"
         assert result.job.prompt_kwargs["advise_findings"] == "use helpers"
         assert result.job.prompt_kwargs["branch_name"] == "1-auto-impl"
+        sandbox, codex_tools, workspace_write = _codex_implementation_grants(result.job)
+        assert sandbox == "workspace-write"
+        assert codex_tools == ("Bash", "Edit", "Glob", "Grep", "Read", "Write")
+        assert workspace_write
         assert item.attempts["implement"] == 0  # submission burns nothing
 
     def test_implement_resumes_the_saved_direct_agent_session(
@@ -3223,6 +3232,8 @@ class TestImplementBudget:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.resume_session_id == "implement-session-id"
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
 
     def test_codex_implement_job_carries_only_explicit_isolation_selection(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
@@ -4234,6 +4245,10 @@ class TestTestsAndFix:
         assert result.job.descr == "test_fix"
         assert result.job.prompt_builder is build_test_fix_prompt
         assert result.job.prompt_kwargs["test_output"] == "FAILED test_y"
+        sandbox, codex_tools, workspace_write = _codex_implementation_grants(result.job)
+        assert sandbox == "workspace-write"
+        assert codex_tools == ("Bash", "Edit", "Glob", "Grep", "Read", "Write")
+        assert workspace_write
         assert result.on_done_state == "TEST_WAIT"
 
         stage.on_job_done(item, JobResult(ok=True, value="fixed"), ctx)

@@ -24,7 +24,11 @@ from unittest.mock import ANY, MagicMock, call, patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
-from hephaestus.agents.codex_isolation import CodexGitReceiptV1, StagedLinuxExecutable
+from hephaestus.agents.codex_isolation import (
+    CodexGitReceiptV1,
+    CodexIsolationError,
+    StagedLinuxExecutable,
+)
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -59,6 +63,8 @@ from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
+    _codex_implementation_grants,
+    _codex_private_profile,
     _confirmed_pytest_failure,
     _controlled_git_signing_env,
     _dirty_worktree_content_snapshot,
@@ -67,6 +73,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
+    _owned_codex_adapter,
     _prepare_host_output_aliases,
     _quota_backed_volume,
     _repo_lock_path,
@@ -409,7 +416,7 @@ def test_codex_boundary_failure_blocks_commit_and_push(pool: WorkerPool, tmp_pat
             side_effect=CodexWorktreeBoundaryError("Git receipt failed"),
         ) as capture,
         patch(f"{_WP}.resolve_agent") as resolve,
-        patch("hephaestus.agents.runtime.run_codex_implementation_session") as invoke,
+        patch("hephaestus.agents.runtime._run_admitted_codex_implementation_session") as invoke,
         patch(f"{_WP}.git_utils.commit_if_changes") as commit,
         patch(f"{_WP}.git_utils.push_branch") as push,
     ):
@@ -475,8 +482,50 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
 
 
 @pytest.mark.parametrize("replace_staged_after_return", [False, True])
+@pytest.mark.parametrize(
+    ("lifecycle", "resume_session_id"),
+    (
+        (SessionLifecycle.START_NEW, None),
+        (SessionLifecycle.RESUME_REQUIRED, "provider-session-id"),
+    ),
+)
+@pytest.mark.parametrize(
+    ("operation", "sandbox", "allowed_tools", "expected_sandbox", "expected_tools"),
+    (
+        (
+            AgentOperation.IMPLEMENT,
+            "workspace-write",
+            None,
+            "workspace-write",
+            ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+        ),
+        (
+            AgentOperation.IMPLEMENT_INSPECT,
+            "read-only",
+            "Read,Glob,Grep",
+            "read-only",
+            ("Glob", "Grep", "Read"),
+        ),
+        (
+            AgentOperation.ADDRESS_REVIEW,
+            "workspace-write",
+            "Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
+            "workspace-write",
+            ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+        ),
+    ),
+)
 def test_codex_implementation_builds_one_frozen_admitted_request(
-    pool: WorkerPool, tmp_path: Path, replace_staged_after_return: bool
+    pool: WorkerPool,
+    tmp_path: Path,
+    replace_staged_after_return: bool,
+    lifecycle: SessionLifecycle,
+    resume_session_id: str | None,
+    operation: AgentOperation,
+    sandbox: str,
+    allowed_tools: str | None,
+    expected_sandbox: str,
+    expected_tools: tuple[str, ...],
 ) -> None:
     """The worker binds all host inputs before it invokes the admitted adapter."""
     worktree = tmp_path.resolve()
@@ -520,6 +569,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     staged_path.write_bytes(staged_bytes)
     staged_path.chmod(0o500)
     staged_status = staged_path.stat()
+    staged_descriptor = os.open(staged_path, os.O_RDONLY | os.O_NOFOLLOW)
     staged_digest = hashlib.sha256(staged_bytes).hexdigest()
     lock = MagicMock(
         adapter_api_version=1,
@@ -548,6 +598,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     )
     staged = StagedLinuxExecutable(
         path=staged_path,
+        descriptor=staged_descriptor,
         digest=staged_digest,
         file_identity=(
             staged_status.st_dev,
@@ -560,14 +611,17 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     )
     request = ExecutionRequest(
         AgentRole.IMPLEMENTER,
-        AgentOperation.IMPLEMENT,
-        SessionLifecycle.START_NEW,
+        operation,
+        lifecycle,
     )
     job = _agent_job(
         agent="codex",
         cwd=tmp_path,
         model="gpt-5.6-sol:high",
         session_key="implementation:123",
+        resume_session_id=resume_session_id,
+        sandbox=sandbox,
+        allowed_tools=allowed_tools,
         execution_request=request,
         codex_isolation_adapter="production",
         codex_isolation_deployment_lock=tmp_path / "deployment-lock.json",
@@ -582,7 +636,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         return AgentRunResult(
             stdout="complete",
             stderr="",
-            session_id="implementation:123",
+            session_id="provider-session-id",
         )
 
     with (
@@ -597,7 +651,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         ),
         patch(f"{_WP}.stage_linux_executable", return_value=staged),
         patch(
-            "hephaestus.agents.runtime.run_codex_implementation_session",
+            "hephaestus.agents.runtime._run_admitted_codex_implementation_session",
             side_effect=invoke_adapter,
         ) as invoke,
         patch(f"{_WP}.resolve_agent") as resolve,
@@ -608,14 +662,35 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     resolve.assert_not_called()
     boundary.verify_before_launch.assert_called_once_with()
     boundary.verify_after_return.assert_called_once_with()
+    adapter._close.assert_called_once_with()
     frozen = invoke.call_args.kwargs["request"]
     assert frozen.command[0] == str(staged.path)
     assert frozen.command[-2:] == ("--json", "-")
+    assert any(expected_sandbox in value for value in frozen.command)
     assert frozen.executable_digest == staged.digest
+    assert invoke.call_args.kwargs["executable_descriptor"] == staged_descriptor
+    assert invoke.call_args.kwargs["execution_request"] is request
     assert frozen.git_receipt is receipt
     assert frozen.policy.command_network == "deny"
     assert frozen.policy.protected_overlay_mounts == receipt.protected_paths
-    assert frozen.session == "implementation:123"
+    assert json.loads(frozen.session) == {
+        "allowed_tools": list(expected_tools),
+        "lifecycle": lifecycle.value,
+        "operation": operation.value,
+        "session_id": resume_session_id,
+    }
+    assert f"hephaestus_automation.operation={json.dumps(operation.value)}" in frozen.command
+    assert (
+        "hephaestus_automation.allowed_tools="
+        + json.dumps(list(expected_tools), separators=(",", ":"))
+        in frozen.command
+    )
+    assert ("resume" in frozen.command) is (lifecycle is SessionLifecycle.RESUME_REQUIRED)
+    if expected_sandbox == "read-only":
+        assert str(worktree) in frozen.policy.read_only_mounts
+        assert str(worktree) not in frozen.policy.read_write_mounts
+    else:
+        assert str(worktree) in frozen.policy.read_write_mounts
     admission.validate_adapter_identity.assert_called_once_with(
         distribution="adapter-dist",
         version="1.0",
@@ -623,6 +698,85 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     )
     if replace_staged_after_return:
         assert result.error == "codex_adapter_request_mismatch"
+    with pytest.raises(OSError):
+        os.fstat(staged_descriptor)
+
+
+def test_codex_implementation_inspect_rejects_a_write_tool(tmp_path: Path) -> None:
+    """A read-only operation cannot widen its tool grant."""
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        sandbox="read-only",
+        allowed_tools="Read,Glob,Grep,Write",
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER,
+            AgentOperation.IMPLEMENT_INSPECT,
+            SessionLifecycle.START_NEW,
+        ),
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+        _codex_implementation_grants(job)
+
+
+def test_owned_codex_adapter_closes_after_initialization_or_body_failure() -> None:
+    """Every admitted helper owner closes on an early production failure."""
+    failed_factory = MagicMock(side_effect=RuntimeError("factory failed"))
+    failed_factory.codex_isolation_api_version = 1
+    failed_admission = MagicMock(
+        factory=failed_factory,
+        lock=MagicMock(adapter_api_version=1),
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_initialization_failed"):
+        with _owned_codex_adapter(failed_admission):
+            pytest.fail("failed initialization must not enter the body")
+    failed_factory._close.assert_called_once_with()
+
+    adapter = MagicMock(
+        adapter_distribution="adapter-dist",
+        adapter_version="1.0",
+        installed_tree_sha256="d" * 64,
+    )
+    factory = MagicMock(return_value=adapter)
+    factory.codex_isolation_api_version = 1
+    admission = MagicMock(
+        factory=factory,
+        lock=MagicMock(adapter_api_version=1),
+    )
+
+    with pytest.raises(RuntimeError, match="pre-staging failure"):
+        with _owned_codex_adapter(admission):
+            raise RuntimeError("pre-staging failure")
+    adapter._close.assert_called_once_with()
+
+
+def test_codex_private_profile_is_bound_to_the_issue_cycle(tmp_path: Path) -> None:
+    """Start and resume reuse only one issue-cycle private profile."""
+    build_root = tmp_path.resolve()
+    first = _agent_job(
+        issue=123,
+        session_key="cycle-one",
+        cwd=tmp_path,
+    )
+    other_cycle = _agent_job(
+        issue=123,
+        session_key="cycle-two",
+        cwd=tmp_path,
+    )
+    other_issue = _agent_job(
+        issue=124,
+        session_key="cycle-one",
+        cwd=tmp_path,
+    )
+
+    profile = _codex_private_profile(first, build_root)
+
+    assert _codex_private_profile(first, build_root) == profile
+    assert _codex_private_profile(other_cycle, build_root) != profile
+    assert _codex_private_profile(other_issue, build_root) != profile
+    assert profile.parent.parent == build_root / Path(DEFAULT_STATE_DIR).name
 
 
 def test_shutdown_can_reap_without_marking_interrupted(

@@ -216,6 +216,9 @@ assumes a POSIX-like development environment. Specifically:
   `GIT_WORK_TREE`, etc.) are scrubbed and author/committer identity is forced
   via `_git_test_env()` so the tests do not depend on the contributor's
   `~/.gitconfig`.
+- **`python3` and `zstd`** on `PATH` — used by
+  `bash scripts/run_ci_local.sh build` to provision and extract the fixed Codex
+  artifact before the network-free artifact test starts.
 
 These cases are tagged with the `requires_posix` pytest marker and are skipped
 automatically on `sys.platform == "win32"`. They run under macOS, Linux, and

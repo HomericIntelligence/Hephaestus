@@ -8,10 +8,9 @@ import math
 import os
 import re
 import stat
-import time
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, fields, is_dataclass
-from importlib import metadata
 from itertools import pairwise
 from pathlib import Path
 from typing import Never, Protocol, cast
@@ -58,6 +57,25 @@ class CodexIsolationError(RuntimeError):
         self.code = code
         self.transient = False
         super().__init__(code)
+
+
+class _CodexPrepareCleanupError(RuntimeError):
+    """Carry one host-only cleanup action for an unpublishable prepare result."""
+
+    def __init__(self, cleanup: Callable[[], None]) -> None:
+        """Store one cleanup action that a host can claim one time."""
+        self._cleanup = cleanup
+        self._claimed = False
+        self._lock = threading.Lock()
+        super().__init__("The prepared guest needs opaque cleanup")
+
+    def claim_cleanup(self) -> Callable[[], None] | None:
+        """Return the cleanup action one time."""
+        with self._lock:
+            if self._claimed:
+                return None
+            self._claimed = True
+            return self._cleanup
 
 
 def _fail(code: str) -> Never:
@@ -277,7 +295,7 @@ class CodexGitReceiptV1:
 
 @dataclass(frozen=True, slots=True)
 class CodexIsolationRequestV1:
-    """Bind all trusted version-1 inputs for one implementation request."""
+    """Bind the accepted version-1 request field set."""
 
     schema_version: int
     run_nonce: str
@@ -317,7 +335,7 @@ class CodexIsolationRequestV1:
     monotonic_deadline: float
 
     def __post_init__(self) -> None:  # noqa: C901
-        """Validate the exact request fields and their digests."""
+        """Validate the accepted version-1 request."""
         _require_schema_version(self.schema_version)
         _require_nonce(self.run_nonce, "run_nonce")
         _require_entry_point_name(self.entry_point_name)
@@ -393,7 +411,7 @@ class CodexIsolationRequestV1:
 
 @dataclass(frozen=True, slots=True)
 class CodexIsolationPreparedV1:
-    """Describe one credential-free prepared guest."""
+    """Describe the accepted version-1 prepared field set."""
 
     schema_version: int
     request_nonce: str
@@ -410,7 +428,7 @@ class CodexIsolationPreparedV1:
     preparation_deadline: float
 
     def __post_init__(self) -> None:
-        """Validate the exact prepared-result fields."""
+        """Validate the accepted version-1 prepared result."""
         _require_schema_version(self.schema_version)
         _require_nonce(self.request_nonce, "request_nonce")
         _require_digest(self.request_digest, "request_digest")
@@ -428,38 +446,8 @@ class CodexIsolationPreparedV1:
 
 
 @dataclass(frozen=True, slots=True)
-class CodexDescendantInventoryV1:
-    """Describe one ordered and complete descendant inventory."""
-
-    schema_version: int
-    sequence: int
-    monotonic_timestamp: float
-    complete: bool
-    descendants: tuple[int, ...]
-    cgroup_populated: bool
-
-    def __post_init__(self) -> None:
-        """Validate the exact descendant-inventory fields."""
-        _require_schema_version(self.schema_version)
-        if not _is_exact_int(self.sequence) or self.sequence < 0:
-            raise TypeError("sequence must be a nonnegative integer")
-        if not _is_number(self.monotonic_timestamp) or float(self.monotonic_timestamp) < 0:
-            raise TypeError("monotonic_timestamp must be a nonnegative finite number")
-        if type(self.complete) is not bool or type(self.cgroup_populated) is not bool:
-            raise TypeError("Inventory state values must be Boolean")
-        if type(self.descendants) is not tuple or any(
-            not _is_exact_int(item) or item <= 0 for item in self.descendants
-        ):
-            raise TypeError("descendants must be an immutable process identifier tuple")
-        if tuple(sorted(set(self.descendants))) != self.descendants:
-            raise ValueError("descendants must be sorted and unique")
-        if self.cgroup_populated != bool(self.descendants):
-            raise ValueError("cgroup_populated does not match descendants")
-
-
-@dataclass(frozen=True, slots=True)
 class CodexIsolationResultV1:
-    """Describe the final result and complete cleanup evidence."""
+    """Describe the accepted version-1 result field set."""
 
     schema_version: int
     adapter_identity: str
@@ -484,7 +472,7 @@ class CodexIsolationResultV1:
     session_identity_digest: str
 
     def __post_init__(self) -> None:
-        """Validate the exact final-result fields."""
+        """Validate the accepted version-1 final result."""
         _require_schema_version(self.schema_version)
         _require_string(self.adapter_identity, "adapter_identity")
         _require_string(self.adapter_version, "adapter_version")
@@ -520,7 +508,7 @@ class CodexIsolationResultV1:
 
 
 class CodexIsolationAdapterV1(Protocol):
-    """Supply the two-phase version-1 adapter operations."""
+    """Supply the accepted version-1 adapter lifecycle."""
 
     def prepare(self, request: CodexIsolationRequestV1) -> CodexIsolationPreparedV1:
         """Prepare one credential-free guest."""
@@ -529,13 +517,43 @@ class CodexIsolationAdapterV1(Protocol):
         """Invoke Codex in the prepared guest."""
 
     def destroy(self, prepared: CodexIsolationPreparedV1) -> None:
-        """Destroy one prepared guest that the host did not invoke."""
+        """Destroy one prepared guest and confirm terminal cleanup."""
 
 
 def validate_adapter(adapter: object) -> None:
-    """Require all version-1 lifecycle operations before guest preparation."""
+    """Require the accepted version-1 lifecycle operations."""
     if any(not callable(getattr(adapter, name, None)) for name in ("prepare", "invoke", "destroy")):
         _fail("codex_adapter_protocol_mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class CodexDescendantInventoryV1:
+    """Describe one ordered and complete descendant inventory."""
+
+    schema_version: int
+    sequence: int
+    monotonic_timestamp: float
+    complete: bool
+    descendants: tuple[int, ...]
+    cgroup_populated: bool
+
+    def __post_init__(self) -> None:
+        """Validate the exact descendant-inventory fields."""
+        _require_schema_version(self.schema_version)
+        if not _is_exact_int(self.sequence) or self.sequence < 0:
+            raise TypeError("sequence must be a nonnegative integer")
+        if not _is_number(self.monotonic_timestamp) or float(self.monotonic_timestamp) < 0:
+            raise TypeError("monotonic_timestamp must be a nonnegative finite number")
+        if type(self.complete) is not bool or type(self.cgroup_populated) is not bool:
+            raise TypeError("Inventory state values must be Boolean")
+        if type(self.descendants) is not tuple or any(
+            not _is_exact_int(item) or item <= 0 for item in self.descendants
+        ):
+            raise TypeError("descendants must be an immutable process identifier tuple")
+        if tuple(sorted(set(self.descendants))) != self.descendants:
+            raise ValueError("descendants must be sorted and unique")
+        if self.cgroup_populated != bool(self.descendants):
+            raise ValueError("cgroup_populated does not match descendants")
 
 
 def _require_entry_point_name(name: object) -> None:
@@ -543,39 +561,11 @@ def _require_entry_point_name(name: object) -> None:
         _fail("codex_adapter_not_selected")
 
 
-def load_adapter_factory(name: str | None) -> Callable[[], CodexIsolationAdapterV1]:
-    """Load only the exact explicitly selected version-1 adapter factory."""
-    _require_entry_point_name(name)
-    selected = cast(str, name)
-    try:
-        candidates = tuple(
-            metadata.entry_points(
-                group=CODEX_ISOLATION_ADAPTER_ENTRY_POINT_GROUP,
-                name=selected,
-            )
-        )
-    except Exception:
-        _fail("codex_adapter_initialization_failed")
-    if not candidates:
-        _fail("codex_adapter_not_installed")
-    if len(candidates) != 1:
-        _fail("codex_adapter_ambiguous")
-    try:
-        factory = candidates[0].load()
-    except Exception:
-        _fail("codex_adapter_initialization_failed")
-    if not callable(factory):
-        _fail("codex_adapter_initialization_failed")
-    if getattr(factory, "codex_isolation_api_version", None) != CODEX_ISOLATION_API_VERSION:
-        _fail("codex_adapter_protocol_mismatch")
-    return cast(Callable[[], CodexIsolationAdapterV1], factory)
-
-
 def validate_prepared(
     request: CodexIsolationRequestV1,
     prepared: CodexIsolationPreparedV1,
 ) -> None:
-    """Validate one credential-free prepared record against its request."""
+    """Validate an accepted version-1 prepared record."""
     if (
         type(request) is not CodexIsolationRequestV1
         or type(prepared) is not CodexIsolationPreparedV1
@@ -597,18 +587,17 @@ def validate_prepared(
         _fail("codex_adapter_request_mismatch")
 
 
-def _validate_inventories(
+def _validate_inventories_v1(
     inventories: tuple[CodexDescendantInventoryV1, ...],
     quiescence: float,
 ) -> None:
-    if len(inventories) < 2:
-        _fail("codex_adapter_inventory_uncertain")
-    if any(not item.complete for item in inventories):
+    if len(inventories) < 2 or any(not item.complete for item in inventories):
         _fail("codex_adapter_inventory_uncertain")
     for previous, current in pairwise(inventories):
-        if current.sequence != previous.sequence + 1:
-            _fail("codex_adapter_inventory_uncertain")
-        if current.monotonic_timestamp < previous.monotonic_timestamp:
+        if (
+            current.sequence != previous.sequence + 1
+            or current.monotonic_timestamp < previous.monotonic_timestamp
+        ):
             _fail("codex_adapter_inventory_uncertain")
     final_two = inventories[-2:]
     if any(item.descendants or item.cgroup_populated for item in final_two):
@@ -617,11 +606,40 @@ def _validate_inventories(
         _fail("codex_adapter_inventory_uncertain")
 
 
-def _validate_cleanup_deadlines(
+def validate_result(  # noqa: C901 - preserve the accepted version-1 validator
     request: CodexIsolationRequestV1,
+    prepared: CodexIsolationPreparedV1,
     result: CodexIsolationResultV1,
 ) -> None:
-    """Reject signal, pipe, or inventory evidence outside its time bound."""
+    """Validate an accepted version-1 final result."""
+    if (
+        type(request) is not CodexIsolationRequestV1
+        or type(prepared) is not CodexIsolationPreparedV1
+        or type(result) is not CodexIsolationResultV1
+    ):
+        _fail("codex_adapter_protocol_mismatch")
+    expected = (
+        (result.adapter_identity, request.entry_point_name),
+        (result.adapter_version, request.package_version),
+        (result.request_nonce, request.run_nonce),
+        (result.request_digest, canonical_sha256(request)),
+        (result.guest_boot_nonce, prepared.guest_boot_nonce),
+        (result.prepared_record_digest, canonical_sha256(prepared)),
+        (result.policy_digest, request.policy_digest),
+        (result.executable_digest, request.executable_digest),
+        (result.git_receipt_digest, request.git_receipt_digest),
+        (result.session_identity_digest, request.session_identity_digest),
+    )
+    if any(actual != required for actual, required in expected):
+        _fail("codex_adapter_request_mismatch")
+    if len(result.output.encode("utf-8")) > request.policy.max_output_bytes:
+        _fail("codex_adapter_result_invalid")
+    if request.prompt and request.prompt in result.output:
+        _fail("codex_adapter_result_invalid")
+    if request.private_profile_path in result.output:
+        _fail("codex_adapter_result_invalid")
+    if not result.pipes_closed:
+        _fail("codex_adapter_pipe_cleanup_failed")
     if result.kill_sent and not result.term_sent:
         _fail("codex_adapter_result_invalid")
     if result.kill_sent and (
@@ -644,82 +662,11 @@ def _validate_cleanup_deadlines(
         item.monotonic_timestamp > request.monotonic_deadline for item in result.inventories
     ):
         _fail("codex_adapter_timeout")
-
-
-def validate_result(
-    request: CodexIsolationRequestV1,
-    prepared: CodexIsolationPreparedV1,
-    result: CodexIsolationResultV1,
-) -> None:
-    """Validate final identity, output, cleanup, and inventory evidence."""
-    if (
-        type(request) is not CodexIsolationRequestV1
-        or type(prepared) is not CodexIsolationPreparedV1
-        or type(result) is not CodexIsolationResultV1
-    ):
-        _fail("codex_adapter_protocol_mismatch")
-    expected = (
-        (result.adapter_identity, request.entry_point_name),
-        (result.adapter_version, request.package_version),
-        (result.request_nonce, request.run_nonce),
-        (result.request_digest, canonical_sha256(request)),
-        (result.guest_boot_nonce, prepared.guest_boot_nonce),
-        (result.prepared_record_digest, canonical_sha256(prepared)),
-        (result.policy_digest, request.policy_digest),
-        (result.executable_digest, request.executable_digest),
-        (result.git_receipt_digest, request.git_receipt_digest),
-        (result.session_identity_digest, request.session_identity_digest),
-    )
-    if any(actual != required for actual, required in expected):
-        _fail("codex_adapter_request_mismatch")
-    output_bytes = result.output.encode("utf-8")
-    if len(output_bytes) > request.policy.max_output_bytes:
-        _fail("codex_adapter_result_invalid")
-    if request.prompt and request.prompt in result.output:
-        _fail("codex_adapter_result_invalid")
-    if request.private_profile_path in result.output:
-        _fail("codex_adapter_result_invalid")
-    if not result.pipes_closed:
-        _fail("codex_adapter_pipe_cleanup_failed")
-    _validate_cleanup_deadlines(request, result)
-    _validate_inventories(result.inventories, request.policy.inventory_quiescence_seconds)
+    _validate_inventories_v1(result.inventories, request.policy.inventory_quiescence_seconds)
     if result.error_code is not None:
         _fail(result.error_code)
     if result.exit_status != 0:
         _fail("codex_adapter_result_invalid")
-
-
-def prepare_and_invoke(
-    adapter: CodexIsolationAdapterV1,
-    request: CodexIsolationRequestV1,
-    auth_path: str,
-    *,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> CodexIsolationResultV1:
-    """Run and validate both phases on one selected adapter instance."""
-    _require_absolute_path(auth_path, "auth_path")
-    validate_adapter(adapter)
-    try:
-        prepared = adapter.prepare(request)
-    except CodexIsolationError:
-        raise
-    except BaseException:
-        _fail("codex_adapter_launch_failed")
-    validate_prepared(request, prepared)
-    if monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
-        try:
-            adapter.destroy(prepared)
-        except BaseException:
-            _fail("codex_adapter_inventory_uncertain")
-        _fail("codex_adapter_timeout")
-    try:
-        result = adapter.invoke(prepared, auth_path)
-    except CodexIsolationError:
-        raise
-    except BaseException:
-        _fail("codex_adapter_launch_failed")
-    validate_result(request, prepared, result)
-    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -727,6 +674,7 @@ class StagedLinuxExecutable:
     """Describe descriptor-copied Linux executable bytes."""
 
     path: Path
+    descriptor: int
     digest: str
     file_identity: FileIdentity
 
@@ -773,6 +721,7 @@ def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExec
     source_descriptor = -1
     destination_descriptor = -1
     directory_descriptor = -1
+    verify_descriptor = -1
     destination = root / "codex-aarch64-unknown-linux-musl"
     try:
         source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
@@ -792,17 +741,21 @@ def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExec
             offset += os.write(destination_descriptor, source_bytes[offset:])
         os.fchmod(destination_descriptor, 0o500)
         os.fsync(destination_descriptor)
-        destination_status = os.fstat(destination_descriptor)
         directory_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         os.fsync(directory_descriptor)
         verify_descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            destination_bytes = _read_descriptor(verify_descriptor)
-        finally:
-            os.close(verify_descriptor)
+        destination_bytes = _read_descriptor(verify_descriptor)
+        verified_status = os.fstat(verify_descriptor)
         if hashlib.sha256(destination_bytes).hexdigest() != source_digest:
             _fail("codex_adapter_protocol_mismatch")
-        return StagedLinuxExecutable(destination, source_digest, _identity(destination_status))
+        staged = StagedLinuxExecutable(
+            destination,
+            verify_descriptor,
+            source_digest,
+            _identity(verified_status),
+        )
+        verify_descriptor = -1
+        return staged
     except CodexIsolationError:
         if destination.exists():
             destination.unlink()
@@ -812,9 +765,22 @@ def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExec
             destination.unlink()
         _fail("codex_adapter_protocol_mismatch")
     finally:
-        for descriptor in (directory_descriptor, destination_descriptor, source_descriptor):
+        for descriptor in (
+            verify_descriptor,
+            directory_descriptor,
+            destination_descriptor,
+            source_descriptor,
+        ):
             if descriptor >= 0:
                 os.close(descriptor)
+
+
+def close_staged_linux_executable(staged: StagedLinuxExecutable) -> None:
+    """Close the held staged-executable descriptor."""
+    try:
+        os.close(staged.descriptor)
+    except OSError:
+        _fail("codex_adapter_protocol_mismatch")
 
 
 __all__ = [
@@ -832,9 +798,8 @@ __all__ = [
     "StagedLinuxExecutable",
     "canonical_bytes",
     "canonical_sha256",
-    "load_adapter_factory",
+    "close_staged_linux_executable",
     "new_run_nonce",
-    "prepare_and_invoke",
     "stage_linux_executable",
     "validate_adapter",
     "validate_prepared",

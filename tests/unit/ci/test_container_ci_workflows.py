@@ -63,6 +63,37 @@ def test_build_artifact_step_is_valid_bash() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_build_artifact_step_uses_provisioned_fixture_without_network() -> None:
+    """The required artifact lane must use the read-only host fixture offline."""
+    provision_definition = _workflow_step_definition(
+        "_required.yml",
+        "build",
+        "Provision Codex Sigstore fixture",
+    )
+    provision = provision_definition["run"]
+    assert isinstance(provision, str)
+    validation = _workflow_step(
+        "_required.yml",
+        "build",
+        "Validate reproducible artifacts and package lifecycle",
+    )
+
+    assert "scripts/provision_codex_sigstore_fixture.py" in provision
+    assert "zstd --version" in provision
+    assert provision_definition["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+    assert "build/test-fixtures/codex-sigstore/rust-v0.153.4" in provision
+    assert "--network=none" in validation
+    assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in validation
+    assert (
+        "build/test-fixtures/codex-sigstore/rust-v0.153.4:"
+        "/codex-sigstore/rust-v0.153.4:ro" in validation
+    )
+    assert (
+        "build/test-fixtures/codex-sigstore/rust-v0.153.4:"
+        "/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro" in validation
+    )
+
+
 def test_schema_step_builds_workflow_file_array_inside_container(tmp_path: Path) -> None:
     """Schema validation must declare and consume its inputs in the container shell."""
     tools = tmp_path / "tools"

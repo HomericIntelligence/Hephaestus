@@ -61,6 +61,10 @@ security scans, schema and version checks, license policy, shell checks, and
 repository structure checks. A failure returns to the bounded implementation
 test-fix loop instead of publishing a knowingly red branch.
 
+The host must supply `python3` and `zstd` on `PATH`. The build subset checks
+`zstd` before it provisions the fixed Codex artifact. It stops before a network
+request when the decompressor is not available.
+
 For each platform, the shell reports an approved runner-initialization failure.
 Approved failures are an absent engine, an unavailable engine, and a failed
 no-op container-start probe. The shell exits with code 75 and writes one exact

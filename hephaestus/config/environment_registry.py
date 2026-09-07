@@ -24,6 +24,11 @@ _PARENT_READER = "hephaestus.config.child_environments.read_approved_parent_env"
 _GH_READER = "hephaestus.config.child_environments.build_gh_child_env"
 _SIGNING_READER = "hephaestus.config.child_environments.build_git_signing_env"
 _COLOR_READER = "hephaestus.cli.colors._automatic_colors_enabled"
+_CODEX_IMPLEMENTATION_WRITER = (
+    "hephaestus.config.child_environments.build_codex_implementation_child_env"
+)
+_HOST_VERIFICATION_WRITER = "hephaestus.config.child_environments.build_host_verification_env"
+_PI_WRITER = "hephaestus.config.child_environments.build_pi_child_env"
 
 
 def _parent(
@@ -33,6 +38,7 @@ def _parent(
     sensitivity: str = "public",
     validation: str = "string-no-nul",
     readers: tuple[str, ...] = (_PARENT_READER,),
+    writers: tuple[str, ...] = (),
 ) -> EnvVarSpec:
     return EnvVarSpec(
         name=name,
@@ -40,8 +46,11 @@ def _parent(
         owner="config.child_environments",
         sensitivity=sensitivity,
         validation=validation,
-        direction="parent-read, child-forward",
+        direction=(
+            "parent-read, child-forward, child-write" if writers else "parent-read, child-forward"
+        ),
         qualified_readers=readers,
+        qualified_writers=writers,
     )
 
 
@@ -112,7 +121,13 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         qualified_readers=(_COLOR_READER,),
     ),
     _parent("PATH", "Command discovery", validation="non-empty-no-nul"),
-    _parent("HOME", "CLI home and configuration lookup", sensitivity="private", validation="path"),
+    _parent(
+        "HOME",
+        "CLI home and configuration lookup",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER),
+    ),
     _parent("USER", "Host identity hint"),
     _parent("LOGNAME", "Host identity hint"),
     _parent("SHELL", "Interactive shell hint", validation="path"),
@@ -126,19 +141,64 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         sensitivity="private",
         validation="path",
         readers=(_PARENT_READER, "hephaestus.github.rate_limit._runtime_base_dir"),
+        writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
     ),
-    _parent("TMP", "Windows temporary directory", sensitivity="private", validation="path"),
-    _parent("TEMP", "Windows temporary directory", sensitivity="private", validation="path"),
-    _parent("USERPROFILE", "Windows home directory", sensitivity="private", validation="path"),
     _parent(
-        "APPDATA", "Windows application configuration", sensitivity="private", validation="path"
+        "TMP",
+        "Windows temporary directory",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
     ),
-    _parent("LOCALAPPDATA", "Windows application cache", sensitivity="private", validation="path"),
     _parent(
-        "XDG_CONFIG_HOME", "Unix configuration directory", sensitivity="private", validation="path"
+        "TEMP",
+        "Windows temporary directory",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
     ),
-    _parent("XDG_CACHE_HOME", "Unix cache directory", sensitivity="private", validation="path"),
-    _parent("XDG_DATA_HOME", "Unix data directory", sensitivity="private", validation="path"),
+    _parent(
+        "USERPROFILE",
+        "Windows home directory",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER,),
+    ),
+    _parent(
+        "APPDATA",
+        "Windows application configuration",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER,),
+    ),
+    _parent(
+        "LOCALAPPDATA",
+        "Windows application cache",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER,),
+    ),
+    _parent(
+        "XDG_CONFIG_HOME",
+        "Unix configuration directory",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER,),
+    ),
+    _parent(
+        "XDG_CACHE_HOME",
+        "Unix cache directory",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER),
+    ),
+    _parent(
+        "XDG_DATA_HOME",
+        "Unix data directory",
+        sensitivity="private",
+        validation="path",
+        writers=(_CODEX_IMPLEMENTATION_WRITER,),
+    ),
     _parent("SYSTEMROOT", "Windows system root", validation="path"),
     _parent("SystemRoot", "Windows system root alias", validation="path"),
     _parent("WINDIR", "Windows system directory", validation="path"),
