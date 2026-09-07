@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,6 +12,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
+
+
+def test_default_pytest_options_exclude_the_explicit_artifact_lane() -> None:
+    """A normal host test run must not enter the container-only artifact lane."""
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
+
+    assert any("not artifact" in option for option in addopts)
 
 
 def _load_workflow(path: Path) -> dict[str, Any]:

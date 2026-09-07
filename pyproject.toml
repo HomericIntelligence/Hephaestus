@@ -235,7 +235,7 @@ addopts = [
     "-v",
     "--strict-markers",
     "-m",
-    "not performance and not nightly",
+    "not performance and not nightly and not artifact",
     "--cov=hephaestus",
     "--cov-report=term-missing",
 ]
