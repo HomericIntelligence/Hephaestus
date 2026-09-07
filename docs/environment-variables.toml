@@ -144,6 +144,7 @@ validation = "path"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -156,6 +157,7 @@ validation = "string"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -168,6 +170,7 @@ validation = "string"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -216,6 +219,7 @@ validation = "non-empty"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -288,6 +292,7 @@ validation = "path"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -300,6 +305,7 @@ validation = "path"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -313,6 +319,7 @@ direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
   { path = "hephaestus/github/rate_limit.py", reader = "_runtime_base_dir", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -373,6 +380,7 @@ validation = "path"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 
 [[variables]]
@@ -397,4 +405,103 @@ validation = "path"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+[[variables]]
+name = "UV_OFFLINE"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Offline host verification"
+sensitivity = "public"
+validation = "literal-1"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "UV_NO_SYNC"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Disable implicit uv synchronization"
+sensitivity = "public"
+validation = "literal-1"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "UV_PROJECT_ENVIRONMENT"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Host verification runtime"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "UV_CACHE_DIR"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Isolated uv cache"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "RUFF_CACHE_DIR"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Isolated Ruff cache"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "COVERAGE_FILE"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Isolated coverage output"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "PYTHONPYCACHEPREFIX"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Isolated bytecode cache"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "PYTHONDONTWRITEBYTECODE"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Disable child bytecode writes"
+sensitivity = "public"
+validation = "literal-1"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
+]
+[[variables]]
+name = "PYTEST_ADDOPTS"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Scoped pytest behavior"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+    {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]

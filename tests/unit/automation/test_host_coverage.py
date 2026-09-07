@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import ANY, call, patch
 
 import pytest
 
 from hephaestus.automation import host_coverage
+from hephaestus.config.child_environments import build_host_verification_env
+
+
+@pytest.fixture(autouse=True)
+def host_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Supply the host environment for command-output tests."""
+    scratch = tmp_path / "scratch"
+    environment = build_host_verification_env(
+        home=scratch / "home",
+        temporary=scratch / "tmp",
+        cache=scratch / "cache",
+        runtime_environment=tmp_path / "runtime",
+        executable=Path(sys.executable),
+    )
+    monkeypatch.setattr(os, "environ", environment)
 
 
 def test_main_runs_policy_only_after_unit_coverage_passes() -> None:
@@ -59,3 +76,62 @@ def test_run_is_silent_on_success(capsys: pytest.CaptureFixture[str]) -> None:
         assert host_coverage._run(("-m", "example")) == 0
 
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "args", [host_coverage._UNIT_COVERAGE_ARGS, host_coverage._COVERAGE_POLICY_ARGS]
+)
+def test_preserves_explicit_scratch_coverage_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, args: tuple[str, ...]
+) -> None:
+    """Both nested commands keep the approved scratch output path."""
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.chdir(source)
+    scratch = tmp_path / "scratch"
+    environment = build_host_verification_env(
+        home=scratch / "home",
+        temporary=scratch / "tmp",
+        cache=scratch / "cache",
+        runtime_environment=tmp_path / "runtime",
+        executable=Path(sys.executable),
+    )
+    monkeypatch.setattr(os, "environ", environment)
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    with patch.object(host_coverage, "run_subprocess", return_value=result) as run:
+        assert host_coverage._run(args) == 0
+    assert run.call_args.kwargs["env"] == {**environment, "PYTHONPATH": str(source.resolve())}
+
+
+@pytest.mark.parametrize("coverage_file", [None, "relative", "source", "outside"])
+def test_coverage_target_cannot_resolve_below_source_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    coverage_file: str | None,
+) -> None:
+    """Invalid output paths stop before a child starts and expose no values."""
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.chdir(source)
+    scratch = tmp_path / "scratch"
+    environment = build_host_verification_env(
+        home=scratch / "home",
+        temporary=scratch / "tmp",
+        cache=scratch / "cache",
+        runtime_environment=tmp_path / "runtime",
+        executable=Path(sys.executable),
+    )
+    if coverage_file is None:
+        del environment["COVERAGE_FILE"]
+    else:
+        environment["COVERAGE_FILE"] = {
+            "relative": "private-relative-value",
+            "source": str(source / ".coverage"),
+            "outside": str(tmp_path / "private-output"),
+        }[coverage_file]
+    monkeypatch.setattr(os, "environ", environment)
+    with patch.object(host_coverage, "run_subprocess") as run:
+        assert host_coverage._run(host_coverage._UNIT_COVERAGE_ARGS) == 2
+    run.assert_not_called()
+    assert capsys.readouterr() == ("", "Invalid host verification environment.\n")

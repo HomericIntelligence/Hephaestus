@@ -32,7 +32,18 @@ _CATEGORIES = frozenset(
 )
 _SENSITIVITIES = frozenset({"public", "sensitive", "secret"})
 _VALIDATIONS = frozenset(
-    {"none", "string", "non-empty", "integer", "number", "boolean", "path", "url", "json"}
+    {
+        "none",
+        "string",
+        "non-empty",
+        "integer",
+        "number",
+        "boolean",
+        "path",
+        "url",
+        "json",
+        "literal-1",
+    }
 )
 _DIRECTIONS = frozenset({"input", "output", "bidirectional"})
 _WILDCARD_CHARS = frozenset("*?[")

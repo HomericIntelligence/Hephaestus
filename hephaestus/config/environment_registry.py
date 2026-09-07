@@ -20,6 +20,7 @@ class EnvVarSpec:
     qualified_writers: tuple[str, ...] = ()
 
 
+_NESTED_READER = "hephaestus.config.child_environments.build_nested_host_verification_env"
 _PARENT_READER = "hephaestus.config.child_environments.read_approved_parent_env"
 _GH_READER = "hephaestus.config.child_environments.build_gh_child_env"
 _SIGNING_READER = "hephaestus.config.child_environments.build_git_signing_env"
@@ -59,6 +60,8 @@ def _child(
     purpose: str,
     writer: str | tuple[str, ...],
     validation: str,
+    *,
+    readers: tuple[str, ...] = (),
 ) -> EnvVarSpec:
     return EnvVarSpec(
         name=name,
@@ -66,7 +69,8 @@ def _child(
         owner="config.child_environments",
         sensitivity="public",
         validation=validation,
-        direction="child-write",
+        direction="parent-read, child-forward, child-write" if readers else "child-write",
+        qualified_readers=readers,
         qualified_writers=(writer,) if isinstance(writer, str) else writer,
     )
 
@@ -120,19 +124,25 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         direction="parent-read",
         qualified_readers=(_COLOR_READER,),
     ),
-    _parent("PATH", "Command discovery", validation="non-empty-no-nul"),
+    _parent(
+        "PATH",
+        "Command discovery",
+        validation="non-empty-no-nul",
+        readers=(_PARENT_READER, _NESTED_READER),
+    ),
     _parent(
         "HOME",
         "CLI home and configuration lookup",
         sensitivity="private",
         validation="path",
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER),
+        readers=(_PARENT_READER, _NESTED_READER),
     ),
     _parent("USER", "Host identity hint"),
     _parent("LOGNAME", "Host identity hint"),
     _parent("SHELL", "Interactive shell hint", validation="path"),
-    _parent("LANG", "Locale stability"),
-    _parent("LC_ALL", "Locale override"),
+    _parent("LANG", "Locale stability", readers=(_PARENT_READER, _NESTED_READER)),
+    _parent("LC_ALL", "Locale override", readers=(_PARENT_READER, _NESTED_READER)),
     _parent("LC_CTYPE", "Character encoding"),
     _parent("TZ", "Timezone stability"),
     _parent(
@@ -140,7 +150,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         "Temporary and runtime directory",
         sensitivity="private",
         validation="path",
-        readers=(_PARENT_READER, "hephaestus.github.rate_limit._runtime_base_dir"),
+        readers=(_PARENT_READER, "hephaestus.github.rate_limit._runtime_base_dir", _NESTED_READER),
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
     ),
     _parent(
@@ -149,6 +159,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         sensitivity="private",
         validation="path",
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
+        readers=(_PARENT_READER, _NESTED_READER),
     ),
     _parent(
         "TEMP",
@@ -156,6 +167,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         sensitivity="private",
         validation="path",
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
+        readers=(_PARENT_READER, _NESTED_READER),
     ),
     _parent(
         "USERPROFILE",
@@ -191,6 +203,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         sensitivity="private",
         validation="path",
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER),
+        readers=(_PARENT_READER, _NESTED_READER),
     ),
     _parent(
         "XDG_DATA_HOME",
@@ -397,48 +410,56 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         "Offline host verification",
         "hephaestus.config.child_environments.build_host_verification_env",
         "literal-1",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "UV_NO_SYNC",
         "Disable implicit uv synchronization",
         "hephaestus.config.child_environments.build_host_verification_env",
         "literal-1",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "UV_PROJECT_ENVIRONMENT",
         "Host verification runtime",
         "hephaestus.config.child_environments.build_host_verification_env",
         "path",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "UV_CACHE_DIR",
         "Isolated uv cache",
         "hephaestus.config.child_environments.build_host_verification_env",
         "path",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "RUFF_CACHE_DIR",
         "Isolated Ruff cache",
         "hephaestus.config.child_environments.build_host_verification_env",
         "path",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "COVERAGE_FILE",
         "Isolated coverage output",
         "hephaestus.config.child_environments.build_host_verification_env",
         "path",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "PYTHONPYCACHEPREFIX",
         "Isolated bytecode cache",
         "hephaestus.config.child_environments.build_host_verification_env",
         "path",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "PYTHONDONTWRITEBYTECODE",
         "Disable child bytecode writes",
         "hephaestus.config.child_environments.build_python_phase_env",
         "literal-1",
+        readers=(_NESTED_READER,),
     ),
     _child(
         "PYTHONPATH",
@@ -451,6 +472,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         "Scoped pytest behavior",
         "hephaestus.config.child_environments.build_host_verification_env",
         "string-no-nul",
+        readers=(_NESTED_READER,),
     ),
 )
 

@@ -218,6 +218,64 @@ def build_host_verification_env(
     }
 
 
+def build_nested_host_verification_env(repo_root: Path) -> dict[str, str]:
+    """Preserve the approved scratch environment for a nested host command."""
+    values = {
+        "HOME": os.environ.get("HOME", ""),
+        "TMPDIR": os.environ.get("TMPDIR", ""),
+        "TMP": os.environ.get("TMP", ""),
+        "TEMP": os.environ.get("TEMP", ""),
+        "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME", ""),
+        "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR", ""),
+        "UV_PROJECT_ENVIRONMENT": os.environ.get("UV_PROJECT_ENVIRONMENT", ""),
+        "UV_OFFLINE": os.environ.get("UV_OFFLINE", ""),
+        "UV_NO_SYNC": os.environ.get("UV_NO_SYNC", ""),
+        "RUFF_CACHE_DIR": os.environ.get("RUFF_CACHE_DIR", ""),
+        "COVERAGE_FILE": os.environ.get("COVERAGE_FILE", ""),
+        "PYTHONPYCACHEPREFIX": os.environ.get("PYTHONPYCACHEPREFIX", ""),
+        "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE", ""),
+        "PYTEST_ADDOPTS": os.environ.get("PYTEST_ADDOPTS", ""),
+        "PATH": os.environ.get("PATH", ""),
+    }
+    optional = {"LANG": os.environ.get("LANG"), "LC_ALL": os.environ.get("LC_ALL")}
+    values.update({name: value for name, value in optional.items() if value is not None})
+    invalid = "Invalid host verification environment."
+    if (
+        any(
+            not validate_environment_value(APPROVED_ENV_BY_NAME[name], value)
+            for name, value in values.items()
+        )
+        or values["PYTEST_ADDOPTS"] != "-p no:cacheprovider"
+    ):
+        raise ValueError(invalid)
+    try:
+        source = repo_root.resolve()
+        scratch = Path(values["HOME"]).resolve().parent
+        expected_paths = {
+            "HOME": scratch / "home",
+            "TMPDIR": scratch / "tmp",
+            "TMP": scratch / "tmp",
+            "TEMP": scratch / "tmp",
+            "XDG_CACHE_HOME": scratch / "cache",
+            "UV_CACHE_DIR": scratch / "cache" / "uv",
+            "RUFF_CACHE_DIR": scratch / "cache" / "ruff",
+            "COVERAGE_FILE": scratch / "cache" / ".coverage",
+            "PYTHONPYCACHEPREFIX": scratch / "cache" / "pycache",
+        }
+        if scratch.is_relative_to(source) or source.is_relative_to(scratch):
+            raise ValueError(invalid)
+        for name, expected in expected_paths.items():
+            actual = Path(values[name]).resolve()
+            if actual != expected or actual.is_relative_to(source):
+                raise ValueError(invalid)
+        if Path(values["UV_PROJECT_ENVIRONMENT"]).resolve().is_relative_to(source):
+            raise ValueError(invalid)
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError(invalid) from None
+    values["PYTHONPATH"] = str(source)
+    return values
+
+
 def build_sbatch_submission_env() -> dict[str, str]:
     """Build the minimal host environment needed to locate and submit sbatch."""
     return _platform_env()
@@ -249,6 +307,7 @@ __all__ = [
     "build_git_child_env",
     "build_git_signing_env",
     "build_host_verification_env",
+    "build_nested_host_verification_env",
     "build_pi_child_env",
     "build_python_phase_env",
     "build_sbatch_submission_env",
