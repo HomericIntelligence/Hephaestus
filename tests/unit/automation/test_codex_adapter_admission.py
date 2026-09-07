@@ -85,6 +85,7 @@ def _deployment(
             check=True,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         wheel = next(wheel_dir.glob("example_adapter-1.0-*.whl"))
         subprocess.run(
@@ -92,6 +93,9 @@ def _deployment(
                 shutil.which("uv") or "uv",
                 "pip",
                 "install",
+                "--python",
+                sys.executable,
+                "--offline",
                 "--target",
                 str(installed),
                 "--no-deps",
@@ -100,6 +104,7 @@ def _deployment(
             check=True,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         (installed / ".lock").unlink(missing_ok=True)
     else:
@@ -485,6 +490,7 @@ print(result.factory())
         capture_output=True,
         text=True,
         env=environment,
+        timeout=60,
     )
 
     assert completed.stdout == "CodexAdapterDeploymentLockV1 1\nlocked\n"
@@ -1472,9 +1478,9 @@ def test_linux_pathlib_cannot_open_a_task_fd_alias(tmp_path: Path) -> None:
         "import os\n"
         "import pathlib\n"
         "def factory():\n"
-        "    alias = pathlib.Path("
-        "f'/proc/{os.getpid()}/task/{os.getpid()}/fd/0')\n"
         "    try:\n"
+        "        alias = pathlib.Path("
+        "f'/proc/{os.getpid()}/task/{os.getpid()}/fd/0')\n"
         "        opened = alias.open('rb')\n"
         "    except PermissionError:\n"
         "        return 'locked'\n"
