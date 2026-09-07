@@ -1309,8 +1309,14 @@ must equal the policy that supplied the required-check inventory. The stage
 applies bypass and conversation safety to the new policy before final admission.
 The adapter performs one request per call and never retries. A required merge
 queue uses exact-head GraphQL admission and then lifecycle polling without a
-mutation replay. Otherwise, direct REST merge requires strict-update protection
-from a source that the current actor cannot bypass. Merge wait does not invoke `gh pr merge`,
+mutation replay. If GitHub returns the typed exact already-enqueued rejection,
+the adapter runs one read-only queue-entry query within the operation time that
+remains. The query must prove the same open pull request node, exact reviewed
+head, and valid queue entry. Only that result is successful idempotent
+admission. A canceled, late, unavailable, absent, malformed, or mismatched
+readback fails closed. All other uncertain mutation outcomes remain terminal.
+Otherwise, direct REST merge requires strict-update protection from a source
+that the current actor cannot bypass. Merge wait does not invoke `gh pr merge`,
 create, disable, adopt, or poll native auto-merge, or use an administrator
 bypass. An existing native auto-merge request is external ownership and is
 left untouched.
@@ -1343,6 +1349,9 @@ stateDiagram-v2
     Verify --> Failed: incomplete or unavailable state
     Merge --> Complete: 200 merged and lifecycle confirms
     Merge --> QueueWait: exact-head queue admission succeeds
+    Merge --> QueueReconcile: typed exact already-enqueued rejection
+    QueueReconcile --> QueueWait: same open PR and exact-head entry
+    QueueReconcile --> Failed: canceled, late, unavailable, or mismatched readback
     QueueWait --> Complete: server lifecycle confirms merged
     QueueWait --> Retry: timer wait
     Merge --> PRReview: 409 or ambiguous lifecycle head drift
@@ -1365,8 +1374,11 @@ Architectural contract:
 - A matching eligibility label, current-process proof, and passing exact-head
   required status evidence can submit a bounded sequence of policy-selected
   server merge requests, each only after fresh admission.
-- A required merge queue uses exact-head queue admission. Direct merge requires
-  strict-update protection from a source that the current actor cannot bypass.
+- A required merge queue uses exact-head queue admission. A typed exact
+  already-enqueued rejection permits one bounded, read-only reconciliation for
+  the same open pull request and reviewed head. It never permits another
+  mutation. Direct merge requires strict-update protection from a source that
+  the current actor cannot bypass.
 - Read-only readiness polling may wait for the `--poll-max-wait` period. Its
   default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof. The
   wait does not spend the request budget or authorize a merge. HTTP 409,

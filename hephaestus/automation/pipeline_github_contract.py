@@ -2,7 +2,9 @@
 
 from typing import TYPE_CHECKING
 
-from .github_api.graphql import GraphQLMutationSpec, GraphQLQuerySpec
+from .github_api.graphql import GraphQLSpec
+
+type _S = int | str
 
 if TYPE_CHECKING:
     import subprocess
@@ -12,6 +14,8 @@ if TYPE_CHECKING:
     from hephaestus.automation.arming_state import ArmingStateStore
 
     class _PipelineGitHubHost(Protocol):
+        """State and cross-collaborator methods supplied by ``PipelineGitHub``."""
+
         org: str
         repo: str | None
         dry_run: bool
@@ -32,14 +36,10 @@ if TYPE_CHECKING:
         def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool:
             pass
 
-        def _graphql[T](
-            self,
-            spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
-            **fields: int | str | float | None,
-        ) -> T:
+        def _graphql[T](self, spec: GraphQLSpec[T], **fields: int | str) -> T:
             pass
 
-        def _graphql_with_timeout[T](self, spec: GraphQLMutationSpec[T], timeout: float) -> T:
+        def _graphql_with_timeout[T](self, spec: GraphQLSpec[T], timeout: float, **fields: _S) -> T:
             pass
 
         def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:

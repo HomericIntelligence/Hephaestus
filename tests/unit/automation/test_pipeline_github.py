@@ -3083,44 +3083,27 @@ class TestConditionalMerge:
             targets=(("pullRequestId", "PR_node"),),
             content_hashes=(),
         )
-        monkeypatch.setattr(
-            adapter,
-            "_graphql_with_timeout",
-            MagicMock(
-                side_effect=github_api_mod.GraphQLMutationOutcomeUnknownError(
-                    "UNPROCESSABLE: Pull request is already in the queue",
+        now = [100.0]
+
+        def graphql(spec: object, timeout: float, **fields: int | str) -> dict[str, object]:
+            if getattr(spec, "operation", "") == "enqueuePullRequest":
+                now[0] = 108.0
+                raise github_api_mod.MergeQueueAlreadyEnqueuedError(
+                    "Pull request is already in the queue",
                     intent=intent,
-                    graphql_error_type="UNPROCESSABLE",
                 )
-            ),
-        )
-        query_call = MagicMock(
-            return_value=SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps(
-                    {
-                        "data": {
-                            "repository": {
-                                "owner": {"login": "org"},
-                                "name": "repo",
-                                "pullRequest": {
-                                    "id": "PR_node",
-                                    "number": 7,
-                                    "state": "OPEN",
-                                    "headRefOid": head,
-                                    "mergeQueueEntry": {
-                                        "id": "ENTRY_node",
-                                        "state": "AWAITING_CHECKS",
-                                    },
-                                },
-                            }
-                        }
-                    }
-                ),
-            )
-        )
-        monkeypatch.setattr(pg, "gh_call", query_call)
-        monkeypatch.setattr(time, "monotonic", MagicMock(side_effect=[100.0, 108.0, 108.0]))
+            assert timeout == pytest.approx(2.0)
+            assert fields == {"number": 7}
+            return {
+                "id": "PR_node",
+                "state": "OPEN",
+                "headRefOid": head,
+                "mergeQueueEntry": {"id": "ENTRY_node", "state": "AWAITING_CHECKS"},
+            }
+
+        graphql_mock = MagicMock(side_effect=graphql)
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql_mock)
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
         policy = EffectiveMergePolicy(
             base_branch="main",
             default_branch="main",
@@ -3141,7 +3124,7 @@ class TestConditionalMerge:
 
         assert result.queued is True
         assert result.body == {"merged": False, "queue_entry_id": "ENTRY_node"}
-        assert query_call.call_args.kwargs["timeout"] == pytest.approx(2.0)
+        assert graphql_mock.call_count == 2
 
     def test_expired_queue_readback_budget_fails_closed(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3155,20 +3138,18 @@ class TestConditionalMerge:
             targets=(("pullRequestId", "PR_node"),),
             content_hashes=(),
         )
-        monkeypatch.setattr(
-            adapter,
-            "_graphql_with_timeout",
-            MagicMock(
-                side_effect=github_api_mod.GraphQLMutationOutcomeUnknownError(
-                    "UNPROCESSABLE: Pull request is already in the queue",
-                    intent=intent,
-                    graphql_error_type="UNPROCESSABLE",
-                )
-            ),
-        )
-        query_call = MagicMock()
-        monkeypatch.setattr(pg, "gh_call", query_call)
-        monkeypatch.setattr(time, "monotonic", MagicMock(side_effect=[100.0, 110.0]))
+        now = [100.0]
+
+        def finish_at_deadline(*_args: object, **_kwargs: object) -> None:
+            now[0] = 110.0
+            raise github_api_mod.MergeQueueAlreadyEnqueuedError(
+                "Pull request is already in the queue",
+                intent=intent,
+            )
+
+        graphql_mock = MagicMock(side_effect=finish_at_deadline)
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql_mock)
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
         policy = EffectiveMergePolicy(
             base_branch="main",
             default_branch="main",
@@ -3188,7 +3169,7 @@ class TestConditionalMerge:
         )
 
         assert result.malformed is True
-        query_call.assert_not_called()
+        graphql_mock.assert_called_once()
 
     def test_cancelled_queue_readback_fails_closed(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3205,19 +3186,13 @@ class TestConditionalMerge:
 
         def reject_after_admission(*_args: object) -> None:
             cancellation.set()
-            raise github_api_mod.GraphQLMutationOutcomeUnknownError(
-                "UNPROCESSABLE: Pull request is already in the queue",
+            raise github_api_mod.MergeQueueAlreadyEnqueuedError(
+                "Pull request is already in the queue",
                 intent=intent,
-                graphql_error_type="UNPROCESSABLE",
             )
 
-        monkeypatch.setattr(
-            adapter,
-            "_graphql_with_timeout",
-            MagicMock(side_effect=reject_after_admission),
-        )
-        query_call = MagicMock()
-        monkeypatch.setattr(pg, "gh_call", query_call)
+        graphql_mock = MagicMock(side_effect=reject_after_admission)
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql_mock)
         policy = EffectiveMergePolicy(
             base_branch="main",
             default_branch="main",
@@ -3237,7 +3212,7 @@ class TestConditionalMerge:
         )
 
         assert result.malformed is True
-        query_call.assert_not_called()
+        graphql_mock.assert_called_once()
 
     def test_dry_run_returns_a_non_mutating_result_without_calling_github(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
