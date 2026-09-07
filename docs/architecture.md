@@ -1442,6 +1442,14 @@ An ambiguous crash-left claim becomes terminal `failed` with
 `outcome_unknown`; it is not submitted twice. Learning failure is ancillary
 and cannot change a confirmed main result.
 
+Dependency preparation runs frozen synchronization and package checks in a
+private source export. The final sandbox command runs the prepared
+environment's absolute Python interpreter with `scripts/validate_plugins.py`
+from the candidate directory. It does not run `uv` or discover parent projects.
+Input, artifact, and runtime checks remain mandatory before and after
+validation. The sandbox denies network access to the validator and its
+children and permits writes only in scratch space.
+
 A live claim held by another process ejects the duplicate item. The owner keeps
 the claim, the main result, and the cleanup obligation. A terminal learning
 record stays recoverable until `finished` records a bounded cleanup result.

@@ -47,15 +47,7 @@ from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess, slugify
 
 MAX_ARTIFACT_BYTES = 65_536
 MAX_SOURCE_FIELD_CHARS = 16_384
-VALIDATOR_ARGV = (
-    "uv",
-    "run",
-    "--offline",
-    "--frozen",
-    "--no-sync",
-    "python",
-    "scripts/validate_plugins.py",
-)
+VALIDATOR_SCRIPT = "scripts/validate_plugins.py"
 VALIDATOR_TIMEOUT_S = 120
 _REQUIRED_PLAN_SECTIONS = (
     "Objective",
@@ -784,8 +776,7 @@ class MnemosynePluginValidator:
                     raise LearnDeliveryError("learning validation boundary failed") from None
                 if probe.returncode != 0:
                     raise LearnDeliveryError("learning validation boundary failed")
-                argv = [str(prepared.uv), *VALIDATOR_ARGV[1:]]
-                argv[-2] = str(prepared.environment / "bin/python")
+                argv = [str(prepared.environment / "bin/python"), VALIDATOR_SCRIPT]
                 try:
                     result = self._runner(
                         [str(sandbox), "-p", profile, *argv],
