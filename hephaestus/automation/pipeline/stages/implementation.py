@@ -72,8 +72,9 @@ import secrets
 import shlex
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -81,6 +82,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.runtime import requires_codex_implementation_isolation
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import (
     _parse_addressed_block,
@@ -112,6 +114,7 @@ from hephaestus.automation.remediation_recovery import (
     RemediationReplyResult,
 )
 from hephaestus.automation.reply_limits import MAX_ADDRESS_REPLY_CHARS
+from hephaestus.automation.review_journal import PlanDiscoveryStatus
 from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     issue_auto_impl_branch_name,
@@ -130,6 +133,7 @@ from hephaestus.automation.state_labels import (
 from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
+from ..admission import parse_publication_scope_files
 from ..diagnostics import redact_diagnostic_text
 from ..git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
@@ -201,7 +205,118 @@ from .repo import (
     is_full_commit_sha,
 )
 
+
+def _implementer_session_lifecycle(item: WorkItem) -> SessionLifecycle:
+    """Resume when either provider session store has an implementer identity."""
+    if AGENT_IMPLEMENTER in item.session_bindings or AGENT_IMPLEMENTER in item.session_ids:
+        return SessionLifecycle.RESUME_REQUIRED
+    return SessionLifecycle.START_NEW
+
+
 logger = logging.getLogger(__name__)
+
+
+class _CodexIsolationJobKwargs(TypedDict):
+    """Type the trusted Codex isolation values on implementation jobs."""
+
+    codex_isolation_adapter: str | None
+    codex_isolation_deployment_lock: Path | None
+    codex_isolation_deployment_lock_sha256: str | None
+
+
+def _codex_isolation_job_kwargs(ctx: StageContext) -> _CodexIsolationJobKwargs:
+    """Return explicit Codex inputs only for the selected Codex provider."""
+    if not requires_codex_implementation_isolation(agent_provider(ctx)):
+        return {
+            "codex_isolation_adapter": None,
+            "codex_isolation_deployment_lock": None,
+            "codex_isolation_deployment_lock_sha256": None,
+        }
+    return {
+        "codex_isolation_adapter": ctx.config.codex_isolation_adapter,
+        "codex_isolation_deployment_lock": ctx.config.codex_isolation_deployment_lock,
+        "codex_isolation_deployment_lock_sha256": (
+            ctx.config.codex_isolation_deployment_lock_sha256
+        ),
+    }
+
+
+_CODEX_PUBLICATION_SCOPE_KEY = "_codex_publication_scope"
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexPublicationScope:
+    """Bind publication paths to one issue and one captured plan body."""
+
+    repository: tuple[str, str]
+    issue: int
+    plan_sha256: str
+    paths: tuple[str, ...]
+
+
+def _capture_codex_publication_scope(
+    item: WorkItem,
+    ctx: StageContext,
+) -> StageOutcome | None:
+    """Freeze one accepted plan scope before Codex implementation starts."""
+    if not requires_codex_implementation_isolation(agent_provider(ctx)):
+        return None
+    if (
+        ctx.config.codex_isolation_adapter is None
+        or ctx.config.codex_isolation_deployment_lock is None
+        or ctx.config.codex_isolation_deployment_lock_sha256 is None
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_adapter_not_selected")
+    if item.issue is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_plan_unavailable")
+    captured = item.payload.get(_CODEX_PUBLICATION_SCOPE_KEY)
+    if captured is not None:
+        if (
+            type(captured) is not _CodexPublicationScope
+            or captured.repository != (ctx.org, item.repo)
+            or captured.issue != item.issue
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_claims_invalid")
+        return None
+    plan = ctx.github.discover_plan(item.issue)
+    if plan.status is not PlanDiscoveryStatus.FOUND or plan.plan_text is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_plan_unavailable")
+    planned_paths = parse_publication_scope_files(plan.plan_text)
+    if not planned_paths:
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_claims_invalid")
+    item.payload[_CODEX_PUBLICATION_SCOPE_KEY] = _CodexPublicationScope(
+        repository=(ctx.org, item.repo),
+        issue=item.issue,
+        plan_sha256=hashlib.sha256(plan.plan_text.encode("utf-8")).hexdigest(),
+        paths=tuple(sorted(planned_paths)),
+    )
+    return None
+
+
+def _codex_publication_kwargs(
+    item: WorkItem,
+    ctx: StageContext,
+    publish_base_sha: object,
+) -> dict[str, object] | StageOutcome:
+    """Return the frozen Codex publication scope or one closed failure."""
+    if not requires_codex_implementation_isolation(agent_provider(ctx)):
+        return {}
+    if not is_full_commit_sha(publish_base_sha):
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_base_invalid")
+    captured = item.payload.get(_CODEX_PUBLICATION_SCOPE_KEY)
+    if (
+        type(captured) is not _CodexPublicationScope
+        or captured.repository != (ctx.org, item.repo)
+        or captured.issue != item.issue
+        or not captured.paths
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_claims_invalid")
+    return {
+        "allowed_paths": captured.paths,
+        "scope_history_base_sha": publish_base_sha,
+    }
+
+
 RUNNER_FAILURE_MARKER = "_".join(("HEPHAESTUS", "CI", "RUNNER", "FAILURE")) + ":"
 RUNNER_FALLBACK_REASONS = frozenset(
     {
@@ -568,6 +683,23 @@ def _remediation_commit_push_kwargs(
     }
 
 
+def _scope_retraction_kwargs(item: WorkItem) -> dict[str, object] | StageOutcome:
+    """Bind a requested scope restoration to its reviewed base."""
+    paths = item.payload.get("scope_retraction_paths")
+    if paths is None:
+        return {}
+    if (
+        not isinstance(paths, tuple)
+        or not paths
+        or not all(is_safe_scope_retraction_path(path) for path in paths)
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+    base_sha = item.payload.get("reviewed_pr_base_sha")
+    if not is_full_commit_sha(base_sha):
+        return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
+    return {"scope_retraction_paths": paths, "scope_retraction_base_sha": base_sha}
+
+
 def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
     """Build one commit-and-push job from validated stage-owned data."""
     issue = _issue_number(item)
@@ -605,6 +737,10 @@ def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
     )
     if is_full_commit_sha(publish_base_sha):
         kwargs["publish_base_sha"] = publish_base_sha
+    publication_scope = _codex_publication_kwargs(item, ctx, publish_base_sha)
+    if isinstance(publication_scope, StageOutcome):
+        return publication_scope
+    kwargs.update(publication_scope)
     direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
     requires_fresh_direct_reservation = (
         not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
@@ -613,17 +749,10 @@ def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
         if not is_full_commit_sha(direct_base_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
         kwargs["expected_remote_sha"] = direct_base_sha
-    scope_retraction_paths = item.payload.get("scope_retraction_paths")
-    if scope_retraction_paths is not None:
-        if not isinstance(scope_retraction_paths, tuple) or not all(
-            is_safe_scope_retraction_path(path) for path in scope_retraction_paths
-        ):
-            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
-        base_sha = item.payload.get("reviewed_pr_base_sha")
-        if not is_full_commit_sha(base_sha):
-            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
-        kwargs["scope_retraction_paths"] = scope_retraction_paths
-        kwargs["scope_retraction_base_sha"] = base_sha
+    retraction_scope = _scope_retraction_kwargs(item)
+    if isinstance(retraction_scope, StageOutcome):
+        return retraction_scope
+    kwargs.update(retraction_scope)
     push_job = GitJob(
         repo=item.repo,
         op="commit_push",
@@ -676,6 +805,16 @@ def _remediation_prepare_request(item: WorkItem, ctx: StageContext) -> StepResul
         "remediation_failure_diagnostic": diagnostic,
         **recovery_kwargs,
     }
+    publication_scope = _codex_publication_kwargs(
+        item, ctx, item.payload.get("_impl_source_revision")
+    )
+    if isinstance(publication_scope, StageOutcome):
+        return publication_scope
+    kwargs.update(publication_scope)
+    retraction_scope = _scope_retraction_kwargs(item)
+    if isinstance(retraction_scope, StageOutcome):
+        return retraction_scope
+    kwargs.update(retraction_scope)
     operation_timeout = stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)
     deadline_s = item.payload.get(_REMEDIATION_PREPARE_DEADLINE)
     if deadline_s is None:
@@ -1276,11 +1415,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT_INSPECT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                (_implementer_session_lifecycle(item)),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1288,6 +1423,7 @@ class ImplementationStage(Stage):
                 "status_text": item.payload.get("worktree_status", ""),
                 "diff_text": item.payload.get("worktree_diff", ""),
             },
+            **_codex_isolation_job_kwargs(ctx),
             descr="dirty_decision",
         )
         return JobRequest(job, on_done_state=DIRTY_DECISION_WAIT)
@@ -1357,6 +1493,7 @@ class ImplementationStage(Stage):
                 "review_input_sha256": receipt.review_input_sha256,
             },
             parse=_parse_addressed_block,
+            **_codex_isolation_job_kwargs(ctx),
             descr="recover_remediation_reply",
             deadline_s=float(deadline_s),
         )
@@ -1716,11 +1853,7 @@ class ImplementationStage(Stage):
                 execution_request=ExecutionRequest(
                     AgentRole.IMPLEMENTER,
                     AgentOperation.ADDRESS_REVIEW,
-                    (
-                        SessionLifecycle.RESUME_REQUIRED
-                        if AGENT_IMPLEMENTER in item.session_bindings
-                        else SessionLifecycle.START_NEW
-                    ),
+                    (_implementer_session_lifecycle(item)),
                 ),
                 resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
                 prompt_kwargs={
@@ -1741,6 +1874,7 @@ class ImplementationStage(Stage):
                     "scope_retraction_paths": scope_retraction_paths or (),
                 },
                 parse=_parse_addressed_block,
+                **_codex_isolation_job_kwargs(ctx),
                 descr="address_review",
             )
             return JobRequest(job, on_done_state=TEST_WAIT)
@@ -1772,11 +1906,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                (_implementer_session_lifecycle(item)),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1789,6 +1919,7 @@ class ImplementationStage(Stage):
                 "rebase_conflict": bool(item.payload.get("rebase_conflict")),
                 "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
+            **_codex_isolation_job_kwargs(ctx),
             descr="implement",
         )
         return JobRequest(job, on_done_state=TEST_WAIT)
@@ -1841,11 +1972,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                (_implementer_session_lifecycle(item)),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1858,6 +1985,7 @@ class ImplementationStage(Stage):
                 "rebase_conflict": True,
                 "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
+            **_codex_isolation_job_kwargs(ctx),
             descr="resolve_rebase_conflict",
         )
         return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
@@ -1870,6 +1998,8 @@ class ImplementationStage(Stage):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
         if item.payload.pop("implement_error", None):
+            if item.payload.pop("codex_isolation_quarantined", None):
+                return StageOutcome(Disposition.FINISH_FAIL, "codex_isolation_quarantined")
             if item.payload.get("implementation_remediation"):
                 if item.payload.get("remediation_reply_inspection_required"):
                     return Continue(next_state=WORKTREE_WAIT)
@@ -1975,6 +2105,7 @@ class ImplementationStage(Stage):
                 "prev_iteration": item.attempts.get("test_fix", 0),
                 "test_output": item.payload.get("test_output", ""),
             },
+            **_codex_isolation_job_kwargs(ctx),
             descr="test_fix",
         )
         return JobRequest(job, on_done_state=TEST_WAIT)
@@ -2791,6 +2922,8 @@ class ImplementationStage(Stage):
         if not result.ok:
             logger.warning("implementation:%s: implement job failed: %s", item.issue, result.error)
             item.payload["implement_error"] = True
+            if result.error == "codex_adapter_inventory_uncertain":
+                item.payload["codex_isolation_quarantined"] = True
             if item.payload.get("implementation_remediation"):
                 item.payload["remediation_reply_inspection_required"] = True
                 item.payload["remediation_failure_diagnostic"] = redact_diagnostic_text(
@@ -3360,7 +3493,7 @@ class ImplementationStage(Stage):
         head = state.get("headRefOid") if isinstance(state, dict) else None
         return head if is_full_commit_sha(head) else None
 
-    def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
 
         Re-houses ``_review_existing_pr`` (:750) and ``_ensure_plan_ready``
@@ -3416,6 +3549,8 @@ class ImplementationStage(Stage):
                     "contradictory_implementation_state",
                 )
             if not (is_plan_go(gate_labels) or has_impl_go or has_impl_no_go):
+                item.payload.pop("_implementation_file_claims", None)
+                item.payload.pop(_CODEX_PUBLICATION_SCOPE_KEY, None)
                 logger.info(
                     "implementation:%d: existing PR #%d lacks an authoritative "
                     "plan/implementation label; failing back",
@@ -3423,6 +3558,9 @@ class ImplementationStage(Stage):
                     existing_pr,
                 )
                 return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+            codex_scope_failure = _capture_codex_publication_scope(item, ctx)
+            if codex_scope_failure is not None:
+                return codex_scope_failure
             return self._adopt_existing_pr(
                 item,
                 ctx,
@@ -3434,8 +3572,14 @@ class ImplementationStage(Stage):
         # At-or-past (never equality): plan-go OR already implementation-go
         # both satisfy the gate; anything earlier fails back to plan_review.
         if not (is_plan_go(gate_labels) or is_implementation_go(gate_labels)):
+            item.payload.pop("_implementation_file_claims", None)
+            item.payload.pop(_CODEX_PUBLICATION_SCOPE_KEY, None)
             logger.info("implementation:%d: plan not GO; failing back", item.issue)
             return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+
+        codex_scope_failure = _capture_codex_publication_scope(item, ctx)
+        if codex_scope_failure is not None:
+            return codex_scope_failure
 
         if not item.branch:
             item.branch = issue_auto_impl_branch_name(item.issue)

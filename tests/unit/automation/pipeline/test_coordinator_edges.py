@@ -661,6 +661,36 @@ class TestSubmitEdges:
         assert isinstance(submitted, AgentJob)
         assert submitted.timeout_s == 1234
 
+    def test_submit_preserves_implementation_codex_isolation_inputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Execution keeps the isolation inputs that the stage supplied."""
+        lock_path = (tmp_path / "deployment-lock.json").absolute()
+        digest = "d" * 64
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        pool = coordinator.pool
+        assert isinstance(pool, FakeWorkerPool)
+        job = AgentJob(
+            repo="repo-a",
+            issue=1,
+            agent="codex",
+            model="m",
+            prompt_builder=lambda **kwargs: "p",
+            cwd=tmp_path,
+            timeout_s=10,
+            codex_isolation_adapter="production",
+            codex_isolation_deployment_lock=lock_path,
+            codex_isolation_deployment_lock_sha256=digest,
+        )
+
+        coordinator._submit(_item(), JobRequest(job, on_done_state="V"))
+
+        submitted = pool.submitted[0].job
+        assert isinstance(submitted, AgentJob)
+        assert submitted.codex_isolation_adapter == "production"
+        assert submitted.codex_isolation_deployment_lock == lock_path
+        assert submitted.codex_isolation_deployment_lock_sha256 == digest
+
     def test_git_job_bypasses_rate_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

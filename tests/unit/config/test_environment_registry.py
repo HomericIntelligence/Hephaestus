@@ -31,6 +31,7 @@ def test_registry_has_one_complete_exact_spec_per_name() -> None:
         assert spec.direction in {
             "parent-read",
             "parent-read, child-forward",
+            "parent-read, child-forward, child-write",
             "child-write",
         }
         authorities = spec.qualified_readers + spec.qualified_writers

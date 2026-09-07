@@ -223,6 +223,10 @@ WSL with no extra setup beyond `uv sync`. Windows contributors using Git
 Bash / MSYS2 will execute them; pure-Windows-Python runs will skip them.
 Tracking: #742.
 
+The command `bash scripts/run_ci_local.sh build` also requires `python3` and
+`zstd` on `PATH`. It uses these tools to provision and extract the fixed Codex
+artifact before the network-free artifact test starts.
+
 ## Documentation
 
 - Update docstrings for code changes

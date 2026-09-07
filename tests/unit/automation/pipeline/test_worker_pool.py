@@ -28,6 +28,11 @@ from unittest.mock import ANY, MagicMock, call, patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
+from hephaestus.agents.codex_isolation import (
+    CodexGitReceiptV1,
+    CodexIsolationError,
+    StagedLinuxExecutable,
+)
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -44,6 +49,7 @@ from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.codex_worktree_boundary import CodexWorktreeBoundaryError
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -68,6 +74,9 @@ from hephaestus.automation.pipeline.worker_pool import (
     _bounded_candidate_commit_paths,
     _BoundedGitOutput,
     _candidate_commit_tree_evidence,
+    _codex_implementation_command,
+    _codex_implementation_grants,
+    _codex_private_profile,
     _confirmed_pytest_failure,
     _controlled_git_signing_env,
     _dirty_worktree_content_snapshot,
@@ -77,6 +86,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
+    _owned_codex_adapter,
     _path_content_identity,
     _prepare_host_output_aliases,
     _quota_backed_volume,
@@ -498,6 +508,535 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     }
     defaults.update(overrides)
     return AgentJob(**defaults)  # type: ignore[arg-type]
+
+
+def test_codex_boundary_failure_blocks_commit_and_push(pool: WorkerPool, tmp_path: Path) -> None:
+    """A failed Codex Git boundary stops all agent and publication actions."""
+    prompt_builder = MagicMock(return_value="private implementation prompt")
+    request = ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        prompt_builder=prompt_builder,
+        execution_request=request,
+        codex_isolation_adapter="production",
+        codex_isolation_deployment_lock=tmp_path / "deployment-lock.json",
+        codex_isolation_deployment_lock_sha256="a" * 64,
+    )
+
+    with (
+        patch(
+            "hephaestus.automation.codex_adapter_admission.admit_codex_adapter",
+            return_value=MagicMock(),
+        ) as admit,
+        patch(
+            "hephaestus.automation.pipeline.codex_worktree_boundary."
+            "capture_codex_worktree_boundary",
+            side_effect=CodexWorktreeBoundaryError("Git receipt failed"),
+        ) as capture,
+        patch(f"{_WP}.resolve_agent") as resolve,
+        patch("hephaestus.agents.runtime._run_admitted_codex_implementation_session") as invoke,
+        patch(f"{_WP}.git_utils.commit_if_changes") as commit,
+        patch(f"{_WP}.git_utils.push_branch") as push,
+    ):
+        result = pool._run_agent(job)
+
+    assert result.ok is False
+    admit.assert_not_called()
+    capture.assert_called_once_with(tmp_path.resolve())
+    resolve.assert_not_called()
+    prompt_builder.assert_not_called()
+    invoke.assert_not_called()
+    commit.assert_not_called()
+    push.assert_not_called()
+
+
+def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_path: Path) -> None:
+    """The publication sink rejects an unplanned path in committed history."""
+    base_sha = "a" * 40
+    job = GitJob(
+        repo="test/repo",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 2472,
+            "worktree_path": tmp_path,
+            "branch": "2472-auto-impl",
+            "agent": "codex",
+            "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+            "scope_history_base_sha": base_sha,
+        },
+    )
+    git_outputs = (
+        "",
+        "",
+        "",
+        "scripts/run_ci_local.sh\0",
+    )
+
+    with (
+        patch(
+            f"{_WP}.git_utils.run",
+            side_effect=(
+                subprocess.CompletedProcess([], 0, stdout=output) for output in git_outputs
+            ),
+        ) as git_run,
+        patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
+        patch(f"{_WP}.git_utils.push_branch") as push,
+    ):
+        result = pool._git_commit_push(job)
+
+    assert result.ok is False
+    assert result.error == "implementation changed paths outside approved scope"
+    assert git_run.call_args_list[-1].args[0] == [
+        "git",
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        f"{base_sha}..HEAD",
+    ]
+    commit.assert_not_called()
+    push.assert_not_called()
+
+
+@pytest.mark.parametrize("replace_staged_after_return", [False, True])
+@pytest.mark.parametrize(
+    ("lifecycle", "resume_session_id"),
+    (
+        (SessionLifecycle.START_NEW, None),
+        (SessionLifecycle.RESUME_REQUIRED, "provider-session-id"),
+    ),
+)
+@pytest.mark.parametrize(
+    ("operation", "sandbox", "allowed_tools", "expected_sandbox", "expected_tools"),
+    (
+        (
+            AgentOperation.IMPLEMENT,
+            "workspace-write",
+            None,
+            "workspace-write",
+            ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+        ),
+        (
+            AgentOperation.IMPLEMENT_INSPECT,
+            "read-only",
+            "Read,Glob,Grep",
+            "read-only",
+            ("Glob", "Grep", "Read"),
+        ),
+        (
+            AgentOperation.ADDRESS_REVIEW,
+            "workspace-write",
+            "Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
+            "workspace-write",
+            ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+        ),
+    ),
+)
+def test_codex_implementation_builds_one_frozen_admitted_request(
+    pool: WorkerPool,
+    tmp_path: Path,
+    replace_staged_after_return: bool,
+    lifecycle: SessionLifecycle,
+    resume_session_id: str | None,
+    operation: AgentOperation,
+    sandbox: str,
+    allowed_tools: str | None,
+    expected_sandbox: str,
+    expected_tools: tuple[str, ...],
+) -> None:
+    """The worker binds all host inputs before it invokes the admitted adapter."""
+    worktree = tmp_path.resolve()
+    git_dir = worktree / ".git-control"
+    common_dir = worktree / ".git-common"
+    index = git_dir / "index"
+    repository_config = common_dir / "config"
+    worktree_config = git_dir / "config.worktree"
+    fixed_environment = tuple(
+        sorted(
+            {
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_DIR": str(git_dir),
+                "GIT_INDEX_FILE": str(index),
+                "GIT_NO_REPLACE_OBJECTS": "1",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_WORK_TREE": str(worktree),
+            }.items()
+        )
+    )
+    receipt = CodexGitReceiptV1(
+        schema_version=1,
+        canonical_worktree=str(worktree),
+        git_dir=str(git_dir),
+        common_dir=str(common_dir),
+        index=str(index),
+        repository_config=str(repository_config),
+        worktree_config=str(worktree_config),
+        fixed_environment=fixed_environment,
+        protected_paths=(str(worktree / ".git"),),
+        read_only_paths=(str(git_dir), str(common_dir)),
+        read_write_paths=(str(worktree),),
+        identities=(),
+        digests=(),
+    )
+    boundary = MagicMock(receipt=receipt)
+    boundary.__enter__.return_value = boundary
+    staged_path = tmp_path / "staged-codex"
+    staged_bytes = b"\x7fELF\x02\x01" + b"\0" * 12 + b"\xb7\0" + b"\0" * 44
+    staged_path.write_bytes(staged_bytes)
+    staged_path.chmod(0o500)
+    staged_status = staged_path.stat()
+    staged_descriptor = os.open(staged_path, os.O_RDONLY | os.O_NOFOLLOW)
+    staged_digest = hashlib.sha256(staged_bytes).hexdigest()
+    lock = MagicMock(
+        adapter_api_version=1,
+        adapter_version="1.0",
+        entry_point_name="production",
+        extracted_elf_path=str(tmp_path / "locked-codex"),
+        extracted_elf_sha256=staged_digest,
+        wheel_sha256="c" * 64,
+        installed_tree_sha256="d" * 64,
+        codex_target="aarch64-unknown-linux-musl",
+        codex_release_tag="rust-v0.153.4",
+        codex_archive_asset="codex-aarch64-unknown-linux-musl.zst",
+        guest_image_sha256="e" * 64,
+    )
+    adapter = MagicMock(
+        adapter_distribution="adapter-dist",
+        adapter_version="1.0",
+        installed_tree_sha256="d" * 64,
+    )
+    factory = MagicMock(return_value=adapter)
+    factory.codex_isolation_api_version = 1
+    admission = MagicMock(
+        lock=lock,
+        deployment_lock_sha256="a" * 64,
+        factory=factory,
+    )
+    staged = StagedLinuxExecutable(
+        path=staged_path,
+        descriptor=staged_descriptor,
+        digest=staged_digest,
+        file_identity=(
+            staged_status.st_dev,
+            staged_status.st_ino,
+            staged_status.st_mode,
+            staged_status.st_uid,
+            staged_status.st_size,
+            staged_status.st_mtime_ns,
+        ),
+    )
+    request = ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        operation,
+        lifecycle,
+    )
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        model="gpt-5.6-sol:high",
+        session_key="implementation:123",
+        resume_session_id=resume_session_id,
+        sandbox=sandbox,
+        allowed_tools=allowed_tools,
+        execution_request=request,
+        codex_isolation_adapter="production",
+        codex_isolation_deployment_lock=tmp_path / "deployment-lock.json",
+        codex_isolation_deployment_lock_sha256="a" * 64,
+    )
+
+    def invoke_adapter(**_kwargs: object) -> AgentRunResult:
+        if replace_staged_after_return:
+            staged_path.unlink()
+            staged_path.write_bytes(staged_bytes)
+            staged_path.chmod(0o500)
+        return AgentRunResult(
+            stdout="complete",
+            stderr="",
+            session_id="provider-session-id",
+        )
+
+    with (
+        patch(
+            "hephaestus.automation.pipeline.codex_worktree_boundary."
+            "capture_codex_worktree_boundary",
+            return_value=boundary,
+        ),
+        patch(
+            "hephaestus.automation.codex_adapter_admission.admit_codex_adapter",
+            return_value=admission,
+        ),
+        patch(f"{_WP}.stage_linux_executable", return_value=staged),
+        patch(
+            "hephaestus.agents.runtime._run_admitted_codex_implementation_session",
+            side_effect=invoke_adapter,
+        ) as invoke,
+        patch(f"{_WP}.resolve_agent") as resolve,
+    ):
+        result = pool._run_agent(job)
+
+    assert result.ok is not replace_staged_after_return
+    resolve.assert_not_called()
+    boundary.verify_before_launch.assert_called_once_with()
+    boundary.verify_after_return.assert_called_once_with()
+    adapter._close.assert_called_once_with()
+    frozen = invoke.call_args.kwargs["request"]
+    assert frozen.command[0] == str(staged.path)
+    assert frozen.command[-2:] == ("--json", "-")
+    assert any(expected_sandbox in value for value in frozen.command)
+    assert frozen.executable_digest == staged.digest
+    assert invoke.call_args.kwargs["executable_descriptor"] == staged_descriptor
+    assert invoke.call_args.kwargs["execution_request"] is request
+    assert frozen.git_receipt is receipt
+    assert frozen.policy.command_network == "deny"
+    assert frozen.policy.protected_overlay_mounts == receipt.protected_paths
+    assert json.loads(frozen.session) == {
+        "allowed_tools": list(expected_tools),
+        "lifecycle": lifecycle.value,
+        "operation": operation.value,
+        "session_id": resume_session_id,
+    }
+    assert f"hephaestus_automation.operation={json.dumps(operation.value)}" in frozen.command
+    assert (
+        "hephaestus_automation.allowed_tools="
+        + json.dumps(list(expected_tools), separators=(",", ":"))
+        in frozen.command
+    )
+    assert ("resume" in frozen.command) is (lifecycle is SessionLifecycle.RESUME_REQUIRED)
+    if expected_sandbox == "read-only":
+        assert str(worktree) in frozen.policy.read_only_mounts
+        assert str(worktree) not in frozen.policy.read_write_mounts
+    else:
+        assert str(worktree) in frozen.policy.read_write_mounts
+    profile = Path(frozen.private_profile_path)
+    auth_path = profile.parent / ".transient-auth" / frozen.run_nonce / "auth.json"
+    assert profile.name == "profile"
+    assert profile.parent.name == frozen.run_nonce
+    assert profile.parent.parent.name == ".runs"
+    assert str(profile) in frozen.policy.read_write_mounts
+    assert {
+        str(profile / "config.toml"),
+        str(profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1"),
+        str(auth_path),
+    }.issubset(frozen.policy.read_only_mounts)
+    assert not any(
+        str(profile / name) in frozen.policy.read_write_mounts
+        for name in ("home", "tmp", "appdata", "localappdata", "xdg", "sessions")
+    )
+    admission.validate_adapter_identity.assert_called_once_with(
+        distribution="adapter-dist",
+        version="1.0",
+        installed_tree_sha256="d" * 64,
+    )
+    if replace_staged_after_return:
+        assert result.error == "codex_adapter_request_mismatch"
+    with pytest.raises(OSError):
+        os.fstat(staged_descriptor)
+
+
+@pytest.mark.parametrize(
+    ("operation", "allowed_tools"),
+    [
+        (AgentOperation.IMPLEMENT, "Read,Write,Glob,Grep"),
+        (AgentOperation.IMPLEMENT, "Read,Write,Edit,Glob,Grep,Unknown"),
+        (AgentOperation.TEST_FIX, "Read,Write,Edit,Glob,Grep"),
+    ],
+)
+def test_codex_rebase_grant_rejects_other_tool_sets(
+    tmp_path: Path, operation: AgentOperation, allowed_tools: str
+) -> None:
+    """The rebase grant does not permit other tool sets."""
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        sandbox="workspace-write",
+        allowed_tools=allowed_tools,
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER, operation, SessionLifecycle.START_NEW
+        ),
+    )
+    with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+        _codex_implementation_grants(job)
+
+
+def test_codex_implementation_inspect_rejects_a_write_tool(tmp_path: Path) -> None:
+    """A read-only operation cannot widen its tool grant."""
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        sandbox="read-only",
+        allowed_tools="Read,Glob,Grep,Write",
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER,
+            AgentOperation.IMPLEMENT_INSPECT,
+            SessionLifecycle.START_NEW,
+        ),
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+        _codex_implementation_grants(job)
+
+
+def test_owned_codex_adapter_closes_after_initialization_or_body_failure() -> None:
+    """Every admitted helper owner closes on an early production failure."""
+    failed_factory = MagicMock(side_effect=RuntimeError("factory failed"))
+    failed_factory.codex_isolation_api_version = 1
+    failed_admission = MagicMock(
+        factory=failed_factory,
+        lock=MagicMock(adapter_api_version=1),
+    )
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_initialization_failed"):
+        with _owned_codex_adapter(failed_admission):
+            pytest.fail("failed initialization must not enter the body")
+    failed_factory._close.assert_called_once_with()
+
+    adapter = MagicMock(
+        adapter_distribution="adapter-dist",
+        adapter_version="1.0",
+        installed_tree_sha256="d" * 64,
+    )
+    factory = MagicMock(return_value=adapter)
+    factory.codex_isolation_api_version = 1
+    admission = MagicMock(
+        factory=factory,
+        lock=MagicMock(adapter_api_version=1),
+    )
+
+    with pytest.raises(RuntimeError, match="pre-staging failure"):
+        with _owned_codex_adapter(admission):
+            raise RuntimeError("pre-staging failure")
+    adapter._close.assert_called_once_with()
+
+
+def test_codex_private_profile_is_bound_to_the_issue_cycle(tmp_path: Path) -> None:
+    """Start and resume reuse only one issue-cycle private profile."""
+    build_root = tmp_path.resolve()
+    first = _agent_job(
+        issue=123,
+        session_key="cycle-one",
+        cwd=tmp_path,
+    )
+    other_cycle = _agent_job(
+        issue=123,
+        session_key="cycle-two",
+        cwd=tmp_path,
+    )
+    other_issue = _agent_job(
+        issue=124,
+        session_key="cycle-one",
+        cwd=tmp_path,
+    )
+
+    profile = _codex_private_profile(first, build_root)
+
+    assert _codex_private_profile(first, build_root) == profile
+    assert _codex_private_profile(other_cycle, build_root) != profile
+    assert _codex_private_profile(other_issue, build_root) != profile
+    assert profile.parent.parent == tmp_path.parent
+    assert not profile.is_relative_to(tmp_path)
+
+
+def test_codex_private_profile_rejects_symlinked_profile_container(tmp_path: Path) -> None:
+    """A pre-created profile-container link cannot redirect durable state."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    profiles = worktree.parent / f".{worktree.name}-codex-sessions"
+    profiles.symlink_to(outside, target_is_directory=True)
+    job = _agent_job(issue=123, session_key="cycle-one", cwd=worktree)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_protocol_mismatch"):
+        _codex_private_profile(job, worktree)
+
+    assert stat.S_IMODE(outside.stat().st_mode) != 0o700
+
+
+@pytest.mark.parametrize("receipt_name", [".active.json", ".quarantine.json"])
+def test_codex_private_profile_rejects_an_active_or_quarantine_receipt(
+    tmp_path: Path,
+    receipt_name: str,
+) -> None:
+    """An unfinished isolated run blocks all reuse of its durable store."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    job = _agent_job(issue=123, session_key="cycle-one", cwd=worktree)
+    profile = _codex_private_profile(job, worktree)
+    receipt = profile / receipt_name
+    receipt.write_text('{"status":"active"}', encoding="utf-8")
+    receipt.chmod(0o400)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        _codex_private_profile(job, worktree)
+
+
+def test_codex_private_profile_rejects_a_terminal_cleanup_tombstone(
+    tmp_path: Path,
+) -> None:
+    """A failed terminal cleanup blocks a new canonical session root."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    job = _agent_job(issue=123, session_key="cycle-one", cwd=worktree)
+    profile = _codex_private_profile(job, worktree)
+    canonical_root = profile.parent
+    (profile / ".quarantine.json").write_text(
+        '{"status":"terminal-state-invalid"}',
+        encoding="utf-8",
+    )
+    (profile / ".quarantine.json").chmod(0o400)
+    tombstone = canonical_root.with_name(canonical_root.name + ".terminal-cleanup")
+    canonical_root.rename(tombstone)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
+        _codex_private_profile(job, worktree)
+
+    assert tombstone.is_dir()
+    assert not canonical_root.exists()
+
+
+@pytest.mark.parametrize("session_id", [None, "provider-session-3019"])
+def test_codex_implementation_command_uses_supported_approval_config(
+    tmp_path: Path,
+    session_id: str | None,
+) -> None:
+    """New and resumed commands use the exact Codex 0.153.4 approval syntax."""
+    command = _codex_implementation_command(
+        executable=tmp_path / "codex",
+        worktree=tmp_path,
+        model="",
+        session_id=session_id,
+        sandbox="workspace-write",
+        operation=AgentOperation.IMPLEMENT,
+        allowed_tools=("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    )
+
+    assert "--ask-for-approval" not in command
+    assert command[
+        command.index('approval_policy="never"') - 1 : command.index('approval_policy="never"') + 1
+    ] == ("-c", 'approval_policy="never"')
+
+
+def test_codex_implementation_command_omits_default_reasoning_config(tmp_path: Path) -> None:
+    """The default effort preserves the selected model's built-in behavior."""
+    command = _codex_implementation_command(
+        executable=tmp_path / "codex",
+        worktree=tmp_path,
+        model="gpt-5.6-sol:default",
+        session_id=None,
+        sandbox="workspace-write",
+        operation=AgentOperation.IMPLEMENT,
+        allowed_tools=("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    )
+
+    assert not any(value.startswith("model_reasoning_effort=") for value in command)
 
 
 def test_shutdown_can_reap_without_marking_interrupted(
@@ -6197,7 +6736,7 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A failed refresh does not copy remote output into the job result."""
-        sensitive_value = "ghp_1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        sensitive_value = "synthetic-private-remote-output"
         job = GitJob(
             repo="Hephaestus",
             expected_repository="HomericIntelligence/Hephaestus",
@@ -10687,6 +11226,131 @@ class TestGitOps:
         assert result.ok is True
         commit.assert_called_once()
 
+    @pytest.mark.parametrize("action", ["restore", "delete"])
+    def test_scope_allows_real_worktree_retraction(
+        self, pool: WorkerPool, tmp_path: Path, action: str
+    ) -> None:
+        """Allow only restoration of tracked content or removal of a new file."""
+        repo, _predecessor, reviewed_base = _worker_repository(tmp_path)
+        name = "tracked.txt" if action == "restore" else "unplanned.txt"
+        target = repo / name
+        target.write_text("unplanned change\n", encoding="utf-8")
+        _git(repo, "add", name)
+        _git(repo, "commit", "-m", "test: add unplanned change")
+        source_head = _git(repo, "rev-parse", "HEAD")
+        if action == "restore":
+            target.write_text("two\n", encoding="utf-8")
+        else:
+            target.unlink()
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "agent": "codex",
+                "scope_history_base_sha": source_head,
+                "scope_retraction_base_sha": reviewed_base,
+                "scope_retraction_paths": (name,),
+            },
+        )
+        assert (
+            pool._verify_implementation_edit_scope(job, repo, allowed_paths=("planned.py",)) is None
+        )
+
+    @pytest.mark.parametrize(
+        ("retraction_paths", "untracked", "restoration_diff", "accepted"),
+        [
+            (("unplanned.py",), "", "", True),
+            (("unplanned.py",), "", "unplanned.py\0", False),
+            (("unplanned.py",), "unplanned.py\0", "", False),
+            (("other.py",), "", "", False),
+            (None, "", "", False),
+        ],
+    )
+    def test_scope_accepts_only_verified_retraction(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        retraction_paths: tuple[str, ...] | None,
+        untracked: str,
+        restoration_diff: str,
+        accepted: bool,
+    ) -> None:
+        """Retraction restores the reviewed base and cannot add unplanned work."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "agent": "codex",
+                "scope_history_base_sha": "a" * 40,
+                "scope_retraction_base_sha": "b" * 40,
+                "scope_retraction_paths": retraction_paths,
+            },
+        )
+
+        def read_git(argv: list[str], **kwargs: Any) -> Any:
+            if "--literal-pathspecs" in argv:
+                return MagicMock(stdout=restoration_diff)
+            if "ls-files" in argv:
+                return MagicMock(stdout=untracked)
+            return MagicMock(stdout="unplanned.py\0")
+
+        with patch(f"{_WP}.git_utils.run", side_effect=read_git):
+            result = pool._verify_implementation_edit_scope(
+                job, tmp_path, allowed_paths=("planned.py",)
+            )
+        assert (result is None) is accepted
+
+    def test_recovery_scope_rejection_precedes_candidate_staging(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Reject an unrelated path before private candidate staging or signing."""
+        old_head = "a" * 40
+        tree = "c" * 40
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2973,
+                "worktree_path": str(tmp_path),
+                "repo_root": str(tmp_path),
+                "branch": "2973-auto-impl",
+                "agent": "codex",
+                "allowed_paths": ("planned.py",),
+                "scope_history_base_sha": old_head,
+                "expected_recovery_head": old_head,
+                "expected_recovery_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "expected_recovery_tree_sha": tree,
+                **_RECOVERY_PATH_MANIFEST,
+            },
+        )
+        with (
+            patch(
+                f"{_WP}._linked_worktree_git_env",
+                return_value=_test_git_binding(tmp_path),
+            ),
+            patch.object(pool, "_read_publish_head", return_value=old_head),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch(
+                f"{_WP}._candidate_commit_tree_evidence",
+                return_value=(tree, _EMPTY_DIFF_OUTPUT),
+            ) as candidate,
+            patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
+            patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="unrelated.py\0")),
+        ):
+            result = pool._git_commit_push(job)
+
+        assert result.ok is False
+        assert result.error == "implementation changed paths outside approved scope"
+        candidate.assert_not_called()
+        commit.assert_not_called()
+
     def test_recovered_reply_commit_timeout_preserves_an_exact_created_child(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -11976,6 +12640,8 @@ class TestGitOps:
                 "git",
                 "--literal-pathspecs",
                 "diff",
+                "--no-ext-diff",
+                "--no-textconv",
                 "--name-only",
                 base_sha,
                 "HEAD",

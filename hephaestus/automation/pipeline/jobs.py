@@ -13,7 +13,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.pi_session import AgentSessionBinding
@@ -21,6 +21,9 @@ from hephaestus.agents.workspace import WorkspaceBinding, validate_workspace_bin
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
 from .job_results import JobHandle, JobResult
+
+if TYPE_CHECKING:
+    from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
 
 __all__ = [
     "GIT_OPS",
@@ -56,6 +59,10 @@ class AgentJob:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    codex_isolation_adapter: str | None = None
+    codex_isolation_deployment_lock: Path | None = None
+    codex_isolation_deployment_lock_sha256: str | None = None
+    codex_isolation_request: CodexIsolationRequestV1 | None = None
     fallback_model: str | None = None
     plugin_skills_dir: Path | None = None
     session_agent: str = ""

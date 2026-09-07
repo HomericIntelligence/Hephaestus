@@ -22,6 +22,20 @@ def test_default_uv_groups_include_automation_without_widening_base_dependencies
     )
 
 
+def test_default_uv_groups_include_sigstore() -> None:
+    """The default automation group installs the locked Sigstore runtime."""
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "automation" in config["tool"]["uv"]["default-groups"]
+    assert any(
+        requirement.startswith("sigstore>=4.5,<5")
+        for requirement in config["dependency-groups"]["automation"]
+    )
+    assert not any(
+        requirement.startswith("sigstore") for requirement in config["project"]["dependencies"]
+    )
+
+
 def test_uv_is_the_only_project_environment_manifest() -> None:
     """The repository exposes uv's lockfile, not a second environment manager."""
     assert (REPO_ROOT / "uv.lock").is_file()

@@ -75,6 +75,52 @@ def build_codex_child_env(*, codex_home: Path | None = None) -> dict[str, str]:
     return env
 
 
+_CODEX_IMPLEMENTATION_GIT_NAMES = frozenset(
+    {
+        "GIT_ATTR_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OPTIONAL_LOCKS",
+        "GIT_WORK_TREE",
+    }
+)
+
+
+def build_codex_implementation_child_env(
+    *, codex_home: Path, fixed_git_environment: Mapping[str, str]
+) -> dict[str, str]:
+    """Build one private Codex environment from a complete Git receipt."""
+    if set(fixed_git_environment) != _CODEX_IMPLEMENTATION_GIT_NAMES:
+        raise ValueError("fixed Git environment is incomplete")
+    for name, value in fixed_git_environment.items():
+        spec = APPROVED_ENV_BY_NAME[name]
+        if not validate_environment_value(spec, value):
+            raise ValueError("fixed Git environment contains an invalid value")
+    if fixed_git_environment["GIT_NO_REPLACE_OBJECTS"] != "1":
+        raise ValueError("fixed Git environment contains an invalid value")
+    env = build_codex_child_env(codex_home=codex_home)
+    private = Path(env["CODEX_HOME"])
+    env.update(
+        {
+            "HOME": _absolute_path(private / "home"),
+            "TMPDIR": _absolute_path(private / "tmp"),
+            "TMP": _absolute_path(private / "tmp"),
+            "TEMP": _absolute_path(private / "tmp"),
+            "USERPROFILE": _absolute_path(private / "home"),
+            "APPDATA": _absolute_path(private / "appdata"),
+            "LOCALAPPDATA": _absolute_path(private / "localappdata"),
+            "XDG_CONFIG_HOME": _absolute_path(private / "xdg" / "config"),
+            "XDG_CACHE_HOME": _absolute_path(private / "xdg" / "cache"),
+            "XDG_DATA_HOME": _absolute_path(private / "xdg" / "data"),
+        }
+    )
+    env.update(fixed_git_environment)
+    return env
+
+
 def build_pi_child_env(
     *, temp_dir: Path | None = None, pi_dir: Path | None = None
 ) -> dict[str, str]:
@@ -198,6 +244,7 @@ def with_correlation_id(environment: Mapping[str, str], trace_id: str | None) ->
 __all__ = [
     "build_claude_child_env",
     "build_codex_child_env",
+    "build_codex_implementation_child_env",
     "build_gh_child_env",
     "build_git_child_env",
     "build_git_signing_env",
