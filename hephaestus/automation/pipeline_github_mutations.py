@@ -15,9 +15,40 @@ from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
 
+_ALREADY_QUEUED = "pull request is already in the queue"
+
 
 class PipelineGitHubMutations(PipelineGitHubIssueComments):
     """Own coordinator-approved non-review GitHub mutations."""
+
+    def _existing_queue_result(
+        self,
+        pr_number: int,
+        pull_request_id: str,
+        reviewed_sha: str,
+    ) -> ConditionalMergeResult | None:
+        """Read back a successful queue result for the exact open PR head."""
+        owner, name = self._owner_name()
+        try:
+            pull_request = self._graphql(
+                github_api.pull_request_queue_entry_query(owner, name, pr_number),
+                number=pr_number,
+            )
+        except (GraphQLResponseError, RuntimeError, OSError, subprocess.SubprocessError):
+            return None
+        entry = pull_request.get("mergeQueueEntry")
+        if (
+            pull_request.get("id") != pull_request_id
+            or pull_request.get("state") != "OPEN"
+            or pull_request.get("headRefOid") != reviewed_sha
+            or not isinstance(entry, dict)
+        ):
+            return None
+        return ConditionalMergeResult(
+            status=200,
+            body={"merged": False, "queue_entry_id": entry["id"]},
+            queued=True,
+        )
 
     def _enqueue_pr_if_head(
         self,
@@ -36,12 +67,24 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
             )
         except GraphQLMutationOutcomeUnknownError as exc:
             logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
+            if str(exc).strip().casefold() == _ALREADY_QUEUED:
+                reconciled = self._existing_queue_result(
+                    pr_number, pull_request_id, reviewed_sha
+                )
+                if reconciled is not None:
+                    return reconciled
             return ConditionalMergeResult(status=None, body=None, malformed=True)
         except GraphQLRetryableError as exc:
             logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
             return ConditionalMergeResult(status=None, body=None, transport_error=True)
         except (GraphQLDeterministicError, GraphQLResponseError) as exc:
             logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
+            if str(exc).strip().casefold() == _ALREADY_QUEUED:
+                reconciled = self._existing_queue_result(
+                    pr_number, pull_request_id, reviewed_sha
+                )
+                if reconciled is not None:
+                    return reconciled
             return ConditionalMergeResult(status=None, body=None, malformed=True)
         return ConditionalMergeResult(
             status=200,

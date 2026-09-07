@@ -17,6 +17,7 @@ from hephaestus.automation.github_api.graphql import (
     GraphQLRetryableError,
     ReviewCommentNotEditableError,
     enqueue_pull_request_mutation,
+    pull_request_queue_entry_query,
     run_graphql,
     update_review_comment_mutation,
 )
@@ -219,6 +220,63 @@ def test_enqueue_pull_request_rejects_invalid_minimal_receipt(
         pytest.raises(GraphQLMutationOutcomeUnknownError),
     ):
         run_graphql(spec)
+
+
+def test_enqueue_already_queued_is_an_outcome_unknown_error() -> None:
+    """GitHub's already-queued mutation error retains its exact safe class text."""
+    spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
+    response = {
+        "data": {"enqueuePullRequest": None},
+        "errors": [
+            {
+                "type": "UNPROCESSABLE",
+                "message": "Pull request is already in the queue",
+            }
+        ],
+    }
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response)),
+        ),
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+        pytest.raises(
+            GraphQLMutationOutcomeUnknownError,
+            match=r"^Pull request is already in the queue$",
+        ),
+    ):
+        run_graphql(spec)
+
+
+def test_pull_request_queue_entry_query_binds_identity_and_head() -> None:
+    """Queue readback returns one validated pull request and queue entry."""
+    spec = pull_request_queue_entry_query("org", "repo", 7)
+    response = {
+        "data": {
+            "repository": {
+                "owner": {"login": "org"},
+                "name": "repo",
+                "pullRequest": {
+                    "id": "PR_node",
+                    "number": 7,
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "mergeQueueEntry": {"id": "MQE_node", "state": "AWAITING_CHECKS"},
+                },
+            }
+        }
+    }
+    with patch(
+        "hephaestus.automation.github_api.graphql._raw_gh_call",
+        return_value=completed(stdout=json.dumps(response)),
+    ):
+        result = run_graphql(spec, {"owner": "org", "name": "repo", "number": 7})
+
+    assert result["headRefOid"] == "a" * 40
+    assert result["mergeQueueEntry"] == {"id": "MQE_node", "state": "AWAITING_CHECKS"}
 
 
 def test_operation_kind_is_structural() -> None:

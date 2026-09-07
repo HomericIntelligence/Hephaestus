@@ -1463,6 +1463,41 @@ def enqueue_pull_request_mutation(
     )
 
 
+def pull_request_queue_entry_query(
+    owner: str, name: str, pr_number: int
+) -> GraphQLQuerySpec[dict[str, Any]]:
+    """Build an exact pull-request queue-entry readback query."""
+    document = (
+        "query PullRequestQueueEntry($owner:String!,$name:String!,$number:Int!){"
+        "repository(owner:$owner,name:$name){owner{login} name pullRequest(number:$number){"
+        "id number state headRefOid mergeQueueEntry{id state}}}}"
+    )
+
+    def validate(data: dict[str, Any]) -> dict[str, Any]:
+        repository = _repo_identity(data, owner, name)
+        pull_request = repository.get("pullRequest")
+        if (
+            not isinstance(pull_request, dict)
+            or pull_request.get("number") != pr_number
+            or not isinstance(pull_request.get("id"), str)
+            or not isinstance(pull_request.get("state"), str)
+            or not isinstance(pull_request.get("headRefOid"), str)
+        ):
+            raise ValueError("pull-request queue identity was malformed")
+        entry = pull_request.get("mergeQueueEntry")
+        if entry is not None and (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"]
+            or entry.get("state")
+            not in {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"}
+        ):
+            raise ValueError("pull-request queue entry was malformed")
+        return pull_request
+
+    return _query("pullRequestQueueEntry", document, validate)
+
+
 def github_schema_contract_query() -> GraphQLQuerySpec[dict[str, Any]]:
     """Build a read-only introspection query for the live schema contract lane."""
     document = (
@@ -1501,6 +1536,7 @@ __all__ = [
     "issue_comments_query",
     "pipeline_thread_snapshot_page_query",
     "pipeline_unresolved_threads_page_query",
+    "pull_request_queue_entry_query",
     "resolve_thread_mutation",
     "review_receipts_page_query",
     "review_thread_snapshot_page_query",

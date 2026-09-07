@@ -1360,3 +1360,111 @@ def test_required_queue_uses_exact_head_graphql_admission(
         "expectedHeadOid": "a" * 40,
     }
     assert "enablePullRequestAutoMerge" not in spec.query
+
+
+def test_required_queue_reconciles_an_existing_exact_head_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated queue admission succeeds only after an exact-head readback."""
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(
+        adapter,
+        "_graphql_with_timeout",
+        MagicMock(
+            side_effect=github_api_mod.GraphQLMutationOutcomeUnknownError(
+                "Pull request is already in the queue",
+                intent=github_api_mod.GraphQLMutationIntent(
+                    operation="enqueuePullRequest",
+                    client_mutation_id="correlation",
+                    targets=(("pullRequestId", "PR_node"),),
+                    content_hashes=(),
+                ),
+            )
+        ),
+    )
+    readback_mock = MagicMock(
+        return_value={
+            "id": "PR_node",
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "mergeQueueEntry": {"id": "MQE_node", "state": "AWAITING_CHECKS"},
+        }
+    )
+    monkeypatch.setattr(adapter, "_graphql", readback_mock)
+    policy = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(RequiredCheck("required-ci", 15368),),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(15556494,),
+        strict_update_enforced=False,
+        merge_queue_method="SQUASH",
+    )
+
+    result = adapter.merge_pr_if_head(
+        7,
+        "a" * 40,
+        policy=policy,
+        pull_request_id="PR_node",
+        deadline_s=time.monotonic() + 2.0,
+        cancellation=threading.Event(),
+    )
+
+    assert result.queued is True
+    assert result.body == {"merged": False, "queue_entry_id": "MQE_node"}
+    assert readback_mock.call_args.kwargs == {"number": 7}
+
+
+def test_required_queue_rejects_an_existing_entry_after_head_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing queue entry does not authorize a different reviewed head."""
+    adapter = pg.PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(
+        adapter,
+        "_graphql_with_timeout",
+        MagicMock(
+            side_effect=github_api_mod.GraphQLMutationOutcomeUnknownError(
+                "Pull request is already in the queue",
+                intent=github_api_mod.GraphQLMutationIntent(
+                    operation="enqueuePullRequest",
+                    client_mutation_id="correlation",
+                    targets=(("pullRequestId", "PR_node"),),
+                    content_hashes=(),
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_graphql",
+        MagicMock(
+            return_value={
+                "id": "PR_node",
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "mergeQueueEntry": {"id": "MQE_node", "state": "AWAITING_CHECKS"},
+            }
+        ),
+    )
+    policy = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(RequiredCheck("required-ci", 15368),),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(15556494,),
+        strict_update_enforced=False,
+        merge_queue_method="SQUASH",
+    )
+
+    result = adapter.merge_pr_if_head(
+        7,
+        "a" * 40,
+        policy=policy,
+        pull_request_id="PR_node",
+        deadline_s=time.monotonic() + 2.0,
+        cancellation=threading.Event(),
+    )
+
+    assert result.malformed is True
+    assert result.queued is False
