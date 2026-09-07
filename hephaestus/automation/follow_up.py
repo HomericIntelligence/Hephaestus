@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.runtime import (
     agent_json_stdout,
     direct_agent_model,
@@ -43,7 +44,7 @@ from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
-from .agent_config import DEFAULT_AGENT_TIMEOUT, learn_model
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .git_utils import issue_ref, run
 from .github_api import gh_issue_comment, gh_issue_create
 from .prompts import get_follow_up_prompt
@@ -386,6 +387,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
     agent: str = "claude",
     session_agent: str | None = None,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
+    model: str = "",
 ) -> FollowUpResponse | None:
     """Resume the implementation agent session and file ONE consolidated follow-up issue.
 
@@ -431,7 +433,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                 prompt=prompt_file.read_text(),
                 cwd=worktree_path,
                 timeout=timeout,
-                model=direct_agent_model(agent, model_value=learn_model(agent=agent)),
+                model=direct_agent_model(agent, model_value=model),
             )
             stdout = agent_json_stdout(direct_result.stdout, direct_result.session_id)
         else:
@@ -443,6 +445,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                     str(prompt_file),
                     "--output-format",
                     "json",
+                    *(["--model", parse_model_selection(model).model] if model else []),
                 ],
                 cwd=worktree_path,
                 timeout=timeout,

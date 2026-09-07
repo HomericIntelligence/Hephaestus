@@ -1,60 +1,50 @@
-# IFM Model Configuration
+# Model Configuration
 
-Hephaestus recognizes the current non-GGUF models in the
-[IFM model catalog](https://huggingface.co/IFM/models). This registry includes
-the six [K2-Horizon](https://ifm.ai/blog/k2/) checkpoints. It also includes the
-0.9B checkpoint.
+Hephaestus accepts model names as strings. It does not maintain a model catalog
+or translate model aliases. Configure an external inference service before you
+use a model that requires one.
 
-Model recognition does not start or manage an inference server. Configure an
-OpenAI-compatible server before you use an IFM model with OpenCode or Pi.
+## Tool and model selection
 
-## Model selection
-
-Use an exact model ID or a K2-Horizon alias. These examples select the same
-model and reasoning effort:
-
-```text
---reviewer-model k2-horizon-0.9:high
---reviewer-model IFM/K2-Horizon-0.9B:high
-```
-
-The available aliases are:
-
-| Alias | Model ID |
-|---|---|
-| `k2-horizon-0.9` | `IFM/K2-Horizon-0.9B` |
-| `k2-horizon-3.7` | `IFM/K2-Horizon-3.7B` |
-| `k2-horizon-7` | `IFM/K2-Horizon-7B` |
-| `k2-horizon-32` | `IFM/K2-Horizon-32B` |
-| `k2-horizon-36` | `IFM/K2-Horizon-MoVA-36B-A4B` |
-| `k2-horizon-375` | `IFM/K2-Horizon-375B-A23B` |
-
-The effort value is free-form. Hephaestus does not keep a fixed list. The
-provider decides which values it supports. Use `:default` to select the
-provider default. The final nonempty colon segment is always the effort, so a
-model ID that contains a colon is ambiguous under this compact format.
-
-For Codex, `astra` and `gpt-6-astra` select the official
-[`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra)
-model. Both forms use `xhigh` when no effort is present. For example:
+Use `--agent` to select `claude`, `codex`, `pi`, or `opencode`. Use `--model`
+to supply the global model. The role options `--planner-agent`,
+`--implementer-agent`, and `--reviewer-agent` override the global tool.
+The corresponding role model option overrides the global model independently.
+If you change a role's tool, the role still inherits the global model unless
+you also supply its model option.
 
 ```text
---reviewer-model astra:max
---reviewer-model gpt-6-astra:future-effort
+--agent codex --model gpt-6-astra:max
+--agent codex --model gpt-6-astra:max --reviewer-agent claude --reviewer-model My-Review-Model
+--agent opencode --model IFM/K2-Horizon-0.9B:high
 ```
 
-Codex also accepts capability aliases. For example, these options select the
-same model and effort:
+If you omit the tool, Hephaestus uses its existing tool detection. Claude has
+preference when available. Pi requires explicit selection and admission.
+If you omit both global and role model options, the selected tool uses its
+configured model default. Supply `--fallback-model` to enable an explicit
+fallback model. The global model does not supply the fallback. Durable review
+sessions retain their recorded model and do not use quota fallback.
 
-```text
---reviewer-model terra:high
---reviewer-model gpt-5.6-terra:high
-```
+Model spelling and case are preserved after whitespace handling. The final
+nonempty colon segment in `MODEL[:EFFORT]` is the effort. Thus, a colon in a
+model ID is ambiguous under this format. Use the `:default` suffix to select the applicable
+tool default. The provider owns effort validation. Claude uses only the base
+model; Codex receives reasoning effort; OpenCode receives a variant; Pi receives
+thinking effort. The bounded Codex unsupported-effort retry remains available.
+
+## Migration from aliases
+
+Former Hephaestus aliases are now literal model names. Replace `astra` with
+`gpt-6-astra` when that is the required model. Replace other former aliases,
+including `terra` and `k2-horizon-0.9`, with the exact IDs that your provider
+accepts. Hephaestus does not translate names across providers or supply a model
+from a difficulty label. Model names in the examples below are operator choices.
 
 ## OpenCode
 
 Add an operator-local custom provider to `opencode.json`. Use the provider ID
-`IFM` so its full model references match the Hephaestus registry. Replace the
+`IFM` for the full model references in this example. Replace the
 placeholders with private operator values.
 
 ```json

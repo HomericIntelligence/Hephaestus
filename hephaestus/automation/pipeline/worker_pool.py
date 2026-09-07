@@ -2384,6 +2384,8 @@ class WorkerPool:
         escapes are converted by :meth:`_run` so the returned result preserves
         the executing worker identity.
         """
+        if job.session_selection_error:
+            return JobResult(ok=False, error=job.session_selection_error)
         try:
             cwd = validate_job_workspace(job)
             agent = resolve_agent(
@@ -2419,6 +2421,7 @@ class WorkerPool:
                         agent=session_key,
                         prompt=prompt,
                         model=job.model,
+                        fallback_model_value=job.fallback_model,
                         cwd=cwd,
                         timeout=job.timeout_s,
                         output_format=job.output_format,
@@ -2581,6 +2584,8 @@ class WorkerPool:
     @staticmethod
     def _run_compact(job: CompactJob) -> JobResult:
         """Compact an agent session without making compaction a hard gate."""
+        if job.session_selection_error:
+            return JobResult(ok=False, error=job.session_selection_error)
         compacted = compact_agent_session(
             repo=job.repo,
             issue=job.issue,

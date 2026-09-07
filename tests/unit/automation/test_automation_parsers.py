@@ -907,6 +907,9 @@ _ENV_MIGRATION_ACTIONS = frozenset(
         "--log-format",
         "-q",
         "--model",
+        "--planner-agent",
+        "--reviewer-agent",
+        "--implementer-agent",
         "--planner-model",
         "--reviewer-model",
         "--implementer-model",
@@ -1057,19 +1060,19 @@ def test_build_automation_parser_does_not_add_throttle_by_default() -> None:
         loop_runner._build_parser,
     ],
 )
-def test_model_help_documents_codex_role_alias_contract(
+def test_model_help_documents_literal_model_contract(
     factory: Callable[[], argparse.ArgumentParser],
 ) -> None:
-    """Each model option describes the shared Codex reference contract."""
+    """Each model option describes literal model names and optional effort."""
     parser = factory()
     help_text = " ".join(
         str(action.help) for action in parser._actions if "MODEL[:EFFORT]" in str(action.help)
     )
 
     assert MODEL_REFERENCE_HELP in help_text
-    assert all(alias in help_text for alias in ("sol", "terra", "luna"))
-    assert "full model IDs" in help_text
-    assert "free-form effort" in help_text
+    assert "literal strings" in help_text
+    assert "effort" in help_text
+    assert "aliases" not in help_text
     assert "default" in help_text
 
 
@@ -1081,3 +1084,28 @@ def test_plan_reviewer_still_has_no_throttle_or_version_flags() -> None:
     assert "--gh-global-burst" not in flags
     assert "--version" not in flags
     assert "-V" not in flags
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        planner._build_parser,
+        implementer._build_parser,
+        pr_reviewer._build_parser,
+        ci_driver._build_parser,
+        loop_runner._build_parser,
+        plan_reviewer._build_parser,
+        audit_reviewer._build_parser,
+    ],
+)
+def test_role_tool_options_are_optional_and_use_supported_tools(
+    factory: Callable[[], argparse.ArgumentParser],
+) -> None:
+    """Role tool options keep their independent supported-tool choices."""
+    specs = {spec.dest: spec for spec in _specs(factory())}
+    for role in ("planner", "implementer", "reviewer"):
+        spec = specs[f"{role}_agent"]
+        assert spec.option_strings == (f"--{role}-agent",)
+        assert spec.default is None
+        assert spec.required is False
+        assert spec.choices == AGENT_CHOICES

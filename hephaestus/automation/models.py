@@ -166,6 +166,14 @@ class WorkerOptionsBase(BaseModel):
     """Shared options for automation worker stages."""
 
     dry_run: bool = False
+    model: str = ""
+    planner_agent: str = ""
+    implementer_agent: str = ""
+    reviewer_agent: str = ""
+    planner_model: str = ""
+    implementer_model: str = ""
+    reviewer_model: str = ""
+    fallback_model: str = ""
 
 
 class ParallelWorkerOptionsBase(WorkerOptionsBase):
@@ -244,8 +252,6 @@ class PlanReviewerOptions(VerboseParallelWorkerOptionsBase):
     agent: str = "claude"
     enable_ui: bool = True
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
-    reviewer_model: str = ""
-    fallback_model: str = ""
     pi_dir: Path | None = None
 
 

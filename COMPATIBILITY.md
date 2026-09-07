@@ -277,6 +277,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `add_learn_timeout_arg` | 0.9.8 | Add a `--learn-timeout` flag to a parser |
 | `add_logging_args` | 0.1.0 | Add `--verbose`/`--quiet` logging flags |
 | `add_pipeline_runtime_args` | TBD | Add explicit model, path, rate-guard, and scoped timeout options to a pipeline wrapper |
+| `add_role_agent_args` | TBD | Add tool overrides for planning, implementation, and review |
 | `add_poll_max_wait_arg` | 0.9.8 | Add a `--poll-max-wait` flag to a parser |
 | `add_version_arg` | 0.1.0 | Add a `--version` flag to a parser |
 | `configure_cli_logging` | 0.9.8 | Configure standard stderr-safe logging for a CLI |

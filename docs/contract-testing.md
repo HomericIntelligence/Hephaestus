@@ -33,7 +33,7 @@ Pytest options:
   repository. If omitted, the repository is resolved once from the checkout
   root with an explicit working directory.
 - `--contract-model MODEL[:EFFORT]` selects the Claude model for the agent
-  lane. Claude ignores the optional effort. The default model is `haiku`.
+  lane. Claude ignores the optional effort. An omitted model uses the selected tool default.
 
 The GitHub lane only calls read endpoints (`rate_limit`, `repo view`, and
 `issue list`) through `gh_call`. Its negative case confirms a missing endpoint

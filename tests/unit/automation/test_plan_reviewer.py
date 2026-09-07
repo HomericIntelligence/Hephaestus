@@ -891,10 +891,10 @@ class TestMain:
         assert reviewer_class.call_args.args[0].reviewer_model == ""
         assert reviewer_class.call_args.args[0].fallback_model == ""
 
-    def test_unknown_claude_alias_stops_before_terminal_guard(
+    def test_literal_claude_model_reaches_reviewer_options(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An invalid Claude alias produces a CLI error before review work."""
+        """A supplied short model name reaches the reviewer unchanged."""
         from hephaestus.automation import plan_reviewer
 
         monkeypatch.setattr(
@@ -907,18 +907,14 @@ class TestMain:
                 "claude",
                 "--reviewer-model",
                 "terra-lite",
+                "--no-ui",
             ],
         )
-        with (
-            patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated,
-            patch.object(plan_reviewer, "terminal_guard") as terminal,
-            pytest.raises(SystemExit) as error,
-        ):
-            plan_reviewer.main()
-
-        assert error.value.code == 2
-        authenticated.assert_not_called()
-        terminal.assert_not_called()
+        monkeypatch.setattr(plan_reviewer, "resolve_agent", lambda *_args, **_kwargs: "claude")
+        with patch.object(plan_reviewer, "PlanReviewer") as reviewer_class:
+            reviewer_class.return_value.run.return_value = {}
+            assert plan_reviewer.main() == 0
+        assert reviewer_class.call_args.args[0].reviewer_model == "terra-lite"
 
     def test_success_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

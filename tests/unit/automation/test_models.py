@@ -316,12 +316,22 @@ class TestWorkerOptionsBase:
     """Tests for shared worker option defaults."""
 
     def test_base_defaults_and_model_dump(self) -> None:
-        """WorkerOptionsBase exposes only the dry-run field."""
+        """Worker options expose shared defaults and empty model selections."""
         options = WorkerOptionsBase()
 
         assert WorkerOptionsBase.model_fields["dry_run"].default is False
         assert "verbose" not in WorkerOptionsBase.model_fields
-        assert options.model_dump() == {"dry_run": False}
+        assert options.model_dump() == {
+            "dry_run": False,
+            "model": "",
+            "planner_agent": "",
+            "implementer_agent": "",
+            "reviewer_agent": "",
+            "planner_model": "",
+            "implementer_model": "",
+            "reviewer_model": "",
+            "fallback_model": "",
+        }
 
     def test_parallel_and_verbose_base_defaults(self) -> None:
         """Narrow worker base classes expose only their shared fields."""

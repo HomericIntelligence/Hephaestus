@@ -54,3 +54,4 @@ numbered, and listed here.
 | [0039](0039-policy-selected-server-merge-route.md) | Policy-selected server merge route | Accepted |
 | [0040](0040-detached-default-branch-planning-source.md) | Detached default-branch source for planning | Accepted |
 | [0041](0041-versioned-recovery-comment-identity.md) | Versioned recovery-comment identity | Accepted |
+| [0042](0042-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |

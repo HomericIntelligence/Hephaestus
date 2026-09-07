@@ -16,8 +16,8 @@ What lives here:
   ``--resume`` (subsequent calls) based on whether the checkout-scoped JSONL
   transcript already exists. No recreate-on-failure cascade — a create/resume
   error propagates (#1168). On a model-specific usage cap it retries the same
-  request once on :func:`agent_config.fallback_model` and pins the fallback
-  for the rest of the process (#1793).
+  request once on an explicitly supplied fallback model and records the cap
+  for the rest of the process. Without a fallback, the failure propagates.
 """
 
 from __future__ import annotations
@@ -190,7 +190,7 @@ def invoke_claude_with_session(
     non-zero exit OR an exit-0 ``is_error: true`` JSON envelope (json format
     only; plain-text output is never scanned, since agent prose can
     legitimately contain the phrases) — the same request is retried once on
-    :func:`agent_config.fallback_model`, and the capped model is pinned to the
+    the explicitly supplied fallback model, and the capped model is pinned to the
     fallback for the rest of this process. The fallback runs under its own
     session lineage (the model is part of the session key), so the capped
     model's cached context is re-sent once. No retry happens when the
@@ -237,6 +237,8 @@ def invoke_claude_with_session(
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
+    if session_lifecycle is not None:
+        session_lifecycle = session_lifecycle.replace("_", "-")
     model = parse_model_selection(model).model
     if fallback_model_value is not None:
         fallback_model_value = parse_model_selection(fallback_model_value).model
@@ -264,7 +266,7 @@ def invoke_claude_with_session(
 
     fallback = fallback_model(fallback_model_value)
     effective = model
-    if session_lifecycle == "resume-required":
+    if not fallback or session_lifecycle in {"start-new", "resume-required"}:
         # A fallback model has a different deterministic Claude lineage.
         # Continuity is stronger than availability for an established review.
         return _attempt(model)

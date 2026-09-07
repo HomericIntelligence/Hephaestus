@@ -54,12 +54,9 @@ CI/CD remains outside this remediation loop.
    comment (NOT one per file). For each todo line, dispatch a sub-agent with the
    Task tool (`subagent_type: "general-purpose"`) to fix exactly that one comment.
 
-2. **Model tier by difficulty** — set each sub-agent's model from the todo line's
-   difficulty:
-   - `simple` → `haiku` (claude-haiku-4-5): mechanical/local fix.
-   - `medium` → `sonnet` (claude-sonnet-4-6): localized logic / small refactor.
-   - `hard`   → `opus` (claude-opus-4-8): cross-cutting or subtle correctness fix.
-   - `hardest`   → `fable` (claude-fable-5): cross-cutting or subtle correctness fix.
+2. **Tool and model selection** — each sub-agent must use the same tool and
+   model as this implementation session. Use the difficulty label to understand
+   the work. Do not select a different model from the label.
 
 3. **Serialize same-file comments.** Two sub-agents must NEVER edit the same file
    at the same time. Group the todo lines by `<file>`: dispatch DIFFERENT files in

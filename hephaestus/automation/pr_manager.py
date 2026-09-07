@@ -32,7 +32,7 @@ from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 from hephaestus.utils.git import git_config_get
 
-from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT, HAIKU
+from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
@@ -195,7 +195,7 @@ def _provenance_for_agent(agent: str, model: str | None = None) -> str:
     """
     if uses_direct_agent_runner(agent):
         return agent_display_name(agent)
-    return model or implementer_model()
+    return model or implementer_model() or agent_display_name(agent)
 
 
 def _issue_body(issue: Any) -> str:
@@ -343,14 +343,11 @@ def _invoke_git_message_agent(
 ) -> str:
     """Run the lightweight message agent in a separate read-only session.
 
-    Pipeline callers must provide their CLI-resolved role model.  Claude and
-    Codex use the deterministic lightweight-message default when a standalone
-    caller omits one; Pi retains its provider-specific default in that case.
+    Pipeline callers supply the implementation model. If a standalone caller
+    omits the model, use the selected tool's configured default.
     """
     model = (
-        model_override
-        if model_override is not None
-        else direct_agent_model(agent, codex_default=HAIKU)
+        model_override if model_override is not None else direct_agent_model(agent, model_value="")
     )
     if uses_direct_agent_runner(agent):
         result = run_agent_text(

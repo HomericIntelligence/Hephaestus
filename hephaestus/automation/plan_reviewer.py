@@ -24,7 +24,6 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resolve_agent,
@@ -37,7 +36,13 @@ from hephaestus.automation._review_utils import (
     print_worker_summary,
     work_report_context,
 )
-from hephaestus.cli.utils import add_agent_timeout_arg, configure_cli_logging, emit_json_status
+from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.utils import (
+    add_agent_timeout_arg,
+    add_role_agent_args,
+    configure_cli_logging,
+    emit_json_status,
+)
 from hephaestus.github.rate_limit import wait_until
 from hephaestus.utils.terminal import terminal_guard
 
@@ -710,6 +715,7 @@ Examples:
         add_version=False,
     )
 
+    add_role_agent_args(parser)
     parser.add_argument(
         "--issues",
         type=int,
@@ -745,18 +751,9 @@ def main() -> int:
     args = _parse_args()
     configure_cli_logging(verbose=args.verbose, log_format=args.log_format)
     try:
-        agent = resolve_agent(
-            args.agent,
-            disable_pi_automation=args.disable_pi_automation,
-            auth_status_timeout=args.auth_status_timeout,
-            pi_isolation_adapter=args.pi_isolation_adapter,
-            pi_dir=args.pi_dir,
-            model_references=(
-                args.reviewer_model or args.model,
-                args.fallback_model or args.model,
-            ),
-        )
-    except UnknownModelAliasError as exc:
+        agent, role_agents = resolve_role_agents(args, ("reviewer",), resolver=resolve_agent)
+        agent = role_agents["reviewer"]
+    except ValueError as exc:
         _build_parser().error(str(exc))
 
     log = logging.getLogger(__name__)
@@ -784,9 +781,7 @@ def main() -> int:
                 reviewer_model=reviewer_model(
                     args.reviewer_model or args.model or None, agent=agent
                 ),
-                fallback_model=fallback_model(
-                    args.fallback_model or args.model or None, agent=agent
-                ),
+                fallback_model=fallback_model(args.fallback_model or None, agent=agent),
                 pi_dir=args.pi_dir,
             )
 

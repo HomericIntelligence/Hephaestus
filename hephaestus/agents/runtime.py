@@ -34,13 +34,9 @@ from hephaestus.agents.execution_policy import (
     resolve_policy,
 )
 from hephaestus.agents.model_selection import (
-    CODEX_ROLE_MODEL_ALIASES,
-    GPT_6_ASTRA,
-    IFM_MODELS,
     PI_THINKING_LEVELS,
     AgentModelSelection,
     parse_model_selection,
-    resolve_codex_model_selection,
     validate_claude_model_reference,
     validate_codex_role_model_reference,
 )
@@ -80,20 +76,6 @@ CODEX_HELP_PROBE_SECONDS = 10
 GIT_COMMON_DIR_PROBE_SECONDS = 5
 CODEX_TERMINATION_GRACE_SECONDS = 5
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
-CODEX_GPT_56_MODEL = "gpt-5.6"
-CODEX_GPT_55_MODEL = "gpt-5.5"
-CODEX_GPT_6_ASTRA_MODEL = GPT_6_ASTRA
-# Preserve the established Claude-tier translation while exposing the GPT-5.6
-# Sol/Terra/Luna family as explicit capability-tier aliases below.
-CODEX_FABLE_MODEL = CODEX_GPT_55_MODEL
-CODEX_FABLE_REASONING_EFFORT = "xhigh"
-CODEX_OPUS_MODEL = CODEX_GPT_55_MODEL
-CODEX_OPUS_REASONING_EFFORT = "xhigh"
-CODEX_SONNET_MODEL = CODEX_GPT_55_MODEL
-CODEX_SONNET_REASONING_EFFORT = "medium"
-CODEX_HAIKU_MODEL = "gpt-5.4-mini"
-CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
-CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
@@ -682,6 +664,7 @@ def _load_pi_default_model_selection(
     pi_dir: Path | None = None,
     *,
     required: bool = True,
+    explicit_model: str = "",
 ) -> AgentModelSelection | None:
     """Load the operator-global Pi default through a bounded regular file."""
     config_path = (
@@ -696,6 +679,12 @@ def _load_pi_default_model_selection(
     provider = payload.get("defaultProvider")
     model = payload.get("defaultModel")
     thinking = payload.get("defaultThinkingLevel", "")
+    if not isinstance(thinking, str) or thinking not in PI_THINKING_LEVELS | {""}:
+        raise AgentExecutionError(
+            "Pi default model configuration has an invalid defaultThinkingLevel"
+        )
+    if explicit_model:
+        return AgentModelSelection(explicit_model, thinking)
     if (
         not isinstance(provider, str)
         or not provider
@@ -706,10 +695,6 @@ def _load_pi_default_model_selection(
     ):
         raise AgentExecutionError(
             "Pi default model configuration requires defaultProvider and defaultModel"
-        )
-    if not isinstance(thinking, str) or thinking not in PI_THINKING_LEVELS | {""}:
-        raise AgentExecutionError(
-            "Pi default model configuration has an invalid defaultThinkingLevel"
         )
     return AgentModelSelection(f"{provider}/{model}", thinking)
 
@@ -723,16 +708,9 @@ def _resolve_pi_model_selection(
     selection = parse_model_selection(model)
     if selection.model and selection.reasoning_effort not in {"", "default"}:
         return selection
-    if selection.model and selection.model not in IFM_MODELS:
-        if selection.reasoning_effort == "default":
-            configured = _load_pi_default_model_selection(pi_dir, required=False)
-            return AgentModelSelection(
-                selection.model,
-                configured.reasoning_effort if configured is not None else "",
-            )
-        return selection
-
-    configured = _load_pi_default_model_selection(pi_dir, required=not selection.model)
+    configured = _load_pi_default_model_selection(
+        pi_dir, required=not selection.model, explicit_model=selection.model
+    )
     if configured is None:
         return AgentModelSelection(selection.model)
     selected_model = selection.model or configured.model
@@ -818,14 +796,17 @@ def validate_durable_model_selection(
     selection_format: object,
 ) -> None:
     """Validate one durable provider, model, and selection-format identity."""
-    configured_default_providers = {"opencode", "pi"}
-    uses_configured_default = provider in configured_default_providers
-    if (
-        provider not in AGENT_CHOICES
-        or uses_configured_default != (selection_format == 1)
-        or (not model and not uses_configured_default)
-    ):
+    if provider not in AGENT_CHOICES:
         raise ValueError("invalid durable provider model selection")
+    if not isinstance(model, str) or model != model.strip():
+        raise ValueError("invalid durable provider model selection")
+    if selection_format is None:
+        # Older Claude and Codex journals required an explicit model.
+        if provider not in {"claude", "codex"} or not model:
+            raise ValueError("invalid durable provider model selection")
+    elif type(selection_format) is not int or selection_format != 1:
+        raise ValueError("invalid durable provider model selection")
+    parse_model_selection(model)
 
 
 def resolve_agent(
@@ -962,22 +943,13 @@ def agent_supports_model_reasoning_effort(agent: str) -> bool:
 
 def agent_uses_configured_model_default(agent: str) -> bool:
     """Return whether the provider owns its model default."""
-    return is_opencode(agent) or is_pi(agent)
+    return agent in AGENT_CHOICES
 
 
 def normalize_provider_model_reference(agent: str, reference: str) -> str:
-    """Return a provider-valid canonical model reference.
-
-    Codex role aliases are provider-specific. Keep their validation and
-    canonicalization inside the runtime adapter so callers do not branch on a
-    provider name.
-    """
-    if is_codex(agent):
-        validate_codex_role_model_reference(reference)
-        return resolve_codex_model_selection(reference).reference
-    if agent == "claude":
-        validate_claude_model_reference(reference)
-    return reference
+    """Validate the tool and preserve the literal model reference."""
+    agent_cli_name(agent)
+    return parse_model_selection(reference).reference
 
 
 def uses_direct_agent_runner(agent: str) -> bool:
@@ -995,17 +967,16 @@ def direct_agent_model(
 ) -> str:
     """Return a provider-neutral direct-runner model default.
 
-    The caller resolves provider defaults at the execution boundary. Pi can
-    read only its trusted operator-global settings at that boundary.
+    The caller supplies model_value explicitly. The deprecated codex_default
+    argument does not select a model. Pi reads only its trusted operator-global
+    settings at the execution boundary.
     """
     if model_value is not None:
         selection = parse_model_selection(model_value)
         if not agent_supports_model_reasoning_effort(agent):
             return selection.model
         return selection.reference
-    if is_opencode(agent) or is_pi(agent):
-        return ""
-    return codex_default
+    return ""
 
 
 def agent_cli_name(agent: str) -> str:
@@ -1539,39 +1510,10 @@ def codex_approval_args(approval: str) -> list[str]:
 
 
 def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelConfig:
-    """Translate legacy tier IDs and split a free-form Codex effort."""
-    validate_codex_role_model_reference(model)
-    selection = resolve_codex_model_selection(model)
-    lower_model = selection.model.lower()
-    explicit_effort = selection.reasoning_effort
-    alias_model = lower_model
-    if not selection.model and use_default:
-        config = CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
-    elif alias_model in {
-        role_selection.model.casefold() for role_selection in CODEX_ROLE_MODEL_ALIASES.values()
-    }:
-        role_selection = next(
-            role_selection
-            for role_selection in CODEX_ROLE_MODEL_ALIASES.values()
-            if role_selection.model.casefold() == alias_model
-        )
-        config = CodexModelConfig(role_selection.model, role_selection.reasoning_effort)
-    elif alias_model in {"astra", CODEX_GPT_6_ASTRA_MODEL}:
-        config = CodexModelConfig(CODEX_GPT_6_ASTRA_MODEL, CODEX_FABLE_REASONING_EFFORT)
-    elif lower_model == "fable" or lower_model.startswith("claude-fable-"):
-        config = CodexModelConfig(CODEX_FABLE_MODEL, CODEX_FABLE_REASONING_EFFORT)
-    elif lower_model == "opus" or lower_model.startswith("claude-opus-"):
-        config = CodexModelConfig(CODEX_OPUS_MODEL, CODEX_OPUS_REASONING_EFFORT)
-    elif lower_model == "sonnet" or lower_model.startswith("claude-sonnet-"):
-        config = CodexModelConfig(CODEX_SONNET_MODEL, CODEX_SONNET_REASONING_EFFORT)
-    elif lower_model == "haiku" or lower_model.startswith("claude-haiku-"):
-        config = CodexModelConfig(CODEX_HAIKU_MODEL)
-    else:
-        config = CodexModelConfig(selection.model)
-    if explicit_effort:
-        reasoning_effort = "" if explicit_effort == "default" else explicit_effort
-        return CodexModelConfig(config.model, reasoning_effort)
-    return config
+    """Split the literal model and free-form effort for Codex."""
+    selection = parse_model_selection(model)
+    effort = selection.reasoning_effort
+    return CodexModelConfig(selection.model, "" if effort == "default" else effort)
 
 
 def _codex_model_args(model: str, *, use_default: bool = False) -> list[str]:

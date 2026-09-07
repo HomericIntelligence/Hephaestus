@@ -44,7 +44,6 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import log_file_path
 from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
-from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
 from .prompts.pr_review import (
     _budget_review_diff,
@@ -167,6 +166,7 @@ def _invoke_and_parse_review_session(
     prompt_file: Path,
     log_file: Path,
     timeout: int,
+    model: str = "",
 ) -> dict[str, Any]:
     """Invoke one reviewer session and parse its response.
 
@@ -188,7 +188,7 @@ def _invoke_and_parse_review_session(
             execution_request=ExecutionRequest(
                 AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
             ),
-            model=direct_agent_model(agent, model_value=reviewer_model(agent=agent)),
+            model=direct_agent_model(agent, model_value=model),
             sandbox="read-only",
         )
         write_secure(log_file, result.stdout or "")
@@ -209,7 +209,7 @@ def _invoke_and_parse_review_session(
         issue=issue_number,
         agent=review_agent,
         prompt=active_prompt,
-        model=reviewer_model(),
+        model=model,
         cwd=worktree_path,
         timeout=timeout,
         output_format="json",
@@ -257,6 +257,7 @@ def run_pr_review_analysis(
     context: dict[str, Any],
     agent: str,
     review_agent: str = AGENT_PR_REVIEWER,
+    model: str = "",
     state_dir: Path,
     dry_run: bool = False,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
@@ -328,6 +329,7 @@ def run_pr_review_analysis(
             active_prompt=active_prompt,
             agent=agent,
             review_agent=review_agent,
+            model=model,
             pr_number=pr_number,
             issue_number=issue_number,
             worktree_path=worktree_path,

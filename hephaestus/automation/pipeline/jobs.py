@@ -55,6 +55,7 @@ class AgentJob:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    session_selection_error: str | None = None
     fallback_model: str | None = None
     plugin_skills_dir: Path | None = None
     session_agent: str = ""
@@ -65,6 +66,7 @@ class AgentJob:
     # stores it on the WorkItem and supplies it here on subsequent turns so
     # review/implementation context survives across loop iterations.
     resume_session_id: str | None = None
+    resume_selection: tuple[str, str] | None = None
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     # Examples: review_audit.parse_review_audit or a label-native plan parser.
@@ -161,6 +163,7 @@ class CompactJob:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    session_selection_error: str | None = None
     session_id: str | None = None
     # Direct-provider compaction only sends ``/compact`` and never needs write
     # access.  Keep the policy explicit so it cannot inherit user defaults.

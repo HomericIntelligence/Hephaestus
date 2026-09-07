@@ -815,3 +815,21 @@ class TestStructuralAuditNotProse:
         assert out["summary"] == "two defects"
         assert out["audit"].grade == "F"
         assert "Verdict: NOGO" not in out["review_text"]
+
+
+def test_review_retry_preserves_selected_model(tmp_path: Path) -> None:
+    """Pass the model through the public review helper."""
+    with patch(
+        "hephaestus.automation.pr_review_core._invoke_and_parse_review_session",
+        return_value={"comments": []},
+    ) as invoke:
+        run_pr_review_analysis(
+            pr_number=1,
+            issue_number=2,
+            context={},
+            worktree_path=tmp_path,
+            state_dir=tmp_path,
+            agent="codex",
+            model="My-Model:max",
+        )
+    assert invoke.call_args.kwargs["model"] == "My-Model:max"

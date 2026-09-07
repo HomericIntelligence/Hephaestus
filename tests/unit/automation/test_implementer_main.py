@@ -18,7 +18,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import implementer as implementer_mod
 from hephaestus.automation.pipeline.routing import StageName
 
@@ -105,8 +104,8 @@ def test_timeout_flags_thread_into_pipeline_config(tmp_path: Path) -> None:
     assert config.reviewer_model == "claude-review-model"
 
 
-def test_codex_role_aliases_reach_implementer_config(tmp_path: Path) -> None:
-    """Implementer role aliases resolve before pipeline configuration is built."""
+def test_literal_codex_models_reach_implementer_config(tmp_path: Path) -> None:
+    """Implementation model names remain literal in pipeline configuration."""
     captured = _run_main_capturing_config(
         [
             "--issues",
@@ -122,19 +121,19 @@ def test_codex_role_aliases_reach_implementer_config(tmp_path: Path) -> None:
         resolved_agent="codex",
     )
 
-    assert captured["config"].implementer_model == "gpt-5.6-luna:xhigh"
-    assert captured["config"].reviewer_model == "gpt-5.6-terra:xhigh"
+    assert captured["config"].implementer_model == "luna:xhigh"
+    assert captured["config"].reviewer_model == "terra"
 
 
-def test_main_rejects_unknown_codex_alias_before_state_or_pipeline_work(
+def test_main_reports_invalid_model_before_state_or_pipeline_work(
     tmp_path: Path,
 ) -> None:
-    """Implementer rejects an unknown alias before state or pipeline work."""
+    """Implementer reports invalid input before state or pipeline work."""
 
-    def reject_unknown_fallback(agent: str | None, **kwargs: Any) -> str:
+    def reject_invalid_fallback(agent: str | None, **kwargs: Any) -> str:
         assert agent == "codex"
-        assert kwargs["model_references"] == ("", "", "unknown")
-        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+        assert kwargs["model_references"] == ("", "unknown")
+        raise ValueError("Invalid model selection")
 
     with (
         patch.object(
@@ -153,7 +152,7 @@ def test_main_rejects_unknown_codex_alias_before_state_or_pipeline_work(
         patch.object(
             implementer_mod,
             "resolve_agent",
-            side_effect=reject_unknown_fallback,
+            side_effect=reject_invalid_fallback,
         ),
         patch.object(implementer_mod, "get_repo_root", return_value=tmp_path) as get_repo_root,
         patch.object(implementer_mod, "_resolve_repo") as resolve_repo,

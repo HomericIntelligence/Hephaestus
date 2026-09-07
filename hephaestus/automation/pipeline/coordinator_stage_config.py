@@ -23,6 +23,9 @@ class _StageRunConfig:
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
     model: str = ""
+    planner_agent: str = ""
+    implementer_agent: str = ""
+    reviewer_agent: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""

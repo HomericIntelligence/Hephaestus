@@ -200,7 +200,8 @@ class TestSessionUUID:
 
         # Slashes/colons in a model id are normalized to a name-safe token.
         name = session_name("R", 1, AGENT_PLANNER, "us.anthropic/opus:4-8")
-        assert name == "R_1_planner_us.anthropic-opus-4-8"
+        assert "/" not in name and ":" not in name
+        assert name != session_name("R", 1, AGENT_PLANNER, "us.anthropic-opus-4-8")
 
     def test_each_agent_constant_yields_distinct_uuid(self) -> None:
         agents = [
@@ -560,3 +561,12 @@ class TestCurrentTrunkGithash:
         """An empty HEPH_TRUNK_GITHASH must fall back, not propagate ``""``."""
         monkeypatch.setenv("HEPH_TRUNK_GITHASH", "")
         assert current_trunk_githash(tmp_path) == "unknown"
+
+
+def test_distinct_literal_models_have_distinct_session_keys() -> None:
+    """Model punctuation must not merge different session identities."""
+    from hephaestus.automation.agent_config import AGENT_IMPLEMENTER, session_name
+
+    assert session_name("Repo", 1, AGENT_IMPLEMENTER, "provider/model") != session_name(
+        "Repo", 1, AGENT_IMPLEMENTER, "provider-model"
+    )

@@ -8,7 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     add_agent_argument,
     agent_stage_execution_request,
@@ -324,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.agent is not None:
         try:
             args.model = normalize_provider_model_reference(args.agent, args.model)
-        except UnknownModelAliasError as exc:
+        except ValueError as exc:
             parser.error(str(exc))
     validate_input_files(parser, args)
 

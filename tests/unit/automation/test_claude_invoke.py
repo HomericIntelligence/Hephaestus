@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
+from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.automation.claude_invoke import (
     describe_claude_failure,
     detect_model_usage_cap,
@@ -254,3 +256,67 @@ class TestDescribeClaudeFailure:
 
     def test_other_exceptions_fall_back_to_str(self) -> None:
         assert describe_claude_failure(TimeoutError("too slow")) == "too slow"
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_model_cap_without_explicit_fallback_does_not_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cached: bool,
+) -> None:
+    """A quota cap cannot choose another model without an explicit fallback."""
+    from hephaestus.automation import claude_invoke
+
+    seen: list[str] = []
+
+    def attempt(**kwargs: object) -> tuple[str, str]:
+        seen.append(str(kwargs["model"]))
+        raise subprocess.CalledProcessError(1, ["claude"], stderr=MODEL_CAP_MESSAGE)
+
+    monkeypatch.setattr(claude_invoke, "_invoke_claude_once", attempt)
+    monkeypatch.setattr(claude_invoke, "is_model_capped", lambda _: cached)
+    with pytest.raises(subprocess.CalledProcessError):
+        claude_invoke.invoke_claude_with_session(
+            repo="Repo", issue=1, agent="implementer", prompt="Work", model="MyModel", cwd=tmp_path
+        )
+    assert seen == ["MyModel"]
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [
+        "start-new",
+        "resume-required",
+        SessionLifecycle.START_NEW.value,
+        SessionLifecycle.RESUME_REQUIRED.value,
+    ],
+)
+def test_durable_review_never_changes_its_recorded_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lifecycle: str
+) -> None:
+    """Quota fallback cannot change a durable review's model identity."""
+    from hephaestus.automation import claude_invoke
+
+    seen: list[str] = []
+
+    def attempt(**kwargs: object) -> tuple[str, str]:
+        model = str(kwargs["model"])
+        seen.append(model)
+        if model == "Primary":
+            raise subprocess.CalledProcessError(1, ["claude"], stderr=MODEL_CAP_MESSAGE)
+        return "review", "fallback-session"
+
+    monkeypatch.setattr(claude_invoke, "_invoke_claude_once", attempt)
+    monkeypatch.setattr(claude_invoke, "is_model_capped", lambda _: False)
+    with pytest.raises(subprocess.CalledProcessError):
+        claude_invoke.invoke_claude_with_session(
+            repo="Repo",
+            issue=1,
+            agent="plan-reviewer",
+            prompt="Review",
+            model="Primary",
+            fallback_model_value="Fallback",
+            cwd=tmp_path,
+            session_lifecycle=lifecycle,
+        )
+    assert seen == ["Primary"]

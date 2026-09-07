@@ -17,7 +17,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import planner as planner_mod
 from hephaestus.automation.models import DEFAULT_WORKER_COUNT
 from hephaestus.automation.pipeline.routing import StageName
@@ -85,8 +84,8 @@ def test_timeout_flags_thread_into_pipeline_config() -> None:
     assert config.reviewer_model == "claude-review-model"
 
 
-def test_codex_role_aliases_reach_planner_config() -> None:
-    """Planner role aliases resolve before pipeline configuration is built."""
+def test_literal_codex_models_reach_planner_config() -> None:
+    """Planning model names remain literal in pipeline configuration."""
     captured = _run_main_capturing_config(
         [
             "--issues",
@@ -101,17 +100,17 @@ def test_codex_role_aliases_reach_planner_config() -> None:
         resolved_agent="codex",
     )
 
-    assert captured["config"].planner_model == "gpt-5.6-sol:xhigh"
-    assert captured["config"].reviewer_model == "gpt-5.6-terra:high"
+    assert captured["config"].planner_model == "sol"
+    assert captured["config"].reviewer_model == "terra:high"
 
 
-def test_main_rejects_unknown_codex_alias_before_repo_resolution() -> None:
-    """Planner rejects an unknown alias before repository or pipeline work."""
+def test_main_reports_invalid_model_before_repo_resolution() -> None:
+    """Planner reports invalid input before repository or pipeline work."""
 
-    def reject_unknown_fallback(agent: str | None, **kwargs: Any) -> str:
+    def reject_invalid_fallback(agent: str | None, **kwargs: Any) -> str:
         assert agent == "codex"
-        assert kwargs["model_references"] == ("", "", "unknown")
-        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+        assert kwargs["model_references"] == ("", "unknown")
+        raise ValueError("Invalid model selection")
 
     with (
         patch(
@@ -129,7 +128,7 @@ def test_main_rejects_unknown_codex_alias_before_repo_resolution() -> None:
         patch.object(
             planner_mod,
             "resolve_agent",
-            side_effect=reject_unknown_fallback,
+            side_effect=reject_invalid_fallback,
         ),
         patch.object(planner_mod, "_resolve_repo") as resolve_repo,
         patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,

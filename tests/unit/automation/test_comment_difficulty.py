@@ -1,9 +1,4 @@
-"""Tests for hephaestus.automation.comment_difficulty (#1083).
-
-A classifier sub-agent labels each unresolved review comment simple/medium/hard;
-the label selects the model tier for the per-comment fix sub-agent and is
-rendered into the coordinator's todo list.
-"""
+"""Test comment difficulty labels and explicit model forwarding."""
 
 from __future__ import annotations
 
@@ -11,24 +6,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hephaestus.automation import comment_difficulty as cd
-from hephaestus.automation.claude_models import HAIKU, OPUS, SONNET
 
 
-class TestDifficultyToModel:
-    """simple→haiku, medium→sonnet, hard→opus."""
-
-    def test_simple_is_haiku(self) -> None:
-        assert cd.model_for_difficulty("simple") == HAIKU
-
-    def test_medium_is_sonnet(self) -> None:
-        assert cd.model_for_difficulty("medium") == SONNET
-
-    def test_hard_is_opus(self) -> None:
-        assert cd.model_for_difficulty("hard") == OPUS
-
-    def test_unknown_defaults_to_medium_tier(self) -> None:
-        # An unrecognized label is treated as medium (safe middle tier).
-        assert cd.model_for_difficulty("bogus") == SONNET
+def test_classifier_forwards_implementation_model(tmp_path: Path) -> None:
+    """Use the selected implementation model for comment classification."""
+    with patch.object(cd, "_run_classifier_session", return_value={"T1": "hard"}) as run:
+        assert cd.classify_comments(
+            threads=[{"id": "T1"}],
+            agent="codex",
+            model="My-Model:max",
+            issue_number=1,
+            worktree_path=tmp_path,
+            repo_root=tmp_path,
+            state_dir=tmp_path,
+        ) == {"T1": "hard"}
+    assert run.call_args.kwargs["model"] == "My-Model:max"
 
 
 class TestTodoLine:

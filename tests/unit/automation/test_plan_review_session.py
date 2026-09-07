@@ -177,7 +177,7 @@ def test_cycle_recovery_rejects_invalid_model_selection_metadata(
         ("unknown", "model", {}),
         ("codex", "", {}),
         ("opencode", "", {}),
-        ("claude", "model", {"model_selection_format": 1, "reasoning_effort": ""}),
+        ("claude", " model", {"model_selection_format": 1, "reasoning_effort": ""}),
         ("pi", "model", {}),
     ],
 )
@@ -329,3 +329,52 @@ def test_explicit_reset_recovers_from_recovery_required_state(tmp_path: Path) ->
     )
     assert replacement.cycle_id != lost.cycle_id
     assert store.recover_active(repo="org/repo", issue=1) == replacement
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "pi", "opencode"])
+def test_cycle_can_store_tool_default_model(provider: str, tmp_path: Path) -> None:
+    """Every supported tool can own an omitted model selection."""
+    store = _store(tmp_path)
+    record = store.start_cycle(
+        repo="org/repo",
+        issue=77,
+        provider=provider,
+        model="",
+        reviewer_config={"model_selection_format": 1, "reasoning_effort": ""},
+        cwd=tmp_path,
+        plan_revision=1,
+        plan_fingerprint="plan",
+    )
+    assert store.recover_active(repo="org/repo", issue=77) == record
+
+
+@pytest.mark.parametrize(
+    "provider,model,effort",
+    [("claude", "MyModel", ""), ("codex", "Other", ""), ("codex", "MyModel", "high")],
+)
+def test_existing_cycle_requires_reset_for_new_selection(
+    provider: str, model: str, effort: str, tmp_path: Path
+) -> None:
+    """A saved review conversation cannot change tool, model, or effort."""
+    store = _store(tmp_path)
+    store.start_cycle(
+        repo="org/repo",
+        issue=77,
+        provider="codex",
+        model="MyModel",
+        reviewer_config={"reasoning_effort": ""},
+        cwd=tmp_path,
+        plan_revision=1,
+        plan_fingerprint="plan",
+    )
+    with pytest.raises(PlanReviewSessionLostError, match="selection"):
+        store.start_cycle(
+            repo="org/repo",
+            issue=77,
+            provider=provider,
+            model=model,
+            reviewer_config={"reasoning_effort": effort},
+            cwd=tmp_path,
+            plan_revision=2,
+            plan_fingerprint="new-plan",
+        )

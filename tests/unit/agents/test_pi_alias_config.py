@@ -116,7 +116,7 @@ def test_direct_agent_model_uses_only_explicit_values(
     for agent in agent_runtime.AGENT_CHOICES:
         assert agent_runtime.direct_agent_model(agent, "explicit") == "explicit"
         assert agent_runtime.direct_agent_model(agent, "") == ""
-        expected = "" if agent in {"opencode", "pi"} else "established"
+        expected = ""
         assert (
             agent_runtime.direct_agent_model(agent, None, codex_default="established") == expected
         )

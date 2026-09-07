@@ -8,7 +8,9 @@ import secrets
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
+from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.runtime import uses_direct_agent_runner
 from hephaestus.github.fleet_sync.git_ops import (
     _git,
@@ -113,6 +115,7 @@ def _run_conflict_agent(
     pr_number: int,
     *,
     timeouts: FleetTimeouts = DEFAULT_FLEET_TIMEOUTS,
+    model: str = "",
 ) -> str | None:
     """Run the selected conflict-resolution agent."""
     if uses_direct_agent_runner(agent):
@@ -133,11 +136,13 @@ def _run_conflict_agent(
         )
         return None
 
+    base_model = parse_model_selection(model).model
     options = ClaudeCodeOptions(
         max_turns=30,
         cwd=str(work),
         allowed_tools=[],
         permission_mode="dontAsk",
+        **({"model": base_model} if base_model else {}),
     )
 
     output: list[str] = []
@@ -339,6 +344,7 @@ def _resolve_conflict_files(
     agent: str,
     *,
     timeouts: FleetTimeouts | None = None,
+    model: str = "",
 ) -> bool:
     """Resolve conflicts in an isolated file copy, then continue the host rebase."""
     current_files = conflict_files
@@ -359,12 +365,17 @@ def _resolve_conflict_files(
                     agent,
                     len(current_files),
                 )
+                agent_options: dict[str, Any] = {}
+                if model:
+                    agent_options["model"] = model
+                if timeouts is not None:
+                    agent_options["timeouts"] = timeouts
                 agent_output = _run_conflict_agent(
                     agent,
                     prompt,
                     isolated_work,
                     pr.number,
-                    **({"timeouts": timeouts} if timeouts is not None else {}),
+                    **agent_options,
                 )
                 if agent_output is None:
                     return False
@@ -709,6 +720,7 @@ def resolve_conflict_with_agent(
     timeouts: FleetTimeouts | None = None,
     resign_email: str | None = None,
     skip_email_key_check: bool = False,
+    model: str = "",
 ) -> bool:
     """Spawn the selected agent to semantically resolve merge conflicts, then re-sign."""
     if dry_run:
@@ -731,13 +743,18 @@ def resolve_conflict_with_agent(
             work,
             **({"timeouts": timeouts} if timeouts is not None else {}),
         )
+        conflict_options: dict[str, Any] = {}
+        if model:
+            conflict_options["model"] = model
+        if timeouts is not None:
+            conflict_options["timeouts"] = timeouts
         if not rebase_completed and not _resolve_conflict_files(
             pr,
             org,
             work,
             conflict_files,
             agent,
-            **({"timeouts": timeouts} if timeouts is not None else {}),
+            **conflict_options,
         ):
             return False
         if not _verify_origin_urls(

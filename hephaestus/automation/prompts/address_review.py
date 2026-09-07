@@ -140,8 +140,8 @@ def get_address_review_prompt(
         todo_block: Pre-rendered, difficulty-classified todo list — one line per
             comment in the form ``@ <file> Line <#> - <difficulty> - <desc>``
             (built by :mod:`hephaestus.automation.comment_difficulty`, #1083).
-            Drives the one-sub-agent-per-comment dispatch and per-comment model
-            tier. The path/line/difficulty are trusted, but the ``<desc>``
+            Assigns one sub-agent to each comment. The model is inherited from
+            the implementation session. The ``<desc>``
             excerpt is verbatim untrusted comment text, so the whole block is
             fenced as untrusted (#1085 C4).
         task_block: Optional task (issue title + body) text, rendered as an

@@ -3184,6 +3184,8 @@ class TestImplementBudget:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.resume_session_id == "implement-session-id"
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle.value == "resume_required"
 
     def test_implement_submission_clears_stale_results(
         self, make_ctx: Any, make_work_item: Any
@@ -4203,6 +4205,8 @@ class TestTestsAndFix:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.resume_session_id == "implement-session-id"
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle.value == "resume_required"
 
     def test_testfix_budget_exhaustion_finishes_failed(
         self, make_ctx: Any, make_work_item: Any
@@ -4862,7 +4866,7 @@ class TestCommitPushAndPrCreate:
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
-            "agent_model": "claude-haiku-4-5",
+            "agent_model": "",
             "git_message_timeout": 1200,
         }
         assert result.on_done_state == "PR_CREATE"

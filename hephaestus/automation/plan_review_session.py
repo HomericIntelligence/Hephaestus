@@ -125,6 +125,22 @@ class PlanReviewSessionStore:
             else:
                 current = self.recover_active(repo=repo, issue=issue)
             if current is not None and not reset:
+                requested_config = dict(reviewer_config)
+                stored_config = dict(current.reviewer_config)
+                # Format 1 also permits configured defaults. It does not change
+                # the identity of a legacy explicit model selection.
+                for config_value in (requested_config, stored_config):
+                    config_value.pop("model_selection_format", None)
+                    config_value.setdefault("reasoning_effort", "")
+                if (
+                    current.provider != provider
+                    or current.reviewer_model != model
+                    or stored_config != requested_config
+                    or current.canonical_cwd != str(Path(cwd).resolve())
+                ):
+                    raise PlanReviewSessionLostError(
+                        "review selection changed; reset the plan-review session explicitly"
+                    )
                 return current
             if current is not None:
                 self._update(current, state="reset")

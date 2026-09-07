@@ -26,8 +26,8 @@ from __future__ import annotations
 import argparse
 import logging
 
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import resolve_agent
+from hephaestus.automation.role_selection import resolve_role_agents
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
     add_pipeline_runtime_args,
@@ -149,18 +149,10 @@ def main() -> int:
     configure_github_throttle_from_args(args)
     configure_cli_logging(verbose=args.verbose, log_format=args.log_format)
     try:
-        agent = resolve_agent(
-            args.agent,
-            disable_pi_automation=args.disable_pi_automation,
-            auth_status_timeout=args.auth_status_timeout,
-            pi_isolation_adapter=args.pi_isolation_adapter,
-            pi_dir=args.pi_dir,
-            model_references=(
-                args.reviewer_model or args.model,
-                args.fallback_model or args.model,
-            ),
+        agent, role_agents = resolve_role_agents(
+            args, ("reviewer", "implementer"), resolver=resolve_agent
         )
-    except UnknownModelAliasError as exc:
+    except ValueError as exc:
         _build_parser().error(str(exc))
 
     log = logging.getLogger(__name__)
@@ -186,12 +178,19 @@ def main() -> int:
             max_workers=args.max_workers,
             dry_run=args.dry_run,
             agent=agent,
+            reviewer_agent=role_agents["reviewer"],
+            implementer_agent=role_agents["implementer"],
             disable_pi_automation=args.disable_pi_automation,
             auth_status_timeout=args.auth_status_timeout,
             pi_dir=args.pi_dir,
             model=args.model,
-            reviewer_model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),
-            fallback_model=fallback_model(args.fallback_model or args.model or None, agent=agent),
+            implementer_model=args.implementer_model or args.model,
+            reviewer_model=reviewer_model(
+                args.reviewer_model or args.model or None, agent=role_agents["reviewer"]
+            ),
+            fallback_model=fallback_model(
+                args.fallback_model or None, agent=role_agents["reviewer"]
+            ),
             reviewer_timeout=args.agent_timeout,
             projects_dir=resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True),
             rate_guard_enabled=args.rate_guard_enabled,

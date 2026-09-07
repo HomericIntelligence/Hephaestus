@@ -674,6 +674,14 @@ on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,
 `--git-message-timeout`, etc.). Legacy `claude_models`, `claude_timeouts`, and
 `session_naming` modules remain compatibility shims over `agent_config`.
 
+The automation loop selects tools and model strings independently. Use
+`--planner-agent`, `--implementer-agent`, and `--reviewer-agent` to override
+`--agent` for each role. Each role model overrides `--model`; a tool override
+does not clear the global model. Omitted models use the selected tool default.
+There is no model catalog or alias translation. Implementation helpers inherit
+the implementation tool and model. Supply `--fallback-model` explicitly to
+select a fallback. See ADR-0042.
+
 The automation loop model options accept `MODEL[:EFFORT]`. The final nonempty
 colon segment is a free-form effort. The runtime maps it to Codex
 `model_reasoning_effort`, OpenCode `--variant`, or Pi `--thinking`. The value

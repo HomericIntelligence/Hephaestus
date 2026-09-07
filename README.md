@@ -364,7 +364,7 @@ host-owned Athena `advise` and `learn` unchanged. See
 [`docs/runbooks/pi-rollout.md`](docs/runbooks/pi-rollout.md) for enable, omit,
 and recovery steps.
 
-For GPT-6 Astra, IFM and K2-Horizon model IDs and aliases,
+For independent tool selection, literal model names, and migration from aliases,
 `MODEL[:EFFORT]` controls, and external server requirements, see
 [`docs/ifm-models.md`](docs/ifm-models.md).
 

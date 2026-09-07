@@ -121,6 +121,7 @@ from hephaestus.automation.state_labels import (
 from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
+from ..coordinator_sessions import agent_session_lifecycle
 from ..diagnostics import redact_diagnostic_text
 from ..git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
@@ -905,7 +906,7 @@ class ImplementationStage(Stage):
                         "status": item.payload.get("worktree_status", ""),
                         "diff": item.payload.get("worktree_diff", ""),
                         "content_snapshot": captured_content,
-                        "agent": agent_provider(ctx),
+                        "agent": agent_provider(ctx, "implementer"),
                         "agent_model": stage_model(ctx, "implementer", implementer_model),
                         "git_message_timeout": stage_timeout(
                             ctx, "git_message", git_message_agent_timeout()
@@ -920,7 +921,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_dirty_reused_worktree_decision_prompt,
             cwd=_worktree_path(item, ctx),
@@ -932,11 +933,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT_INSPECT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -980,7 +977,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_remediation_reply_recovery_prompt,
             cwd=_worktree_path(item, ctx),
@@ -992,11 +989,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT_INSPECT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1245,7 +1238,7 @@ class ImplementationStage(Stage):
                 kind="advise",
                 repo=item.repo,
                 issue=issue,
-                agent=agent_provider(ctx),
+                agent=agent_provider(ctx, "implementer"),
                 model=stage_model(ctx, "advise", advise_model),
                 cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
                 timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
@@ -1353,7 +1346,7 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=issue,
-                agent=agent_provider(ctx),
+                agent=agent_provider(ctx, "implementer"),
                 model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_address_review_prompt,
                 cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -1365,11 +1358,7 @@ class ImplementationStage(Stage):
                 execution_request=ExecutionRequest(
                     AgentRole.IMPLEMENTER,
                     AgentOperation.ADDRESS_REVIEW,
-                    (
-                        SessionLifecycle.RESUME_REQUIRED
-                        if AGENT_IMPLEMENTER in item.session_bindings
-                        else SessionLifecycle.START_NEW
-                    ),
+                    agent_session_lifecycle(item, AGENT_IMPLEMENTER),
                 ),
                 resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
                 prompt_kwargs={
@@ -1409,7 +1398,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -1421,11 +1410,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1479,7 +1464,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=_worktree_path(item, ctx),
@@ -1490,11 +1475,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1604,7 +1585,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_test_fix_prompt,
             cwd=_worktree_path(item, ctx),
@@ -1652,7 +1633,7 @@ class ImplementationStage(Stage):
             )
             return Continue(next_state=TEST_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
-        agent = agent_provider(ctx)
+        agent = agent_provider(ctx, "implementer")
         kwargs: dict[str, object] = {
             "issue_number": issue,
             "worktree_path": item.worktree,

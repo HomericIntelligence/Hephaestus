@@ -19,7 +19,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import loop_runner
 from hephaestus.automation.loop_runner import (
     ALL_PHASES,
@@ -1004,25 +1003,25 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
         auth_status_timeout=10,
         pi_isolation_adapter=None,
         pi_dir=None,
-        model_references=("", "", "", ""),
+        model_references=("",),
     )
     assert config.agent == "codex"  # type: ignore[attr-defined]
 
 
-def test_main_rejects_unknown_codex_alias_before_scope_resolution(
+def test_main_reports_invalid_model_before_scope_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The loop rejects an unknown alias before repository discovery or dispatch."""
+    """The loop reports invalid input before repository discovery or dispatch."""
 
-    def reject_unknown_fallback(agent: str | None, **kwargs: object) -> str:
+    def reject_invalid_fallback(agent: str | None, **kwargs: object) -> str:
         assert agent == "codex"
-        assert kwargs["model_references"] == ("", "", "", "unknown")
-        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+        assert kwargs["model_references"] == ("", "unknown")
+        raise ValueError("Invalid model selection")
 
     monkeypatch.setattr(
         loop_runner,
         "resolve_agent",
-        reject_unknown_fallback,
+        reject_invalid_fallback,
     )
     resolve_scope = patch.object(loop_runner, "_resolve_org_and_repos")
     run_pipeline = patch("hephaestus.automation.pipeline.coordinator.run_pipeline")
@@ -1060,11 +1059,12 @@ def test_main_passes_inline_role_effort_before_pi_admission(
             monkeypatch,
         )
 
-    call = mock_resolve.call_args
-    references = call.kwargs["model_references"]
-    assert references[0] == "private/custom-model:default"
-    assert references[1] == "private/custom-model:high"
-    assert references[2] == "private/custom-model"
+    references = {call.kwargs["model_references"] for call in mock_resolve.call_args_list}
+    assert references == {
+        ("private/custom-model:default",),
+        ("private/custom-model:high",),
+        ("private/custom-model",),
+    }
 
 
 def test_main_errors_on_empty_repo_list() -> None:

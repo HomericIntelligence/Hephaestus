@@ -152,11 +152,11 @@ def test_run_agent_dispatches_claude_and_writes_outputs(
     assert Path(args.log_file).read_text(encoding="utf-8") == "claude output"
 
 
-def test_run_agent_normalizes_claude_model_alias(
+def test_run_agent_preserves_literal_claude_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Claude one-off stages should accept the same model aliases as env vars."""
+    """Claude one-off stages pass literal model names to the runtime."""
     seen: dict[str, object] = {}
 
     def fake_run_claude_text(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -170,7 +170,7 @@ def test_run_agent_normalizes_claude_model_alias(
     args.model = "mythos"
 
     assert agent_stage.run_agent(args) == 0
-    assert seen["model"] == "claude-mythos-5"
+    assert seen["model"] == "mythos"
 
 
 def test_run_agent_dispatches_codex_and_logs_session(
@@ -198,11 +198,11 @@ def test_run_agent_dispatches_codex_and_logs_session(
     )
 
 
-def test_main_normalizes_codex_alias_before_agent_execution(
+def test_main_preserves_literal_codex_model_before_agent_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A documented Codex alias reaches the provider as an exact model ID."""
+    """A short model name reaches the provider without translation."""
     seen: dict[str, object] = {}
 
     def fake_run_agent_session(*args: object, **kwargs: object) -> AgentRunResult:
@@ -234,27 +234,44 @@ def test_main_normalizes_codex_alias_before_agent_execution(
         == 0
     )
 
-    assert seen["model"] == "gpt-5.6-terra:high"
+    assert seen["model"] == "terra:high"
 
 
 @pytest.mark.parametrize(
     ("agent", "model"),
     [("codex", "terra-lite:high"), ("claude", "terra-lite:high")],
 )
-def test_main_rejects_unknown_fixed_provider_alias_before_agent_or_prompt_work(
+def test_main_accepts_literal_fixed_provider_models(
     tmp_path: Path,
     agent: str,
     model: str,
 ) -> None:
-    """An unknown fixed-provider alias fails before authentication or prompt work."""
+    """A literal model reference reaches the selected provider unchanged."""
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("stage prompt", encoding="utf-8")
 
     with (
-        patch.object(agent_stage, "resolve_agent") as resolve_agent,
-        patch.object(agent_stage, "read_prompt") as read_prompt,
-        patch.object(agent_stage, "run_agent_session") as run_agent_session,
-        pytest.raises(SystemExit) as error,
+        patch.object(agent_stage, "resolve_agent", return_value=agent),
+        patch.object(agent_stage, "read_prompt", return_value="stage prompt"),
+        patch.object(
+            agent_stage,
+            "run_claude_text",
+            return_value=subprocess.CompletedProcess(
+                ["claude"],
+                0,
+                stdout="output",
+                stderr="",
+            ),
+        ) as run_claude_text,
+        patch.object(
+            agent_stage,
+            "run_agent_session",
+            return_value=AgentRunResult(
+                stdout="output",
+                stderr="",
+                session_id=None,
+            ),
+        ) as run_agent_session,
     ):
         agent_stage.main(
             [
@@ -273,10 +290,12 @@ def test_main_rejects_unknown_fixed_provider_alias_before_agent_or_prompt_work(
             ]
         )
 
-    assert error.value.code == 2
-    resolve_agent.assert_not_called()
-    read_prompt.assert_not_called()
-    run_agent_session.assert_not_called()
+    invocation = run_claude_text if agent == "claude" else run_agent_session
+    assert invocation.call_args.kwargs["model"] == (
+        model.rsplit(":", 1)[0] if agent == "claude" else model
+    )
+    if agent != "claude":
+        assert invocation.call_args.kwargs["agent"] == agent
 
 
 def test_run_agent_dispatches_athena_skill_request(

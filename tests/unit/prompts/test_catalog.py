@@ -137,3 +137,14 @@ def test_harness_can_override_a_shared_prompt_fragment(tmp_path: Path) -> None:
     assert "HARNESS DIRECTIVE" in rendered
     assert "Output discipline (token budget)" not in rendered
     assert WRITING_STANDARD_SENTINEL in rendered
+
+
+def test_review_fix_prompt_inherits_model_selection() -> None:
+    """Difficulty labels must not select a different model."""
+    from hephaestus.automation.prompts.address_review import get_address_review_prompt
+
+    rendered = get_address_review_prompt(1, 2, "/work", "[]")
+    assert "same tool and\n   model as this implementation session" in rendered
+    assert "Model tier by difficulty" not in rendered
+    for name in ("haiku", "sonnet", "opus", "fable"):
+        assert f"`{name}`" not in rendered

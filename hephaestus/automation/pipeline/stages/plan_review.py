@@ -105,6 +105,7 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.prompts import PromptCatalog
 
+from ..coordinator_sessions import agent_session_lifecycle
 from ..plan_journal import publish_plan_revision, reconcile_plan_journal
 from ..work_item import LearningIntent
 from .base import (
@@ -302,6 +303,18 @@ def _restore_review_conversation(
                 item.issue,
             )
             reset = True
+        if active is not None and not reset:
+            selected_provider = agent_provider(ctx, "reviewer")
+            selected_model = stage_model(ctx, "reviewer", reviewer_model)
+            previous_model = _restore_reviewer_selection(
+                active.provider, active.reviewer_model, active.reviewer_config
+            )
+            if active.provider != selected_provider or parse_model_selection(
+                previous_model
+            ) != parse_model_selection(selected_model):
+                raise PlanReviewSessionLostError(
+                    "reviewer tool or model changed; reset the review session"
+                )
         if active is not None and active.canonical_cwd != str(Path(ctx.paths.worktree).resolve()):
             raise PlanReviewSessionLostError("reviewer checkout identity changed")
         if active is not None and active.plan_fingerprint != plan_fingerprint(plan_text):
@@ -314,7 +327,7 @@ def _restore_review_conversation(
                 plan_fingerprint=plan_fingerprint(plan_text),
             )
         if active is None or reset:
-            provider = agent_provider(ctx)
+            provider = agent_provider(ctx, "reviewer")
             selected_model = stage_model(ctx, "reviewer", reviewer_model)
             stored_model, selection_config = _durable_reviewer_selection(provider, selected_model)
             active = store.start_cycle(
@@ -768,7 +781,9 @@ class PlanReviewStage(Stage):
                 repo=item.repo,
                 issue=item.issue,
                 agent=(
-                    review_session.provider if review_session is not None else agent_provider(ctx)
+                    review_session.provider
+                    if review_session is not None
+                    else agent_provider(ctx, "reviewer")
                 ),
                 model=(
                     _restore_reviewer_selection(
@@ -793,6 +808,20 @@ class PlanReviewStage(Stage):
                 resume_binding=(
                     AgentSessionBinding.from_json(review_session.session_binding)
                     if review_session is not None and review_session.session_binding
+                    else None
+                ),
+                resume_selection=(
+                    (
+                        review_session.provider,
+                        str(
+                            _restore_reviewer_selection(
+                                review_session.provider,
+                                review_session.reviewer_model,
+                                review_session.reviewer_config,
+                            )
+                        ),
+                    )
+                    if review_session is not None
                     else None
                 ),
                 session_checkpoint=_review_session_checkpoint(ctx, cycle_id),
@@ -846,7 +875,7 @@ class PlanReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=agent_provider(ctx),
+                agent=agent_provider(ctx, "planner"),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_amend_prompt,
                 cwd=workspace.cwd if workspace else ctx.paths.worktree,
@@ -856,8 +885,16 @@ class PlanReviewStage(Stage):
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,
                 execution_request=ExecutionRequest(
-                    AgentRole.PLANNER, AgentOperation.AMEND, SessionLifecycle.RESUME_REQUIRED
+                    AgentRole.PLANNER,
+                    (
+                        AgentOperation.AMEND
+                        if AGENT_PLANNER in item.session_bindings
+                        or AGENT_PLANNER in item.session_ids
+                        else AgentOperation.PLAN
+                    ),
+                    agent_session_lifecycle(item, AGENT_PLANNER),
                 ),
+                resume_session_id=item.session_ids.get(AGENT_PLANNER),
                 resume_binding=item.session_bindings.get(AGENT_PLANNER),
                 # build_amend_prompt composes get_plan_prompt with the
                 # reviewer feedback block in-worker (doc: "resume planner
