@@ -114,7 +114,7 @@ def test_preparation_creates_complete_bound_delivery_request(tmp_path: Path) -> 
     class Validator:
         def validate(self, path: Path) -> tuple[str, ...]:
             assert path == worktree
-            return ("uv run --offline --frozen python scripts/validate_plugins.py",)
+            return ("/prepared/environment/bin/python scripts/validate_plugins.py",)
 
     service = MnemosyneLearningPreparationService(
         source_reader=Reader(),
@@ -131,7 +131,7 @@ def test_preparation_creates_complete_bound_delivery_request(tmp_path: Path) -> 
     assert request.allowed_paths[0].startswith("skills/")
     assert (worktree / request.allowed_paths[0]).is_file()
     assert request.validation_evidence == (
-        "uv run --offline --frozen python scripts/validate_plugins.py",
+        "/prepared/environment/bin/python scripts/validate_plugins.py",
     )
 
 
@@ -520,3 +520,67 @@ def test_unusable_validator_boundary_has_a_safe_category(
     assert str(error.value) == "learning validation boundary failed"
     assert len(calls) == 1
     assert calls[0][-1] == "/usr/bin/true"
+
+
+@pytest.mark.parametrize("failure", [None, "nonzero", "timeout", "launch", "artifact"])
+def test_prepared_interpreter_keeps_validation_failures_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+) -> None:
+    """Only successful execution and artifact verification return evidence."""
+    import platform
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from hephaestus.automation import mnemosyne_learning_preparation as preparation
+
+    verified = Mock()
+    if failure == "artifact":
+        verified.side_effect = [None, LearnDeliveryError("learning dependency artifact changed")]
+
+    @contextmanager
+    def prepared(_path: Path, _runner: object) -> Iterator[SimpleNamespace]:
+        yield SimpleNamespace(
+            root=tmp_path,
+            runtime=tmp_path,
+            environment=tmp_path / "environment",
+            uv=tmp_path / "uv",
+            verify=verified,
+        )
+
+    monkeypatch.setattr(preparation, "prepare_dependencies", prepared)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    real_is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: str(path) == "/usr/bin/sandbox-exec" or real_is_file(path)
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[-1] != "/usr/bin/true":
+            assert argv[3:] == [
+                str(tmp_path / "environment/bin/python"),
+                "scripts/validate_plugins.py",
+            ]
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired("secret", 120)
+            if failure == "launch":
+                raise OSError("secret")
+            if failure == "nonzero":
+                return subprocess.CompletedProcess(argv, 2, stderr="secret")
+        return subprocess.CompletedProcess(argv, 0)
+
+    validator = MnemosynePluginValidator(runner=runner)
+    if failure is None:
+        assert validator.validate(tmp_path) == (
+            f"{tmp_path / 'environment/bin/python'} scripts/validate_plugins.py",
+        )
+        assert verified.call_count == 2
+    else:
+        with pytest.raises(LearnDeliveryError) as error:
+            validator.validate(tmp_path)
+        assert "secret" not in str(error.value)
+        assert verified.call_count == (2 if failure == "artifact" else 1)
+    assert len(calls) == 2
