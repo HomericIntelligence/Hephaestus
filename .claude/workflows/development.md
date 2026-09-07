@@ -22,16 +22,9 @@ of project principles only to satisfy this writing standard.
 1. **Automated Checks**: Normal `$athena:pr-review` assesses PR check evidence; automation-loop stages do not modify CI/CD state.
 2. **PR Policy Gate**: The active `homeric-main-baseline` ruleset enforces cryptographically signed commits; the `pr-policy` CI gate enforces the `Closes #<issue-number>` body line, Conventional Commit subjects, and DCO trailers. See `AGENTS.md` §"Working with GitHub" for the canonical policy.
 3. **Loop-owned State**: `pr_review` may apply `state:implementation-go` only after structural audit facts, complete live GitHub thread facts, an exact reviewed open/unarmed head, and exclusive-label readback all agree. Audit prose, grades, and model decision text are informational.
-4. **Merge**: Do not manually enable auto-merge. `merge_wait` verifies the
-   current process's reviewed-head proof before each attempt. It may make a
-   bounded sequence (default: five) of SHA-conditional ordinary REST
-   squash-merge requests; every request requires fresh admission of the same
-   open `main` PR, absent native auto-merge request, exclusive loop-owned
-   state label, and reviewed head. Only retryable HTTP 405 readiness and
-   unresolved transport ambiguity can timer-park a later attempt. No queue
-   stage uses `gh pr merge`, creates, adopts, changes, or polls auto-merge, or
-   uses a merge-queue or administrator bypass. CI/CD and external review
-   artifacts are not loop authority.
+4. **Merge**: Do not manually enable auto-merge. `merge_wait` applies the canonical merge policy.
+   See [Working with GitHub](../../AGENTS.md#working-with-github) and
+   [ADR-0039](../../docs/adr/0039-policy-selected-server-merge-route.md).
 
 ## Testing Workflow
 
