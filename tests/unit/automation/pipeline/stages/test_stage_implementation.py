@@ -63,6 +63,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
 )
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
+from hephaestus.automation.review_journal import PlanDiscoveryResult
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_NEEDS_PLAN,
@@ -377,6 +378,44 @@ class TestGate:
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
         assert item.branch == "7-auto-impl"
+
+    def test_codex_gate_freezes_only_the_accepted_plan_scope(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """A plan amendment before GO replaces the proposed publication scope."""
+
+        class MutablePlanGitHub(FakeStageGitHub):
+            plan_text = "# Implementation Plan\n\n## Files to Modify\n\n- `src/old.py`\n"
+
+            def discover_plan(self, issue_number: int) -> Any:
+                return PlanDiscoveryResult.found(self.plan_text)
+
+        github = MutablePlanGitHub()
+        ctx = make_ctx(
+            github=github,
+            config_overrides={
+                "agent": "codex",
+                "codex_isolation_adapter": "production",
+                "codex_isolation_deployment_lock": tmp_path / "deployment-lock.json",
+                "codex_isolation_deployment_lock_sha256": "a" * 64,
+            },
+        )
+        item = make_work_item(issue=3019, state="GATE")
+
+        first = ImplementationStage().step(item, ctx)
+
+        assert first == StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+        assert "_implementation_file_claims" not in item.payload
+
+        github.plan_text = "# Implementation Plan\n\n## Files to Modify\n\n- `src/new.py`\n"
+        github.labels[3019] = {STATE_PLAN_GO}
+        second = ImplementationStage().step(item, ctx)
+
+        assert isinstance(second, Continue)
+        assert item.payload["_implementation_file_claims"] == {((ctx.org, item.repo), "src/new.py")}
 
     def test_gate_preserves_preallocated_direct_restart_branch(
         self, make_ctx: Any, make_work_item: Any
@@ -3185,6 +3224,59 @@ class TestImplementBudget:
         assert isinstance(result.job, AgentJob)
         assert result.job.resume_session_id == "implement-session-id"
 
+    def test_codex_implement_job_carries_only_explicit_isolation_selection(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A Codex implement job carries the trusted inputs for worker admission."""
+        lock = tmp_path / "deployment-lock.json"
+        ctx = make_ctx(
+            config_overrides={
+                "agent": "codex",
+                "codex_isolation_adapter": "production",
+                "codex_isolation_deployment_lock": lock,
+                "codex_isolation_deployment_lock_sha256": "a" * 64,
+            }
+        )
+        item = make_work_item(issue=3019, state="IMPLEMENT_WAIT")
+
+        result = ImplementationStage().step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.codex_isolation_adapter == "production"
+        assert result.job.codex_isolation_deployment_lock == lock
+        assert result.job.codex_isolation_deployment_lock_sha256 == "a" * 64
+        assert result.job.codex_isolation_request is None
+
+    def test_codex_gate_fails_before_worktree_when_adapter_inputs_are_absent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stock Codex implementation stops before it creates a worktree."""
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], has_plan=True)
+        ctx = make_ctx(config_overrides={"agent": "codex"}, github=github)
+        item = make_work_item(issue=3019, state="GATE")
+
+        result = ImplementationStage().step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "codex_adapter_not_selected")
+        assert not item.worktree
+
+    def test_non_codex_implement_job_has_no_codex_isolation_inputs(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A non-Codex implement job cannot receive Codex adapter authority."""
+        ctx = make_ctx(config_overrides={"agent": "claude"})
+        item = make_work_item(issue=3019, state="IMPLEMENT_WAIT")
+
+        result = ImplementationStage().step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.codex_isolation_adapter is None
+        assert result.job.codex_isolation_deployment_lock is None
+        assert result.job.codex_isolation_deployment_lock_sha256 is None
+        assert result.job.codex_isolation_request is None
+
     def test_implement_submission_clears_stale_results(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -4897,12 +4989,22 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
+        item.payload["_impl_source_revision"] = "a" * 40
+        item.payload["_implementation_file_claims"] = {
+            ((ctx.org, item.repo), "hephaestus/agents/runtime.py"),
+            ((ctx.org, item.repo), "tests/unit/agents/test_runtime.py"),
+        }
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["agent_model"] == "sol:medium"
+        assert result.job.kwargs["scope_history_base_sha"] == "a" * 40
+        assert result.job.kwargs["allowed_paths"] == (
+            "hephaestus/agents/runtime.py",
+            "tests/unit/agents/test_runtime.py",
+        )
 
     def test_commit_push_carries_the_sealed_implementation_base(
         self, make_ctx: Any, make_work_item: Any

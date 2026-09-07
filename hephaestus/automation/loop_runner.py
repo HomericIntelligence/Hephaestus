@@ -263,6 +263,9 @@ class LoopConfig:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    codex_isolation_adapter: str | None = None
+    codex_isolation_deployment_lock: Path | None = None
+    codex_isolation_deployment_lock_sha256: str | None = None
     issues: list[int] = field(default_factory=list)
     reset_plan_review_session: bool = False
     prs: list[int] = field(default_factory=list)
@@ -937,6 +940,9 @@ def _build_pipeline_config(
         auth_status_timeout=cfg.auth_status_timeout,
         pi_isolation_adapter=cfg.pi_isolation_adapter,
         pi_dir=cfg.pi_dir,
+        codex_isolation_adapter=cfg.codex_isolation_adapter,
+        codex_isolation_deployment_lock=cfg.codex_isolation_deployment_lock,
+        codex_isolation_deployment_lock_sha256=cfg.codex_isolation_deployment_lock_sha256,
         model=cfg.model,
         planner_model=cfg.planner_model,
         reviewer_model=cfg.reviewer_model,
@@ -1140,6 +1146,9 @@ def main(argv: list[str] | None = None) -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
+        codex_isolation_adapter=args.codex_isolation_adapter,
+        codex_isolation_deployment_lock=args.codex_isolation_deployment_lock,
+        codex_isolation_deployment_lock_sha256=args.codex_isolation_deployment_lock_sha256,
         issues=args.issues or [],
         reset_plan_review_session=args.reset_plan_review_session,
         prs=args.prs or [],

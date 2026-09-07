@@ -145,3 +145,41 @@ def test_correlation_id_is_explicit_validated_and_non_mutating() -> None:
     assert source == {"PATH": os.defpath}
     with pytest.raises(ValueError, match="non-empty token"):
         child_environments.with_correlation_id(source, "bad\0trace")
+
+
+def test_codex_implementation_environment_uses_only_receipt_git_values(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """The implementation child gets the exact receipt-owned Git environment."""
+    monkeypatch.setenv("GIT_DIR", "/poison/git")
+    worktree = tmp_path / "worktree"
+    fixed = {
+        "GIT_DIR": str(tmp_path / "git-dir"),
+        "GIT_WORK_TREE": str(worktree),
+        "GIT_INDEX_FILE": str(tmp_path / "index"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_ATTR_NOSYSTEM": "1",
+    }
+
+    environment = child_environments.build_codex_implementation_child_env(
+        codex_home=tmp_path / "private-codex",
+        fixed_git_environment=fixed,
+    )
+
+    assert environment["CODEX_HOME"] == str(tmp_path / "private-codex")
+    assert {name: environment[name] for name in fixed} == fixed
+
+
+def test_codex_implementation_environment_rejects_incomplete_git_receipt(
+    platform_env: dict[str, str], tmp_path: Path
+) -> None:
+    """The child environment rejects a partial Git authority set."""
+    with pytest.raises(ValueError, match="fixed Git environment"):
+        child_environments.build_codex_implementation_child_env(
+            codex_home=tmp_path / "private-codex",
+            fixed_git_environment={"GIT_DIR": str(tmp_path / "git-dir")},
+        )

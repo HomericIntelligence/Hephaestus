@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+import hashlib
 import inspect
 import json
 import logging
@@ -24,6 +25,14 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
+from hephaestus.agents.codex_isolation import (
+    CodexIsolationAdapterV1,
+    CodexIsolationError,
+    CodexIsolationRequestV1,
+    validate_adapter,
+    validate_prepared,
+    validate_result,
+)
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -95,6 +104,13 @@ CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
+CODEX_ATHENA_MARKETPLACE_SOURCE = "https://github.com/HomericIntelligence/Athena.git"
+CODEX_ATHENA_MARKETPLACE_REF = "5df1b2f9fd8037fe0655edb36a37e0189eaab8c9"
+CODEX_ATHENA_VERSION = "0.5.1"
+CODEX_ATHENA_ARTIFACT_SHA256 = "7fbfb710a8da2c36e276276c1ff2d33ee40fe8f2365348c06c40696a9dfe0af1"
+CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena" / "athena"
+CODEX_AUTH_MAX_BYTES = 1024 * 1024
+CODEX_ATHENA_MAX_BYTES = 32 * 1024 * 1024
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
@@ -554,6 +570,53 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Explicit Pi coding-agent configuration directory",
     )
+    parser.add_argument(
+        "--codex-isolation-adapter",
+        type=_codex_adapter_name,
+        default=None,
+        metavar="NAME",
+        help="Exact external Codex implementation-isolation entry point",
+    )
+    parser.add_argument(
+        "--codex-isolation-deployment-lock",
+        type=_absolute_cli_path,
+        default=None,
+        metavar="PATH",
+        help="Absolute detached Codex adapter deployment-lock path",
+    )
+    parser.add_argument(
+        "--codex-isolation-deployment-lock-sha256",
+        type=_lowercase_sha256,
+        default=None,
+        metavar="SHA256",
+        help="Expected SHA-256 digest for the detached deployment lock",
+    )
+
+
+def _codex_adapter_name(value: str) -> str:
+    """Parse one public entry-point name without command syntax."""
+    if (
+        not value
+        or any(character.isspace() for character in value)
+        or any(token in value for token in ("/", "\\", ":", ";"))
+    ):
+        raise argparse.ArgumentTypeError("Codex isolation adapter name is invalid")
+    return value
+
+
+def _absolute_cli_path(value: str) -> Path:
+    """Parse one lexical absolute path without file-system access."""
+    path = Path(value)
+    if not path.is_absolute() or "\x00" in value:
+        raise argparse.ArgumentTypeError("Codex deployment-lock path must be absolute")
+    return path
+
+
+def _lowercase_sha256(value: str) -> str:
+    """Parse one lowercase SHA-256 value."""
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise argparse.ArgumentTypeError("Codex deployment-lock digest must be lowercase SHA-256")
+    return value
 
 
 def _positive_timeout(value: str) -> int:
@@ -918,6 +981,11 @@ def resolve_agent(
 def is_codex(agent: str) -> bool:
     """Return True when the selected provider is Codex."""
     return agent == "codex"
+
+
+def requires_codex_implementation_isolation(agent: str) -> bool:
+    """Return true when implementation must use the Codex isolation contract."""
+    return is_codex(agent)
 
 
 def is_pi(agent: str) -> bool:
@@ -2076,6 +2144,524 @@ def run_codex_session(
     )
 
 
+def run_codex_implementation_session(
+    *,
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    auth_source: Path | None = None,
+) -> AgentRunResult:
+    """Run one Codex implementation through an admitted isolation adapter."""
+    validate_adapter(adapter)
+    try:
+        prepared = adapter.prepare(request)
+    except CodexIsolationError:
+        raise
+    except BaseException:
+        raise CodexIsolationError("codex_adapter_launch_failed") from None
+    invoke_started = False
+    auth_path: Path | None = None
+    auth_bridge: tuple[int, int, tuple[int, int, int, int, int, int]] | None = None
+    authentication = ""
+    try:
+        validate_prepared(request, prepared)
+        _check_codex_preparation_deadline(request, prepared)
+        _verify_codex_implementation_executable(request)
+        profile = _populate_codex_implementation_profile(request)
+        source = auth_source or Path(_codex_child_env()["CODEX_HOME"]) / "auth.json"
+        auth_path = profile / "auth.json"
+        try:
+            authentication = _read_codex_authentication(source)
+            auth_bridge = _create_codex_authentication_bridge(
+                auth_path,
+                authentication,
+            )
+        except CodexIsolationError:
+            raise
+        except BaseException:
+            raise CodexIsolationError("codex_adapter_initialization_failed") from None
+        _check_codex_preparation_deadline(request, prepared)
+        _verify_codex_implementation_executable(request)
+        invoke_started = True
+        try:
+            result = adapter.invoke(prepared, str(auth_path))
+        except CodexIsolationError:
+            raise
+        except BaseException:
+            raise CodexIsolationError("codex_adapter_launch_failed") from None
+        validate_result(request, prepared, result)
+        _validate_codex_authentication_output(result.output, authentication)
+        _verify_codex_implementation_executable(request)
+        return AgentRunResult(
+            stdout=result.output,
+            stderr="",
+            session_id=request.session,
+        )
+    finally:
+        _finish_codex_implementation_session(
+            adapter=adapter,
+            prepared=prepared,
+            invoke_started=invoke_started,
+            auth_path=auth_path,
+            auth_bridge=auth_bridge,
+        )
+
+
+def _finish_codex_implementation_session(
+    *,
+    adapter: CodexIsolationAdapterV1,
+    prepared: object,
+    invoke_started: bool,
+    auth_path: Path | None,
+    auth_bridge: tuple[int, int, tuple[int, int, int, int, int, int]] | None,
+) -> None:
+    """Remove authentication and destroy one guest that did not start."""
+    cleanup_failure: BaseException | None = None
+    if auth_path is not None and auth_bridge is not None:
+        try:
+            _remove_codex_authentication(auth_path, *auth_bridge)
+        except BaseException as exc:
+            cleanup_failure = exc
+    destroy_failure: BaseException | None = None
+    if not invoke_started:
+        try:
+            _destroy_codex_prepared(adapter, prepared)
+        except BaseException as exc:
+            destroy_failure = exc
+    if cleanup_failure is not None:
+        raise cleanup_failure
+    if destroy_failure is not None:
+        raise destroy_failure
+
+
+def _check_codex_preparation_deadline(request: CodexIsolationRequestV1, prepared: Any) -> None:
+    """Fail if the host cannot start invocation before the bound deadline."""
+    if time.monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
+        raise CodexIsolationError("codex_adapter_timeout")
+
+
+def _destroy_codex_prepared(adapter: CodexIsolationAdapterV1, prepared: Any) -> None:
+    """Destroy one prepared guest when the host does not invoke it."""
+    destroy = getattr(adapter, "destroy", None)
+    if not callable(destroy):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    try:
+        destroy(prepared)
+    except BaseException:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+
+
+def _verify_codex_implementation_executable(request: CodexIsolationRequestV1) -> None:
+    """Verify the staged executable identity and digest at the host boundary."""
+    path = Path(request.executable_path)
+    try:
+        initial = _codex_file_fingerprint(path.lstat())
+        _mode, payload = _read_codex_regular_file(
+            path,
+            max_bytes=request.executable_file_identity[4],
+        )
+        final = _codex_file_fingerprint(path.lstat())
+    except (CodexIsolationError, OSError, IndexError, TypeError):
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    if (
+        initial != request.executable_file_identity
+        or final != request.executable_file_identity
+        or hashlib.sha256(payload).hexdigest() != request.executable_digest
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+
+
+def _populate_codex_implementation_profile(request: CodexIsolationRequestV1) -> Path:
+    """Create the private profile after the adapter prepares its guest."""
+    source_home = Path(_codex_child_env()["CODEX_HOME"])
+    source = source_home / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+    files = _codex_athena_snapshot(source)
+    source_digest = _codex_athena_snapshot_digest(files)
+    if source_digest != CODEX_ATHENA_ARTIFACT_SHA256:
+        raise CodexIsolationError("codex_adapter_initialization_failed")
+    metadata = {relative.as_posix(): payload for relative, _mode, payload in files}
+    try:
+        install = json.loads(metadata[".codex-marketplace-install.json"])
+        package = json.loads(metadata["package.json"])
+    except (KeyError, UnicodeError, json.JSONDecodeError):
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    if (
+        type(install) is not dict
+        or type(package) is not dict
+        or install.get("source") != CODEX_ATHENA_MARKETPLACE_SOURCE
+        or install.get("revision") != CODEX_ATHENA_MARKETPLACE_REF
+        or package.get("version") != CODEX_ATHENA_VERSION
+    ):
+        raise CodexIsolationError("codex_adapter_initialization_failed")
+
+    profile = Path(request.private_profile_path)
+    try:
+        profile.mkdir(mode=0o700)
+        profile.chmod(0o700)
+        destination = profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+        destination.mkdir(parents=True, mode=0o700)
+        for relative, mode, payload in files:
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _write_codex_profile_file(target, payload, mode)
+        expected_copy = tuple(
+            (relative, 0o700 if mode & 0o100 else 0o600, payload)
+            for relative, mode, payload in files
+        )
+        if _codex_athena_snapshot(destination) != expected_copy:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        write_secure(profile / "config.toml", _codex_implementation_config(destination))
+        for path in (
+            profile / "tmp",
+            profile / "xdg" / "config",
+            profile / "xdg" / "cache",
+            profile / "xdg" / "data",
+        ):
+            path.mkdir(parents=True, mode=0o700)
+        _fsync_codex_directory(profile)
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    return profile
+
+
+def _codex_file_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    """Return the fields that bind one regular-file snapshot."""
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _read_codex_regular_file(path: Path, *, max_bytes: int) -> tuple[int, bytes]:
+    """Read one owned regular file and reject path replacement."""
+    descriptor = -1
+    try:
+        initial = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or opened.st_size > max_bytes
+            or _codex_file_fingerprint(initial) != _codex_file_fingerprint(opened)
+        ):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := os.read(descriptor, min(1024 * 1024, max_bytes + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > max_bytes:
+                raise CodexIsolationError("codex_adapter_initialization_failed")
+        final = os.fstat(descriptor)
+        path_final = path.lstat()
+        if _codex_file_fingerprint(final) != _codex_file_fingerprint(
+            opened
+        ) or _codex_file_fingerprint(path_final) != _codex_file_fingerprint(opened):
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        return stat.S_IMODE(opened.st_mode), b"".join(chunks)
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _codex_athena_snapshot(root: Path) -> tuple[tuple[Path, int, bytes], ...]:
+    """Return a bounded immutable snapshot of the admitted Athena package."""
+    try:
+        root_status = root.lstat()
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or root_status.st_uid != os.geteuid()
+        or stat.S_IMODE(root_status.st_mode) & 0o022
+    ):
+        raise CodexIsolationError("codex_adapter_initialization_failed")
+    files: list[tuple[Path, int, bytes]] = []
+    total = 0
+    try:
+        paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+        for path in paths:
+            relative = path.relative_to(root)
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                raise CodexIsolationError("codex_adapter_initialization_failed")
+            if ".git" in relative.parts or "__pycache__" in relative.parts:
+                continue
+            if path.suffix in {".pyc", ".pyo"}:
+                continue
+            if stat.S_ISDIR(status.st_mode):
+                if status.st_uid != os.geteuid() or stat.S_IMODE(status.st_mode) & 0o022:
+                    raise CodexIsolationError("codex_adapter_initialization_failed")
+                continue
+            mode, payload = _read_codex_regular_file(
+                path,
+                max_bytes=CODEX_ATHENA_MAX_BYTES - total,
+            )
+            total += len(payload)
+            files.append((relative, mode, payload))
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    return tuple(files)
+
+
+def _codex_athena_snapshot_digest(files: tuple[tuple[Path, int, bytes], ...]) -> str:
+    """Return the digest of one ordered Athena package snapshot."""
+    digest = hashlib.sha256()
+    for relative, mode, payload in files:
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(str(mode).encode())
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _codex_athena_artifact_digest(root: Path) -> str:
+    """Return the digest of one validated Athena package tree."""
+    return _codex_athena_snapshot_digest(_codex_athena_snapshot(root))
+
+
+def _write_codex_profile_file(path: Path, payload: bytes, source_mode: int) -> None:
+    """Write one private profile file without path replacement."""
+    descriptor = -1
+    mode = 0o700 if source_mode & 0o100 else 0o600
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            mode,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    except OSError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _codex_implementation_config(athena_path: Path) -> str:
+    """Return the private profile configuration for the one admitted plugin."""
+    return "\n".join(
+        (
+            "[marketplaces.athena]",
+            'source_type = "git"',
+            f"source = {json.dumps(CODEX_ATHENA_MARKETPLACE_SOURCE)}",
+            f"ref = {json.dumps(CODEX_ATHENA_MARKETPLACE_REF)}",
+            "",
+            '[plugins."athena@athena"]',
+            "enabled = true",
+            "",
+            'default_permissions = "hephaestus-automation"',
+            "",
+            "[permissions.hephaestus-automation]",
+            'extends = ":workspace"',
+            "",
+            "[permissions.hephaestus-automation.filesystem]",
+            '":minimal" = "read"',
+            f'{json.dumps(str(athena_path))} = "read"',
+            "",
+            "[permissions.hephaestus-automation.network]",
+            "enabled = false",
+            "",
+        )
+    )
+
+
+def _fsync_codex_directory(path: Path) -> None:
+    """Make one private-profile directory update durable."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_codex_authentication(source: Path) -> str:
+    """Read one trusted authentication file through a held descriptor."""
+    try:
+        _mode, payload = _read_codex_regular_file(source, max_bytes=CODEX_AUTH_MAX_BYTES)
+        document = json.loads(payload)
+        if type(document) is not dict:
+            raise CodexIsolationError("codex_adapter_initialization_failed")
+        return payload.decode("utf-8")
+    except CodexIsolationError:
+        raise
+    except (UnicodeError, json.JSONDecodeError):
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+
+
+def _validate_codex_authentication_output(output: str, authentication: str) -> None:
+    """Reject output that contains a value from authentication state."""
+    try:
+        document = json.loads(authentication)
+    except json.JSONDecodeError:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+
+    values: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            if value:
+                values.append(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested)
+
+    collect(document)
+    if any(value in output for value in values):
+        raise CodexIsolationError("codex_adapter_result_invalid")
+
+
+def _create_codex_authentication_bridge(
+    auth_path: Path,
+    payload: str,
+) -> tuple[int, int, tuple[int, int, int, int, int, int]]:
+    """Create authentication with held file and parent descriptors."""
+    parent_descriptor = -1
+    auth_descriptor = -1
+    try:
+        parent_descriptor = os.open(
+            auth_path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        auth_descriptor = os.open(
+            auth_path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        data = payload.encode("utf-8")
+        offset = 0
+        while offset < len(data):
+            offset += os.write(auth_descriptor, data[offset:])
+        os.fchmod(auth_descriptor, 0o600)
+        os.fsync(auth_descriptor)
+        identity = _codex_file_fingerprint(os.fstat(auth_descriptor))
+        path_identity = _codex_file_fingerprint(
+            os.stat(auth_path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        )
+        if path_identity != identity:
+            raise OSError("authentication path identity changed")
+        os.fsync(parent_descriptor)
+        return auth_descriptor, parent_descriptor, identity
+    except BaseException:
+        if not _remove_partial_codex_authentication(
+            auth_path,
+            auth_descriptor,
+            parent_descriptor,
+        ):
+            raise CodexIsolationError("codex_adapter_result_invalid") from None
+        raise
+
+
+def _remove_partial_codex_authentication(
+    auth_path: Path,
+    auth_descriptor: int,
+    parent_descriptor: int,
+) -> bool:
+    """Remove a partially created bridge and return true only with absence proof."""
+    failed = False
+    if auth_descriptor >= 0:
+        try:
+            os.close(auth_descriptor)
+        except BaseException:
+            failed = True
+    if parent_descriptor < 0:
+        return not failed
+    try:
+        os.unlink(auth_path.name, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        pass
+    except BaseException:
+        failed = True
+    try:
+        os.fsync(parent_descriptor)
+    except BaseException:
+        failed = True
+    try:
+        os.stat(auth_path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    except BaseException:
+        failed = True
+    else:
+        failed = True
+    try:
+        os.close(parent_descriptor)
+    except BaseException:
+        failed = True
+    return not failed
+
+
+def _remove_codex_authentication(
+    auth_path: Path,
+    auth_descriptor: int,
+    parent_descriptor: int,
+    expected_identity: tuple[int, int, int, int, int, int],
+) -> None:
+    """Close, remove, flush, and prove absence of the authentication bridge."""
+    failed = False
+    try:
+        try:
+            os.close(auth_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            current = os.stat(
+                auth_path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if _codex_file_fingerprint(current) != expected_identity:
+                failed = True
+        except BaseException:
+            failed = True
+        try:
+            os.unlink(auth_path.name, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+        except BaseException:
+            failed = True
+        try:
+            os.stat(auth_path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            failed = True
+        else:
+            failed = True
+    finally:
+        try:
+            os.close(parent_descriptor)
+        except BaseException:
+            failed = True
+    if failed:
+        raise CodexIsolationError("codex_adapter_result_invalid") from None
+
+
 def resume_codex_session(
     session_id: str,
     prompt: str,
@@ -3069,6 +3655,26 @@ def _redact_pi_exception_output(
     return None
 
 
+def _is_codex_implementation_request(request: ExecutionRequest | None) -> bool:
+    """Return true for one Codex implementation execution request."""
+    return request is not None and request.role is AgentRole.IMPLEMENTER
+
+
+def _codex_implementation_inputs(
+    execution_request: ExecutionRequest | None,
+    adapter: CodexIsolationAdapterV1 | None,
+    request: CodexIsolationRequestV1 | None,
+) -> tuple[CodexIsolationAdapterV1, CodexIsolationRequestV1] | None:
+    """Return complete isolation inputs or fail before host state is read."""
+    if not _is_codex_implementation_request(execution_request):
+        return None
+    if adapter is None:
+        raise CodexIsolationError("codex_adapter_not_selected")
+    if request is None:
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    return adapter, request
+
+
 def run_agent_text(
     agent: str,
     prompt: str,
@@ -3099,6 +3705,8 @@ def run_agent_text(
         pi_thinking = pi_selection.reasoning_effort
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
+        if _is_codex_implementation_request(execution_request):
+            raise CodexIsolationError("codex_adapter_not_selected")
         return run_codex_text(
             prompt,
             cwd=cwd,
@@ -3150,6 +3758,8 @@ def run_agent_session(
     resume_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
     pi_dir: Path | None = None,
+    codex_isolation_adapter: CodexIsolationAdapterV1 | None = None,
+    codex_isolation_request: CodexIsolationRequestV1 | None = None,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     pi_thinking = ""
@@ -3176,6 +3786,16 @@ def run_agent_session(
             )
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
+        isolation = _codex_implementation_inputs(
+            execution_request,
+            codex_isolation_adapter,
+            codex_isolation_request,
+        )
+        if isolation is not None:
+            return run_codex_implementation_session(
+                adapter=isolation[0],
+                request=isolation[1],
+            )
         return run_codex_session(
             prompt,
             cwd=cwd,
@@ -3249,6 +3869,8 @@ def resume_agent_session(
     resume_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
     pi_dir: Path | None = None,
+    codex_isolation_adapter: CodexIsolationAdapterV1 | None = None,
+    codex_isolation_request: CodexIsolationRequestV1 | None = None,
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     pi_thinking = ""
@@ -3274,6 +3896,16 @@ def resume_agent_session(
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
+        isolation = _codex_implementation_inputs(
+            execution_request,
+            codex_isolation_adapter,
+            codex_isolation_request,
+        )
+        if isolation is not None:
+            return run_codex_implementation_session(
+                adapter=isolation[0],
+                request=isolation[1],
+            )
         return resume_codex_session(
             session_id,
             prompt,

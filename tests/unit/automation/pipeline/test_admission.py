@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.admission import (
     _parse_planned_files,
     _select_non_overlapping,
     order_for_implementation,
+    parse_publication_scope_files,
 )
 from hephaestus.automation.review_journal import render_current_plan
 
@@ -74,6 +75,12 @@ class TestParsePlannedFiles:
         """Bare filenames without directory (e.g., `pyproject.toml`) are NOT captured."""
         body = "# Implementation Plan\n\n## Files to Modify\n\n- `pyproject.toml`\n"
         assert _parse_planned_files(body) == set()
+
+    def test_publication_scope_captures_top_level_files(self) -> None:
+        """The publication allowlist includes top-level planned files."""
+        body = "## Files to Modify\n\n- `pyproject.toml`\n- `uv.lock`\n"
+
+        assert parse_publication_scope_files(body) == {"pyproject.toml", "uv.lock"}
 
     def test_parse_planned_files_case_insensitive_heading(self) -> None:
         """## Files to Modify/Create headings are case-insensitive."""

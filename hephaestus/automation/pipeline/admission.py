@@ -62,6 +62,7 @@ LOG = logging.getLogger(__name__)
 # are intentionally NOT captured — overlap goes undetected and both plans dispatch
 # concurrently, falling back to pre-#1623 behavior (acceptable tradeoff for regex tightness).
 _PLAN_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)`")
+_PLAN_TOP_LEVEL_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9_]+)`")
 _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IGNORECASE)
 
 # A source path only conflicts with work in the same repository.  The
@@ -97,6 +98,27 @@ def _parse_planned_files(plan_body: str) -> set[str]:
             in_section = False
         if in_section:
             files.update(_PLAN_FILE_RE.findall(line))
+    return files
+
+
+def parse_publication_scope_files(plan_body: str) -> set[str]:
+    """Return every repo-relative file in the plan's exact file sections.
+
+    Publication also controls top-level files. The overlap scheduler keeps its
+    older slash-only parser because bare dotted tokens can cause false overlap,
+    but a publication guard must prefer a closed false negative over that
+    scheduling tradeoff.
+    """
+    files = _parse_planned_files(plan_body)
+    in_section = False
+    for line in plan_body.splitlines():
+        if _PLAN_FILE_SECTION_RE.match(line):
+            in_section = True
+            continue
+        if line.startswith("## "):
+            in_section = False
+        if in_section:
+            files.update(_PLAN_TOP_LEVEL_FILE_RE.findall(line))
     return files
 
 

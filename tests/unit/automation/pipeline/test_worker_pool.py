@@ -24,6 +24,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
+from hephaestus.agents.codex_isolation import CodexGitReceiptV1, StagedLinuxExecutable
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -39,6 +40,7 @@ from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.codex_worktree_boundary import CodexWorktreeBoundaryError
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -376,6 +378,251 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     }
     defaults.update(overrides)
     return AgentJob(**defaults)  # type: ignore[arg-type]
+
+
+def test_codex_boundary_failure_blocks_commit_and_push(pool: WorkerPool, tmp_path: Path) -> None:
+    """A failed Codex Git boundary stops all agent and publication actions."""
+    prompt_builder = MagicMock(return_value="private implementation prompt")
+    request = ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        prompt_builder=prompt_builder,
+        execution_request=request,
+        codex_isolation_adapter="production",
+        codex_isolation_deployment_lock=tmp_path / "deployment-lock.json",
+        codex_isolation_deployment_lock_sha256="a" * 64,
+    )
+
+    with (
+        patch(
+            "hephaestus.automation.codex_adapter_admission.admit_codex_adapter",
+            return_value=MagicMock(),
+        ) as admit,
+        patch(
+            "hephaestus.automation.pipeline.codex_worktree_boundary."
+            "capture_codex_worktree_boundary",
+            side_effect=CodexWorktreeBoundaryError("Git receipt failed"),
+        ) as capture,
+        patch(f"{_WP}.resolve_agent") as resolve,
+        patch("hephaestus.agents.runtime.run_codex_implementation_session") as invoke,
+        patch(f"{_WP}.git_utils.commit_if_changes") as commit,
+        patch(f"{_WP}.git_utils.push_branch") as push,
+    ):
+        result = pool._run_agent(job)
+
+    assert result.ok is False
+    admit.assert_not_called()
+    capture.assert_called_once_with(tmp_path.resolve())
+    resolve.assert_not_called()
+    prompt_builder.assert_not_called()
+    invoke.assert_not_called()
+    commit.assert_not_called()
+    push.assert_not_called()
+
+
+def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_path: Path) -> None:
+    """The publication sink rejects an unplanned path in committed history."""
+    base_sha = "a" * 40
+    job = GitJob(
+        repo="test/repo",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 2472,
+            "worktree_path": tmp_path,
+            "branch": "2472-auto-impl",
+            "agent": "codex",
+            "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+            "scope_history_base_sha": base_sha,
+        },
+    )
+    git_outputs = (
+        "",
+        "",
+        "",
+        "scripts/run_ci_local.sh\0",
+    )
+
+    with (
+        patch(
+            f"{_WP}.git_utils.run",
+            side_effect=(
+                subprocess.CompletedProcess([], 0, stdout=output) for output in git_outputs
+            ),
+        ) as git_run,
+        patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
+        patch(f"{_WP}.git_utils.push_branch") as push,
+    ):
+        result = pool._git_commit_push(job)
+
+    assert result.ok is False
+    assert result.error == "implementation changed paths outside approved scope"
+    assert git_run.call_args_list[-1].args[0] == [
+        "git",
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        f"{base_sha}..HEAD",
+    ]
+    commit.assert_not_called()
+    push.assert_not_called()
+
+
+@pytest.mark.parametrize("replace_staged_after_return", [False, True])
+def test_codex_implementation_builds_one_frozen_admitted_request(
+    pool: WorkerPool, tmp_path: Path, replace_staged_after_return: bool
+) -> None:
+    """The worker binds all host inputs before it invokes the admitted adapter."""
+    worktree = tmp_path.resolve()
+    git_dir = worktree / ".git-control"
+    common_dir = worktree / ".git-common"
+    index = git_dir / "index"
+    repository_config = common_dir / "config"
+    worktree_config = git_dir / "config.worktree"
+    fixed_environment = tuple(
+        sorted(
+            {
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_DIR": str(git_dir),
+                "GIT_INDEX_FILE": str(index),
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_WORK_TREE": str(worktree),
+            }.items()
+        )
+    )
+    receipt = CodexGitReceiptV1(
+        schema_version=1,
+        canonical_worktree=str(worktree),
+        git_dir=str(git_dir),
+        common_dir=str(common_dir),
+        index=str(index),
+        repository_config=str(repository_config),
+        worktree_config=str(worktree_config),
+        fixed_environment=fixed_environment,
+        protected_paths=(str(worktree / ".git"),),
+        read_only_paths=(str(git_dir), str(common_dir)),
+        read_write_paths=(str(worktree),),
+        identities=(),
+        digests=(),
+    )
+    boundary = MagicMock(receipt=receipt)
+    boundary.__enter__.return_value = boundary
+    staged_path = tmp_path / "staged-codex"
+    staged_bytes = b"\x7fELF\x02\x01" + b"\0" * 12 + b"\xb7\0" + b"\0" * 44
+    staged_path.write_bytes(staged_bytes)
+    staged_path.chmod(0o500)
+    staged_status = staged_path.stat()
+    staged_digest = hashlib.sha256(staged_bytes).hexdigest()
+    lock = MagicMock(
+        adapter_api_version=1,
+        adapter_version="1.0",
+        entry_point_name="production",
+        extracted_elf_path=str(tmp_path / "locked-codex"),
+        extracted_elf_sha256=staged_digest,
+        wheel_sha256="c" * 64,
+        installed_tree_sha256="d" * 64,
+        codex_target="aarch64-unknown-linux-musl",
+        codex_release_tag="rust-v0.153.4",
+        codex_archive_asset="codex-aarch64-unknown-linux-musl.zst",
+        guest_image_sha256="e" * 64,
+    )
+    adapter = MagicMock(
+        adapter_distribution="adapter-dist",
+        adapter_version="1.0",
+        installed_tree_sha256="d" * 64,
+    )
+    factory = MagicMock(return_value=adapter)
+    factory.codex_isolation_api_version = 1
+    admission = MagicMock(
+        lock=lock,
+        deployment_lock_sha256="a" * 64,
+        factory=factory,
+    )
+    staged = StagedLinuxExecutable(
+        path=staged_path,
+        digest=staged_digest,
+        file_identity=(
+            staged_status.st_dev,
+            staged_status.st_ino,
+            staged_status.st_mode,
+            staged_status.st_uid,
+            staged_status.st_size,
+            staged_status.st_mtime_ns,
+        ),
+    )
+    request = ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
+    job = _agent_job(
+        agent="codex",
+        cwd=tmp_path,
+        model="gpt-5.6-sol:high",
+        session_key="implementation:123",
+        execution_request=request,
+        codex_isolation_adapter="production",
+        codex_isolation_deployment_lock=tmp_path / "deployment-lock.json",
+        codex_isolation_deployment_lock_sha256="a" * 64,
+    )
+
+    def invoke_adapter(**_kwargs: object) -> AgentRunResult:
+        if replace_staged_after_return:
+            staged_path.unlink()
+            staged_path.write_bytes(staged_bytes)
+            staged_path.chmod(0o500)
+        return AgentRunResult(
+            stdout="complete",
+            stderr="",
+            session_id="implementation:123",
+        )
+
+    with (
+        patch(
+            "hephaestus.automation.pipeline.codex_worktree_boundary."
+            "capture_codex_worktree_boundary",
+            return_value=boundary,
+        ),
+        patch(
+            "hephaestus.automation.codex_adapter_admission.admit_codex_adapter",
+            return_value=admission,
+        ),
+        patch(f"{_WP}.stage_linux_executable", return_value=staged),
+        patch(
+            "hephaestus.agents.runtime.run_codex_implementation_session",
+            side_effect=invoke_adapter,
+        ) as invoke,
+        patch(f"{_WP}.resolve_agent") as resolve,
+    ):
+        result = pool._run_agent(job)
+
+    assert result.ok is not replace_staged_after_return
+    resolve.assert_not_called()
+    boundary.verify_before_launch.assert_called_once_with()
+    boundary.verify_after_return.assert_called_once_with()
+    frozen = invoke.call_args.kwargs["request"]
+    assert frozen.command[0] == str(staged.path)
+    assert frozen.command[-2:] == ("--json", "-")
+    assert frozen.executable_digest == staged.digest
+    assert frozen.git_receipt is receipt
+    assert frozen.policy.command_network == "deny"
+    assert frozen.policy.protected_overlay_mounts == receipt.protected_paths
+    assert frozen.session == "implementation:123"
+    admission.validate_adapter_identity.assert_called_once_with(
+        distribution="adapter-dist",
+        version="1.0",
+        installed_tree_sha256="d" * 64,
+    )
+    if replace_staged_after_return:
+        assert result.error == "codex_adapter_request_mismatch"
 
 
 def test_shutdown_can_reap_without_marking_interrupted(

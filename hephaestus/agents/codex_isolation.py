@@ -1,0 +1,842 @@
+"""Define the fail-closed Codex isolation-adapter protocol."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import re
+import stat
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, fields, is_dataclass
+from importlib import metadata
+from itertools import pairwise
+from pathlib import Path
+from typing import Never, Protocol, cast
+
+CODEX_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.codex_isolation_adapters"
+CODEX_ISOLATION_API_VERSION = 1
+CODEX_RELEASE = "rust-v0.153.4"
+CODEX_VERSION_OUTPUT = "codex-cli 0.153.4"
+CODEX_LINUX_TARGET = "aarch64-unknown-linux-musl"
+CODEX_LINUX_ASSET = "codex-aarch64-unknown-linux-musl.zst"
+
+STABLE_ERROR_CODES = frozenset(
+    {
+        "codex_adapter_not_selected",
+        "codex_adapter_not_installed",
+        "codex_adapter_ambiguous",
+        "codex_adapter_initialization_failed",
+        "codex_adapter_protocol_mismatch",
+        "codex_adapter_request_mismatch",
+        "codex_adapter_launch_failed",
+        "codex_adapter_timeout",
+        "codex_adapter_pipe_cleanup_failed",
+        "codex_adapter_inventory_uncertain",
+        "codex_adapter_descendants_remain",
+        "codex_adapter_result_invalid",
+    }
+)
+
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
+_ENTRY_POINT_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?\Z")
+_FILE_IDENTITY_LENGTH = 6
+FileIdentity = tuple[int, int, int, int, int, int]
+StringPairs = tuple[tuple[str, str], ...]
+NamedFileIdentities = tuple[tuple[str, FileIdentity], ...]
+
+
+class CodexIsolationError(RuntimeError):
+    """Report one stable, non-transient isolation failure."""
+
+    def __init__(self, code: str) -> None:
+        """Initialize the error with one stable code."""
+        if code not in STABLE_ERROR_CODES:
+            raise ValueError("The Codex isolation error code is not valid")
+        self.code = code
+        self.transient = False
+        super().__init__(code)
+
+
+def _fail(code: str) -> Never:
+    raise CodexIsolationError(code)
+
+
+def _is_exact_int(value: object) -> bool:
+    return type(value) is int
+
+
+def _is_number(value: object) -> bool:
+    if type(value) is int:
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    return False
+
+
+def _require_schema_version(value: object) -> None:
+    if not _is_exact_int(value) or value != 1:
+        raise TypeError("schema_version must be integer 1")
+
+
+def _require_string(value: object, field_name: str, *, allow_empty: bool = False) -> None:
+    if type(value) is not str or (not allow_empty and not value):
+        raise TypeError(f"{field_name} must be a string")
+
+
+def _require_digest(value: object, field_name: str) -> None:
+    if type(value) is not str or _DIGEST_RE.fullmatch(value) is None:
+        raise TypeError(f"{field_name} must be a lowercase SHA-256 digest")
+
+
+def _require_nonce(value: object, field_name: str) -> None:
+    _require_digest(value, field_name)
+
+
+def _require_absolute_path(value: object, field_name: str) -> None:
+    _require_string(value, field_name)
+    path = cast(str, value)
+    if not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise ValueError(f"{field_name} must be a canonical absolute path")
+
+
+def _require_string_tuple(value: object, field_name: str) -> None:
+    if type(value) is not tuple or any(type(item) is not str or not item for item in value):
+        raise TypeError(f"{field_name} must be a tuple of strings")
+
+
+def _require_path_tuple(value: object, field_name: str) -> None:
+    _require_string_tuple(value, field_name)
+    for item in cast(tuple[str, ...], value):
+        _require_absolute_path(item, field_name)
+
+
+def _require_file_identity(value: object, field_name: str) -> None:
+    if (
+        type(value) is not tuple
+        or len(value) != _FILE_IDENTITY_LENGTH
+        or any(not _is_exact_int(item) or item < 0 for item in value)
+    ):
+        raise TypeError(f"{field_name} must be an immutable file identity")
+
+
+def _require_string_pairs(value: object, field_name: str, *, digests: bool = False) -> None:
+    if type(value) is not tuple:
+        raise TypeError(f"{field_name} must be an immutable tuple")
+    pairs = cast(tuple[object, ...], value)
+    keys: list[str] = []
+    for pair in pairs:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise TypeError(f"{field_name} must contain pairs")
+        key, item = pair
+        _require_string(key, field_name)
+        if digests:
+            _require_digest(item, field_name)
+        else:
+            _require_string(item, field_name, allow_empty=True)
+        keys.append(cast(str, key))
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise ValueError(f"{field_name} must have sorted unique keys")
+
+
+def _require_named_identities(value: object, field_name: str) -> None:
+    if type(value) is not tuple:
+        raise TypeError(f"{field_name} must be an immutable tuple")
+    keys: list[str] = []
+    for pair in cast(tuple[object, ...], value):
+        if type(pair) is not tuple or len(pair) != 2:
+            raise TypeError(f"{field_name} must contain pairs")
+        key, identity = pair
+        _require_string(key, field_name)
+        _require_file_identity(identity, field_name)
+        keys.append(cast(str, key))
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise ValueError(f"{field_name} must have sorted unique keys")
+
+
+def _canonical_value(value: object) -> object:
+    if is_dataclass(value) and not isinstance(value, type):
+        parameters = getattr(type(value), "__dataclass_params__", None)
+        if parameters is None or not parameters.frozen:
+            raise TypeError("Canonical records must be frozen")
+        return {field.name: _canonical_value(getattr(value, field.name)) for field in fields(value)}
+    if type(value) is tuple:
+        return [_canonical_value(item) for item in cast(tuple[object, ...], value)]
+    if type(value) in {str, int, bool} or value is None:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise TypeError("Canonical floats must be finite")
+        return value
+    raise TypeError("The value is not canonical")
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Return the unique UTF-8 bytes for one frozen protocol value."""
+    if type(value) is bytes:
+        return value
+    normalized = _canonical_value(value)
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def canonical_sha256(value: object) -> str:
+    """Return the SHA-256 digest of one canonical value."""
+    return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def new_run_nonce() -> str:
+    """Return a fresh 32-byte host nonce in lowercase hexadecimal."""
+    return os.urandom(32).hex()
+
+
+@dataclass(frozen=True, slots=True)
+class CodexExecutionPolicyV1:
+    """Bind the version-1 operating-system execution policy."""
+
+    schema_version: int
+    read_only_mounts: tuple[str, ...]
+    read_write_mounts: tuple[str, ...]
+    protected_overlay_mounts: tuple[str, ...]
+    provider_relay: str
+    command_network: str
+    max_output_bytes: int
+    term_grace_seconds: float
+    kill_grace_seconds: float
+    pipe_close_grace_seconds: float
+    inventory_quiescence_seconds: float
+    total_deadline: float
+
+    def __post_init__(self) -> None:
+        """Validate the exact policy fields."""
+        _require_schema_version(self.schema_version)
+        _require_path_tuple(self.read_only_mounts, "read_only_mounts")
+        _require_path_tuple(self.read_write_mounts, "read_write_mounts")
+        _require_path_tuple(self.protected_overlay_mounts, "protected_overlay_mounts")
+        _require_string(self.provider_relay, "provider_relay")
+        if self.command_network != "deny":
+            raise ValueError("command_network must deny access")
+        if not _is_exact_int(self.max_output_bytes) or self.max_output_bytes <= 0:
+            raise TypeError("max_output_bytes must be a positive integer")
+        for name in (
+            "term_grace_seconds",
+            "kill_grace_seconds",
+            "pipe_close_grace_seconds",
+            "inventory_quiescence_seconds",
+            "total_deadline",
+        ):
+            value = getattr(self, name)
+            if not _is_number(value) or float(value) <= 0:
+                raise TypeError(f"{name} must be a positive finite number")
+
+
+@dataclass(frozen=True, slots=True)
+class CodexGitReceiptV1:
+    """Bind the version-1 Git paths, identities, digests, and policy grants."""
+
+    schema_version: int
+    canonical_worktree: str
+    git_dir: str
+    common_dir: str
+    index: str
+    repository_config: str
+    worktree_config: str
+    fixed_environment: StringPairs
+    protected_paths: tuple[str, ...]
+    read_only_paths: tuple[str, ...]
+    read_write_paths: tuple[str, ...]
+    identities: NamedFileIdentities
+    digests: StringPairs
+
+    def __post_init__(self) -> None:
+        """Validate the exact Git receipt fields."""
+        _require_schema_version(self.schema_version)
+        for name in (
+            "canonical_worktree",
+            "git_dir",
+            "common_dir",
+            "index",
+            "repository_config",
+            "worktree_config",
+        ):
+            _require_absolute_path(getattr(self, name), name)
+        _require_string_pairs(self.fixed_environment, "fixed_environment")
+        _require_path_tuple(self.protected_paths, "protected_paths")
+        _require_path_tuple(self.read_only_paths, "read_only_paths")
+        _require_path_tuple(self.read_write_paths, "read_write_paths")
+        _require_named_identities(self.identities, "identities")
+        _require_string_pairs(self.digests, "digests", digests=True)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexIsolationRequestV1:
+    """Bind all trusted version-1 inputs for one implementation request."""
+
+    schema_version: int
+    run_nonce: str
+    entry_point_name: str
+    adapter_api_version: int
+    package_version: str
+    deployment_lock_digest: str
+    wheel_digest: str
+    installed_tree_digest: str
+    command: tuple[str, ...]
+    command_digest: str
+    executable_platform: str
+    executable_target: str
+    executable_release: str
+    executable_asset_name: str
+    executable_path: str
+    executable_digest: str
+    executable_file_identity: FileIdentity
+    guest_image_digest: str
+    environment: StringPairs
+    environment_digest: str
+    prompt: str
+    prompt_digest: str
+    worktree_path: str
+    private_profile_path: str
+    policy: CodexExecutionPolicyV1
+    policy_digest: str
+    git_receipt: CodexGitReceiptV1
+    git_receipt_digest: str
+    repository: str
+    issue: int
+    role: str
+    worktree_identity: str
+    model: str
+    session: str
+    session_identity_digest: str
+    monotonic_deadline: float
+
+    def __post_init__(self) -> None:  # noqa: C901
+        """Validate the exact request fields and their digests."""
+        _require_schema_version(self.schema_version)
+        _require_nonce(self.run_nonce, "run_nonce")
+        _require_entry_point_name(self.entry_point_name)
+        if not _is_exact_int(self.adapter_api_version) or self.adapter_api_version != 1:
+            raise TypeError("adapter_api_version must be integer 1")
+        _require_string(self.package_version, "package_version")
+        for name in (
+            "deployment_lock_digest",
+            "wheel_digest",
+            "installed_tree_digest",
+            "command_digest",
+            "executable_digest",
+            "guest_image_digest",
+            "environment_digest",
+            "prompt_digest",
+            "policy_digest",
+            "git_receipt_digest",
+            "session_identity_digest",
+        ):
+            _require_digest(getattr(self, name), name)
+        _require_string_tuple(self.command, "command")
+        if not self.command:
+            raise ValueError("command must not be empty")
+        if canonical_sha256(self.command) != self.command_digest:
+            raise ValueError("command_digest does not match command")
+        if self.executable_platform != "linux":
+            raise ValueError("executable_platform must be linux")
+        if self.executable_target != CODEX_LINUX_TARGET:
+            raise ValueError("executable_target is not supported")
+        if self.executable_release != CODEX_RELEASE:
+            raise ValueError("executable_release is not supported")
+        if self.executable_asset_name != CODEX_LINUX_ASSET:
+            raise ValueError("executable_asset_name is not supported")
+        _require_absolute_path(self.executable_path, "executable_path")
+        _require_file_identity(self.executable_file_identity, "executable_file_identity")
+        _require_string_pairs(self.environment, "environment")
+        if canonical_sha256(self.environment) != self.environment_digest:
+            raise ValueError("environment_digest does not match environment")
+        _require_string(self.prompt, "prompt", allow_empty=True)
+        if canonical_sha256(self.prompt) != self.prompt_digest:
+            raise ValueError("prompt_digest does not match prompt")
+        _require_absolute_path(self.worktree_path, "worktree_path")
+        _require_absolute_path(self.private_profile_path, "private_profile_path")
+        if type(self.policy) is not CodexExecutionPolicyV1:
+            raise TypeError("policy must be CodexExecutionPolicyV1")
+        if canonical_sha256(self.policy) != self.policy_digest:
+            raise ValueError("policy_digest does not match policy")
+        if type(self.git_receipt) is not CodexGitReceiptV1:
+            raise TypeError("git_receipt must be CodexGitReceiptV1")
+        if canonical_sha256(self.git_receipt) != self.git_receipt_digest:
+            raise ValueError("git_receipt_digest does not match git_receipt")
+        _require_string(self.repository, "repository")
+        if not _is_exact_int(self.issue) or self.issue <= 0:
+            raise TypeError("issue must be a positive integer")
+        if self.role != "implementer":
+            raise ValueError("role must be implementer")
+        _require_absolute_path(self.worktree_identity, "worktree_identity")
+        _require_string(self.model, "model")
+        _require_string(self.session, "session")
+        identity = (
+            self.repository,
+            self.issue,
+            self.role,
+            self.worktree_identity,
+            self.model,
+            self.session,
+        )
+        if canonical_sha256(identity) != self.session_identity_digest:
+            raise ValueError("session_identity_digest does not match the bound identity")
+        if not _is_number(self.monotonic_deadline) or float(self.monotonic_deadline) <= 0:
+            raise TypeError("monotonic_deadline must be a positive finite number")
+
+
+@dataclass(frozen=True, slots=True)
+class CodexIsolationPreparedV1:
+    """Describe one credential-free prepared guest."""
+
+    schema_version: int
+    request_nonce: str
+    request_digest: str
+    guest_boot_nonce: str
+    guest_image_digest: str
+    adapter_package_digest: str
+    executable_digest: str
+    elf_platform: str
+    elf_target: str
+    version_output: str
+    guest_file_identity: FileIdentity
+    invocation_token: str
+    preparation_deadline: float
+
+    def __post_init__(self) -> None:
+        """Validate the exact prepared-result fields."""
+        _require_schema_version(self.schema_version)
+        _require_nonce(self.request_nonce, "request_nonce")
+        _require_digest(self.request_digest, "request_digest")
+        _require_nonce(self.guest_boot_nonce, "guest_boot_nonce")
+        for name in ("guest_image_digest", "adapter_package_digest", "executable_digest"):
+            _require_digest(getattr(self, name), name)
+        if self.elf_platform != "linux" or self.elf_target != CODEX_LINUX_TARGET:
+            raise ValueError("The prepared ELF identity is not supported")
+        if self.version_output != CODEX_VERSION_OUTPUT:
+            raise ValueError("The prepared Codex version is not supported")
+        _require_file_identity(self.guest_file_identity, "guest_file_identity")
+        _require_nonce(self.invocation_token, "invocation_token")
+        if not _is_number(self.preparation_deadline) or float(self.preparation_deadline) <= 0:
+            raise TypeError("preparation_deadline must be a positive finite number")
+
+
+@dataclass(frozen=True, slots=True)
+class CodexDescendantInventoryV1:
+    """Describe one ordered and complete descendant inventory."""
+
+    schema_version: int
+    sequence: int
+    monotonic_timestamp: float
+    complete: bool
+    descendants: tuple[int, ...]
+    cgroup_populated: bool
+
+    def __post_init__(self) -> None:
+        """Validate the exact descendant-inventory fields."""
+        _require_schema_version(self.schema_version)
+        if not _is_exact_int(self.sequence) or self.sequence < 0:
+            raise TypeError("sequence must be a nonnegative integer")
+        if not _is_number(self.monotonic_timestamp) or float(self.monotonic_timestamp) < 0:
+            raise TypeError("monotonic_timestamp must be a nonnegative finite number")
+        if type(self.complete) is not bool or type(self.cgroup_populated) is not bool:
+            raise TypeError("Inventory state values must be Boolean")
+        if type(self.descendants) is not tuple or any(
+            not _is_exact_int(item) or item <= 0 for item in self.descendants
+        ):
+            raise TypeError("descendants must be an immutable process identifier tuple")
+        if tuple(sorted(set(self.descendants))) != self.descendants:
+            raise ValueError("descendants must be sorted and unique")
+        if self.cgroup_populated != bool(self.descendants):
+            raise ValueError("cgroup_populated does not match descendants")
+
+
+@dataclass(frozen=True, slots=True)
+class CodexIsolationResultV1:
+    """Describe the final result and complete cleanup evidence."""
+
+    schema_version: int
+    adapter_identity: str
+    adapter_version: str
+    request_nonce: str
+    request_digest: str
+    guest_boot_nonce: str
+    prepared_record_digest: str
+    exit_status: int
+    output: str
+    error_code: str | None
+    term_sent: bool
+    term_timestamp: float
+    kill_sent: bool
+    kill_timestamp: float
+    pipes_closed: bool
+    pipe_close_timestamp: float
+    inventories: tuple[CodexDescendantInventoryV1, ...]
+    policy_digest: str
+    executable_digest: str
+    git_receipt_digest: str
+    session_identity_digest: str
+
+    def __post_init__(self) -> None:
+        """Validate the exact final-result fields."""
+        _require_schema_version(self.schema_version)
+        _require_string(self.adapter_identity, "adapter_identity")
+        _require_string(self.adapter_version, "adapter_version")
+        _require_nonce(self.request_nonce, "request_nonce")
+        _require_nonce(self.guest_boot_nonce, "guest_boot_nonce")
+        for name in (
+            "request_digest",
+            "prepared_record_digest",
+            "policy_digest",
+            "executable_digest",
+            "git_receipt_digest",
+            "session_identity_digest",
+        ):
+            _require_digest(getattr(self, name), name)
+        if not _is_exact_int(self.exit_status) or not -255 <= self.exit_status <= 255:
+            raise TypeError("exit_status must be a bounded integer")
+        _require_string(self.output, "output", allow_empty=True)
+        if self.error_code is not None and self.error_code not in STABLE_ERROR_CODES:
+            raise ValueError("error_code is not a stable code")
+        for name in ("term_sent", "kill_sent", "pipes_closed"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be Boolean")
+        for name in ("term_timestamp", "kill_timestamp", "pipe_close_timestamp"):
+            value = getattr(self, name)
+            if not _is_number(value) or float(value) < 0:
+                raise TypeError(f"{name} must be a nonnegative finite number")
+        if not self.term_timestamp <= self.kill_timestamp <= self.pipe_close_timestamp:
+            raise ValueError("Cleanup timestamps must be ordered")
+        if type(self.inventories) is not tuple or any(
+            type(item) is not CodexDescendantInventoryV1 for item in self.inventories
+        ):
+            raise TypeError("inventories must contain frozen version-1 records")
+
+
+class CodexIsolationAdapterV1(Protocol):
+    """Supply the two-phase version-1 adapter operations."""
+
+    def prepare(self, request: CodexIsolationRequestV1) -> CodexIsolationPreparedV1:
+        """Prepare one credential-free guest."""
+
+    def invoke(self, prepared: CodexIsolationPreparedV1, auth_path: str) -> CodexIsolationResultV1:
+        """Invoke Codex in the prepared guest."""
+
+    def destroy(self, prepared: CodexIsolationPreparedV1) -> None:
+        """Destroy one prepared guest that the host did not invoke."""
+
+
+def validate_adapter(adapter: object) -> None:
+    """Require all version-1 lifecycle operations before guest preparation."""
+    if any(not callable(getattr(adapter, name, None)) for name in ("prepare", "invoke", "destroy")):
+        _fail("codex_adapter_protocol_mismatch")
+
+
+def _require_entry_point_name(name: object) -> None:
+    if type(name) is not str or _ENTRY_POINT_RE.fullmatch(name) is None:
+        _fail("codex_adapter_not_selected")
+
+
+def load_adapter_factory(name: str | None) -> Callable[[], CodexIsolationAdapterV1]:
+    """Load only the exact explicitly selected version-1 adapter factory."""
+    _require_entry_point_name(name)
+    selected = cast(str, name)
+    try:
+        candidates = tuple(
+            metadata.entry_points(
+                group=CODEX_ISOLATION_ADAPTER_ENTRY_POINT_GROUP,
+                name=selected,
+            )
+        )
+    except Exception:
+        _fail("codex_adapter_initialization_failed")
+    if not candidates:
+        _fail("codex_adapter_not_installed")
+    if len(candidates) != 1:
+        _fail("codex_adapter_ambiguous")
+    try:
+        factory = candidates[0].load()
+    except Exception:
+        _fail("codex_adapter_initialization_failed")
+    if not callable(factory):
+        _fail("codex_adapter_initialization_failed")
+    if getattr(factory, "codex_isolation_api_version", None) != CODEX_ISOLATION_API_VERSION:
+        _fail("codex_adapter_protocol_mismatch")
+    return cast(Callable[[], CodexIsolationAdapterV1], factory)
+
+
+def validate_prepared(
+    request: CodexIsolationRequestV1,
+    prepared: CodexIsolationPreparedV1,
+) -> None:
+    """Validate one credential-free prepared record against its request."""
+    if (
+        type(request) is not CodexIsolationRequestV1
+        or type(prepared) is not CodexIsolationPreparedV1
+    ):
+        _fail("codex_adapter_protocol_mismatch")
+    expected = (
+        (prepared.request_nonce, request.run_nonce),
+        (prepared.request_digest, canonical_sha256(request)),
+        (prepared.guest_image_digest, request.guest_image_digest),
+        (prepared.adapter_package_digest, request.installed_tree_digest),
+        (prepared.executable_digest, request.executable_digest),
+        (prepared.elf_platform, request.executable_platform),
+        (prepared.elf_target, request.executable_target),
+        (prepared.guest_file_identity, request.executable_file_identity),
+    )
+    if any(actual != required for actual, required in expected):
+        _fail("codex_adapter_request_mismatch")
+    if prepared.preparation_deadline > request.monotonic_deadline:
+        _fail("codex_adapter_request_mismatch")
+
+
+def _validate_inventories(
+    inventories: tuple[CodexDescendantInventoryV1, ...],
+    quiescence: float,
+) -> None:
+    if len(inventories) < 2:
+        _fail("codex_adapter_inventory_uncertain")
+    if any(not item.complete for item in inventories):
+        _fail("codex_adapter_inventory_uncertain")
+    for previous, current in pairwise(inventories):
+        if current.sequence != previous.sequence + 1:
+            _fail("codex_adapter_inventory_uncertain")
+        if current.monotonic_timestamp < previous.monotonic_timestamp:
+            _fail("codex_adapter_inventory_uncertain")
+    final_two = inventories[-2:]
+    if any(item.descendants or item.cgroup_populated for item in final_two):
+        _fail("codex_adapter_descendants_remain")
+    if final_two[1].monotonic_timestamp - final_two[0].monotonic_timestamp < quiescence:
+        _fail("codex_adapter_inventory_uncertain")
+
+
+def _validate_cleanup_deadlines(
+    request: CodexIsolationRequestV1,
+    result: CodexIsolationResultV1,
+) -> None:
+    """Reject signal, pipe, or inventory evidence outside its time bound."""
+    if result.kill_sent and not result.term_sent:
+        _fail("codex_adapter_result_invalid")
+    if result.kill_sent and (
+        result.kill_timestamp - result.term_timestamp > request.policy.term_grace_seconds
+    ):
+        _fail("codex_adapter_timeout")
+    if result.term_sent:
+        cleanup_start = result.kill_timestamp if result.kill_sent else result.term_timestamp
+        signal_grace = (
+            request.policy.kill_grace_seconds
+            if result.kill_sent
+            else request.policy.term_grace_seconds
+        )
+        if (
+            result.pipe_close_timestamp - cleanup_start
+            > signal_grace + request.policy.pipe_close_grace_seconds
+        ):
+            _fail("codex_adapter_pipe_cleanup_failed")
+    if result.pipe_close_timestamp > request.monotonic_deadline or any(
+        item.monotonic_timestamp > request.monotonic_deadline for item in result.inventories
+    ):
+        _fail("codex_adapter_timeout")
+
+
+def validate_result(
+    request: CodexIsolationRequestV1,
+    prepared: CodexIsolationPreparedV1,
+    result: CodexIsolationResultV1,
+) -> None:
+    """Validate final identity, output, cleanup, and inventory evidence."""
+    if (
+        type(request) is not CodexIsolationRequestV1
+        or type(prepared) is not CodexIsolationPreparedV1
+        or type(result) is not CodexIsolationResultV1
+    ):
+        _fail("codex_adapter_protocol_mismatch")
+    expected = (
+        (result.adapter_identity, request.entry_point_name),
+        (result.adapter_version, request.package_version),
+        (result.request_nonce, request.run_nonce),
+        (result.request_digest, canonical_sha256(request)),
+        (result.guest_boot_nonce, prepared.guest_boot_nonce),
+        (result.prepared_record_digest, canonical_sha256(prepared)),
+        (result.policy_digest, request.policy_digest),
+        (result.executable_digest, request.executable_digest),
+        (result.git_receipt_digest, request.git_receipt_digest),
+        (result.session_identity_digest, request.session_identity_digest),
+    )
+    if any(actual != required for actual, required in expected):
+        _fail("codex_adapter_request_mismatch")
+    output_bytes = result.output.encode("utf-8")
+    if len(output_bytes) > request.policy.max_output_bytes:
+        _fail("codex_adapter_result_invalid")
+    if request.prompt and request.prompt in result.output:
+        _fail("codex_adapter_result_invalid")
+    if request.private_profile_path in result.output:
+        _fail("codex_adapter_result_invalid")
+    if not result.pipes_closed:
+        _fail("codex_adapter_pipe_cleanup_failed")
+    _validate_cleanup_deadlines(request, result)
+    _validate_inventories(result.inventories, request.policy.inventory_quiescence_seconds)
+    if result.error_code is not None:
+        _fail(result.error_code)
+    if result.exit_status != 0:
+        _fail("codex_adapter_result_invalid")
+
+
+def prepare_and_invoke(
+    adapter: CodexIsolationAdapterV1,
+    request: CodexIsolationRequestV1,
+    auth_path: str,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> CodexIsolationResultV1:
+    """Run and validate both phases on one selected adapter instance."""
+    _require_absolute_path(auth_path, "auth_path")
+    validate_adapter(adapter)
+    try:
+        prepared = adapter.prepare(request)
+    except CodexIsolationError:
+        raise
+    except BaseException:
+        _fail("codex_adapter_launch_failed")
+    validate_prepared(request, prepared)
+    if monotonic() >= min(request.monotonic_deadline, prepared.preparation_deadline):
+        try:
+            adapter.destroy(prepared)
+        except BaseException:
+            _fail("codex_adapter_inventory_uncertain")
+        _fail("codex_adapter_timeout")
+    try:
+        result = adapter.invoke(prepared, auth_path)
+    except CodexIsolationError:
+        raise
+    except BaseException:
+        _fail("codex_adapter_launch_failed")
+    validate_result(request, prepared, result)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class StagedLinuxExecutable:
+    """Describe descriptor-copied Linux executable bytes."""
+
+    path: Path
+    digest: str
+    file_identity: FileIdentity
+
+
+def _read_descriptor(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _validate_linux_elf(data: bytes) -> None:
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        _fail("codex_adapter_protocol_mismatch")
+    if data[4] != 2 or data[5] != 1 or int.from_bytes(data[18:20], "little") != 183:
+        _fail("codex_adapter_protocol_mismatch")
+
+
+def _identity(status: os.stat_result) -> FileIdentity:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_uid,
+        status.st_size,
+        status.st_mtime_ns,
+    )
+
+
+def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExecutable:
+    """Copy a locked AArch64 Linux ELF through held descriptors."""
+    source = Path(source_path)
+    root = Path(job_root)
+    root_status = root.lstat()
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or root_status.st_uid != os.geteuid()
+        or stat.S_IMODE(root_status.st_mode) & 0o077
+    ):
+        _fail("codex_adapter_protocol_mismatch")
+    source_descriptor = -1
+    destination_descriptor = -1
+    directory_descriptor = -1
+    destination = root / "codex-aarch64-unknown-linux-musl"
+    try:
+        source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        source_status = os.fstat(source_descriptor)
+        if not stat.S_ISREG(source_status.st_mode):
+            _fail("codex_adapter_protocol_mismatch")
+        source_bytes = _read_descriptor(source_descriptor)
+        _validate_linux_elf(source_bytes)
+        source_digest = hashlib.sha256(source_bytes).hexdigest()
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o500,
+        )
+        offset = 0
+        while offset < len(source_bytes):
+            offset += os.write(destination_descriptor, source_bytes[offset:])
+        os.fchmod(destination_descriptor, 0o500)
+        os.fsync(destination_descriptor)
+        destination_status = os.fstat(destination_descriptor)
+        directory_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        os.fsync(directory_descriptor)
+        verify_descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            destination_bytes = _read_descriptor(verify_descriptor)
+        finally:
+            os.close(verify_descriptor)
+        if hashlib.sha256(destination_bytes).hexdigest() != source_digest:
+            _fail("codex_adapter_protocol_mismatch")
+        return StagedLinuxExecutable(destination, source_digest, _identity(destination_status))
+    except CodexIsolationError:
+        if destination.exists():
+            destination.unlink()
+        raise
+    except OSError:
+        if destination.exists():
+            destination.unlink()
+        _fail("codex_adapter_protocol_mismatch")
+    finally:
+        for descriptor in (directory_descriptor, destination_descriptor, source_descriptor):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+__all__ = [
+    "CODEX_ISOLATION_ADAPTER_ENTRY_POINT_GROUP",
+    "CODEX_ISOLATION_API_VERSION",
+    "STABLE_ERROR_CODES",
+    "CodexDescendantInventoryV1",
+    "CodexExecutionPolicyV1",
+    "CodexGitReceiptV1",
+    "CodexIsolationAdapterV1",
+    "CodexIsolationError",
+    "CodexIsolationPreparedV1",
+    "CodexIsolationRequestV1",
+    "CodexIsolationResultV1",
+    "StagedLinuxExecutable",
+    "canonical_bytes",
+    "canonical_sha256",
+    "load_adapter_factory",
+    "new_run_nonce",
+    "prepare_and_invoke",
+    "stage_linux_executable",
+    "validate_adapter",
+    "validate_prepared",
+    "validate_result",
+]

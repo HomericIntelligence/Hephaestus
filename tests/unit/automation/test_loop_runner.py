@@ -1009,6 +1009,37 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
     assert config.agent == "codex"  # type: ignore[attr-defined]
 
 
+def test_main_threads_codex_isolation_inputs_into_pipeline_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loop keeps all explicit Codex isolation inputs typed."""
+    lock_path = (tmp_path / "deployment-lock.json").absolute()
+    digest = "a" * 64
+
+    config = _capture_config(
+        [
+            "--repos",
+            "Repo",
+            "--dry-run",
+            "--loops",
+            "1",
+            "--agent",
+            "codex",
+            "--codex-isolation-adapter",
+            "production",
+            "--codex-isolation-deployment-lock",
+            str(lock_path),
+            "--codex-isolation-deployment-lock-sha256",
+            digest,
+        ],
+        monkeypatch,
+    )
+
+    assert config.codex_isolation_adapter == "production"  # type: ignore[attr-defined]
+    assert config.codex_isolation_deployment_lock == lock_path  # type: ignore[attr-defined]
+    assert config.codex_isolation_deployment_lock_sha256 == digest  # type: ignore[attr-defined]
+
+
 def test_main_rejects_unknown_codex_alias_before_scope_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

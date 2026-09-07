@@ -42,6 +42,18 @@ def test_pydantic_is_declared_in_automation_extra() -> None:
     )
 
 
+def test_sigstore_is_only_an_automation_extra_dependency() -> None:
+    """Sigstore is available to automation but absent from the base package."""
+    config = _data()
+    base_names = {_name(value) for value in config["project"]["dependencies"]}
+    automation_names = {
+        _name(value) for value in config["project"]["optional-dependencies"]["automation"]
+    }
+
+    assert "sigstore" not in base_names
+    assert "sigstore" in automation_names
+
+
 def test_nats_extra_declares_nats_py_without_pydantic() -> None:
     """The [nats] extra must stay sufficient without reintroducing pydantic."""
     extras = _data()["project"]["optional-dependencies"]["nats"]

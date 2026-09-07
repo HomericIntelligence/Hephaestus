@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -10,14 +11,20 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
+from hephaestus.agents.codex_isolation import (
+    CodexIsolationAdapterV1,
+    CodexIsolationError,
+)
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -268,6 +275,558 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
+
+
+def test_codex_implementation_runtime_seam_is_available() -> None:
+    """The runtime supplies one explicit implementation-isolation entry point."""
+    assert callable(getattr(agent_runtime, "run_codex_implementation_session", None))
+
+
+class _CodexImplementationAdapter:
+    """Supply controlled two-phase results for the runtime boundary tests."""
+
+    def __init__(self, invoke_result: object) -> None:
+        self.prepared = SimpleNamespace(
+            preparation_deadline=time.monotonic() + 60,
+        )
+        self.invoke_result = invoke_result
+        self.auth_paths: list[Path] = []
+
+    def prepare(self, _request: object) -> object:
+        return self.prepared
+
+    def invoke(self, prepared: object, auth_path: str) -> object:
+        assert prepared is self.prepared
+        path = Path(auth_path)
+        assert path.is_file()
+        self.auth_paths.append(path)
+        if isinstance(self.invoke_result, BaseException):
+            raise self.invoke_result
+        return self.invoke_result
+
+    def destroy(self, _prepared: object) -> None:
+        """Destroy a prepared test guest that did not start."""
+
+
+def _codex_implementation_request(tmp_path: Path) -> Any:
+    """Return the runtime fields used by a controlled request."""
+    return SimpleNamespace(
+        private_profile_path=str((tmp_path / "private-codex-home").resolve()),
+        session="session-3019",
+        monotonic_deadline=time.monotonic() + 60,
+    )
+
+
+def _patch_codex_profile_source(
+    monkeypatch: pytest.MonkeyPatch,
+    request: Any,
+    *,
+    verify_executable: bool = False,
+) -> None:
+    """Replace the admitted package copy with one controlled package marker."""
+
+    def populate(current_request: Any) -> Path:
+        assert current_request is request
+        profile = Path(current_request.private_profile_path)
+        profile.mkdir(mode=0o700)
+        package = profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
+        package.mkdir(parents=True)
+        (package / "package.json").write_text('{"version":"0.5.1"}', encoding="utf-8")
+        return profile
+
+    monkeypatch.setattr(
+        agent_runtime,
+        "_populate_codex_implementation_profile",
+        populate,
+        raising=False,
+    )
+    monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_args: None, raising=False)
+    if not verify_executable:
+        monkeypatch.setattr(
+            agent_runtime,
+            "_verify_codex_implementation_executable",
+            lambda _request: None,
+            raising=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(RuntimeError("invoke failed"), id="exception"),
+        pytest.param(KeyboardInterrupt(), id="keyboard-interrupt"),
+        pytest.param(SystemExit(2), id="system-exit"),
+    ],
+)
+def test_codex_implementation_unlinks_auth_for_every_base_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: BaseException,
+) -> None:
+    """Each adapter failure removes the transient authentication bridge."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    adapter = _CodexImplementationAdapter(failure)
+    _patch_codex_profile_source(monkeypatch, request)
+
+    with pytest.raises(
+        CodexIsolationError,
+        match="codex_adapter_launch_failed",
+    ):
+        agent_runtime.run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+    assert len(adapter.auth_paths) == 1
+    assert not adapter.auth_paths[0].exists()
+
+
+def test_codex_failed_state_contains_no_authentication_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A result-validation failure leaves no credential in the private profile."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    adapter = _CodexImplementationAdapter(SimpleNamespace(output="unsafe"))
+    _patch_codex_profile_source(monkeypatch, request)
+    monkeypatch.setattr(
+        agent_runtime,
+        "validate_result",
+        lambda *_args: (_ for _ in ()).throw(CodexIsolationError("codex_adapter_result_invalid")),
+        raising=False,
+    )
+
+    with pytest.raises(
+        CodexIsolationError,
+        match="codex_adapter_result_invalid",
+    ):
+        agent_runtime.run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+    profile = Path(request.private_profile_path)
+    assert not (profile / "auth.json").exists()
+    assert not any(path.name.startswith("auth") for path in profile.rglob("*"))
+
+
+def test_codex_authentication_creation_interruption_removes_partial_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An interruption during authentication creation removes partial data."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    adapter = _CodexImplementationAdapter(SimpleNamespace(output="unused"))
+    _patch_codex_profile_source(monkeypatch, request)
+
+    def interrupt_write(_descriptor: int, _data: bytes) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("hephaestus.agents.runtime.os.write", interrupt_write)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_initialization_failed"):
+        agent_runtime.run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+    assert not (Path(request.private_profile_path) / "auth.json").exists()
+
+
+def test_codex_result_rejects_authentication_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Adapter output cannot carry a value from authentication state."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+    adapter = _CodexImplementationAdapter(SimpleNamespace(output="token=test-secret"))
+    _patch_codex_profile_source(monkeypatch, request)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args: None)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime.run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+    assert not (Path(request.private_profile_path) / "auth.json").exists()
+
+
+def test_codex_adapter_requires_destroy_before_prepare(
+    tmp_path: Path,
+) -> None:
+    """An adapter without destruction cannot prepare a guest."""
+
+    class AdapterWithoutDestroy:
+        prepared = False
+
+        def prepare(self, _request: object) -> object:
+            self.prepared = True
+            return object()
+
+        def invoke(self, _prepared: object, _auth_path: str) -> object:
+            raise AssertionError("invoke must not run")
+
+    adapter = AdapterWithoutDestroy()
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_protocol_mismatch"):
+        agent_runtime.run_codex_implementation_session(
+            adapter=adapter,  # type: ignore[arg-type]
+            request=_codex_implementation_request(tmp_path),
+            auth_source=tmp_path / "unused-auth.json",
+        )
+
+    assert adapter.prepared is False
+
+
+def test_codex_authentication_replacement_fails_cleanup_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An auth-path replacement cannot produce a successful adapter result."""
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+
+    class ReplacingAuthAdapter(_CodexImplementationAdapter):
+        def invoke(self, prepared: object, auth_path: str) -> object:
+            result = super().invoke(prepared, auth_path)
+            path = Path(auth_path)
+            path.unlink()
+            path.write_text("replacement", encoding="utf-8")
+            path.chmod(0o600)
+            return result
+
+    adapter = ReplacingAuthAdapter(SimpleNamespace(output="unsafe"))
+    _patch_codex_profile_source(monkeypatch, request)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args: None)
+
+    with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
+        agent_runtime.run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+    assert not adapter.auth_paths[0].exists()
+
+
+def test_codex_prepare_failure_creates_no_profile_or_authentication(
+    tmp_path: Path,
+) -> None:
+    """A prepare failure remains stable and does not read credential state."""
+
+    class PrepareFailure:
+        def prepare(self, _request: object) -> object:
+            raise RuntimeError("prepare failed")
+
+        def invoke(self, _prepared: object, _auth_path: str) -> object:
+            raise AssertionError("invoke must not run")
+
+        def destroy(self, _prepared: object) -> None:
+            raise AssertionError("destroy must not run without a prepared guest")
+
+    request = _codex_implementation_request(tmp_path)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+
+    with pytest.raises(
+        CodexIsolationError,
+        match="codex_adapter_launch_failed",
+    ):
+        agent_runtime.run_codex_implementation_session(
+            adapter=PrepareFailure(),  # type: ignore[arg-type]
+            request=request,
+            auth_source=auth_source,
+        )
+
+    assert not Path(request.private_profile_path).exists()
+
+
+def test_codex_expired_prepare_is_destroyed_before_profile_or_invoke(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An expired prepared guest is destroyed before credential work."""
+
+    class ExpiredAdapter:
+        def __init__(self) -> None:
+            self.prepared = SimpleNamespace(preparation_deadline=9.0)
+            self.destroyed: list[object] = []
+            self.invoked = False
+
+        def prepare(self, _request: object) -> object:
+            return self.prepared
+
+        def invoke(self, _prepared: object, _auth_path: str) -> object:
+            self.invoked = True
+            return SimpleNamespace(output="unexpected")
+
+        def destroy(self, prepared: object) -> None:
+            self.destroyed.append(prepared)
+
+    request = _codex_implementation_request(tmp_path)
+    request.monotonic_deadline = 10.0
+    adapter = ExpiredAdapter()
+    monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_args: None)
+    monkeypatch.setattr("hephaestus.agents.runtime.time.monotonic", lambda: 10.0)
+
+    with pytest.raises(
+        CodexIsolationError,
+        match="codex_adapter_timeout",
+    ):
+        agent_runtime.run_codex_implementation_session(
+            adapter=adapter,  # type: ignore[arg-type]
+            request=request,
+            auth_source=tmp_path / "unused-auth.json",
+        )
+
+    assert adapter.destroyed == [adapter.prepared]
+    assert adapter.invoked is False
+    assert not Path(request.private_profile_path).exists()
+
+
+def test_codex_profile_failure_destroys_the_uninvoked_guest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A profile failure destroys the prepared guest without an auth copy."""
+
+    class PreparedAdapter:
+        def __init__(self) -> None:
+            self.prepared = SimpleNamespace(
+                preparation_deadline=time.monotonic() + 60,
+            )
+            self.destroyed: list[object] = []
+
+        def prepare(self, _request: object) -> object:
+            return self.prepared
+
+        def invoke(self, _prepared: object, _auth_path: str) -> object:
+            raise AssertionError("invoke must not run after a profile failure")
+
+        def destroy(self, prepared: object) -> None:
+            self.destroyed.append(prepared)
+
+    request = _codex_implementation_request(tmp_path)
+    request.monotonic_deadline = time.monotonic() + 60
+    adapter = PreparedAdapter()
+    monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_args: None)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_verify_codex_implementation_executable",
+        lambda _request: None,
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_populate_codex_implementation_profile",
+        lambda _request: (_ for _ in ()).throw(
+            CodexIsolationError("codex_adapter_initialization_failed")
+        ),
+    )
+
+    with pytest.raises(
+        CodexIsolationError,
+        match="codex_adapter_initialization_failed",
+    ):
+        agent_runtime.run_codex_implementation_session(
+            adapter=adapter,  # type: ignore[arg-type]
+            request=request,
+            auth_source=tmp_path / "unused-auth.json",
+        )
+
+    assert adapter.destroyed == [adapter.prepared]
+    assert not Path(request.private_profile_path).exists()
+
+
+def test_codex_executable_replacement_after_invoke_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A staged executable change after invocation invalidates the result."""
+    executable = tmp_path / "codex-linux"
+    executable.write_bytes(b"trusted executable")
+    executable.chmod(0o500)
+    status = executable.stat()
+    request = _codex_implementation_request(tmp_path)
+    request.executable_path = str(executable.resolve())
+    request.executable_digest = hashlib.sha256(b"trusted executable").hexdigest()
+    request.executable_file_identity = (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_uid,
+        status.st_size,
+        status.st_mtime_ns,
+    )
+    request.monotonic_deadline = time.monotonic() + 60
+
+    class ReplacingAdapter(_CodexImplementationAdapter):
+        def invoke(self, prepared: object, auth_path: str) -> object:
+            result = super().invoke(prepared, auth_path)
+            executable.unlink()
+            executable.write_bytes(b"replaced executable")
+            executable.chmod(0o500)
+            return result
+
+    adapter = ReplacingAdapter(SimpleNamespace(output="unsafe"))
+    _patch_codex_profile_source(monkeypatch, request, verify_executable=True)
+    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args: None)
+    auth_source = tmp_path / "trusted-auth.json"
+    auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
+    auth_source.chmod(0o600)
+
+    with pytest.raises(
+        CodexIsolationError,
+        match="codex_adapter_request_mismatch",
+    ):
+        agent_runtime.run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter),
+            request=request,
+            auth_source=auth_source,
+        )
+
+
+def test_codex_implementation_profile_admits_only_validated_athena(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The private profile copies no operator state other than Athena."""
+    source_home = tmp_path / "source-codex-home"
+    athena = source_home / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
+    athena.mkdir(parents=True)
+    (athena / ".codex-marketplace-install.json").write_text(
+        json.dumps(
+            {
+                "revision": "5df1b2f9fd8037fe0655edb36a37e0189eaab8c9",
+                "source": "https://github.com/HomericIntelligence/Athena.git",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (athena / "package.json").write_text(
+        json.dumps({"version": "0.5.1"}),
+        encoding="utf-8",
+    )
+    (athena / "skill.md").write_text("validated Athena\n", encoding="utf-8")
+    (source_home / "sessions").mkdir()
+    (source_home / "sessions" / "old.jsonl").write_text("private history", encoding="utf-8")
+    (source_home / "logs").mkdir()
+    (source_home / "logs" / "codex.log").write_text("private log", encoding="utf-8")
+    (source_home / "trust.db").write_text("private trust", encoding="utf-8")
+    (source_home / "plugins" / "other").mkdir()
+    request = _codex_implementation_request(tmp_path)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"CODEX_HOME": str(source_home)},
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "CODEX_ATHENA_ARTIFACT_SHA256",
+        agent_runtime._codex_athena_artifact_digest(athena),
+    )
+
+    profile = agent_runtime._populate_codex_implementation_profile(request)
+
+    copied = profile / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
+    assert (copied / "skill.md").read_text(encoding="utf-8") == "validated Athena\n"
+    assert not (profile / "auth.json").exists()
+    assert not (profile / "sessions").exists()
+    assert not (profile / "logs").exists()
+    assert not (profile / "trust.db").exists()
+    assert not (profile / "plugins" / "other").exists()
+
+
+@pytest.mark.parametrize("entry_point", ["session", "text"])
+def test_codex_implementation_requires_adapter_before_profile_or_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    entry_point: str,
+) -> None:
+    """A missing adapter blocks an implementation before host state is read."""
+    request = ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
+    profile = patch("hephaestus.agents.runtime._codex_child_env")
+    process = patch("hephaestus.agents.runtime.run_codex_session")
+    with (
+        profile as profile_mock,
+        process as process_mock,
+        pytest.raises(
+            CodexIsolationError,
+            match="codex_adapter_not_selected",
+        ),
+    ):
+        if entry_point == "session":
+            agent_runtime.run_agent_session(
+                "codex",
+                "implement",
+                cwd=tmp_path,
+                timeout=30,
+                execution_request=request,
+            )
+        else:
+            agent_runtime.run_agent_text(
+                "codex",
+                "implement",
+                cwd=tmp_path,
+                timeout=30,
+                execution_request=request,
+            )
+
+    profile_mock.assert_not_called()
+    process_mock.assert_not_called()
+
+
+def test_non_implementation_codex_does_not_load_isolation_adapter(
+    tmp_path: Path,
+) -> None:
+    """A Codex planning request keeps the direct session behavior."""
+    request = ExecutionRequest(
+        AgentRole.PLANNER,
+        AgentOperation.PLAN,
+        SessionLifecycle.START_NEW,
+    )
+    expected = agent_runtime.AgentRunResult("planned", "", "session-plan")
+    with (
+        patch("hephaestus.agents.codex_isolation.load_adapter_factory") as load_adapter,
+        patch(
+            "hephaestus.agents.runtime.run_codex_session",
+            return_value=expected,
+        ) as direct_session,
+    ):
+        result = agent_runtime.run_agent_session(
+            "codex",
+            "plan",
+            cwd=tmp_path,
+            timeout=30,
+            execution_request=request,
+        )
+
+    assert result is expected
+    load_adapter.assert_not_called()
+    direct_session.assert_called_once()
 
 
 def test_run_codex_session_tracks_a_dedicated_process_group(tmp_path: Path) -> None:
@@ -4123,3 +4682,48 @@ def test_add_agent_argument_defaults_to_auto_detect() -> None:
     assert parser.parse_args([]).agent is None
     assert parser.parse_args(["--agent", "codex"]).agent == "codex"
     assert parser.parse_args(["--agent", "pi"]).agent == "pi"
+
+
+def test_add_agent_argument_parses_explicit_codex_isolation_inputs(tmp_path: Path) -> None:
+    """The parser admits one named adapter and one detached lock identity."""
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    agent_runtime.add_agent_argument(parser)
+    lock = tmp_path / "deployment-lock.json"
+    values = parser.parse_args(
+        [
+            "--codex-isolation-adapter",
+            "production",
+            "--codex-isolation-deployment-lock",
+            str(lock.absolute()),
+            "--codex-isolation-deployment-lock-sha256",
+            "a" * 64,
+        ]
+    )
+
+    assert values.codex_isolation_adapter == "production"
+    assert values.codex_isolation_deployment_lock == lock.absolute()
+    assert values.codex_isolation_deployment_lock_sha256 == "a" * 64
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--codex-isolation-adapter", "module:factory"],
+        ["--codex-isolation-deployment-lock", "relative.json"],
+        ["--codex-isolation-deployment-lock-sha256", "A" * 64],
+        ["--codex-isolation-deployment-lock-sha256", "a" * 63],
+    ],
+)
+def test_add_agent_argument_rejects_invalid_codex_isolation_inputs(
+    arguments: list[str],
+) -> None:
+    """The command boundary rejects ambiguous adapter and lock values."""
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    agent_runtime.add_agent_argument(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(arguments)

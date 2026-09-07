@@ -76,3 +76,24 @@ def test_validation_package_and_console_script_targets_import() -> None:
         capture_output=True,
         text=True,
     )
+
+
+def test_base_import_does_not_load_sigstore() -> None:
+    """The base package import does not load the automation Sigstore dependency."""
+    code = (
+        "import sys\n"
+        "before = set(sys.modules)\n"
+        "import hephaestus\n"
+        "loaded = sorted(name for name in set(sys.modules) - before "
+        "if name == 'sigstore' or name.startswith('sigstore.'))\n"
+        "print('SIGSTORE_LOADED:' + ','.join(loaded))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "SIGSTORE_LOADED:" in result.stdout
+    assert result.stdout.strip() == "SIGSTORE_LOADED:"

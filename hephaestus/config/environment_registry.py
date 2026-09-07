@@ -45,7 +45,12 @@ def _parent(
     )
 
 
-def _child(name: str, purpose: str, writer: str, validation: str) -> EnvVarSpec:
+def _child(
+    name: str,
+    purpose: str,
+    writer: str | tuple[str, ...],
+    validation: str,
+) -> EnvVarSpec:
     return EnvVarSpec(
         name=name,
         purpose=purpose,
@@ -53,7 +58,7 @@ def _child(name: str, purpose: str, writer: str, validation: str) -> EnvVarSpec:
         sensitivity="public",
         validation=validation,
         direction="child-write",
-        qualified_writers=(writer,),
+        qualified_writers=(writer,) if isinstance(writer, str) else writer,
     )
 
 
@@ -231,13 +236,49 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     _child(
         "GIT_CONFIG_GLOBAL",
         "Scoped Git configuration",
-        "hephaestus.config.child_environments.build_git_child_env",
+        (
+            "hephaestus.config.child_environments.build_git_child_env",
+            "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        ),
         "path",
     ),
     _child(
         "GIT_CONFIG_NOSYSTEM",
         "Disable system Git configuration",
-        "hephaestus.config.child_environments.build_git_child_env",
+        (
+            "hephaestus.config.child_environments.build_git_child_env",
+            "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        ),
+        "literal-1",
+    ),
+    _child(
+        "GIT_DIR",
+        "Bound implementation Git directory",
+        "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        "path",
+    ),
+    _child(
+        "GIT_WORK_TREE",
+        "Bound implementation worktree",
+        "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        "path",
+    ),
+    _child(
+        "GIT_INDEX_FILE",
+        "Bound implementation Git index",
+        "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        "path",
+    ),
+    _child(
+        "GIT_OPTIONAL_LOCKS",
+        "Disable optional child Git locks",
+        "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        "literal-0",
+    ),
+    _child(
+        "GIT_ATTR_NOSYSTEM",
+        "Disable system Git attributes",
+        "hephaestus.config.child_environments.build_codex_implementation_child_env",
         "literal-1",
     ),
     _child(

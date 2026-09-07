@@ -33,10 +33,25 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TypeGuard, cast
 
+import hephaestus.agents.runtime as agent_runtime
 import hephaestus.automation.claude_invoke as claude_invoke
+import hephaestus.automation.codex_adapter_admission as codex_adapter_admission
 import hephaestus.automation.git_utils as git_utils
+import hephaestus.automation.pipeline.codex_worktree_boundary as codex_worktree_boundary
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_policy
+from hephaestus.agents.codex_isolation import (
+    CodexExecutionPolicyV1,
+    CodexGitReceiptV1,
+    CodexIsolationAdapterV1,
+    CodexIsolationError,
+    CodexIsolationRequestV1,
+    StagedLinuxExecutable,
+    canonical_sha256,
+    new_run_nonce,
+    stage_linux_executable,
+)
+from hephaestus.agents.execution_policy import AgentRole, ExecutionPolicyError, resolve_policy
+from hephaestus.agents.model_selection import resolve_codex_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -109,6 +124,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
 )
 from hephaestus.config.child_environments import (
+    build_codex_implementation_child_env,
     build_git_child_env,
     build_git_signing_env,
     build_host_verification_env,
@@ -133,6 +149,10 @@ _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _DIRTY_CONTENT_SNAPSHOT_KEYS = frozenset({"index_sha256", "worktree_sha256", "untracked_sha256"})
+_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
+_CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
+_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS = 1.0
+_CODEX_IMPLEMENTATION_PROVIDER_RELAY = "vsock://2:443"
 
 
 class _GitInspectionResourceLimitError(RuntimeError):
@@ -1915,6 +1935,220 @@ def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
     return fields
 
 
+def _is_codex_implementation_job(job: AgentJob) -> bool:
+    """Return true only for a Codex implementation-role job."""
+    return bool(
+        agent_runtime.requires_codex_implementation_isolation(job.agent)
+        and job.execution_request is not None
+        and job.execution_request.role is AgentRole.IMPLEMENTER
+    )
+
+
+@contextmanager
+def _codex_git_boundary(cwd: Path) -> Iterator[codex_worktree_boundary.CodexWorktreeBoundary]:
+    """Map Git receipt failures to one stable adapter error."""
+    try:
+        with codex_worktree_boundary.capture_codex_worktree_boundary(cwd) as boundary:
+            yield boundary
+    except codex_worktree_boundary.CodexWorktreeBoundaryError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+
+
+def _codex_implementation_command(
+    *, executable: Path, worktree: Path, model: str, session_id: str | None
+) -> tuple[str, ...]:
+    """Build one exact guest command from frozen worker inputs."""
+    command = [str(executable), "exec"]
+    if session_id:
+        command.extend(("resume", session_id))
+    selection = resolve_codex_model_selection(model)
+    if selection.model:
+        command.extend(("--model", selection.model))
+    if selection.reasoning_effort:
+        command.extend(("-c", f"model_reasoning_effort={json.dumps(selection.reasoning_effort)}"))
+    if session_id:
+        command.extend(
+            (
+                "-c",
+                'sandbox_mode="workspace-write"',
+                "-c",
+                'approval_policy="never"',
+            )
+        )
+    else:
+        command.extend(
+            (
+                "--cd",
+                str(worktree),
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+            )
+        )
+    command.extend(("--json", "-"))
+    return tuple(command)
+
+
+def _initialize_codex_adapter(
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+) -> CodexIsolationAdapterV1:
+    """Initialize one admitted adapter and check its locked identity."""
+    factory = admission.factory
+    if (
+        not callable(factory)
+        or getattr(factory, "codex_isolation_api_version", None)
+        != admission.lock.adapter_api_version
+    ):
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    try:
+        adapter = factory()
+        admission.validate_adapter_identity(
+            distribution=getattr(adapter, "adapter_distribution", ""),
+            version=getattr(adapter, "adapter_version", ""),
+            installed_tree_sha256=getattr(adapter, "installed_tree_sha256", ""),
+        )
+    except CodexIsolationError:
+        raise
+    except BaseException:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    return cast(CodexIsolationAdapterV1, adapter)
+
+
+def _validate_staged_codex_executable(executable: StagedLinuxExecutable) -> None:
+    """Recheck the staged path identity and bytes without following a link."""
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            executable.path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        value = os.fstat(descriptor)
+        identity = (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_uid,
+            value.st_size,
+            value.st_mtime_ns,
+        )
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+        if identity != executable.file_identity or digest.hexdigest() != executable.digest:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _codex_implementation_request(
+    *,
+    job: AgentJob,
+    worktree: Path,
+    prompt: str,
+    private_profile: Path,
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+    git_receipt: CodexGitReceiptV1,
+    executable: StagedLinuxExecutable,
+) -> CodexIsolationRequestV1:
+    """Build the complete frozen request for one admitted adapter."""
+    lock = admission.lock
+    if executable.digest != lock.extracted_elf_sha256:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    fixed_git_environment = dict(git_receipt.fixed_environment)
+    environment = tuple(
+        sorted(
+            build_codex_implementation_child_env(
+                codex_home=private_profile,
+                fixed_git_environment=fixed_git_environment,
+            ).items()
+        )
+    )
+    session_id = (
+        job.resume_binding.session_id if job.resume_binding is not None else job.resume_session_id
+    )
+    session = session_id or job.session_key or job.session_agent or job.agent
+    command = _codex_implementation_command(
+        executable=executable.path,
+        worktree=worktree,
+        model=job.model,
+        session_id=session_id,
+    )
+    policy = CodexExecutionPolicyV1(
+        schema_version=1,
+        read_only_mounts=tuple(sorted({*git_receipt.read_only_paths, str(executable.path)})),
+        read_write_mounts=tuple(sorted({*git_receipt.read_write_paths, str(private_profile)})),
+        protected_overlay_mounts=tuple(sorted(git_receipt.protected_paths)),
+        provider_relay=_CODEX_IMPLEMENTATION_PROVIDER_RELAY,
+        command_network="deny",
+        max_output_bytes=_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES,
+        term_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        kill_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        pipe_close_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        inventory_quiescence_seconds=_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS,
+        total_deadline=float(job.timeout_s),
+    )
+    worktree_identity = git_receipt.canonical_worktree
+    model = job.model or "default"
+    issue = int(job.issue)
+    session_identity = (
+        job.repo,
+        issue,
+        "implementer",
+        worktree_identity,
+        model,
+        session,
+    )
+    return CodexIsolationRequestV1(
+        schema_version=1,
+        run_nonce=new_run_nonce(),
+        entry_point_name=lock.entry_point_name,
+        adapter_api_version=lock.adapter_api_version,
+        package_version=lock.adapter_version,
+        deployment_lock_digest=admission.deployment_lock_sha256,
+        wheel_digest=lock.wheel_sha256,
+        installed_tree_digest=lock.installed_tree_sha256,
+        command=command,
+        command_digest=canonical_sha256(command),
+        executable_platform="linux",
+        executable_target=lock.codex_target,
+        executable_release=lock.codex_release_tag,
+        executable_asset_name=lock.codex_archive_asset,
+        executable_path=str(executable.path),
+        executable_digest=executable.digest,
+        executable_file_identity=executable.file_identity,
+        guest_image_digest=lock.guest_image_sha256,
+        environment=environment,
+        environment_digest=canonical_sha256(environment),
+        prompt=prompt,
+        prompt_digest=canonical_sha256(prompt),
+        worktree_path=str(worktree),
+        private_profile_path=str(private_profile),
+        policy=policy,
+        policy_digest=canonical_sha256(policy),
+        git_receipt=git_receipt,
+        git_receipt_digest=canonical_sha256(git_receipt),
+        repository=job.repo,
+        issue=issue,
+        role="implementer",
+        worktree_identity=worktree_identity,
+        model=model,
+        session=session,
+        session_identity_digest=canonical_sha256(session_identity),
+        monotonic_deadline=time.monotonic() + job.timeout_s,
+    )
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -2362,6 +2596,72 @@ class WorkerPool:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
 
+    @staticmethod
+    def _run_codex_implementation(job: AgentJob, cwd: Path) -> agent_runtime.AgentRunResult:
+        """Run one implementation job through the selected external adapter."""
+        if (
+            not job.codex_isolation_adapter
+            or job.codex_isolation_deployment_lock is None
+            or job.codex_isolation_deployment_lock_sha256 is None
+        ):
+            raise CodexIsolationError("codex_adapter_not_selected")
+        with _agent_workspace_lease(job) as leased:
+            if leased != cwd:
+                raise CodexIsolationError("codex_adapter_request_mismatch")
+            with _codex_git_boundary(cwd) as boundary:
+                try:
+                    admission = codex_adapter_admission.admit_codex_adapter(
+                        lock_path=job.codex_isolation_deployment_lock,
+                        expected_sha256=job.codex_isolation_deployment_lock_sha256,
+                        selected_entry_point=job.codex_isolation_adapter,
+                    )
+                except codex_adapter_admission.CodexAdapterAdmissionError:
+                    raise CodexIsolationError("codex_adapter_initialization_failed") from None
+                adapter = _initialize_codex_adapter(admission)
+                build_root = cwd / "build"
+                if build_root.is_symlink():
+                    raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                try:
+                    build_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    canonical_build_root = build_root.resolve(strict=True)
+                except OSError:
+                    raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+                if not canonical_build_root.is_relative_to(cwd):
+                    raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                with tempfile.TemporaryDirectory(
+                    prefix="codex-implementation-",
+                    dir=canonical_build_root,
+                ) as temporary:
+                    job_root = Path(temporary)
+                    job_root.chmod(0o700)
+                    executable = stage_linux_executable(
+                        Path(admission.lock.extracted_elf_path),
+                        job_root,
+                    )
+                    with plugin_skills_context(job.plugin_skills_dir):
+                        prompt = job.prompt_builder(**job.prompt_kwargs)
+                    request = _codex_implementation_request(
+                        job=job,
+                        worktree=cwd,
+                        prompt=prompt,
+                        private_profile=job_root / "codex-home",
+                        admission=admission,
+                        git_receipt=boundary.receipt,
+                        executable=executable,
+                    )
+                    boundary.verify_before_launch()
+                    _validate_staged_codex_executable(executable)
+                    try:
+                        return agent_runtime.run_codex_implementation_session(
+                            adapter=adapter,
+                            request=request,
+                        )
+                    finally:
+                        try:
+                            _validate_staged_codex_executable(executable)
+                        finally:
+                            boundary.verify_after_return()
+
     def _run_agent(  # noqa: C901 - provider and session dispatch are one atomic boundary
         self, job: AgentJob
     ) -> JobResult:
@@ -2386,6 +2686,33 @@ class WorkerPool:
         """
         try:
             cwd = validate_job_workspace(job)
+            if _is_codex_implementation_job(job):
+                agent_result = self._run_codex_implementation(job, cwd)
+                session_id = agent_result.session_id or job.resume_session_id
+                if session_id is not None and job.session_checkpoint is not None:
+                    job.session_checkpoint(session_id, agent_result.session_binding)
+                stdout = agent_result.stdout or ""
+                value = None
+                if job.parse is not None:
+                    try:
+                        value = job.parse(stdout)
+                    except Exception as exc:
+                        logger.exception("Parse callable raised for Codex implementation job")
+                        return JobResult(
+                            ok=False,
+                            error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                            stdout_tail=stdout[-_TAIL:],
+                            session_id=session_id,
+                            session_binding=agent_result.session_binding,
+                        )
+                return JobResult(
+                    ok=True,
+                    value=value if value is not None else stdout,
+                    stdout_tail=stdout[-_TAIL:],
+                    session_id=session_id,
+                    session_binding=agent_result.session_binding,
+                    observed_skill_invocations=agent_result.observed_skill_invocations,
+                )
             agent = resolve_agent(
                 job.agent,
                 cwd=cwd,
@@ -2534,6 +2861,8 @@ class WorkerPool:
                 observed_skill_invocations=observed_skill_invocations,
             )
 
+        except CodexIsolationError as exc:
+            return JobResult(ok=False, error=exc.code)
         except CircuitBreakerOpenError:
             return JobResult(ok=False, error="circuit_open")
         except subprocess.TimeoutExpired:
@@ -5190,6 +5519,13 @@ class WorkerPool:
             str(job.kwargs.get("agent", "claude")),
         )
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+        scope_check = self._verify_implementation_edit_scope(
+            job,
+            worktree,
+            allowed_paths=allowed_paths,
+        )
+        if scope_check is not None:
+            return scope_check
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         changed = self._commit_if_changes_with_controlled_signing(
@@ -5238,6 +5574,13 @@ class WorkerPool:
         scope_retraction = self._verify_scope_retraction(job, worktree)
         if scope_retraction is not None:
             return scope_retraction
+        scope_check = self._verify_implementation_edit_scope(
+            job,
+            worktree,
+            allowed_paths=allowed_paths,
+        )
+        if scope_check is not None:
+            return scope_check
         if not recovery_bound:
             return self._publish_commit_push(job, branch, worktree)
         publication_head = self._read_publish_head(worktree, timeout=job.timeout_s)
@@ -5265,6 +5608,59 @@ class WorkerPool:
             expected_head=publication_head,
             expected_content_snapshot=publication_snapshot,
         )
+
+    @staticmethod
+    def _verify_implementation_edit_scope(
+        job: GitJob,
+        worktree: Path,
+        *,
+        allowed_paths: Collection[str] | None,
+    ) -> JobResult | None:
+        """Reject dirty and committed edits outside the host-approved scope."""
+        if allowed_paths is None:
+            if agent_runtime.requires_codex_implementation_isolation(
+                str(job.kwargs.get("agent", ""))
+            ):
+                return JobResult(ok=False, error="implementation approved scope is unavailable")
+            return None
+        if not allowed_paths or not all(
+            is_safe_scope_retraction_path(path) for path in allowed_paths
+        ):
+            return JobResult(ok=False, error="implementation approved scope is unavailable")
+        history_base_sha = job.kwargs.get("scope_history_base_sha")
+        if not _is_full_commit_sha(history_base_sha):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        probes = (
+            ["git", "diff", "--no-renames", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{history_base_sha}..HEAD",
+            ],
+        )
+        try:
+            changed: set[str] = set()
+            for argv in probes:
+                result = git_utils.run(
+                    argv,
+                    cwd=worktree,
+                    capture_output=True,
+                    timeout=job.timeout_s,
+                )
+                changed.update(path for path in str(result.stdout or "").split("\0") if path)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        if not changed.issubset(set(allowed_paths)):
+            return JobResult(
+                ok=False,
+                error="implementation changed paths outside approved scope",
+            )
+        return None
 
     @staticmethod
     def _commit_if_changes_with_controlled_signing(
