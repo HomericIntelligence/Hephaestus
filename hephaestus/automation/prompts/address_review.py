@@ -191,31 +191,23 @@ def get_address_review_prompt(
 
 def get_remediation_reply_recovery_prompt(
     *,
-    issue_number: int,
-    worktree_path: str,
-    thread_snapshots: list[dict[str, Any]],
-    inspection_status: dict[str, Any],
-    diff_text: str,
-    diagnostic: str,
+    review_input: bytes,
+    review_input_sha256: str,
 ) -> str:
-    """Build a read-only prompt to recover remediation reply mappings."""
+    """Build a read-only prompt from one exact remediation review input."""
+    from hephaestus.automation.remediation_recovery import RemediationReviewInput
+
+    parsed_input = RemediationReviewInput.from_canonical_bytes(review_input)
+    if review_input_sha256 != parsed_input.review_input_sha256:
+        raise ValueError("review input digest does not match its canonical bytes")
     fenced = fence_content()
     return PromptCatalog.current().render(
         "address_review/reply_recovery.j2",
-        issue_number=issue_number,
-        worktree_path=worktree_path,
-        thread_snapshots_block=fenced.fence(
-            "THREAD_SNAPSHOTS",
-            json.dumps(thread_snapshots, ensure_ascii=False, sort_keys=True),
+        review_input_block=fenced.fence(
+            "REMEDIATION_REVIEW_INPUT",
+            review_input.decode("utf-8"),
         ),
-        inspection_status_block=fenced.fence(
-            "INSPECTION_STATUS",
-            json.dumps(inspection_status, ensure_ascii=False, sort_keys=True),
-        ),
-        diff_block=fenced.fence("WORKTREE_DIFF", json.dumps(diff_text, ensure_ascii=False)),
-        diagnostic_block=fenced.fence(
-            "FAILURE_DIAGNOSTIC", json.dumps(diagnostic, ensure_ascii=False)
-        ),
+        review_input_sha256=review_input_sha256,
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )

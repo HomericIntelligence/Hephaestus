@@ -505,9 +505,10 @@ class FakeStageGitHub(FakeGitHub):
         replies: dict[str, str],
         batch_nonce: str,
         progress: ImplementationReplyProgress | None = None,
+        recover_pending_review: bool = False,
     ) -> ImplementationThreadReplyResult:
         """Record head-gated implementation replies for stage tests."""
-        del expected_head_sha, batch_nonce, progress
+        del expected_head_sha, batch_nonce, progress, recover_pending_review
         by_id = {
             str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads
         }
@@ -850,6 +851,8 @@ def make_work_item() -> Callable[..., WorkItem]:
         payload: dict[str, Any] | None = None,
     ) -> WorkItem:
         item = WorkItem(repo=repo, kind=kind, issue=issue, pr=pr, stage=stage, state=state)
+        if state == "COMMIT_PUSH_WAIT":
+            item.payload.update({"issue_title": "A task", "issue_body": ""})
         if labels:
             item.labels_cache = dict.fromkeys(labels, True)
         if payload:

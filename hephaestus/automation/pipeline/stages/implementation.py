@@ -66,6 +66,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import secrets
 import shlex
@@ -82,9 +83,9 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import (
-    MAX_ADDRESS_REPLY_CHARS,
     _parse_addressed_block,
     parse_addressed_replies,
+    parse_remediation_reply_result,
 )
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
@@ -95,6 +96,7 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
+from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.prompts.address_review import (
     get_address_review_prompt,
     get_remediation_reply_recovery_prompt,
@@ -105,6 +107,11 @@ from hephaestus.automation.prompts.implementation import (
     get_implementation_prompt,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
+from hephaestus.automation.remediation_recovery import (
+    RemediationRecoveryReceipt,
+    RemediationReplyResult,
+)
+from hephaestus.automation.reply_limits import MAX_ADDRESS_REPLY_CHARS
 from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     issue_auto_impl_branch_name,
@@ -134,10 +141,12 @@ from ..github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
     GitHubJob,
+    RecoverRemediationReplyJournalRequest,
     RecoverReplyJournalRequest,
+    RemediationReplyJournalRecovered,
     ReplyHandoffAttempted,
     ReplyJournalAppended,
-    ReplyJournalRecovered,
+    bind_delivery_request,
 )
 from ..jobs import WORKTREE_MATERIALIZED_KEY
 from ..reply_handoff import (
@@ -149,6 +158,7 @@ from ..reply_handoff import (
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES,
+    implementation_remediation_reply_handoff_journal_entry,
     implementation_reply_handoff,
     implementation_reply_handoff_journal_entry,
 )
@@ -208,6 +218,9 @@ WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
 DIRTY_RECOVERY_WAIT = "DIRTY_RECOVERY_WAIT"
 REMEDIATION_REPLY_RECOVERY_WAIT = "REMEDIATION_REPLY_RECOVERY_WAIT"
+REMEDIATION_PREPARE_WAIT = "REMEDIATION_PREPARE_WAIT"
+REMEDIATION_PUBLISH_WAIT = "REMEDIATION_PUBLISH_WAIT"
+REMEDIATION_JOURNAL_GIT_VERIFY_WAIT = "REMEDIATION_JOURNAL_GIT_VERIFY_WAIT"
 REBASE_WAIT = "REBASE_WAIT"
 REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
@@ -229,6 +242,9 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
     DIRTY_RECOVERY_WAIT: "_dirty_recovery_wait",
     REMEDIATION_REPLY_RECOVERY_WAIT: "_remediation_reply_recovery_wait",
+    REMEDIATION_PREPARE_WAIT: "_remediation_prepare_wait",
+    REMEDIATION_PUBLISH_WAIT: "_remediation_publish_wait",
+    REMEDIATION_JOURNAL_GIT_VERIFY_WAIT: "_remediation_journal_git_verify_wait",
     REBASE_WAIT: "_rebase_wait",
     REBASE_CONFLICT_WAIT: "_rebase_conflict_wait",
     REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
@@ -247,6 +263,9 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _REPLY_JOURNAL_RECOVERY_RESULT = "_reply_journal_recovery_result"
 _REPLY_JOURNAL_RECOVERY_DELAY = "_reply_journal_recovery_delay"
+_REPLY_JOURNAL_RECOVERY_DEADLINE = "_reply_journal_recovery_deadline_s"
+_REMEDIATION_REPLY_AGENT_DEADLINE = "_remediation_reply_agent_deadline_s"
+_REPLY_HANDOFF_DEADLINE = "_reply_handoff_deadline_s"
 _REPLY_JOURNAL_APPEND_RESULT = "_reply_journal_append_result"
 _REPLY_HANDOFF_RESULT = "_reply_handoff_result"
 _SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
@@ -366,16 +385,28 @@ def _validated_source_workspace_recovery(
     }
 
 
+def _commit_issue_metadata(item: WorkItem) -> tuple[str, str] | None:
+    """Return the closed issue snapshot for a Git commit job."""
+    title = item.payload.get("issue_title")
+    body = item.payload.get("issue_body")
+    if not isinstance(title, str) or not title.strip() or not isinstance(body, str):
+        return None
+    return title, body
+
+
 #: Max CONSECUTIVE transient git failures (worktree creation / commit+push)
 #: tolerated before the stage finishes failed (``git_error``) instead of
 #: RETRYing forever. Mirrors pr_review.REVIEW_ERROR_RETRY_CAP: transient
 #: failures never burn the implement budget, but a persistently broken
 #: remote must still terminate. Reset on any successful git job.
 GIT_ERROR_RETRY_CAP = 2
+_TRANSIENT_REMEDIATION_PUBLICATION_FAILURES = frozenset({"unknown", "timeout", "transport"})
 
 #: A provider error can contain details from an untrusted tool event. Keep only
 #: a redacted bounded diagnostic for the read-only reply-recovery prompt.
 REMEDIATION_FAILURE_DIAGNOSTIC_MAX = 500
+_REMEDIATION_PUBLISH_DEADLINE = "_remediation_publish_deadline_s"
+_REMEDIATION_PREPARE_DEADLINE = "_remediation_prepare_deadline_s"
 
 #: A pending shared-branch holder waits for the in-flight creator's completion
 #: instead of re-entering the implementation drain in a tight loop.
@@ -459,6 +490,8 @@ def _recovery_publish_kwargs(item: WorkItem) -> dict[str, object] | None:
     expected_head = inspection.get("head_sha")
     expected_content = inspection.get("content_snapshot")
     expected_tree = inspection.get("candidate_tree_sha")
+    expected_diff = inspection.get("diff")
+    expected_diff_sha256 = inspection.get("diff_sha256")
     add_paths = inspection.get("candidate_add_paths")
     update_paths = inspection.get("candidate_update_paths")
     if (
@@ -466,6 +499,13 @@ def _recovery_publish_kwargs(item: WorkItem) -> dict[str, object] | None:
         or expected_head != item.payload.get("_impl_source_revision")
         or not _is_valid_dirty_content_snapshot(expected_content)
         or not is_full_commit_sha(expected_tree)
+        or not _is_bounded_inspection_text(
+            expected_diff,
+            max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+        )
+        or not _is_sha256(expected_diff_sha256)
+        or expected_diff_sha256
+        != hashlib.sha256(cast(str, expected_diff).encode("utf-8", "surrogateescape")).hexdigest()
         or not isinstance(add_paths, list)
         or not isinstance(update_paths, list)
         or not is_bounded_commit_paths(
@@ -479,6 +519,8 @@ def _recovery_publish_kwargs(item: WorkItem) -> dict[str, object] | None:
         "expected_recovery_head": expected_head,
         "expected_recovery_content_snapshot": dict(cast(dict[str, str], expected_content)),
         "expected_recovery_tree_sha": expected_tree,
+        "expected_recovery_diff": expected_diff,
+        "expected_recovery_diff_sha256": expected_diff_sha256,
         "expected_recovery_add_paths": tuple(add_paths),
         "expected_recovery_update_paths": tuple(update_paths),
     }
@@ -490,12 +532,256 @@ def _recovery_publish_kwargs(item: WorkItem) -> dict[str, object] | None:
     return kwargs
 
 
+def _remediation_commit_push_kwargs(
+    item: WorkItem,
+    ctx: StageContext,
+) -> dict[str, object] | None:
+    """Return the immutable remediation inputs for one commit-and-push job."""
+    if not item.payload.get("implementation_remediation"):
+        return {}
+    snapshots = item.payload.get("remediation_thread_snapshots")
+    replies = (
+        parse_addressed_replies(item.payload.get("remediation_output"), snapshots)
+        if isinstance(snapshots, list)
+        else None
+    )
+    if item.pr is None or not isinstance(snapshots, list) or replies is None:
+        return None
+    batch_nonce = item.payload.get("remediation_batch_nonce")
+    if batch_nonce is None:
+        batch_nonce = secrets.token_hex(16)
+        item.payload["remediation_batch_nonce"] = batch_nonce
+    diagnostic = item.payload.get("remediation_failure_diagnostic", "")
+    if (
+        not isinstance(batch_nonce, str)
+        or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None
+        or not isinstance(diagnostic, str)
+    ):
+        return None
+    return {
+        "remediation_repository": f"{ctx.org}/{item.repo}".casefold(),
+        "remediation_pr_number": item.pr,
+        "remediation_thread_snapshots": snapshots,
+        "remediation_replies": replies,
+        "remediation_batch_nonce": batch_nonce,
+        "remediation_failure_diagnostic": diagnostic,
+    }
+
+
+def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
+    """Build one commit-and-push job from validated stage-owned data."""
+    issue = _issue_number(item)
+    agent = agent_provider(ctx)
+    issue_metadata = _commit_issue_metadata(item)
+    if issue_metadata is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_issue_metadata_invalid")
+    issue_title, issue_body = issue_metadata
+    kwargs: dict[str, object] = {
+        "issue_number": issue,
+        "issue_title": issue_title,
+        "issue_body": issue_body,
+        "worktree_path": item.worktree,
+        "repo_root": str(ctx.paths.repo_root),
+        "branch": item.branch,
+        "agent": agent,
+        "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
+        "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
+    }
+    recovery_kwargs = _recovery_publish_kwargs(item)
+    if recovery_kwargs is None:
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_reply_writer_identity_invalid",
+        )
+    kwargs.update(recovery_kwargs)
+    remediation_kwargs = _remediation_commit_push_kwargs(item, ctx)
+    if remediation_kwargs is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+    kwargs.update(remediation_kwargs)
+    if ctx.config.pi_dir is not None:
+        kwargs["pi_dir"] = ctx.config.pi_dir
+    publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
+        "_synced_default_branch_sha"
+    )
+    if is_full_commit_sha(publish_base_sha):
+        kwargs["publish_base_sha"] = publish_base_sha
+    direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+    requires_fresh_direct_reservation = (
+        not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+    )
+    if requires_fresh_direct_reservation:
+        if not is_full_commit_sha(direct_base_sha):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
+        kwargs["expected_remote_sha"] = direct_base_sha
+    scope_retraction_paths = item.payload.get("scope_retraction_paths")
+    if scope_retraction_paths is not None:
+        if not isinstance(scope_retraction_paths, tuple) or not all(
+            is_safe_scope_retraction_path(path) for path in scope_retraction_paths
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+        base_sha = item.payload.get("reviewed_pr_base_sha")
+        if not is_full_commit_sha(base_sha):
+            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
+        kwargs["scope_retraction_paths"] = scope_retraction_paths
+        kwargs["scope_retraction_base_sha"] = base_sha
+    push_job = GitJob(
+        repo=item.repo,
+        op="commit_push",
+        timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+        expected_repository=f"{ctx.org}/{item.repo}",
+        kwargs=kwargs,
+        descr="commit_push",
+    )
+    return JobRequest(push_job, on_done_state=PR_CREATE)
+
+
+def _remediation_prepare_request(item: WorkItem, ctx: StageContext) -> StepResult:
+    """Build one commit-preparation job from the inspected writer."""
+    issue_metadata = _commit_issue_metadata(item)
+    recovery_kwargs = _recovery_publish_kwargs(item)
+    snapshots = item.payload.get("remediation_thread_snapshots")
+    diagnostic = item.payload.get("remediation_failure_diagnostic", "")
+    if (
+        item.issue is None
+        or item.pr is None
+        or issue_metadata is None
+        or recovery_kwargs is None
+        or not recovery_kwargs
+        or not isinstance(snapshots, list)
+        or not snapshots
+        or not isinstance(diagnostic, str)
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_writer_identity_invalid")
+    batch_nonce = item.payload.get("remediation_batch_nonce")
+    if batch_nonce is None:
+        batch_nonce = secrets.token_hex(16)
+        item.payload["remediation_batch_nonce"] = batch_nonce
+    if not isinstance(batch_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+    title, body = issue_metadata
+    kwargs: dict[str, object] = {
+        "issue_number": item.issue,
+        "issue_title": title,
+        "issue_body": body,
+        "repo_root": str(ctx.paths.repo_root),
+        "worktree_path": item.worktree,
+        "branch": item.branch,
+        "agent": agent_provider(ctx),
+        "agent_model": stage_model(ctx, "implementer", implementer_model),
+        "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
+        "remediation_repository": f"{ctx.org}/{item.repo}".casefold(),
+        "remediation_pr_number": item.pr,
+        "remediation_thread_snapshots": snapshots,
+        "remediation_batch_nonce": batch_nonce,
+        "remediation_failure_diagnostic": diagnostic,
+        **recovery_kwargs,
+    }
+    operation_timeout = stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)
+    deadline_s = item.payload.get(_REMEDIATION_PREPARE_DEADLINE)
+    if deadline_s is None:
+        deadline_s = operation_deadline_after(operation_timeout)
+        item.payload[_REMEDIATION_PREPARE_DEADLINE] = deadline_s
+    if (
+        isinstance(deadline_s, bool)
+        or not isinstance(deadline_s, (int, float))
+        or not math.isfinite(deadline_s)
+        or deadline_s <= 0
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+    return JobRequest(
+        GitJob(
+            repo=item.repo,
+            op="prepare_remediation_recovery",
+            timeout_s=operation_timeout,
+            expected_repository=f"{ctx.org}/{item.repo}",
+            deadline_s=float(deadline_s),
+            kwargs=kwargs,
+            descr="prepare_remediation_recovery",
+        ),
+        on_done_state=REMEDIATION_PREPARE_WAIT,
+    )
+
+
+def _remediation_publish_request(item: WorkItem, ctx: StageContext) -> StepResult:
+    """Build one exact publication job from a prepared receipt and reply result."""
+    try:
+        receipt = RemediationRecoveryReceipt.from_dict(
+            item.payload.get("remediation_recovery_receipt")
+        )
+        reply_result = RemediationReplyResult.from_dict(
+            item.payload.get("remediation_reply_result")
+        )
+    except ValueError:
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+    batch_nonce = item.payload.get("remediation_batch_nonce")
+    if reply_result.review_input_sha256 != receipt.review_input_sha256 or not isinstance(
+        batch_nonce, str
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+    operation_timeout = stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)
+    deadline_s = item.payload.get(_REMEDIATION_PUBLISH_DEADLINE)
+    if deadline_s is None:
+        deadline_s = operation_deadline_after(operation_timeout)
+        item.payload[_REMEDIATION_PUBLISH_DEADLINE] = deadline_s
+    if (
+        isinstance(deadline_s, bool)
+        or not isinstance(deadline_s, (int, float))
+        or not math.isfinite(deadline_s)
+        or deadline_s <= 0
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+    return JobRequest(
+        GitJob(
+            repo=item.repo,
+            op="publish_remediation_recovery",
+            timeout_s=operation_timeout,
+            expected_repository=f"{ctx.org}/{item.repo}",
+            deadline_s=float(deadline_s),
+            kwargs={
+                "recovery_receipt": receipt.as_dict(),
+                "reply_result": reply_result.as_dict(),
+                "remediation_batch_nonce": batch_nonce,
+                "already_published": item.payload.get("remediation_recovery_already_published")
+                is True,
+            },
+            descr="publish_remediation_recovery",
+        ),
+        on_done_state=PR_CREATE,
+    )
+
+
+def _remediation_reply_recovery_cwd(item: WorkItem, ctx: StageContext) -> Path:
+    """Return one empty host directory for receipt-only reply recovery."""
+    identity = hashlib.sha256(f"{ctx.org}/{item.repo}#{item.pr}".encode()).hexdigest()[:24]
+    root = Path(ctx.config.projects_dir).resolve(strict=False)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root = root.resolve(strict=True)
+    neutral = root / "build" / ".hephaestus-remediation-reply" / identity
+    neutral.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if neutral.is_symlink():
+        raise RuntimeError("remediation reply directory must not be a symlink")
+    canonical = neutral.resolve(strict=True)
+    if root not in canonical.parents or any(canonical.iterdir()):
+        raise RuntimeError("remediation reply directory is not an empty host directory")
+    return canonical
+
+
 def _clear_remediation_cycle(item: WorkItem) -> None:
     """Remove state that is valid only for the completed remediation cycle."""
     item.payload.pop("implementation_remediation", None)
     item.payload.pop("remediation_output", None)
     item.payload.pop("remediation_writer_inspection", None)
     item.payload.pop("remediation_recovery_commit_sha", None)
+    item.payload.pop("remediation_recovery_receipt", None)
+    item.payload.pop("remediation_reply_result", None)
+    item.payload.pop("remediation_batch_nonce", None)
+    item.payload.pop("remediation_publish_retry", None)
+    item.payload.pop("remediation_publish_permanent", None)
+    item.payload.pop(_REMEDIATION_PUBLISH_DEADLINE, None)
+    item.payload.pop(_REMEDIATION_PREPARE_DEADLINE, None)
+    item.payload.pop(_REPLY_JOURNAL_RECOVERY_DEADLINE, None)
+    item.payload.pop(_REMEDIATION_REPLY_AGENT_DEADLINE, None)
+    item.payload.pop(_REPLY_HANDOFF_DEADLINE, None)
 
 
 def _remediation_reply_head(
@@ -660,7 +946,7 @@ class ImplementationStage(Stage):
         """ENTER advances to GATE."""
         return Continue(next_state=GATE)
 
-    def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
         inspection = self._restored_remediation_inspection_job(item, ctx)
@@ -729,6 +1015,14 @@ class ImplementationStage(Stage):
             kwargs["sync_to_remote"] = True
             kwargs["pr_number"] = item.pr
             kwargs["implementation_adoption_head"] = adopted_head
+            remediation_snapshots = item.payload.get("remediation_thread_snapshots")
+            if item.payload.get("implementation_remediation") and isinstance(
+                remediation_snapshots, list
+            ):
+                kwargs["recover_prepared_remediation"] = True
+                kwargs["remediation_repository"] = f"{ctx.org}/{item.repo}".casefold()
+                kwargs["remediation_pr_number"] = item.pr
+                kwargs["remediation_thread_snapshots"] = remediation_snapshots
         worktree_job = GitJob(
             repo=item.repo,
             op="create_worktree",
@@ -829,7 +1123,9 @@ class ImplementationStage(Stage):
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
             item.payload.pop("git_error_retries", None)
             item.payload["remediation_writer_inspection"] = dict(inspection)
-            return Continue(next_state=REMEDIATION_REPLY_RECOVERY_WAIT)
+            item.payload.pop("implement_error", None)
+            item.payload.pop("remediation_reply_inspection_required", None)
+            return Continue(next_state=TEST_WAIT)
         if item.payload.pop("source_workspace_ownership_unavailable", None):
             recovery = _validated_source_workspace_recovery(
                 item.payload.pop("source_workspace_recovery", None),
@@ -892,6 +1188,8 @@ class ImplementationStage(Stage):
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
             return outcome
+        if item.payload.pop("prepared_remediation_recovered", False):
+            return Continue(next_state=TEST_WAIT)
         # Reviewers never rebase. A reviewed head that merge-wait finds behind
         # or conflicting returns here for implementation-owned rebasing, then
         # passes through a fresh review of the rewritten head.
@@ -995,33 +1293,48 @@ class ImplementationStage(Stage):
         return JobRequest(job, on_done_state=DIRTY_DECISION_WAIT)
 
     def _remediation_reply_recovery_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Submit one read-only mapping recovery for an inspected dirty writer."""
+        """Submit one digest-bound reply recovery for a prepared commit."""
         issue = _issue_number(item)
         if item.payload.pop("remediation_reply_recovery_invalid", False):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
-        if "remediation_output" in item.payload:
-            snapshots = item.payload.get("remediation_thread_snapshots")
-            if (
-                not isinstance(snapshots, list)
-                or parse_addressed_replies(item.payload["remediation_output"], snapshots) is None
-            ):
+        if "remediation_reply_result" in item.payload:
+            try:
+                receipt = RemediationRecoveryReceipt.from_dict(
+                    item.payload.get("remediation_recovery_receipt")
+                )
+                result = RemediationReplyResult.from_dict(item.payload["remediation_reply_result"])
+            except ValueError:
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
-            return Continue(next_state=TEST_WAIT)
+            if result.review_input_sha256 != receipt.review_input_sha256:
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            return Continue(next_state=REMEDIATION_PUBLISH_WAIT)
         if item.attempts.get("remediation_reply", 0) >= ctx.budget("remediation_reply"):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
-        inspection = item.payload.get("remediation_writer_inspection")
-        snapshots = item.payload.get("remediation_thread_snapshots")
-        diagnostic = item.payload.get("remediation_failure_diagnostic")
+        try:
+            receipt = RemediationRecoveryReceipt.from_dict(
+                item.payload.get("remediation_recovery_receipt")
+            )
+        except ValueError:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+        deadline_s = item.payload.get(_REMEDIATION_REPLY_AGENT_DEADLINE)
+        if deadline_s is None:
+            deadline_s = operation_deadline_after(
+                stage_timeout(ctx, "implementer", implementer_claude_timeout())
+            )
+            item.payload[_REMEDIATION_REPLY_AGENT_DEADLINE] = deadline_s
         if (
-            not _is_valid_dirty_inspection(inspection)
-            or not isinstance(snapshots, list)
-            or not snapshots
-            or not isinstance(diagnostic, str)
+            isinstance(deadline_s, bool)
+            or not isinstance(deadline_s, (int, float))
+            or not math.isfinite(deadline_s)
+            or deadline_s <= 0
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
-        inspection = cast(dict[str, object], inspection)
-        content_snapshot = inspection.get("content_snapshot")
-        if not _is_valid_dirty_content_snapshot(content_snapshot):
+        try:
+            recovery_cwd = _remediation_reply_recovery_cwd(item, ctx)
+        except (OSError, RuntimeError) as error:
+            logger.warning(
+                "implementation:%d: receipt-only directory unavailable: %s", issue, error
+            )
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
         job = AgentJob(
             repo=item.repo,
@@ -1029,48 +1342,37 @@ class ImplementationStage(Stage):
             agent=agent_provider(ctx),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_remediation_reply_recovery_prompt,
-            cwd=_worktree_path(item, ctx),
+            cwd=recovery_cwd,
             timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             sandbox="read-only",
-            allowed_tools="Read,Glob,Grep",
-            session_agent=AGENT_IMPLEMENTER,
-            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            allowed_tools="",
+            session_agent="remediation-reply-recovery",
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
-                AgentOperation.IMPLEMENT_INSPECT,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_IMPLEMENTER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                AgentOperation.REMEDIATION_REPLY,
+                SessionLifecycle.ONE_SHOT,
             ),
-            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
-                "issue_number": issue,
-                "worktree_path": item.worktree,
-                "thread_snapshots": snapshots,
-                "inspection_status": {
-                    key: inspection[key]
-                    for key in (
-                        "outcome",
-                        "branch",
-                        "head_sha",
-                        "status",
-                        "status_sha256",
-                        "diff_sha256",
-                        "candidate_tree_sha",
-                        "content_snapshot",
-                        "worktree_path",
-                    )
-                    if key in inspection
-                },
-                "diff_text": inspection["diff"],
-                "diagnostic": diagnostic,
+                "review_input": receipt.review_input_bytes.encode("utf-8"),
+                "review_input_sha256": receipt.review_input_sha256,
             },
             parse=_parse_addressed_block,
             descr="recover_remediation_reply",
+            deadline_s=float(deadline_s),
         )
         return JobRequest(job, on_done_state=REMEDIATION_REPLY_RECOVERY_WAIT)
+
+    def _remediation_prepare_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Prepare one signed recovery commit without publication."""
+        if item.payload.pop("remediation_prepare_error", None):
+            return self._git_retry(item, "remediation preparation failed")
+        if "remediation_recovery_receipt" in item.payload:
+            return Continue(next_state=REMEDIATION_REPLY_RECOVERY_WAIT)
+        return _remediation_prepare_request(item, ctx)
+
+    def _remediation_publish_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Publish the exact prepared recovery commit after reply validation."""
+        return _remediation_publish_request(item, ctx)
 
     def _dirty_recovery_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Validate host recovery and route only its exact durable result."""
@@ -1395,6 +1697,8 @@ class ImplementationStage(Stage):
                         Disposition.FINISH_FAIL,
                         "implementation_reply_handoff_journal_invalid",
                     )
+                if item.payload.get("remediation_journal_handoff_unverified") is not None:
+                    return Continue(next_state=REMEDIATION_JOURNAL_GIT_VERIFY_WAIT)
                 if not item.payload.pop("_reply_journal_recovery_complete", False):
                     return Continue(next_state=REPLY_JOURNAL_RECOVERY_WAIT)
             job = AgentJob(
@@ -1579,8 +1883,9 @@ class ImplementationStage(Stage):
             "homericintelligence",
             "hephaestus",
         )
-        run_hephaestus_pre_pr_checks = (
-            is_hephaestus and item.pr is None and not bool(item.payload.get("existing_pr"))
+        remediation = bool(item.payload.get("implementation_remediation"))
+        run_hephaestus_pre_pr_checks = is_hephaestus and (
+            remediation or (item.pr is None and not bool(item.payload.get("existing_pr")))
         )
         run_configured_pre_pr_checks = not is_hephaestus and bool(
             getattr(ctx.config, "run_pre_pr_tests", False)
@@ -1698,70 +2003,21 @@ class ImplementationStage(Stage):
                 shlex.join(PRE_PR_TEST_ARGV),
             )
             return Continue(next_state=TEST_WAIT)
+        if isinstance(item.payload.get("remediation_writer_inspection"), dict):
+            if "remediation_recovery_receipt" not in item.payload:
+                return Continue(next_state=REMEDIATION_PREPARE_WAIT)
+            if "remediation_reply_result" not in item.payload:
+                return Continue(next_state=REMEDIATION_REPLY_RECOVERY_WAIT)
+            return Continue(next_state=REMEDIATION_PUBLISH_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
-        agent = agent_provider(ctx)
-        kwargs: dict[str, object] = {
-            "issue_number": issue,
-            "worktree_path": item.worktree,
-            "repo_root": str(ctx.paths.repo_root),
-            "branch": item.branch,
-            "agent": agent,
-            "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
-            "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
-        }
-        recovery_kwargs = _recovery_publish_kwargs(item)
-        if recovery_kwargs is None:
-            return StageOutcome(
-                Disposition.FINISH_FAIL,
-                "implementation_reply_writer_identity_invalid",
-            )
-        kwargs.update(recovery_kwargs)
-        if ctx.config.pi_dir is not None:
-            kwargs["pi_dir"] = ctx.config.pi_dir
-        publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
-            "_synced_default_branch_sha"
-        )
-        if is_full_commit_sha(publish_base_sha):
-            kwargs["publish_base_sha"] = publish_base_sha
-        direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
-        # A direct cursor's bootstrap pin reserves a newly created writer
-        # branch.  Once an existing PR is adopted, its remote branch is the
-        # writer authority; carrying the cursor pin forward must neither
-        # require a new receipt nor lease-push against the unrelated trunk
-        # SHA.
-        requires_fresh_direct_reservation = (
-            not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
-        )
-        if requires_fresh_direct_reservation:
-            if not is_full_commit_sha(direct_base_sha):
-                return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
-            kwargs["expected_remote_sha"] = direct_base_sha
-        scope_retraction_paths = item.payload.get("scope_retraction_paths")
-        if scope_retraction_paths is not None:
-            if not isinstance(scope_retraction_paths, tuple) or not all(
-                is_safe_scope_retraction_path(path) for path in scope_retraction_paths
-            ):
-                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
-            base_sha = item.payload.get("reviewed_pr_base_sha")
-            if not is_full_commit_sha(base_sha):
-                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
-            kwargs["scope_retraction_paths"] = scope_retraction_paths
-            kwargs["scope_retraction_base_sha"] = base_sha
-        push_job = GitJob(
-            repo=item.repo,
-            op="commit_push",
-            timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
-            expected_repository=f"{ctx.org}/{item.repo}",
-            kwargs=kwargs,
-            descr="commit_push",
-        )
-        return JobRequest(push_job, on_done_state=PR_CREATE)
+        return _commit_push_request(item, ctx)
 
     @staticmethod
     def _github_job(
         item: WorkItem,
         ctx: StageContext,
         request: RecoverReplyJournalRequest
+        | RecoverRemediationReplyJournalRequest
         | AppendReplyJournalRequest
         | DeliverReplyHandoffRequest,
         descr: str,
@@ -1783,19 +2039,70 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
         if pending is None:
-            pending = RecoverReplyJournalRequest(
-                # Pull requests share the issue-comments REST channel. Keep
-                # this transient recovery record on the PR, never its linked
-                # issue, so the issue has only the canonical plan and review.
-                issue_number=item.pr,
+            current_head = item.payload.get("_impl_source_revision")
+            if not is_full_commit_sha(current_head) or not item.branch:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "implementation_reply_handoff_invalid",
+                )
+            pending = RecoverRemediationReplyJournalRequest(
+                issue_number=item.issue,
                 pr_number=item.pr,
+                repository=f"{ctx.org}/{item.repo}".casefold(),
+                branch=item.branch,
+                current_remote_head=current_head,
                 threads=FrozenJson.snapshot(snapshots),
+                deadline_s=operation_deadline_after(
+                    stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)
+                ),
             )
             item.payload[_PENDING_GITHUB_REQUEST] = pending
-        if not isinstance(pending, RecoverReplyJournalRequest):
+        if not isinstance(pending, RecoverRemediationReplyJournalRequest) or (
+            pending.issue_number != item.issue
+            or pending.pr_number != item.pr
+            or pending.repository != f"{ctx.org}/{item.repo}".casefold()
+            or pending.branch != item.branch
+            or pending.current_remote_head != item.payload.get("_impl_source_revision")
+            or pending.threads != FrozenJson.snapshot(snapshots)
+        ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
         return JobRequest(
             self._github_job(item, ctx, pending, "recover_implementation_reply_journal"),
+            on_done_state=IMPLEMENT_WAIT,
+        )
+
+    def _remediation_journal_git_verify_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Verify one recovered format-3 authority against local Git truth."""
+        handoff = item.payload.get("remediation_journal_handoff_unverified")
+        if not isinstance(handoff, dict):
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_reply_handoff_journal_invalid",
+            )
+        deadline_s = item.payload.get(_REPLY_JOURNAL_RECOVERY_DEADLINE)
+        if (
+            isinstance(deadline_s, bool)
+            or not isinstance(deadline_s, (int, float))
+            or not math.isfinite(deadline_s)
+            or deadline_s <= 0
+        ):
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "implementation_reply_handoff_journal_invalid",
+            )
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="verify_remediation_journal",
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "handoff": handoff,
+                },
+                descr="verify_remediation_journal",
+                deadline_s=float(deadline_s),
+            ),
             on_done_state=IMPLEMENT_WAIT,
         )
 
@@ -1813,7 +2120,11 @@ class ImplementationStage(Stage):
                 Disposition.FINISH_FAIL,
                 "implementation_reply_handoff_journal_invalid",
             )
-        expected = implementation_reply_handoff_journal_entry(item.pr, handoff)
+        expected = (
+            implementation_remediation_reply_handoff_journal_entry(item.pr, handoff)
+            if isinstance(handoff, dict) and handoff.get("format") == 3
+            else implementation_reply_handoff_journal_entry(item.pr, handoff)
+        )
         marker = pending_journal.get("marker")
         body = pending_journal.get("body")
         if (
@@ -1828,14 +2139,30 @@ class ImplementationStage(Stage):
             )
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
         if pending is None:
+            operation_timeout = stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)
+            receipt_sha256 = (
+                handoff.get("review_input_sha256")
+                if isinstance(handoff, dict) and handoff.get("format") == 3
+                else None
+            )
             pending = AppendReplyJournalRequest(
                 issue_number=item.pr,
                 marker=marker,
                 body=body,
+                deadline_s=operation_deadline_after(operation_timeout),
+                prepublication_receipt_sha256=receipt_sha256,
             )
             item.payload[_PENDING_GITHUB_REQUEST] = pending
-        if not isinstance(pending, AppendReplyJournalRequest) or pending != (
-            AppendReplyJournalRequest(item.pr, marker, body)
+        if not isinstance(pending, AppendReplyJournalRequest) or (
+            pending.issue_number != item.pr
+            or pending.marker != marker
+            or pending.body != body
+            or pending.prepublication_receipt_sha256
+            != (
+                handoff.get("review_input_sha256")
+                if isinstance(handoff, dict) and handoff.get("format") == 3
+                else None
+            )
         ):
             return StageOutcome(
                 Disposition.FINISH_FAIL,
@@ -1863,16 +2190,30 @@ class ImplementationStage(Stage):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
-        if pending is None:
-            pending = DeliverReplyHandoffRequest(
+        operation_timeout = stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)
+        deadline_s = item.payload.get(_REPLY_HANDOFF_DEADLINE)
+        if deadline_s is None:
+            deadline_s = operation_deadline_after(operation_timeout)
+            item.payload[_REPLY_HANDOFF_DEADLINE] = deadline_s
+        if (
+            isinstance(deadline_s, bool)
+            or not isinstance(deadline_s, (int, float))
+            or not math.isfinite(deadline_s)
+            or deadline_s <= 0
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        try:
+            pending = bind_delivery_request(
+                pending,
                 issue_number=item.issue,
                 pr_number=item.pr,
-                handoff=FrozenJson.snapshot(handoff),
+                handoff=handoff,
                 visibility_retries=visibility_retries,
+                deadline_s=float(deadline_s),
             )
-            item.payload[_PENDING_GITHUB_REQUEST] = pending
-        if not isinstance(pending, DeliverReplyHandoffRequest):
+        except (TypeError, ValueError):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        item.payload[_PENDING_GITHUB_REQUEST] = pending
         return JobRequest(
             self._github_job(item, ctx, pending, "deliver_implementation_reply_handoff"),
             on_done_state=PR_CREATE,
@@ -2012,18 +2353,59 @@ class ImplementationStage(Stage):
 
         if item.state == REMEDIATION_REPLY_RECOVERY_WAIT:
             item.attempts["remediation_reply"] = item.attempts.get("remediation_reply", 0) + 1
-            snapshots = item.payload.get("remediation_thread_snapshots")
-            replies = (
-                parse_addressed_replies(result.value, snapshots)
-                if result.ok and isinstance(snapshots, list)
+            try:
+                recovery_receipt = RemediationRecoveryReceipt.from_dict(
+                    item.payload.get("remediation_recovery_receipt")
+                )
+            except ValueError:
+                recovery_receipt = None
+            reply_result = (
+                parse_remediation_reply_result(result.value, recovery_receipt.review_input)
+                if result.ok and recovery_receipt is not None
                 else None
             )
-            if replies is None:
+            if reply_result is None:
                 item.payload["remediation_reply_recovery_invalid"] = True
             else:
-                item.payload["remediation_output"] = result.value
+                item.payload["remediation_reply_result"] = reply_result.as_dict()
+                item.payload["remediation_output"] = {
+                    "addressed": list(dict(reply_result.replies)),
+                    "replies": dict(reply_result.replies),
+                }
                 item.payload.pop("implement_error", None)
                 item.payload.pop("remediation_reply_inspection_required", None)
+            return
+
+        if item.state == REMEDIATION_PREPARE_WAIT:
+            self._on_remediation_prepare_done(item, result)
+            return
+
+        if item.state == REMEDIATION_PUBLISH_WAIT:
+            self._on_commit_push_done(item, result)
+            if not result.ok:
+                value = result.value if isinstance(result.value, dict) else {}
+                failure_kind = value.get("failure_kind")
+                if failure_kind in _TRANSIENT_REMEDIATION_PUBLICATION_FAILURES:
+                    item.payload["remediation_publish_retry"] = True
+                else:
+                    item.payload["remediation_publish_permanent"] = True
+            return
+
+        if item.state == REMEDIATION_JOURNAL_GIT_VERIFY_WAIT:
+            handoff = item.payload.pop("remediation_journal_handoff_unverified", None)
+            value = result.value if isinstance(result.value, dict) else {}
+            if (
+                not result.ok
+                or not isinstance(handoff, dict)
+                or value.get("verified") is not True
+                or value.get("head_sha") != handoff.get("head_sha")
+                or value.get("review_input_sha256") != handoff.get("review_input_sha256")
+            ):
+                item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "invalid"
+                return
+            item.payload.pop(_REPLY_JOURNAL_RECOVERY_DEADLINE, None)
+            item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
+            item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
             return
 
         if item.state == REBASE_CONFLICT_WAIT:
@@ -2089,11 +2471,16 @@ class ImplementationStage(Stage):
             item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "retry"
             return
         receipt = result.value
-        if not isinstance(receipt, ReplyJournalRecovered) or not (
+        if not isinstance(receipt, RemediationReplyJournalRecovered) or not (
             ImplementationStage._matching_receipt_request(item, receipt)
         ):
             item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "invalid"
             return
+        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        if not isinstance(pending, RecoverRemediationReplyJournalRequest):
+            item.payload[_REPLY_JOURNAL_RECOVERY_RESULT] = "invalid"
+            return
+        item.payload[_REPLY_JOURNAL_RECOVERY_DEADLINE] = pending.deadline_s
         item.payload.pop(_PENDING_GITHUB_REQUEST, None)
         item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RECOVERY_RETRIES, None)
         item.payload.pop(_REPLY_JOURNAL_RECOVERY_DELAY, None)
@@ -2107,11 +2494,9 @@ class ImplementationStage(Stage):
             snapshots if isinstance(snapshots, list) else [],
         )
         if isinstance(handoff, dict) and handoff.get("head_sha") == current_head:
-            handoff["reconciliation_only"] = True
-            item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
-            item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            item.payload["remediation_journal_handoff_unverified"] = handoff
             logger.info(
-                "implementation:%s: recovered exact GitHub-journaled review reply handoff",
+                "implementation:%s: recovered journaled reply for Git verification",
                 item.issue,
             )
 
@@ -2141,11 +2526,17 @@ class ImplementationStage(Stage):
         item.payload[_REPLY_JOURNAL_APPEND_RESULT] = "completed"
 
     @staticmethod
-    def _on_reply_handoff_done(item: WorkItem, result: JobResult) -> None:
+    def _on_reply_handoff_done(item: WorkItem, result: JobResult) -> None:  # noqa: C901
         """Apply a detached exact-reply receipt without retaining mutable state."""
+        previous_handoff = item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF)
         receipt = result.value
         if not result.ok:
             status = "blocked"
+            if isinstance(
+                item.payload.get(_PENDING_GITHUB_REQUEST),
+                DeliverReplyHandoffRequest,
+            ):
+                item.payload.pop(_PENDING_GITHUB_REQUEST, None)
         elif not isinstance(receipt, ReplyHandoffAttempted) or not (
             ImplementationStage._matching_receipt_request(item, receipt)
         ):
@@ -2162,6 +2553,39 @@ class ImplementationStage(Stage):
                     item.payload[_REPLY_HANDOFF_RESULT] = "invalid"
                     return
                 item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = remaining
+                if status == "retry" and remaining.get("format") == 3:
+                    previous_sequence = (
+                        previous_handoff.get("journal_sequence")
+                        if isinstance(previous_handoff, dict)
+                        else None
+                    )
+                    current_sequence = remaining.get("journal_sequence")
+                    if (
+                        isinstance(previous_sequence, bool)
+                        or not isinstance(previous_sequence, int)
+                        or isinstance(current_sequence, bool)
+                        or not isinstance(current_sequence, int)
+                    ):
+                        item.payload[_REPLY_HANDOFF_RESULT] = "invalid"
+                        return
+                    if current_sequence > previous_sequence:
+                        journal = implementation_remediation_reply_handoff_journal_entry(
+                            item.pr, remaining
+                        )
+                        if journal is None:
+                            item.payload[_REPLY_HANDOFF_RESULT] = "invalid"
+                            return
+                        pending_journal = {
+                            "marker": journal[0],
+                            "body": journal[1],
+                        }
+                        existing_journal = item.payload.get(
+                            PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL
+                        )
+                        if existing_journal is not None and existing_journal != pending_journal:
+                            item.payload[_REPLY_HANDOFF_RESULT] = "invalid"
+                            return
+                        item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL] = pending_journal
             if receipt.visibility_retries:
                 item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES] = (
                     receipt.visibility_retries
@@ -2179,7 +2603,45 @@ class ImplementationStage(Stage):
             retries += 1
             item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES] = retries
             status = "retry" if retries <= IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP else "failed"
+        if status not in {"retry", "visibility_wait"}:
+            item.payload.pop(_REPLY_HANDOFF_DEADLINE, None)
         item.payload[_REPLY_HANDOFF_RESULT] = status
+
+    @staticmethod
+    def _on_remediation_prepare_done(item: WorkItem, result: JobResult) -> None:
+        """Retain one validated prepared commit receipt without publishing it."""
+        value = result.value if isinstance(result.value, dict) else {}
+        recovery_commit = value.get("head_sha") or value.get("recovery_commit_sha")
+        if is_full_commit_sha(recovery_commit):
+            item.payload["remediation_recovery_commit_sha"] = recovery_commit
+        if not result.ok:
+            item.payload["remediation_prepare_error"] = True
+            return
+        try:
+            receipt = RemediationRecoveryReceipt.from_dict(value.get("recovery_receipt"))
+        except ValueError:
+            item.payload["remediation_prepare_error"] = True
+            return
+        review_input = receipt.review_input
+        inspection = item.payload.get("remediation_writer_inspection")
+        if (
+            value.get("pushed") is not False
+            or recovery_commit != review_input.recovery_commit_sha
+            or item.issue != review_input.issue_number
+            or item.pr != review_input.pr_number
+            or item.branch != review_input.branch
+            or item.worktree != review_input.worktree_path
+            or not isinstance(inspection, dict)
+            or inspection.get("head_sha") != review_input.reviewed_parent_sha
+            or inspection.get("candidate_tree_sha") != review_input.candidate_tree_sha
+            or inspection.get("diff_sha256") != review_input.committed_diff_sha256
+        ):
+            item.payload["remediation_prepare_error"] = True
+            return
+        item.payload["remediation_recovery_receipt"] = receipt.as_dict()
+        item.payload.pop(_REMEDIATION_PREPARE_DEADLINE, None)
+        item.payload.pop("remediation_prepare_error", None)
+        item.payload.pop("git_error_retries", None)
 
     @staticmethod
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
@@ -2255,36 +2717,53 @@ class ImplementationStage(Stage):
         if not is_full_commit_sha(head_sha):
             item.payload["remediation_reply_error"] = True
             return
-        replies = parse_addressed_replies(
-            item.payload.get("remediation_output"),
-            snapshots,
-        )
-        if replies is None:
-            item.payload["remediation_reply_error"] = True
-            return
         if item.pr is None:
             item.payload["remediation_reply_error"] = True
             return
-        if not pushed:
-            replies = {
-                thread_id: _append_no_commit_reply_warning(reply)
-                for thread_id, reply in replies.items()
-            }
-            item.payload.pop("no_commits", None)
-        handoff = implementation_reply_handoff(
-            head_sha,
-            snapshots,
-            replies,
-            secrets.token_hex(16),
+        format_three_required = pushed or isinstance(
+            item.payload.get("remediation_writer_inspection"), dict
         )
-        if handoff is None:
-            item.payload["remediation_reply_error"] = True
-            return
-        journal_entry = implementation_reply_handoff_journal_entry(item.pr, handoff)
-        if journal_entry is None or item.issue is None:
-            item.payload["remediation_reply_error"] = True
-            return
-        marker, body = journal_entry
+        if format_three_required:
+            handoff = receipt.get("remediation_handoff")
+            journal = receipt.get("remediation_journal")
+            expected = implementation_remediation_reply_handoff_journal_entry(item.pr, handoff)
+            if (
+                not isinstance(handoff, dict)
+                or not isinstance(journal, dict)
+                or expected is None
+                or journal != {"marker": expected[0], "body": expected[1]}
+            ):
+                item.payload["remediation_reply_error"] = True
+                return
+            marker, body = expected
+        else:
+            replies = parse_addressed_replies(
+                item.payload.get("remediation_output"),
+                snapshots,
+            )
+            if replies is None:
+                item.payload["remediation_reply_error"] = True
+                return
+            if not pushed:
+                replies = {
+                    thread_id: _append_no_commit_reply_warning(reply)
+                    for thread_id, reply in replies.items()
+                }
+                item.payload.pop("no_commits", None)
+            handoff = implementation_reply_handoff(
+                head_sha,
+                snapshots,
+                replies,
+                secrets.token_hex(16),
+            )
+            if handoff is None:
+                item.payload["remediation_reply_error"] = True
+                return
+            journal_entry = implementation_reply_handoff_journal_entry(item.pr, handoff)
+            if journal_entry is None:
+                item.payload["remediation_reply_error"] = True
+                return
+            marker, body = journal_entry
         # Persist the deterministic batch locally before the GitHub append.
         # A transient append failure must retry this host-only write, never
         # rerun the writer or create a second remediation commit.
@@ -2561,6 +3040,62 @@ class ImplementationStage(Stage):
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
+            incomplete_inspection = value.get("incomplete_remediation_inspection")
+            if incomplete_inspection is not None:
+                batch_nonce = value.get("remediation_batch_nonce")
+                if (
+                    not isinstance(incomplete_inspection, dict)
+                    or not _is_valid_dirty_inspection(incomplete_inspection)
+                    or incomplete_inspection.get("branch") != item.branch
+                    or incomplete_inspection.get("worktree_path") != item.worktree
+                    or incomplete_inspection.get("head_sha")
+                    != item.payload.get("_impl_source_revision")
+                    or not isinstance(batch_nonce, str)
+                    or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None
+                ):
+                    item.payload["git_error"] = True
+                    return
+                item.payload["remediation_writer_inspection"] = dict(incomplete_inspection)
+                item.payload["remediation_batch_nonce"] = batch_nonce
+                item.payload["prepared_remediation_recovered"] = True
+            prepared = value.get("prepared_remediation_receipt")
+            batch_nonce = value.get("remediation_batch_nonce")
+            if prepared is not None:
+                try:
+                    receipt = RemediationRecoveryReceipt.from_dict(prepared)
+                except ValueError:
+                    item.payload["git_error"] = True
+                    return
+                review_input = receipt.review_input
+                if (
+                    item.issue != review_input.issue_number
+                    or item.pr != review_input.pr_number
+                    or item.branch != review_input.branch
+                    or item.worktree != review_input.worktree_path
+                    or not isinstance(batch_nonce, str)
+                    or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None
+                ):
+                    item.payload["git_error"] = True
+                    return
+                item.payload["remediation_recovery_receipt"] = receipt.as_dict()
+                item.payload["remediation_batch_nonce"] = batch_nonce
+                item.payload["remediation_recovery_commit_sha"] = review_input.recovery_commit_sha
+                item.payload["remediation_recovery_already_published"] = (
+                    value.get("remediation_recovery_already_published") is True
+                )
+                item.payload["remediation_writer_inspection"] = {
+                    "outcome": "dirty",
+                    "branch": review_input.branch,
+                    "worktree_path": review_input.worktree_path,
+                    "head_sha": review_input.reviewed_parent_sha,
+                    "candidate_tree_sha": review_input.candidate_tree_sha,
+                    "diff": review_input.committed_diff,
+                    "diff_sha256": review_input.committed_diff_sha256,
+                    "candidate_add_paths": list(receipt.add_paths),
+                    "candidate_update_paths": list(receipt.update_paths),
+                    "content_snapshot": dict(receipt.content_snapshot),
+                }
+                item.payload["prepared_remediation_recovered"] = True
             if item.payload["worktree_dirty"]:
                 item.payload["worktree_branch"] = value.get("branch")
                 item.payload["worktree_head_sha"] = value.get("head_sha")
@@ -2992,13 +3527,20 @@ class ImplementationStage(Stage):
                 "re-enter the loop.",
             )
             return StageOutcome(Disposition.SKIP, "no commits vs base")
+        if item.payload.pop("remediation_publish_permanent", False):
+            item.payload.pop("git_error", None)
+            return StageOutcome(Disposition.FINISH_FAIL, "remediation_publication_failed")
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by
             # GIT_ERROR_RETRY_CAP (M5).
             outcome = self._git_retry(item, "commit_push failed")
             if outcome.disposition is Disposition.RETRY:
-                item.state = COMMIT_PUSH_WAIT
+                item.state = (
+                    REMEDIATION_PUBLISH_WAIT
+                    if item.payload.pop("remediation_publish_retry", False)
+                    else COMMIT_PUSH_WAIT
+                )
             return outcome
 
         if item.pr is None:

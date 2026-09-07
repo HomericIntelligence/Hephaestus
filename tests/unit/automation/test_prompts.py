@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
-from hephaestus.automation import prompts
+import pytest
+
+from hephaestus.automation import address_review_core, prompts
 from hephaestus.automation._review_utils import parse_json_block
 from hephaestus.automation.address_review_core import (
     _parse_addressed_block,
@@ -19,6 +22,10 @@ from hephaestus.automation.pipeline.stages.pr_review_threads import (
 )
 from hephaestus.automation.prompts._review_rubric import get_full_sweep_suffix
 from hephaestus.automation.prompts._shared import get_untrusted_notice
+from hephaestus.automation.remediation_recovery import (
+    RemediationReplyResult,
+    RemediationReviewInput,
+)
 from hephaestus.automation.review_audit import parse_review_audit
 
 _FENCE_RE = re.compile(
@@ -108,35 +115,120 @@ def test_address_prompt_example_is_accepted_by_address_parser() -> None:
     ) == {"<thread_id>": "what was fixed"}
 
 
-def test_remediation_reply_recovery_prompt_fences_inspection_evidence() -> None:
-    """Read-only reply recovery keeps restored-writer evidence fenced."""
-    snapshots = [{"thread_id": "T1", "path": "module.py", "body": "fix {this}"}]
-    status = {"outcome": "dirty", "branch": "2973-fix", "head_sha": "a" * 40}
-    diff = "diff --git a/module.py b/module.py\ninjected {data}"
-    diagnostic = "codex_tool_or_provider_failure: file_change status=failed"
+def test_remediation_reply_recovery_prompt_fences_only_canonical_input() -> None:
+    """Read-only recovery accepts only one digest-bound canonical input."""
+    review_input = _remediation_review_input()
 
     rendered = prompts.get_remediation_reply_recovery_prompt(
-        issue_number=2973,
-        worktree_path="/tmp/worktree",
-        thread_snapshots=snapshots,
-        inspection_status=status,
-        diff_text=diff,
-        diagnostic=diagnostic,
+        review_input=review_input.canonical_bytes,
+        review_input_sha256=review_input.review_input_sha256,
     )
 
     _assert_fenced(
         rendered,
         {
-            "THREAD_SNAPSHOTS": json.dumps(snapshots, ensure_ascii=False, sort_keys=True),
-            "INSPECTION_STATUS": json.dumps(status, ensure_ascii=False, sort_keys=True),
-            "WORKTREE_DIFF": json.dumps(diff, ensure_ascii=False),
-            "FAILURE_DIAGNOSTIC": json.dumps(diagnostic, ensure_ascii=False),
+            "REMEDIATION_REVIEW_INPUT": review_input.canonical_bytes.decode("utf-8"),
         },
     )
+    assert review_input.review_input_sha256 in rendered
     assert "Do not edit files." in rendered
     assert "Do not run Git commands." in rendered
     assert "Do not call GitHub." in rendered
-    assert "Read, Glob, or Grep" in rendered
+    assert "Do not read worktree files." in rendered
+    assert {match.group("label") for match in _FENCE_RE.finditer(rendered)} == {
+        "REMEDIATION_REVIEW_INPUT"
+    }
+
+
+def _remediation_review_input() -> RemediationReviewInput:
+    """Return one canonical recovery input for prompt and parser tests."""
+    snapshots = [
+        {
+            "id": "T1",
+            "isResolved": False,
+            "comments": [{"id": "C1", "author": "reviewer", "body": "Fix this."}],
+        },
+        {
+            "id": "T2",
+            "isResolved": False,
+            "comments": [{"id": "C2", "author": "reviewer", "body": "Fix that."}],
+        },
+    ]
+    diff = "diff --git a/module.py b/module.py\n+fixed"
+    thread_json = RemediationReviewInput.canonical_thread_snapshot(snapshots)
+    return RemediationReviewInput(
+        format_version=3,
+        repository="owner/repository",
+        issue_number=2973,
+        pr_number=3010,
+        repo_root="/tmp/repository",
+        worktree_path="/tmp/repository/worktree",
+        branch="fix/recovery",
+        reviewed_parent_sha="a" * 40,
+        candidate_tree_sha="b" * 40,
+        recovery_commit_sha="c" * 40,
+        changed_paths=("module.py",),
+        committed_diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+        committed_diff=diff,
+        failure_diagnostic="provider failed",
+        thread_snapshot_sha256=hashlib.sha256(thread_json.encode("utf-8")).hexdigest(),
+        thread_snapshot_json=thread_json,
+    )
+
+
+def test_remediation_reply_recovery_prompt_rejects_digest_mismatch() -> None:
+    """The prompt does not render an input with a different digest."""
+    review_input = _remediation_review_input()
+
+    with pytest.raises(ValueError, match="digest"):
+        prompts.get_remediation_reply_recovery_prompt(
+            review_input=review_input.canonical_bytes,
+            review_input_sha256="d" * 64,
+        )
+
+
+def test_remediation_reply_parser_binds_exhaustive_replies_to_exact_input() -> None:
+    """The recovery parser returns one immutable digest-bound reply result."""
+    review_input = _remediation_review_input()
+
+    result = address_review_core.parse_remediation_reply_result(
+        {
+            "review_input_sha256": review_input.review_input_sha256,
+            "replies": {"T2": "Fixed that.", "T1": "Fixed this."},
+        },
+        review_input,
+    )
+
+    assert result == RemediationReplyResult.create(
+        review_input_sha256=review_input.review_input_sha256,
+        replies={"T1": "Fixed this.", "T2": "Fixed that."},
+        thread_snapshot_json=review_input.thread_snapshot_json,
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"addressed": ["T1", "T2"], "replies": {"T1": "one", "T2": "two"}},
+        {"review_input_sha256": "d" * 64, "replies": {"T1": "one", "T2": "two"}},
+        {"review_input_sha256": "EXPECTED", "replies": {"T1": "one"}},
+        {
+            "review_input_sha256": "EXPECTED",
+            "replies": {"T1": "one", "T2": "two"},
+            "addressed": ["T1", "T2"],
+        },
+    ],
+    ids=("legacy", "digest-mismatch", "incomplete", "extra-field"),
+)
+def test_remediation_reply_parser_rejects_unbound_or_incomplete_output(
+    payload: dict[str, object],
+) -> None:
+    """The recovery parser rejects output that does not bind all thread replies."""
+    review_input = _remediation_review_input()
+    if payload.get("review_input_sha256") == "EXPECTED":
+        payload["review_input_sha256"] = review_input.review_input_sha256
+
+    assert address_review_core.parse_remediation_reply_result(payload, review_input) is None
 
 
 def test_comment_classification_example_is_accepted_by_response_parser() -> None:

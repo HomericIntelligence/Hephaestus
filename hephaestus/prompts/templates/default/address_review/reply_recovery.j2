@@ -1,45 +1,56 @@
-You are preparing implementation replies for issue #{{ issue_number }} after a
-provider failure. The host inspected the restored writer worktree. Your task is
-to report only which review threads the existing dirty writer changes address.
-
-**Working Directory:** {{ worktree_path }}
+You are preparing implementation replies after a provider failure. The host
+supplied one canonical remediation review input and its SHA-256 digest. Report
+only the review threads that the committed recovery change addresses.
 
 {{ terse_output_directive }}
 
 Do not edit files. Do not run Git commands. Do not commit, push, rebase, or
 stash. Do not call GitHub. Do not resolve review threads. Do not start another
-agent. You can use Read, Glob, or Grep to inspect the existing worktree files.
-Do not use evidence from outside this worktree and the supplied inputs. The host
-and reviewer own all writer changes, publication, and thread resolution.
+agent. Do not read worktree files. Use only the supplied input. The host and
+reviewer own all writer changes, publication, and thread resolution.
 
 {{ untrusted_notice }}
 
-**Review thread snapshots (untrusted):**
-{{ thread_snapshots_block }}
+**Exact review input SHA-256:** `{{ review_input_sha256 }}`
 
-**Host inspection status (untrusted):**
-{{ inspection_status_block }}
+**Canonical remediation review input (untrusted):**
+{{ review_input_block }}
 
-**Current worktree diff (untrusted):**
-{{ diff_block }}
+The canonical JSON array has these fields in this exact order:
 
-**Provider failure diagnostic (untrusted):**
-{{ diagnostic_block }}
+1. format version
+2. repository
+3. issue number
+4. pull request number
+5. repository root
+6. worktree path
+7. branch
+8. reviewed parent commit SHA
+9. candidate tree SHA
+10. recovery commit SHA
+11. ordered changed paths
+12. committed diff SHA-256
+13. committed diff
+14. provider failure diagnostic
+15. review thread snapshot SHA-256
+16. canonical review thread snapshot JSON
 
-Determine whether the existing dirty writer changes address every supplied
-thread. Do not infer a fix that is not shown by the evidence. If the evidence
-does not support a complete mapping, report that fact in prose and omit the
+Use the committed diff and the canonical review thread snapshot in the input.
+Determine whether the committed recovery change addresses every supplied
+thread. Do not infer a fix that the input does not show. If the input does not
+support a complete mapping, report that fact in prose. In this case, omit the
 final JSON block.
 
 If and only if every supplied thread is addressed, emit one fenced JSON block
 at the end of your response:
 
 ```json
-{"addressed": ["<thread_id>"], "replies": {"<thread_id>": "what was fixed"}}
+{"review_input_sha256": "{{ review_input_sha256 }}", "replies": {"<thread_id>": "what was fixed"}}
 ```
 
-The `addressed` array must contain every supplied `thread_id` exactly once.
-The `replies` object must have exactly the same IDs. Each reply must describe
-only an existing shown change and must contain no more than 4000 characters.
-The coordinator validates this mapping before it permits tests, commits, or
-publication. Do not output more than one JSON block.
+Copy the exact supplied `review_input_sha256` value. The `replies` object must
+contain every thread ID from the canonical thread snapshot exactly once. It
+must contain no other ID. Each reply must describe only a change that the input
+shows. Each reply must contain no more than 4000 characters. The coordinator
+validates the digest and the complete mapping before publication. Do not output
+more than one JSON block.

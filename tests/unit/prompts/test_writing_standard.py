@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import audit_reviewer, learn, pr_manager
+from hephaestus.automation import audit_reviewer, commit_runtime, learn, pr_manager
 from hephaestus.automation.pipeline.stages.planning import build_plan_prompt
 from hephaestus.automation.prompts import (
     get_address_review_prompt,
@@ -314,7 +314,7 @@ def test_production_prompt_builders_keep_the_writing_standard(tmp_path: Path) ->
         audit_reviewer._build_coordinator_prompt(
             [{"number": 1, "title": "Review", "url": "https://example.test/pr/1"}]
         ),
-        pr_manager._commit_message_prompt(
+        commit_runtime._commit_message_prompt(
             issue_number=2,
             issue_title="Title",
             issue_body="Body",

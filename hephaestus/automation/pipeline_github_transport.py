@@ -68,6 +68,7 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
+from .operation_deadlines import PipelineGitHubDeadlineMixin
 from .pipeline_github_contract import _PipelineGitHubHost
 
 # ruff: noqa: F811
@@ -210,14 +211,13 @@ find_merged_pr_for_issue = _CompatCallable("find_merged_pr_for_issue")
 get_pr_head_branch = _CompatCallable("get_pr_head_branch")
 issue_auto_impl_branch_name = _CompatCallable("issue_auto_impl_branch_name")
 file_lock = _CompatCallable("file_lock")
-# Preserve the façade patch seam and static function signature.
 if TYPE_CHECKING:
     rate_budget_ok = _rate_budget_ok_impl
 else:  # pragma: no cover - runtime seam exercised by coordinator tests
     rate_budget_ok = cast(Callable[[], tuple[bool, float]], _CompatCallable("rate_budget_ok"))
 
 
-class PipelineGitHubTransport(_PipelineGitHubHost):
+class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
     """Provide repository-scoped GitHub reads and guarded mutations."""
 
     def __init__(
@@ -264,11 +264,9 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
 
     def _viewer_login(self) -> str:
         """Return the authenticated actor used to own mutable journal comments."""
-        if self._viewer_login_cache is None:
-            self._viewer_login_cache = github_api.gh_current_login(timeout=self._gh_timeout) or ""
-        if not self._viewer_login_cache:
-            raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
-        return self._viewer_login_cache
+        return self._deadline_viewer_login(
+            lambda: github_api.gh_current_login(timeout=self._gh_timeout) or ""
+        )
 
     def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool:
         """Fail closed unless GitHub proves the current actor authored a comment."""
@@ -289,7 +287,7 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
             argv: list[str], **kwargs: Any
         ) -> subprocess.CompletedProcess[str]:
             """Pass the capability marker consumed only by the guarded façade."""
-            return gh_call(argv, _graphql_internal=True, **kwargs)
+            return self._deadline_gh_call(argv, _graphql_internal=True, **kwargs)
 
         if isinstance(spec, GraphQLMutationSpec):
             if fields:
@@ -306,11 +304,15 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
 
     def _graphql_with_timeout(self, spec: GraphQLSpec[T], timeout: float, **fields: _Scalar) -> T:
         """Run one typed operation within an aggregate operation deadline."""
+        timeout = cast(
+            float,
+            self._operation_timeout(timeout),
+        )
 
         def _run_internal_graphql(
             argv: list[str], **kwargs: Any
         ) -> subprocess.CompletedProcess[str]:
-            return gh_call(
+            return self._deadline_gh_call(
                 argv,
                 _graphql_internal=True,
                 timeout=timeout,
@@ -338,7 +340,7 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
 
     def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         kwargs.setdefault("timeout", self._gh_timeout)
-        return gh_call(self._with_repo(argv), **kwargs)
+        return self._deadline_gh_call(self._with_repo(argv), **kwargs)
 
     def _label_names(self) -> set[str]:
         if self._repo_slug is None:
@@ -395,7 +397,6 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         return names
 
     def _skip(self, what: str) -> bool:
-        """Return True (and log) when dry-run should skip a mutation."""
         if self.dry_run:
             logger.info("[dry-run] would %s", what)
             return True
@@ -419,5 +420,5 @@ __all__ = [
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
     'github_api', 'has_exact_closing_line', 'has_label', 'hashlib', 'is_implementation_go',
     'issue_auto_impl_branch_name', 'json', 'logger', 'logging', 'normalize_scope_retraction_paths',
-    'rate_budget_ok', 'rate_limit_remaining', 're',
-    'scope_retraction_marker', 'subprocess', 'sys', 'time']
+    'rate_budget_ok', 'rate_limit_remaining', 're', 'scope_retraction_marker', 'subprocess',
+    'sys', 'time']

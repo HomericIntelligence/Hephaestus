@@ -47,9 +47,13 @@ pre-dispatch failure may retry. Mutation success requires a correlation-bound
 receipt, and reply or resolution success additionally requires the existing
 exact-head and unchanged-conversation readback.
 
-Journal-recovered implementation handoffs are reconciliation-only. They may
-read marker-bound GitHub state to prove an earlier operation completed, but
-they may not issue a mutation whose earlier dispatch cannot be excluded.
+Journal-recovered version-one and version-two handoffs are reconciliation-only.
+They can read marker-bound GitHub state to prove that an earlier operation
+completed. They cannot issue a mutation if an earlier dispatch is possible.
+A format-three remediation journal contains one immutable initial authority and
+an ordered digest-linked progress chain. Recovery first reconciles each marked
+operation. It can then issue only the exact pending operations that the chain
+proves were not dispatched. An outcome-unknown mutation is still terminal.
 
 ## Alternatives considered
 

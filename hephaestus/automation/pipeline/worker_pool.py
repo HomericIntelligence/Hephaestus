@@ -37,13 +37,23 @@ from typing import Any, TypeGuard, cast
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_policy
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionPolicyError,
+    ExecutionRequest,
+    SessionLifecycle,
+    resolve_policy,
+)
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
+    run_agent_text,
+    uses_direct_agent_runner,
+    validate_agent_execution_support,
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
@@ -83,6 +93,10 @@ from hephaestus.automation.pipeline.rebase_policy import (
     RebasePolicySelector,
     RebaseValidationPolicy,
 )
+from hephaestus.automation.pipeline.reply_handoff import (
+    implementation_remediation_reply_handoff,
+    implementation_remediation_reply_handoff_journal_entry,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.pipeline.tool_scopes import (
@@ -91,11 +105,26 @@ from hephaestus.automation.pipeline.tool_scopes import (
     tool_scope_for,
 )
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
+from hephaestus.automation.remediation_prepublication import (
+    load_prepublication_intent,
+    load_prepublication_receipt,
+    prepublication_private_git_dir,
+    read_prepublication_private_head,
+    save_prepublication_intent,
+    save_prepublication_receipt,
+)
+from hephaestus.automation.remediation_recovery import (
+    RemediationRecoveryReceipt,
+    RemediationReplyResult,
+    RemediationReviewInput,
+    encode_remediation_review_input,
+)
 from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
 from hephaestus.automation.review_journal import CommentJournalReadError
+from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -135,6 +164,157 @@ _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _DIRTY_CONTENT_SNAPSHOT_KEYS = frozenset({"index_sha256", "worktree_sha256", "untracked_sha256"})
+
+
+def _remediation_review_input(
+    job: GitJob,
+    *,
+    repo_root: Path,
+    worktree: Path,
+    branch: str,
+    parent_sha: str,
+    candidate_tree_sha: str,
+    recovery_commit_sha: str,
+    paths: CommitPaths,
+    committed_diff: str,
+    committed_diff_sha256: str,
+) -> RemediationReviewInput:
+    """Build the exact immutable input for one prepared recovery commit."""
+    repository = job.kwargs.get("remediation_repository")
+    issue_number = job.kwargs.get("issue_number")
+    pr_number = job.kwargs.get("remediation_pr_number")
+    diagnostic = job.kwargs.get("remediation_failure_diagnostic")
+    threads = job.kwargs.get("remediation_thread_snapshots")
+    if (
+        not isinstance(repository, str)
+        or isinstance(issue_number, bool)
+        or not isinstance(issue_number, int)
+        or isinstance(pr_number, bool)
+        or not isinstance(pr_number, int)
+        or not isinstance(diagnostic, str)
+        or not isinstance(threads, list)
+    ):
+        raise ValueError("remediation recovery input is incomplete")
+    return RemediationReviewInput(
+        format_version=3,
+        repository=repository,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        repo_root=str(repo_root),
+        worktree_path=str(worktree),
+        branch=branch,
+        reviewed_parent_sha=parent_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        recovery_commit_sha=recovery_commit_sha,
+        changed_paths=(*paths.add_paths, *paths.update_paths),
+        committed_diff_sha256=committed_diff_sha256,
+        committed_diff=committed_diff,
+        failure_diagnostic=diagnostic,
+        thread_snapshot_sha256=RemediationReviewInput.thread_snapshot_digest(threads),
+        thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(threads),
+    )
+
+
+def _remediation_recovery_artifacts(
+    job: GitJob,
+    *,
+    repo_root: Path,
+    worktree: Path,
+    branch: str,
+    parent_sha: str,
+    candidate_tree_sha: str,
+    recovery_commit_sha: str,
+    paths: CommitPaths,
+    committed_diff: str,
+    committed_diff_sha256: str,
+) -> tuple[dict[str, Any], tuple[str, str]]:
+    """Build and verify the complete durable record before publication."""
+    review_input = _remediation_review_input(
+        job,
+        repo_root=repo_root,
+        worktree=worktree,
+        branch=branch,
+        parent_sha=parent_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        recovery_commit_sha=recovery_commit_sha,
+        paths=paths,
+        committed_diff=committed_diff,
+        committed_diff_sha256=committed_diff_sha256,
+    )
+    replies = job.kwargs.get("remediation_replies")
+    batch_nonce = job.kwargs.get("remediation_batch_nonce")
+    if (
+        not isinstance(replies, dict)
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in replies.items()
+        )
+        or not isinstance(batch_nonce, str)
+    ):
+        raise ValueError("remediation recovery reply input is incomplete")
+    reply_result = RemediationReplyResult.create(
+        review_input_sha256=review_input.review_input_sha256,
+        replies=cast(dict[str, str], replies),
+        thread_snapshot_json=review_input.thread_snapshot_json,
+    )
+    handoff = implementation_remediation_reply_handoff(
+        review_input,
+        reply_result,
+        batch_nonce,
+        journal_input_encoding=job.kwargs.get("remediation_journal_input_encoding"),
+        journal_input_data=job.kwargs.get("remediation_journal_input_data"),
+    )
+    journal = implementation_remediation_reply_handoff_journal_entry(
+        review_input.pr_number,
+        handoff,
+    )
+    if handoff is None or journal is None:
+        raise ValueError("remediation recovery journal is not encodable")
+    return handoff, journal
+
+
+def _invoke_claude_commit_message(
+    issue_number: int,
+    prompt: str,
+    worktree_path: Path,
+    agent: str,
+    timeout: int,
+    model: str,
+    pi_dir: Path | None,
+) -> str:
+    """Run a commit-message request from the approved worker adapter."""
+    remaining_s = cast(float, git_utils.remaining_operation_timeout(timeout))
+    if remaining_s < 1:
+        raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
+    timeout = min(timeout, int(remaining_s))
+    if uses_direct_agent_runner(agent):
+        result = run_agent_text(
+            agent,
+            prompt,
+            cwd=worktree_path,
+            timeout=timeout,
+            model=model,
+            sandbox="read-only",
+            approval="never",
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.GIT_MESSAGE,
+                SessionLifecycle.ONE_SHOT,
+            ),
+            pi_dir=pi_dir,
+        )
+        return (result.stdout or "").strip()
+    stdout, _ = claude_invoke.invoke_claude_with_session(
+        repo=git_utils.get_repo_slug(worktree_path),
+        issue=issue_number,
+        agent=AGENT_COMMIT_MESSAGE,
+        prompt=prompt,
+        model=model,
+        cwd=worktree_path,
+        timeout=timeout,
+        output_format="text",
+        allowed_tools="Read,Glob,Grep",
+    )
+    return (stdout or "").strip()
 
 
 class _GitInspectionResourceLimitError(RuntimeError):
@@ -207,7 +387,7 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
     process: subprocess.Popen[bytes],
     argv: tuple[str, ...],
     *,
-    timeout: int,
+    timeout: int | float,
     max_bytes: int,
     retain_text: bool,
     process_group: bool = False,
@@ -330,12 +510,13 @@ def _run_bounded_git_output(  # noqa: C901
     argv: tuple[str, ...],
     *,
     cwd: Path,
-    timeout: int,
+    timeout: int | float,
     max_bytes: int,
     retain_text: bool,
     env: dict[str, str] | None = None,
 ) -> _BoundedGitOutput:
     """Run Git with bounded memory and return an exact output digest."""
+    timeout = cast(float, git_utils.remaining_operation_timeout(timeout))
     thread_backend = not _subprocess_pipe_selector_supported()
     process_options: dict[str, object] = {}
     if os.name == "posix":
@@ -1003,6 +1184,8 @@ def _classify_github_failure(error: BaseException, *, now_epoch: float) -> tuple
         return "github_unavailable", delay
     if any(isinstance(item, subprocess.CalledProcessError) for item in chain):
         return "github_cli_error", 1.0
+    if any(isinstance(item, (subprocess.TimeoutExpired, _GitLockTimeoutError)) for item in chain):
+        return "github_timeout", 1.0
     if any(isinstance(item, CommentJournalReadError) for item in chain):
         return "comment_journal_read_error", 1.0
     return None
@@ -2361,30 +2544,80 @@ def _unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
     return None
 
 
-def _checkout_preflight_error(
+def _checkout_preflight_error(  # noqa: C901
     checkout: Path,
     timeout_s: int,
     *,
     max_config_bytes: int | None = None,
 ) -> str | None:
     """Return a reusable-checkout metadata safety failure before synchronization."""
-    if not (checkout / ".git").exists():
+    git_marker = checkout / ".git"
+    if not git_marker.exists():
         return None
-    if max_config_bytes is None:
-        config = git_utils.run(
-            ["git", "config", "--null", "--list"],
-            cwd=checkout,
-            timeout=timeout_s,
-            env=_controlled_git_env(),
-        ).stdout
+    if git_marker.is_symlink():
+        return "checkout has unsafe Git metadata"
+    config_paths: list[Path]
+    if git_marker.is_dir():
+        config_paths = [git_marker / "config"]
+        worktree_config = git_marker / "config.worktree"
+    elif git_marker.is_file():
+        pointer, _identity = _portable_read_git_pointer(git_marker)
+        if not pointer.startswith("gitdir: "):
+            return "checkout has unsafe Git metadata"
+        admin_dir = _normalized_metadata_path(checkout, pointer.removeprefix("gitdir: "))
+        if admin_dir.parent.name != "worktrees":
+            return "checkout has unsafe Git metadata"
+        repo_git_dir = admin_dir.parent.parent
+        if not repo_git_dir.is_dir():
+            return "checkout has unsafe Git metadata"
+        config_paths = [repo_git_dir / "config"]
+        worktree_config = admin_dir / "config.worktree"
     else:
-        config = _run_bounded_git_output(
-            ("git", "config", "--null", "--list"),
-            cwd=checkout,
-            timeout=timeout_s,
-            max_bytes=max_config_bytes,
-            retain_text=True,
-        ).text
+        return "checkout has unsafe Git metadata"
+    if worktree_config.exists():
+        config_paths.append(worktree_config)
+    config_parts: list[str] = []
+    if max_config_bytes is None:
+        for config_path in config_paths:
+            neutral_cwd = Path(config_path.anchor)
+            config_parts.append(
+                git_utils.run(
+                    [
+                        "git",
+                        "config",
+                        "--file",
+                        str(config_path),
+                        "--no-includes",
+                        "--null",
+                        "--list",
+                    ],
+                    cwd=neutral_cwd,
+                    timeout=timeout_s,
+                    env=_controlled_git_env(),
+                ).stdout
+            )
+    else:
+        remaining = max_config_bytes
+        for config_path in config_paths:
+            neutral_cwd = Path(config_path.anchor)
+            output = _run_bounded_git_output(
+                (
+                    "git",
+                    "config",
+                    "--file",
+                    str(config_path),
+                    "--no-includes",
+                    "--null",
+                    "--list",
+                ),
+                cwd=neutral_cwd,
+                timeout=timeout_s,
+                max_bytes=remaining,
+                retain_text=True,
+            ).text
+            config_parts.append(output)
+            remaining -= len(output.encode("utf-8", "surrogateescape"))
+    config = "\0".join(config_parts)
     unsafe_config = _unsafe_local_git_config_key(config)
     if unsafe_config is not None:
         return "checkout has unsafe local Git configuration"
@@ -2552,6 +2785,36 @@ def _read_bounded_git_pointer_at(parent_fd: int, name: str) -> tuple[str, _Files
         return payload.decode("utf-8").strip(), identity
     except UnicodeDecodeError as exc:
         raise RuntimeError("linked worktree metadata pointer is invalid") from exc
+
+
+def _reject_object_alternates_at(objects_fd: int) -> None:
+    """Reject a repository object store that can redirect object reads."""
+    try:
+        info_fd, _identity = _open_directory_at_no_follow(objects_fd, "info")
+    except FileNotFoundError:
+        return
+    try:
+        try:
+            os.stat("alternates", dir_fd=info_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise RuntimeError("linked worktree object store has unsafe alternates")
+    finally:
+        os.close(info_fd)
+
+
+def _reject_portable_object_alternates(objects: Path) -> None:
+    """Reject an alternate-object entry without following a portable path."""
+    info = objects / "info"
+    try:
+        _portable_path_identity(info, directory=True)
+    except FileNotFoundError:
+        return
+    try:
+        (info / "alternates").lstat()
+    except FileNotFoundError:
+        return
+    raise RuntimeError("linked worktree object store has unsafe alternates")
 
 
 def _regular_file_identity_at(parent_fd: int, name: str) -> _FilesystemIdentity:
@@ -2799,6 +3062,7 @@ def _linked_worktree_git_env_portable(
     index_identity = _portable_path_identity(index, directory=False)
     objects = common_dir / "objects"
     objects_identity = _portable_path_identity(objects, directory=True)
+    _reject_portable_object_alternates(objects)
     binding = _LinkedWorktreeBinding(
         repo_root=repo_root,
         worktree=worktree,
@@ -2879,6 +3143,7 @@ def _linked_worktree_git_env(
         index_identity = _regular_file_identity_at(admin_fd, "index")
         objects_fd, objects_identity = _open_directory_at_no_follow(common_fd, "objects")
         descriptors.append(objects_fd)
+        _reject_object_alternates_at(objects_fd)
         index = admin_dir / "index"
         objects = common_dir / "objects"
         binding = _LinkedWorktreeBinding(
@@ -2916,16 +3181,33 @@ def _private_linked_worktree_git_env(
     linked_env: dict[str, str],
     *,
     detached_head: str,
+    durable_git_dir: Path | None = None,
 ) -> Iterator[dict[str, str]]:
     """Use private Git metadata with the validated real index and object store."""
     if not _is_full_commit_sha(detached_head):
         raise RuntimeError("private Git metadata HEAD is invalid")
-    with tempfile.TemporaryDirectory(prefix="hephaestus-recovery-git-") as temporary:
-        git_dir = Path(temporary) / "git"
-        git_dir.mkdir(mode=0o700)
-        (git_dir / "refs" / "heads").mkdir(parents=True)
-        (git_dir / "refs" / "tags").mkdir(parents=True)
-        write_secure(git_dir / "HEAD", f"{detached_head}\n", permissions=0o600)
+    with ExitStack() as stack:
+        if durable_git_dir is None:
+            temporary = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="hephaestus-recovery-git-")
+            )
+            git_dir = Path(temporary) / "git"
+            git_dir.mkdir(mode=0o700)
+        else:
+            git_dir = durable_git_dir.resolve(strict=True)
+            if durable_git_dir.is_symlink() or not git_dir.is_dir():
+                raise RuntimeError("durable private Git metadata is invalid")
+        (git_dir / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+        (git_dir / "refs" / "tags").mkdir(parents=True, exist_ok=True)
+        head_path = git_dir / "HEAD"
+        if head_path.exists():
+            if (
+                head_path.is_symlink()
+                or head_path.read_text(encoding="ascii").strip() != detached_head
+            ):
+                raise RuntimeError("durable private Git HEAD changed")
+        else:
+            write_secure(head_path, f"{detached_head}\n", permissions=0o600)
         if len(detached_head) == 64:
             write_secure(
                 git_dir / "config",
@@ -2933,6 +3215,16 @@ def _private_linked_worktree_git_env(
                 permissions=0o600,
             )
         binding = getattr(linked_env, "binding", None)
+        if isinstance(binding, _LinkedWorktreeBinding):
+            rebound = _linked_worktree_git_env(binding.repo_root, binding.worktree)
+            if not _linked_binding_matches(linked_env, rebound, include_index=True):
+                kind = "durable" if durable_git_dir is not None else "temporary"
+                raise RuntimeError(
+                    f"linked worktree metadata changed before {kind} private Git use "
+                    f"({binding.index_identity!r} != {rebound.binding.index_identity!r})"
+                )
+            linked_env = rebound
+            binding = rebound.binding
         objects = (
             binding.objects
             if isinstance(binding, _LinkedWorktreeBinding)
@@ -3308,7 +3600,7 @@ class WorkerPool:
         self._evidence_receipt_dir = evidence_receipt_dir
 
     @contextmanager
-    def _repo_lock(self, repo: str) -> Iterator[None]:
+    def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
         """Serialize in-process worker operations for one repository."""
         with self._repo_locks_guard:
             entry = self._repo_locks.get(repo)
@@ -3317,10 +3609,20 @@ class WorkerPool:
                 self._repo_locks[repo] = entry
             entry.users += 1
 
+        acquired = False
         try:
-            with entry.lock:
-                yield
+            if deadline_s is None:
+                entry.lock.acquire()
+                acquired = True
+            else:
+                remaining_s = deadline_s - time.monotonic()
+                if remaining_s <= 0 or not entry.lock.acquire(timeout=remaining_s):
+                    raise _GitLockTimeoutError
+                acquired = True
+            yield
         finally:
+            if acquired:
+                entry.lock.release()
             with self._repo_locks_guard:
                 entry.users -= 1
                 if entry.users == 0 and self._repo_locks.get(repo) is entry:
@@ -3657,7 +3959,8 @@ class WorkerPool:
         if self._github_job_runner is None:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
         try:
-            with self._repo_lock(job.repo):
+            deadline_s = getattr(job.request, "deadline_s", None)
+            with self._repo_lock(job.repo, deadline_s=deadline_s):
                 receipt = self._github_job_runner.run(job)
         except Exception as exc:
             failure = _classify_github_failure(exc, now_epoch=time.time())
@@ -3707,7 +4010,21 @@ class WorkerPool:
         escapes are converted by :meth:`_run` so the returned result preserves
         the executing worker identity.
         """
+
+        def remaining_timeout() -> int:
+            """Return the checked time for the next recovery subprocess."""
+            if job.deadline_s is None:
+                return int(job.timeout_s)
+            remaining = float(job.deadline_s) - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("agent operation deadline", 0)
+            bounded = int(min(float(job.timeout_s), remaining))
+            if bounded <= 0:
+                raise subprocess.TimeoutExpired("agent operation deadline", 0)
+            return bounded
+
         try:
+            remaining_timeout()
             cwd = validate_job_workspace(job)
             agent = resolve_agent(
                 job.agent,
@@ -3719,10 +4036,12 @@ class WorkerPool:
                 model_references=(job.model,),
             )
             is_claude = agent == "claude"
+            validate_agent_execution_support(agent, job.execution_request)
             session_agent = job.session_agent or job.agent
             session_key = job.session_key or session_agent
             with plugin_skills_context(job.plugin_skills_dir):
                 prompt = job.prompt_builder(**job.prompt_kwargs)
+            remaining_timeout()
 
             def _invoke() -> tuple[str, str | None, AgentSessionBinding | None, tuple[str, ...]]:
                 if is_claude:
@@ -3730,7 +4049,7 @@ class WorkerPool:
                     # knows its exact needs, e.g. pr_review) wins; a read-only
                     # sandbox without one clamps to the fail-closed default;
                     # everything else resolves by session-agent role.
-                    if job.allowed_tools:
+                    if job.allowed_tools is not None:
                         scope = ToolScope(job.allowed_tools)
                     elif job.sandbox == "read-only":
                         scope = DEFAULT_TOOL_SCOPE
@@ -3743,7 +4062,7 @@ class WorkerPool:
                         prompt=prompt,
                         model=job.model,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         output_format=job.output_format,
                         allowed_tools=scope.allowed_tools,
                         permission_mode=scope.permission_mode,
@@ -3761,7 +4080,7 @@ class WorkerPool:
                         session_id=job.resume_binding.session_id,
                         prompt=prompt,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
@@ -3777,7 +4096,7 @@ class WorkerPool:
                         session_id=job.resume_session_id,
                         prompt=prompt,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
@@ -3792,7 +4111,7 @@ class WorkerPool:
                         agent=agent,
                         prompt=prompt,
                         cwd=cwd,
-                        timeout=job.timeout_s,
+                        timeout=remaining_timeout(),
                         model=job.model,
                         sandbox=job.sandbox,
                         approval="never",
@@ -4088,11 +4407,15 @@ class WorkerPool:
         lock_path = _repo_lock_path(job.repo, self._lock_dir)
         try:
             with (
-                self._repo_lock(job.repo),
+                git_utils.operation_deadline(job.deadline_s),
+                self._repo_lock(job.repo, deadline_s=job.deadline_s),
                 _interruptible_file_lock(
                     lock_path,
                     shutdown=self._shutdown,
-                    timeout_s=job.timeout_s,
+                    timeout_s=cast(
+                        float,
+                        git_utils.remaining_operation_timeout(job.timeout_s),
+                    ),
                 ),
             ):
                 return self._dispatch_git_op(job)
@@ -4187,6 +4510,9 @@ class WorkerPool:
         elif job.op == "verify_pr_review_checkout":
             return self._git_verify_pr_review_checkout(job)
 
+        elif job.op == "verify_remediation_journal":
+            return self._git_verify_remediation_journal(job)
+
         elif job.op == "remove_worktree":
             from .git_cleanup import run_cleanup_job
 
@@ -4214,8 +4540,11 @@ class WorkerPool:
             )
             return JobResult(ok=True)
 
-        elif job.op == "commit_push":
+        elif job.op == "commit_push" or job.op == "prepare_remediation_recovery":
             return self._git_commit_push(job)
+
+        elif job.op == "publish_remediation_recovery":
+            return self._git_publish_remediation_recovery(job)
 
         elif job.op == "release_branch_reservation":
             from .git_cleanup import run_cleanup_job
@@ -4255,6 +4584,192 @@ class WorkerPool:
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
+
+    def _git_publish_remediation_recovery(self, job: GitJob) -> JobResult:
+        """Validate and publish one already-prepared remediation commit."""
+        try:
+            receipt = RemediationRecoveryReceipt.from_dict(job.kwargs.get("recovery_receipt"))
+            reply_result = RemediationReplyResult.from_dict(job.kwargs.get("reply_result"))
+        except ValueError as error:
+            return JobResult(ok=False, error=f"remediation publication receipt is invalid: {error}")
+        review_input = receipt.review_input
+        batch_nonce = job.kwargs.get("remediation_batch_nonce")
+        if (
+            reply_result.review_input_sha256 != receipt.review_input_sha256
+            or job.transport_repository.casefold() != review_input.repository
+            or not isinstance(batch_nonce, str)
+        ):
+            return JobResult(ok=False, error="remediation publication identity is invalid")
+        if job.kwargs.get("already_published") is True:
+            worktree = Path(review_input.worktree_path)
+            remote_head = self._read_remote_branch_head(
+                worktree,
+                remote="origin",
+                branch=review_input.branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            exact_commit = self._is_exact_recovery_commit(
+                worktree,
+                review_input.recovery_commit_sha,
+                parent=review_input.reviewed_parent_sha,
+                tree=review_input.candidate_tree_sha,
+                timeout=job.timeout_s,
+            )
+            if remote_head != review_input.recovery_commit_sha or not exact_commit:
+                return JobResult(
+                    ok=False,
+                    error="published remediation recovery commit is not exact",
+                    value={"failure_kind": "publication_unavailable"},
+                )
+            artifact_job = replace(
+                job,
+                kwargs={
+                    **job.kwargs,
+                    "remediation_repository": review_input.repository,
+                    "remediation_pr_number": review_input.pr_number,
+                    "remediation_thread_snapshots": json.loads(review_input.thread_snapshot_json),
+                    "remediation_replies": dict(reply_result.replies),
+                    "remediation_failure_diagnostic": review_input.failure_diagnostic,
+                    "remediation_journal_input_encoding": receipt.journal_input_encoding,
+                    "remediation_journal_input_data": receipt.journal_input_data,
+                },
+            )
+            try:
+                handoff, journal = _remediation_recovery_artifacts(
+                    artifact_job,
+                    repo_root=Path(review_input.repo_root),
+                    worktree=worktree,
+                    branch=review_input.branch,
+                    parent_sha=review_input.reviewed_parent_sha,
+                    candidate_tree_sha=review_input.candidate_tree_sha,
+                    recovery_commit_sha=review_input.recovery_commit_sha,
+                    paths=CommitPaths(receipt.add_paths, receipt.update_paths),
+                    committed_diff=review_input.committed_diff,
+                    committed_diff_sha256=review_input.committed_diff_sha256,
+                )
+            except (TypeError, ValueError) as exc:
+                return JobResult(ok=False, error=f"remediation journal is unavailable: {exc}")
+            return JobResult(
+                ok=True,
+                value={
+                    "pushed": True,
+                    "head_sha": review_input.recovery_commit_sha,
+                    "remediation_handoff": handoff,
+                    "remediation_journal": {"marker": journal[0], "body": journal[1]},
+                },
+            )
+        retry_job = replace(
+            job,
+            kwargs={
+                "issue_number": review_input.issue_number,
+                "worktree_path": review_input.worktree_path,
+                "repo_root": review_input.repo_root,
+                "branch": review_input.branch,
+                "expected_recovery_head": receipt.expected_remote_sha,
+                "expected_recovery_content_snapshot": dict(receipt.content_snapshot),
+                "expected_recovery_tree_sha": review_input.candidate_tree_sha,
+                "expected_recovery_diff": review_input.committed_diff,
+                "expected_recovery_diff_sha256": review_input.committed_diff_sha256,
+                "expected_recovery_add_paths": receipt.add_paths,
+                "expected_recovery_update_paths": receipt.update_paths,
+                "expected_recovery_commit_sha": review_input.recovery_commit_sha,
+                "remediation_repository": review_input.repository,
+                "remediation_pr_number": review_input.pr_number,
+                "remediation_thread_snapshots": json.loads(review_input.thread_snapshot_json),
+                "remediation_replies": dict(reply_result.replies),
+                "remediation_batch_nonce": batch_nonce,
+                "remediation_failure_diagnostic": review_input.failure_diagnostic,
+                "remediation_journal_input_encoding": receipt.journal_input_encoding,
+                "remediation_journal_input_data": receipt.journal_input_data,
+            },
+        )
+        return self._git_commit_push(retry_job)
+
+    def _git_verify_remediation_journal(self, job: GitJob) -> JobResult:
+        """Prove one recovered journal against exact local Git objects."""
+        raw_handoff = job.kwargs.get("handoff")
+        raw_repo_root = job.kwargs.get("repo_root")
+        if not isinstance(raw_handoff, dict) or not isinstance(raw_repo_root, str):
+            return JobResult(ok=False, error="remediation journal Git identity is invalid")
+        try:
+            review_input_bytes = raw_handoff.get("review_input_bytes")
+            if not isinstance(review_input_bytes, str):
+                raise ValueError("remediation journal review input is unavailable")
+            review_input = RemediationReviewInput.from_canonical_bytes(
+                review_input_bytes.encode("utf-8")
+            )
+            repo_root = Path(raw_repo_root).resolve(strict=True)
+            if (
+                str(repo_root) != review_input.repo_root
+                or job.transport_repository.casefold() != review_input.repository
+                or raw_handoff.get("head_sha") != review_input.recovery_commit_sha
+            ):
+                raise ValueError("remediation journal repository binding is invalid")
+            git_env = _isolated_checkout_git_env()
+            if not self._is_exact_recovery_commit(
+                repo_root,
+                review_input.recovery_commit_sha,
+                parent=review_input.reviewed_parent_sha,
+                tree=review_input.candidate_tree_sha,
+                timeout=job.timeout_s,
+                git_env=git_env,
+            ):
+                raise ValueError("remediation journal commit identity is invalid")
+            committed_diff = _run_bounded_git_output(
+                (
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-renames",
+                    "--binary",
+                    "--full-index",
+                    review_input.reviewed_parent_sha,
+                    review_input.candidate_tree_sha,
+                ),
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+                retain_text=True,
+                env=git_env,
+            )
+            changed = _run_bounded_git_output(
+                (
+                    "git",
+                    "diff",
+                    "--name-only",
+                    "--no-renames",
+                    "-z",
+                    review_input.reviewed_parent_sha,
+                    review_input.candidate_tree_sha,
+                ),
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                retain_text=True,
+                env=git_env,
+            )
+            changed_paths = tuple(path for path in changed.text.split("\0") if path)
+            if (
+                committed_diff.text != review_input.committed_diff
+                or committed_diff.sha256 != review_input.committed_diff_sha256
+                or len(changed_paths) != len(review_input.changed_paths)
+                or set(changed_paths) != set(review_input.changed_paths)
+            ):
+                raise ValueError("remediation journal committed evidence is invalid")
+        except (OSError, RuntimeError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+            return JobResult(ok=False, error=f"remediation journal Git verification failed: {exc}")
+        return JobResult(
+            ok=True,
+            value={
+                "verified": True,
+                "review_input_sha256": review_input.review_input_sha256,
+                "head_sha": review_input.recovery_commit_sha,
+            },
+        )
 
     def _git_verify_issue_wave_ancestry(self, job: GitJob) -> JobResult:
         """Verify checkpoint commits are ancestors of synchronized main."""
@@ -5379,12 +5894,351 @@ class WorkerPool:
         )
         try:
             with source_manager.implementation_writer_handoff(item_number) as handoff:
+                recovered = self._recover_prepared_remediation_worktree(job, repo_root)
+                if recovered is not None:
+                    return recovered
                 return self._git_create_worktree_with_handoff(job, source_manager, handoff)
         except SourceWorkspaceError as exc:
             return JobResult(
                 ok=False,
                 error=f"source_workspace_ownership_unavailable: {exc}",
             )
+
+    def _recover_prepared_remediation_worktree(  # noqa: C901
+        self,
+        job: GitJob,
+        repo_root: Path,
+    ) -> JobResult | None:
+        """Return one exact durable prepared child before adopted-branch sync."""
+        if job.kwargs.get("recover_prepared_remediation") is not True:
+            return None
+        issue_number = job.kwargs.get("issue_number")
+        pr_number = job.kwargs.get("remediation_pr_number")
+        repository = job.kwargs.get("remediation_repository")
+        branch = job.kwargs.get("branch_name")
+        remote_head = job.kwargs.get("implementation_adoption_head")
+        threads = job.kwargs.get("remediation_thread_snapshots")
+        if (
+            isinstance(issue_number, bool)
+            or not isinstance(issue_number, int)
+            or isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or not isinstance(repository, str)
+            or not isinstance(branch, str)
+            or not _is_full_commit_sha(remote_head)
+            or not isinstance(threads, list)
+        ):
+            return JobResult(ok=False, error="prepared remediation recovery identity is invalid")
+        try:
+            thread_json = RemediationReviewInput.canonical_thread_snapshot(threads)
+            intent = load_prepublication_intent(
+                repo_root=repo_root,
+                repository=repository,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                expected_remote_sha=remote_head,
+                thread_snapshot_json=thread_json,
+            )
+            if intent is not None:
+                child = read_prepublication_private_head(
+                    repo_root=repo_root,
+                    pr_number=pr_number,
+                )
+                worktree = Path(intent.worktree_path)
+                expected_path = (
+                    repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+                ).resolve(strict=False)
+                if worktree.resolve(strict=True) != expected_path:
+                    raise ValueError("prepared remediation writer path is invalid")
+                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+                binding = getattr(linked_env, "binding", None)
+                if (
+                    not isinstance(binding, _LinkedWorktreeBinding)
+                    or binding.branch_ref != f"refs/heads/{intent.branch}"
+                    or binding.branch_sha != intent.expected_remote_sha
+                ):
+                    raise ValueError("prepared remediation writer binding is invalid")
+                if child == intent.expected_remote_sha:
+                    (
+                        current,
+                        status_result,
+                        candidate_tree,
+                        diff_result,
+                        selected_paths,
+                    ) = _inspect_candidate_with_private_git(
+                        worktree,
+                        intent.expected_remote_sha,
+                        timeout=job.timeout_s,
+                        linked_env=linked_env,
+                    )
+                    if (
+                        not status_result.text.strip()
+                        or selected_paths is None
+                        or current.snapshot != dict(intent.content_snapshot)
+                        or candidate_tree != intent.candidate_tree_sha
+                        or diff_result.text != intent.committed_diff
+                        or diff_result.sha256 != intent.committed_diff_sha256
+                        or selected_paths.add_paths != intent.add_paths
+                        or selected_paths.update_paths != intent.update_paths
+                    ):
+                        raise ValueError("prepared remediation intent candidate changed")
+                    inspection = {
+                        "outcome": "dirty",
+                        "branch": intent.branch,
+                        "worktree_path": intent.worktree_path,
+                        "head_sha": intent.expected_remote_sha,
+                        "status": status_result.text,
+                        "diff": diff_result.text,
+                        "status_sha256": status_result.sha256,
+                        "diff_sha256": diff_result.sha256,
+                        "candidate_tree_sha": candidate_tree,
+                        "content_snapshot": current.snapshot,
+                        "changed_file_count": current.changed_file_count,
+                        "candidate_add_paths": list(selected_paths.add_paths),
+                        "candidate_update_paths": list(selected_paths.update_paths),
+                    }
+                    return JobResult(
+                        ok=True,
+                        value={
+                            "path": str(worktree),
+                            "impl_source_revision": intent.expected_remote_sha,
+                            "branch": intent.branch,
+                            "head_sha": intent.expected_remote_sha,
+                            "dirty": True,
+                            "status": status_result.text,
+                            "diff": diff_result.text,
+                            "content_snapshot": current.snapshot,
+                            "incomplete_remediation_inspection": inspection,
+                            "remediation_batch_nonce": intent.batch_nonce,
+                        },
+                    )
+                with _private_linked_worktree_git_env(
+                    linked_env,
+                    detached_head=intent.expected_remote_sha,
+                ) as parent_env:
+                    current_snapshot = _dirty_worktree_content_snapshot(
+                        worktree,
+                        timeout=job.timeout_s,
+                        git_env=parent_env,
+                    )
+                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+                index_is_original = current_snapshot == dict(intent.content_snapshot)
+                index_tree = git_utils.run(
+                    ["git", "write-tree"],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                    env=linked_env,
+                ).stdout.strip()
+                if not index_is_original and index_tree != intent.candidate_tree_sha:
+                    raise ValueError("prepared remediation writer index changed")
+                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+                durable_git_dir = prepublication_private_git_dir(
+                    repo_root=repo_root,
+                    pr_number=pr_number,
+                    create=False,
+                )
+                with _private_linked_worktree_git_env(
+                    linked_env,
+                    detached_head=child,
+                    durable_git_dir=durable_git_dir,
+                ) as child_env:
+                    if not self._is_exact_recovery_commit(
+                        worktree,
+                        child,
+                        parent=intent.expected_remote_sha,
+                        tree=intent.candidate_tree_sha,
+                        timeout=job.timeout_s,
+                        git_env=child_env,
+                    ):
+                        raise ValueError("prepared remediation private child is not exact")
+                    with tempfile.TemporaryDirectory(
+                        prefix="hephaestus-recovery-verify-index-"
+                    ) as temporary:
+                        verify_env = dict(child_env)
+                        verify_env["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+                        git_utils.run(
+                            ["git", "read-tree", child],
+                            cwd=worktree,
+                            timeout=job.timeout_s,
+                            env=verify_env,
+                        )
+                        status = _run_bounded_git_output(
+                            (
+                                "git",
+                                "-c",
+                                "core.fsmonitor=false",
+                                "status",
+                                "--porcelain=v1",
+                                "-z",
+                                "--untracked-files=all",
+                                "--no-renames",
+                            ),
+                            cwd=worktree,
+                            timeout=job.timeout_s,
+                            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                            retain_text=True,
+                            env=verify_env,
+                        ).text
+                    if status:
+                        raise ValueError("prepared remediation writer content changed")
+                    _refresh_verified_recovery_index(
+                        repo_root.resolve(strict=True),
+                        worktree,
+                        expected_git_env=child_env,
+                        private_git_env=child_env,
+                        source_sha=child,
+                        expected_tree=intent.candidate_tree_sha,
+                        timeout=job.timeout_s,
+                    )
+                recovered_receipt = intent.receipt(child)
+                save_prepublication_receipt(
+                    repo_root=repo_root,
+                    receipt=recovered_receipt,
+                    batch_nonce=intent.batch_nonce,
+                )
+            loaded = load_prepublication_receipt(
+                repo_root=repo_root,
+                repository=repository,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                expected_remote_sha=remote_head,
+                thread_snapshot_json=thread_json,
+            )
+            if loaded is None:
+                expected_path = (
+                    repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+                ).resolve(strict=False)
+                if expected_path.exists():
+                    linked_env = _linked_worktree_git_env(
+                        repo_root.resolve(strict=True),
+                        expected_path,
+                    )
+                    binding = getattr(linked_env, "binding", None)
+                    if not isinstance(binding, _LinkedWorktreeBinding):
+                        raise ValueError("prepared remediation writer binding is invalid")
+                    if (
+                        binding.branch_ref == f"refs/heads/{branch}"
+                        and binding.branch_sha != remote_head
+                    ):
+                        raise ValueError(
+                            "prepared remediation receipt is absent for a preserved local child"
+                        )
+                return None
+            receipt, batch_nonce, already_published = loaded
+            review_input = receipt.review_input
+            worktree = Path(review_input.worktree_path)
+            expected_path = (
+                repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+            ).resolve(strict=False)
+            if worktree.resolve(strict=True) != expected_path:
+                raise ValueError("prepared remediation writer path is invalid")
+            linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+            binding = getattr(linked_env, "binding", None)
+            if (
+                not isinstance(binding, _LinkedWorktreeBinding)
+                or binding.branch_ref != f"refs/heads/{branch}"
+                or binding.branch_sha
+                not in {
+                    review_input.reviewed_parent_sha,
+                    review_input.recovery_commit_sha,
+                }
+                or not self._is_exact_recovery_commit(
+                    worktree,
+                    review_input.recovery_commit_sha,
+                    parent=review_input.reviewed_parent_sha,
+                    tree=review_input.candidate_tree_sha,
+                    timeout=job.timeout_s,
+                    git_env=linked_env,
+                )
+            ):
+                raise ValueError("prepared remediation commit is not exact")
+            if (
+                git_utils.run(
+                    ["git", "write-tree"],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                    env=linked_env,
+                ).stdout.strip()
+                != review_input.candidate_tree_sha
+            ):
+                raise ValueError("prepared remediation writer index changed")
+            linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
+            with _private_linked_worktree_git_env(
+                linked_env,
+                detached_head=review_input.recovery_commit_sha,
+            ) as child_env:
+                with tempfile.TemporaryDirectory(
+                    prefix="hephaestus-recovery-verify-index-"
+                ) as temporary:
+                    verify_env = dict(child_env)
+                    verify_env["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+                    git_utils.run(
+                        ["git", "read-tree", review_input.recovery_commit_sha],
+                        cwd=worktree,
+                        timeout=job.timeout_s,
+                        env=verify_env,
+                    )
+                    status = _run_bounded_git_output(
+                        (
+                            "git",
+                            "-c",
+                            "core.fsmonitor=false",
+                            "status",
+                            "--porcelain=v1",
+                            "-z",
+                            "--untracked-files=all",
+                            "--no-renames",
+                        ),
+                        cwd=worktree,
+                        timeout=job.timeout_s,
+                        max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+                        retain_text=True,
+                        env=verify_env,
+                    ).text
+                    if status:
+                        raise ValueError("prepared remediation writer content changed")
+                committed = _run_bounded_git_output(
+                    (
+                        "git",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-renames",
+                        "--binary",
+                        "--full-index",
+                        review_input.reviewed_parent_sha,
+                        review_input.candidate_tree_sha,
+                    ),
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                    max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
+                    retain_text=True,
+                    env=child_env,
+                )
+                if (
+                    committed.text != review_input.committed_diff
+                    or committed.sha256 != review_input.committed_diff_sha256
+                ):
+                    raise ValueError("prepared remediation committed diff changed")
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+            return JobResult(ok=False, error=f"prepared remediation recovery failed: {exc}")
+        return JobResult(
+            ok=True,
+            value={
+                "path": str(worktree),
+                "impl_source_revision": review_input.reviewed_parent_sha,
+                "dirty": False,
+                "status": "",
+                "diff": "",
+                "prepared_remediation_receipt": receipt.as_dict(),
+                "remediation_batch_nonce": batch_nonce,
+                "remediation_recovery_already_published": already_published,
+            },
+        )
 
     def _git_create_worktree_with_handoff(  # noqa: C901
         self,
@@ -6433,13 +7287,18 @@ class WorkerPool:
         expected_recovery_head = job.kwargs.get("expected_recovery_head")
         expected_recovery_snapshot = job.kwargs.get("expected_recovery_content_snapshot")
         expected_recovery_tree = job.kwargs.get("expected_recovery_tree_sha")
+        expected_recovery_diff = job.kwargs.get("expected_recovery_diff")
+        expected_recovery_diff_sha256 = job.kwargs.get("expected_recovery_diff_sha256")
         expected_recovery_add_paths = job.kwargs.get("expected_recovery_add_paths")
         expected_recovery_update_paths = job.kwargs.get("expected_recovery_update_paths")
         expected_recovery_commit = job.kwargs.get("expected_recovery_commit_sha")
+        prepare_only = job.op == "prepare_remediation_recovery"
         recovery_bound = (
             expected_recovery_head is not None
             or expected_recovery_snapshot is not None
             or expected_recovery_tree is not None
+            or expected_recovery_diff is not None
+            or expected_recovery_diff_sha256 is not None
             or expected_recovery_add_paths is not None
             or expected_recovery_update_paths is not None
             or expected_recovery_commit is not None
@@ -6453,6 +7312,9 @@ class WorkerPool:
         recovery_git_env: dict[str, str] | None = None
         recovery_commit_git_env: dict[str, str] | None = None
         recovery_repo_root: Path | None = None
+        remediation_parent_sha: str | None = None
+        remediation_tree_sha: str | None = None
+        remediation_diff: _BoundedGitOutput | None = None
         if recovery_bound:
             raw_repo_root = job.kwargs.get("repo_root")
             if (
@@ -6475,6 +7337,14 @@ class WorkerPool:
                 not _is_full_commit_sha(expected_recovery_head)
                 or not (_valid_dirty_content_snapshot(expected_recovery_snapshot))
                 or not _is_full_commit_sha(expected_recovery_tree)
+                or not isinstance(expected_recovery_diff, str)
+                or len(expected_recovery_diff.encode("utf-8", "surrogateescape"))
+                > IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES
+                or not isinstance(expected_recovery_diff_sha256, str)
+                or expected_recovery_diff_sha256
+                != hashlib.sha256(
+                    expected_recovery_diff.encode("utf-8", "surrogateescape")
+                ).hexdigest()
                 or not is_bounded_commit_paths(
                     recovery_paths,
                     max_paths=DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
@@ -6504,10 +7374,23 @@ class WorkerPool:
                     ):
                         raise RuntimeError("remediation writer branch binding changed")
                 private_head = expected_recovery_commit or expected_recovery_head
+                durable_git_dir: Path | None = None
+                if prepare_only:
+                    private_pr_number = job.kwargs.get("remediation_pr_number")
+                    if isinstance(private_pr_number, bool) or not isinstance(
+                        private_pr_number, int
+                    ):
+                        raise RuntimeError("remediation PR identity is invalid")
+                    durable_git_dir = prepublication_private_git_dir(
+                        repo_root=recovery_repo_root,
+                        pr_number=private_pr_number,
+                        create=True,
+                    )
                 recovery_git_env = recovery_stack.enter_context(
                     _private_linked_worktree_git_env(
                         linked_env,
                         detached_head=private_head,
+                        durable_git_dir=durable_git_dir,
                     )
                 )
             except (OSError, RuntimeError):
@@ -6557,7 +7440,7 @@ class WorkerPool:
                         timeout=job.timeout_s,
                         git_env=recovery_git_env,
                     )
-                    current_tree, _current_diff = _candidate_commit_tree_evidence(
+                    current_tree, current_diff = _candidate_commit_tree_evidence(
                         worktree,
                         current_head,
                         timeout=job.timeout_s,
@@ -6600,6 +7483,44 @@ class WorkerPool:
                         ok=False,
                         error="remediation writer content drift before commit",
                     )
+                if (
+                    current_diff.text != expected_recovery_diff
+                    or current_diff.sha256 != expected_recovery_diff_sha256
+                ):
+                    return JobResult(
+                        ok=False,
+                        error="remediation writer diff drift before commit",
+                    )
+            remediation_parent_sha = expected_recovery_head
+            remediation_tree_sha = expected_recovery_tree
+            remediation_diff = _BoundedGitOutput(
+                text=expected_recovery_diff,
+                sha256=expected_recovery_diff_sha256,
+                byte_count=len(expected_recovery_diff.encode("utf-8", "surrogateescape")),
+            )
+        elif job.kwargs.get("remediation_repository") is not None:
+            try:
+                remediation_parent = self._read_publish_head(worktree, timeout=job.timeout_s)
+                if isinstance(remediation_parent, JobResult):
+                    return remediation_parent
+                remediation_paths = _bounded_candidate_commit_paths(
+                    worktree,
+                    remediation_parent,
+                    timeout=job.timeout_s,
+                )
+                remediation_tree_sha, remediation_diff = _candidate_commit_tree_evidence(
+                    worktree,
+                    remediation_parent,
+                    timeout=job.timeout_s,
+                    selected=remediation_paths,
+                )
+                recovery_paths = remediation_paths
+                remediation_parent_sha = remediation_parent
+            except RuntimeError:
+                if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
+                    return JobResult(
+                        ok=False, error="remediation candidate evidence is unavailable"
+                    )
         # ``commit_if_changes`` returns False for a clean worktree.  An agent
         # is instructed to leave its edits uncommitted, but a defensive
         # recovery still recognizes a clean branch that is ahead of its
@@ -6615,6 +7536,49 @@ class WorkerPool:
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         changed: bool | str | JobResult = False
+        if prepare_only and not retry_recovery_commit:
+            try:
+                intent_repository = job.kwargs.get("remediation_repository")
+                intent_pr_number = job.kwargs.get("remediation_pr_number")
+                intent_threads = job.kwargs.get("remediation_thread_snapshots")
+                intent_batch = job.kwargs.get("remediation_batch_nonce")
+                intent_diagnostic = job.kwargs.get("remediation_failure_diagnostic")
+                if (
+                    not isinstance(intent_repository, str)
+                    or isinstance(intent_pr_number, bool)
+                    or not isinstance(intent_pr_number, int)
+                    or not isinstance(intent_threads, list)
+                    or not isinstance(intent_batch, str)
+                    or not isinstance(intent_diagnostic, str)
+                ):
+                    raise ValueError("remediation prepublication intent is incomplete")
+                save_prepublication_intent(
+                    repo_root=cast(Path, recovery_repo_root),
+                    repository=intent_repository,
+                    issue_number=cast(int, issue_number),
+                    pr_number=intent_pr_number,
+                    worktree_path=worktree,
+                    branch=branch,
+                    expected_remote_sha=cast(str, expected_recovery_head),
+                    candidate_tree_sha=cast(str, expected_recovery_tree),
+                    add_paths=cast(CommitPaths, recovery_paths).add_paths,
+                    update_paths=cast(CommitPaths, recovery_paths).update_paths,
+                    committed_diff_sha256=cast(str, expected_recovery_diff_sha256),
+                    committed_diff=cast(str, expected_recovery_diff),
+                    failure_diagnostic=intent_diagnostic,
+                    thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(
+                        intent_threads
+                    ),
+                    content_snapshot=tuple(
+                        sorted(cast(dict[str, str], expected_recovery_snapshot).items())
+                    ),
+                    batch_nonce=intent_batch,
+                )
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return JobResult(
+                    ok=False,
+                    error=f"remediation prepublication intent is unavailable: {exc}",
+                )
         if not retry_recovery_commit:
             try:
                 changed = self._commit_if_changes_with_controlled_signing(
@@ -6624,6 +7588,7 @@ class WorkerPool:
                     agent_model,
                     git_message_timeout,
                     recovery_paths=recovery_paths,
+                    expected_tree_sha=remediation_tree_sha,
                     git_env=recovery_commit_git_env or recovery_git_env,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
@@ -6682,7 +7647,44 @@ class WorkerPool:
             scope_retraction = self._verify_scope_retraction(job, worktree)
             if scope_retraction is not None:
                 return scope_retraction
-            return self._publish_commit_push(job, branch, worktree)
+            remediation_artifacts: tuple[dict[str, Any], tuple[str, str]] | None = None
+            if (
+                selected_recovery_commit is not None
+                and remediation_parent_sha is not None
+                and remediation_tree_sha is not None
+                and remediation_diff is not None
+                and recovery_paths is not None
+            ):
+                try:
+                    raw_repo_root = job.kwargs.get("repo_root")
+                    if not isinstance(raw_repo_root, str):
+                        raise ValueError("remediation repository root is unavailable")
+                    remediation_artifacts = _remediation_recovery_artifacts(
+                        job,
+                        repo_root=Path(raw_repo_root).resolve(strict=True),
+                        worktree=worktree.resolve(strict=True),
+                        branch=branch,
+                        parent_sha=remediation_parent_sha,
+                        candidate_tree_sha=remediation_tree_sha,
+                        recovery_commit_sha=selected_recovery_commit,
+                        paths=recovery_paths,
+                        committed_diff=remediation_diff.text,
+                        committed_diff_sha256=remediation_diff.sha256,
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    return JobResult(
+                        ok=False,
+                        value={"recovery_commit_sha": selected_recovery_commit},
+                        error=f"remediation recovery journal is unavailable: {exc}",
+                    )
+            publication = self._publish_commit_push(job, branch, worktree)
+            if not publication.ok or remediation_artifacts is None:
+                return publication
+            handoff, journal = remediation_artifacts
+            value = dict(publication.value) if isinstance(publication.value, dict) else {}
+            value["remediation_handoff"] = handoff
+            value["remediation_journal"] = {"marker": journal[0], "body": journal[1]}
+            return replace(publication, value=value)
         publication_head = self._read_publish_head(
             worktree,
             timeout=job.timeout_s,
@@ -6782,7 +7784,76 @@ class WorkerPool:
             return recovery_failure(
                 JobResult(ok=False, error="remediation writer changed after commit")
             )
-        return self._publish_recovery_commit(
+        if prepare_only:
+            try:
+                review_input = _remediation_review_input(
+                    job,
+                    repo_root=cast(Path, recovery_repo_root),
+                    worktree=worktree,
+                    branch=branch,
+                    parent_sha=cast(str, expected_recovery_head),
+                    candidate_tree_sha=cast(str, expected_recovery_tree),
+                    recovery_commit_sha=selected_recovery_commit,
+                    paths=cast(CommitPaths, recovery_paths),
+                    committed_diff=cast(_BoundedGitOutput, remediation_diff).text,
+                    committed_diff_sha256=cast(_BoundedGitOutput, remediation_diff).sha256,
+                )
+                journal_input_encoding, journal_input_data = encode_remediation_review_input(
+                    review_input.canonical_bytes
+                )
+                receipt = RemediationRecoveryReceipt(
+                    review_input_bytes=review_input.canonical_bytes.decode("utf-8"),
+                    review_input_sha256=review_input.review_input_sha256,
+                    journal_input_encoding=journal_input_encoding,
+                    journal_input_data=journal_input_data,
+                    expected_remote_sha=cast(str, expected_recovery_head),
+                    content_snapshot=tuple(
+                        sorted(cast(dict[str, str], expected_recovery_snapshot).items())
+                    ),
+                    add_paths=cast(CommitPaths, recovery_paths).add_paths,
+                    update_paths=cast(CommitPaths, recovery_paths).update_paths,
+                )
+                batch_nonce = job.kwargs.get("remediation_batch_nonce")
+                if not isinstance(batch_nonce, str):
+                    raise ValueError("remediation recovery batch identity is unavailable")
+                save_prepublication_receipt(
+                    repo_root=cast(Path, recovery_repo_root),
+                    receipt=receipt,
+                    batch_nonce=batch_nonce,
+                )
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return recovery_failure(
+                    JobResult(ok=False, error=f"remediation recovery receipt is unavailable: {exc}")
+                )
+            return JobResult(
+                ok=True,
+                value={
+                    "pushed": False,
+                    "head_sha": selected_recovery_commit,
+                    "recovery_receipt": receipt.as_dict(),
+                },
+            )
+        try:
+            remediation_handoff, remediation_journal = _remediation_recovery_artifacts(
+                job,
+                repo_root=cast(Path, recovery_repo_root),
+                worktree=worktree,
+                branch=branch,
+                parent_sha=cast(str, expected_recovery_head),
+                candidate_tree_sha=cast(str, expected_recovery_tree),
+                recovery_commit_sha=selected_recovery_commit,
+                paths=cast(CommitPaths, recovery_paths),
+                committed_diff=cast(_BoundedGitOutput, remediation_diff).text,
+                committed_diff_sha256=cast(_BoundedGitOutput, remediation_diff).sha256,
+            )
+        except (TypeError, ValueError) as exc:
+            return recovery_failure(
+                JobResult(
+                    ok=False,
+                    error=f"remediation recovery journal is unavailable: {exc}",
+                )
+            )
+        publication = self._publish_recovery_commit(
             job,
             branch,
             worktree,
@@ -6791,6 +7862,15 @@ class WorkerPool:
             repo_root=cast(Path, recovery_repo_root),
             expected_git_env=cast(dict[str, str], recovery_git_env),
         )
+        if not publication.ok:
+            return publication
+        value = dict(publication.value) if isinstance(publication.value, dict) else {}
+        value["remediation_handoff"] = remediation_handoff
+        value["remediation_journal"] = {
+            "marker": remediation_journal[0],
+            "body": remediation_journal[1],
+        }
+        return replace(publication, value=value)
 
     def _classify_recovery_commit_failure(
         self,
@@ -6988,14 +8068,24 @@ class WorkerPool:
         git_message_timeout: int,
         *,
         recovery_paths: CommitPaths | None = None,
+        expected_tree_sha: str | None = None,
         git_env: dict[str, str] | None = None,
     ) -> bool | str | JobResult:
         """Commit only dirty worktrees with the validated host signing identity."""
+        operation_timeout = float(job.timeout_s)
+        if job.deadline_s is not None:
+            operation_timeout = cast(
+                float,
+                git_utils.remaining_operation_timeout(job.timeout_s),
+            )
+            if operation_timeout < 1:
+                raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
+            git_message_timeout = min(git_message_timeout, int(operation_timeout))
 
         def signing_env_factory() -> dict[str, str]:
             signing_env = _controlled_git_signing_env(
                 commit_args[1],
-                timeout=job.timeout_s,
+                timeout=cast(int, operation_timeout),
                 private_metadata=isinstance(
                     git_env,
                     _PrivateLinkedWorktreeGitEnvironment,
@@ -7023,12 +8113,14 @@ class WorkerPool:
 
         commit_kwargs: dict[str, Any] = {
             "allowed_paths": allowed_paths,
-            "timeout": job.timeout_s,
+            "timeout": operation_timeout,
             "git_message_timeout": git_message_timeout,
             "signing_env_factory": signing_env_factory,
             "git_env": git_env or _isolated_checkout_git_env(),
+            "issue_title": job.kwargs.get("issue_title"),
+            "issue_body": job.kwargs.get("issue_body"),
+            "claude_message_agent": _invoke_claude_commit_message,
         }
-        expected_tree_sha = job.kwargs.get("expected_recovery_tree_sha")
         if expected_tree_sha is not None:
             commit_kwargs["expected_tree_sha"] = expected_tree_sha
             commit_kwargs["return_commit_sha"] = True

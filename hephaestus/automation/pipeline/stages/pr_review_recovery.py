@@ -3,19 +3,34 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
+from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
     AGENT_PR_REVIEWER,
 )
 
+from ..github_jobs import (
+    DeliverReplyHandoffRequest,
+    GitHubJob,
+    bind_delivery_request,
+)
 from ..reply_handoff import (
     PENDING_IMPLEMENTATION_REPLY_HANDOFF as _PENDING_IMPLEMENTATION_REPLY_HANDOFF,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES as _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES as _REPLY_VISIBILITY_RETRIES,
 )
 from ..work_item import WorkItem
-from .base import Disposition, StageOutcome
+from .base import (
+    GIT_JOB_TIMEOUT_S,
+    Disposition,
+    JobRequest,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    stage_timeout,
+)
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
     _REPLY_HANDOFF_RECEIPT_ERROR,
@@ -24,6 +39,53 @@ from .pr_review_threads import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def recovery_reply_job(
+    item: WorkItem,
+    ctx: StageContext,
+    pending_request_key: str,
+) -> StepResult:
+    """Build one exact deadline-bound recovery reply job."""
+    if item.issue is None or item.pr is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+    handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
+    retries = item.payload.get(_REPLY_VISIBILITY_RETRIES, 0)
+    if (
+        not isinstance(handoff, dict)
+        or isinstance(retries, bool)
+        or not isinstance(retries, int)
+        or retries < 0
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+    pending = item.payload.get(pending_request_key)
+    if isinstance(pending, DeliverReplyHandoffRequest):
+        if pending.deadline_s is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        deadline_s = pending.deadline_s
+    else:
+        deadline_s = operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+    try:
+        request = bind_delivery_request(
+            pending,
+            issue_number=item.issue,
+            pr_number=item.pr,
+            handoff=handoff,
+            visibility_retries=retries,
+            deadline_s=deadline_s,
+        )
+    except (TypeError, ValueError):
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+    item.payload[pending_request_key] = request
+    return JobRequest(
+        GitHubJob(
+            repo=item.repo,
+            repo_root=Path(str(ctx.paths.repo_root)).resolve(),
+            request=request,
+            descr="recover_implementation_reply_handoff",
+        ),
+        on_done_state="EVAL",
+    )
 
 
 def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:
@@ -100,5 +162,6 @@ def consume_reply_handoff_receipt(item: WorkItem, pending_request_key: str) -> s
 __all__ = [
     "consume_reply_handoff_receipt",
     "empty_diff_outcome",
+    "recovery_reply_job",
     "restart_direct_pr_review",
 ]

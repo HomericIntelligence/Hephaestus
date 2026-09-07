@@ -1,8 +1,14 @@
 """Dependency-neutral Git execution and repository identity helpers."""
 
 import logging
+import math
 import subprocess
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from typing import cast
 
 from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.cache import ThreadSafeCache
@@ -11,24 +17,58 @@ from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subproc
 
 logger = logging.getLogger(__name__)
 
+_operation_deadline_s: ContextVar[float | None] = ContextVar(
+    "git_operation_deadline_s",
+    default=None,
+)
+
+
+@contextmanager
+def operation_deadline(deadline_s: float | None) -> Iterator[None]:
+    """Apply one absolute monotonic deadline to all Git children in this context."""
+    if deadline_s is not None and (
+        isinstance(deadline_s, bool)
+        or not isinstance(deadline_s, (int, float))
+        or not math.isfinite(deadline_s)
+        or deadline_s <= 0
+    ):
+        raise ValueError("deadline_s must be a finite positive monotonic time")
+    token = _operation_deadline_s.set(float(deadline_s) if deadline_s is not None else None)
+    try:
+        yield
+    finally:
+        _operation_deadline_s.reset(token)
+
+
+def remaining_operation_timeout(timeout: int | float | None) -> int | float | None:
+    """Return the smaller per-child timeout or operation time that remains."""
+    deadline_s = _operation_deadline_s.get()
+    if deadline_s is None:
+        return timeout
+    remaining_s = deadline_s - time.monotonic()
+    if remaining_s <= 0:
+        raise subprocess.TimeoutExpired("operation deadline", 0)
+    return remaining_s if timeout is None else min(float(timeout), remaining_s)
+
 
 def run(
     cmd: list[str],
     cwd: Path | None = None,
     capture_output: bool = True,
     check: bool = True,
-    timeout: int | None = None,
+    timeout: int | float | None = None,
     log_errors: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command with consistent, redacted error handling."""
     logger.debug("Running subprocess")
+    timeout = remaining_operation_timeout(timeout)
     try:
         if cmd and cmd[0] == "git":
             return _shared_run_git(
                 cmd,
                 cwd=cwd,
-                timeout=timeout,
+                timeout=cast(int | None, timeout),
                 check=check,
                 log_on_error=False,
                 env=env,

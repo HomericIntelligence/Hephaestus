@@ -1,8 +1,12 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
+import hephaestus.automation.pipeline_github_reply_recovery as reply_recovery
+
 from .pipeline.github_jobs import ImplementationReplyProgress
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
+
+__all__ = ["reply_recovery"]
 
 
 class PipelineGitHubReviews(_PipelineGitHubHost):
@@ -473,8 +477,8 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         self, pull_request_id: str, head_sha: str, batch_nonce: str
     ) -> str | None:
         """Create one pending review envelope for an implementation reply batch."""
-        del batch_nonce
-        spec = github_api.create_pending_review_mutation(pull_request_id, head_sha)
+        body = reply_recovery.implementation_review_body(pull_request_id, head_sha, batch_nonce)
+        spec = github_api.create_pending_review_mutation(pull_request_id, head_sha, body)
         receipt = self._mutation_payload(self._graphql(spec), spec.operation)
         review_id = receipt.get("id") if isinstance(receipt, dict) else None
         return review_id if isinstance(review_id, str) and review_id else None
@@ -506,6 +510,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
 
         def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
             comments: list[dict[str, Any]] = []
+            comment_bytes = 0
             seen_comment_ids: set[str] = set()
             seen_cursors: set[str] = set()
             after: str | None = None
@@ -514,6 +519,10 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             expected_pr_state: dict[str, Any] | None = None
             expected_thread_fields: tuple[bool, str, int | None, str | None] | None = None
             while True:
+                if page_count >= reply_recovery.THREAD_COMMENT_PAGE_MAX:
+                    raise RuntimeError(
+                        f"could not fetch all comments for PR review thread {thread_id}"
+                    )
                 page_count += 1
                 fields: dict[str, int | str] = {
                     "number": int(pr_number),
@@ -615,19 +624,18 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                     if comment_id in seen_comment_ids:
                         return None
                     seen_comment_ids.add(comment_id)
-                    comments.append(
-                        {
-                            "id": comment_id,
-                            "body": body,
-                            "author": author,
-                            "author_type": author_type,
-                            "viewer_did_author": comment["viewerDidAuthor"],
-                            "review_id": review_id,
-                            "review_state": review_state,
-                            "review_body": review_body,
-                            "review_commit_sha": review_commit_sha,
-                        }
+                    admitted = reply_recovery.admitted_review_comment(
+                        comment,
+                        author=author,
+                        author_type=author_type,
+                        review=(review_id, review_state, review_body, review_commit_sha),
+                        comment_count=len(comments),
+                        current_bytes=comment_bytes,
                     )
+                    if admitted is None:
+                        return None
+                    normalized_comment, comment_bytes = admitted
+                    comments.append(normalized_comment)
                 page_info = comment_connection["pageInfo"]
                 if not page_info["hasNextPage"]:
                     if expected_thread_fields is None or expected_pr_state is None:
@@ -745,6 +753,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         replies: dict[str, str],
         batch_nonce: str | None = None,
         progress: ImplementationReplyProgress | None = None,
+        recover_pending_review: bool = False,
     ) -> ImplementationThreadReplyResult:
         """Serialize one repository-local implementation reply batch per PR.
 
@@ -762,7 +771,10 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         ):
             return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
         try:
-            with file_lock(self._implementation_reply_lock_path(pr_number), require_exclusive=True):
+            with self._operation_file_lock(
+                self._implementation_reply_lock_path(pr_number),
+                require_exclusive=True,
+            ):
                 return self._post_implementation_thread_replies_locked(
                     pr_number,
                     expected_head_sha=expected_head_sha,
@@ -770,6 +782,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                     replies=replies,
                     batch_nonce=batch_nonce,
                     progress=progress,
+                    recover_pending_review=recover_pending_review,
                 )
         except (LockUnavailableError, OSError) as error:
             logger.warning("Implementation reply batch lock failed on PR #%s: %s", pr_number, error)
@@ -787,6 +800,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         replies: dict[str, str],
         batch_nonce: str,
         progress: ImplementationReplyProgress | None = None,
+        recover_pending_review: bool = False,
     ) -> ImplementationThreadReplyResult:
         """Post implementation-agent replies against a verified current PR head.
 
@@ -941,25 +955,29 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 )
             pull_request_id = next(iter(pull_request_ids))
             observed_pending_review_id = next(iter(pending_review_ids), None)
+            try:
+                pending_review_id = reply_recovery.select_pending_implementation_review(
+                    self.pull_request_reviews(pr_number)
+                    if recover_pending_review and observed_pending_review_id is None
+                    else None,
+                    saved_review_id=pending_review_id,
+                    observed_review_id=observed_pending_review_id,
+                    pull_request_id=pull_request_id,
+                    head_sha=expected_head_sha,
+                    batch_nonce=batch_nonce,
+                    has_commented_reply=has_commented_recovery,
+                )
+            except (RuntimeError, ValueError):
+                return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
             if (
-                observed_pending_review_id is not None
-                and pending_review_id is not None
-                and observed_pending_review_id != pending_review_id
+                has_commented_recovery
+                and len(candidate_ids) > 1
+                and len(commented_review_ids) != 1
+                and not recover_pending_review
             ):
+                # Only journal-bound restart can authorize multiple submitted reviews.
                 return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
-            pending_review_id = observed_pending_review_id or pending_review_id
-            if has_commented_recovery and prepared:
-                # Another actor submitted the previous pending envelope.
-                # Operator policy (#2393): never stall the happy path on
-                # that race — the remaining prepared replies continue
-                # under a freshly created pending review below, so the
-                # submitted id must not be reused as a binding target.
-                pending_review_id = None
-            if has_commented_recovery and len(candidate_ids) > 1 and len(commented_review_ids) != 1:
-                # Never let legacy one-review-per-comment recovery masquerade
-                # as a complete implementation pass.
-                return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
-            if has_commented_recovery:
+            if has_commented_recovery and not prepared and pending_review_id is None:
                 # The submit mutation may have succeeded even when its
                 # response was lost. Every reply is already bound to the
                 # submitted review, so a retry must not create an empty one.

@@ -15,11 +15,14 @@ from pathlib import Path
 from typing import Any
 
 import hephaestus.automation.git_runtime as _git_runtime
+from hephaestus.automation.commit_runtime import (
+    CommitIssueMetadata,
+    CommitMessageAgent,
+    commit_changes as _commit_changes,
+)
 from hephaestus.constants import agent_git_timeout
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.retry import retry_with_backoff
-
-from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_impl_branch_name
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,8 @@ get_repo_slug = _git_runtime.get_repo_slug
 issue_ref = _git_runtime.issue_ref
 pr_ref = _git_runtime.pr_ref
 run = _git_runtime.run
+operation_deadline = _git_runtime.operation_deadline
+remaining_operation_timeout = _git_runtime.remaining_operation_timeout
 
 
 class DetachedHeadPushError(RuntimeError):
@@ -102,7 +107,7 @@ def _timeout_kw(timeout: int | None) -> dict[str, Any]:
 
 def issue_auto_impl_branch_name(issue_number: int | str) -> str:
     """Return the canonical branch name for an issue implementation PR."""
-    return _session_issue_auto_impl_branch_name(issue_number)
+    return f"{issue_number}-auto-impl"
 
 
 def _has_pending_commit_input(
@@ -144,6 +149,7 @@ def _commit_helper_kwargs(
     expected_add_paths: tuple[str, ...] | None,
     expected_update_paths: tuple[str, ...] | None,
     disable_hooks: bool,
+    claude_message_agent: CommitMessageAgent | None,
 ) -> dict[str, Any]:
     """Build arguments for the product-layer commit helper."""
     kwargs: dict[str, Any] = {
@@ -167,6 +173,8 @@ def _commit_helper_kwargs(
         kwargs["expected_update_paths"] = expected_update_paths
     if disable_hooks:
         kwargs["disable_hooks"] = True
+    if claude_message_agent is not None:
+        kwargs["claude_message_agent"] = claude_message_agent
     return kwargs
 
 
@@ -188,6 +196,9 @@ def commit_if_changes(
     expected_add_paths: tuple[str, ...] | None = None,
     expected_update_paths: tuple[str, ...] | None = None,
     disable_hooks: bool = False,
+    issue_title: str = "",
+    issue_body: str = "",
+    claude_message_agent: CommitMessageAgent | None = None,
 ) -> bool | str:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
@@ -210,6 +221,9 @@ def commit_if_changes(
         expected_add_paths: Bounded inspected paths to add without re-enumeration.
         expected_update_paths: Bounded inspected paths to update without re-enumeration.
         disable_hooks: Disable commit hooks for a host-validated recovery commit.
+        issue_title: Issue title captured before the Git job was enqueued.
+        issue_body: Issue body captured before the Git job was enqueued.
+        claude_message_agent: Host-owned Claude commit-message adapter.
 
     Returns:
         The exact commit SHA when ``return_commit_sha`` is true. Otherwise,
@@ -226,12 +240,12 @@ def commit_if_changes(
         logger.info("No changes to commit for issue #%s", issue_number)
         return False
 
-    try:
-        # Import on demand to keep the product-layer commit implementation out
-        # of the neutral Git utility import path without hidden registration
-        # state or an import-order dependency.
-        from .pr_manager import commit_changes
+    if not isinstance(issue_title, str) or not issue_title.strip():
+        raise ValueError("commit issue title is unavailable")
+    if not isinstance(issue_body, str):
+        raise ValueError("commit issue body is unavailable")
 
+    try:
         commit_kwargs = _commit_helper_kwargs(
             allowed_paths=allowed_paths,
             expected_tree_sha=expected_tree_sha,
@@ -246,9 +260,10 @@ def commit_if_changes(
             expected_add_paths=expected_add_paths,
             expected_update_paths=expected_update_paths,
             disable_hooks=disable_hooks,
+            claude_message_agent=claude_message_agent,
         )
-        committed_sha = commit_changes(
-            issue_number,
+        committed_sha = _commit_changes(
+            CommitIssueMetadata(issue_number, issue_title, issue_body),
             worktree_path,
             agent,
             **commit_kwargs,
