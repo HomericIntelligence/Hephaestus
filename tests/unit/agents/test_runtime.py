@@ -2632,47 +2632,47 @@ def test_codex_rollout_export_rejects_a_symlinked_store_ancestor(tmp_path: Path)
     assert stat.S_IMODE(outside.stat().st_mode) == outside_mode
 
 
-@pytest.mark.parametrize("entry_point", ["session", "text"])
-def test_codex_implementation_requires_adapter_before_profile_or_process(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("entry_point", ["session", "text", "resume"])
+def test_codex_implementation_uses_native_runner_without_adapter(
     tmp_path: Path,
     entry_point: str,
 ) -> None:
-    """A missing adapter blocks an implementation before host state is read."""
+    """An implementation can use the native runner without an adapter."""
     request = ExecutionRequest(
         AgentRole.IMPLEMENTER,
         AgentOperation.IMPLEMENT,
-        SessionLifecycle.START_NEW,
+        SessionLifecycle.RESUME_REQUIRED if entry_point == "resume" else SessionLifecycle.START_NEW,
     )
-    profile = patch("hephaestus.agents.runtime._codex_child_env")
-    process = patch("hephaestus.agents.runtime.run_codex_session")
-    with (
-        profile as profile_mock,
-        process as process_mock,
-        pytest.raises(
-            CodexIsolationError,
-            match="codex_adapter_not_selected",
-        ),
-    ):
-        if entry_point == "session":
-            agent_runtime.run_agent_session(
+    native_name = {
+        "session": "run_codex_session",
+        "text": "run_codex_text",
+        "resume": "resume_codex_session",
+    }[entry_point]
+    expected = agent_runtime.AgentRunResult("done", "", "session-3059")
+    result: agent_runtime.AgentRunResult | subprocess.CompletedProcess[str]
+    with patch(f"hephaestus.agents.runtime.{native_name}", return_value=expected) as native:
+        if entry_point == "resume":
+            result = agent_runtime.resume_agent_session(
                 "codex",
+                "session-3059",
                 "implement",
                 cwd=tmp_path,
                 timeout=30,
                 execution_request=request,
+            )
+        elif entry_point == "session":
+            result = agent_runtime.run_agent_session(
+                "codex", "implement", cwd=tmp_path, timeout=30, execution_request=request
             )
         else:
-            agent_runtime.run_agent_text(
-                "codex",
-                "implement",
-                cwd=tmp_path,
-                timeout=30,
-                execution_request=request,
+            result = agent_runtime.run_agent_text(
+                "codex", "implement", cwd=tmp_path, timeout=30, execution_request=request
             )
 
-    profile_mock.assert_not_called()
-    process_mock.assert_not_called()
+    assert result is expected
+    native.assert_called_once()
+    assert native.call_args.kwargs["sandbox"] == "workspace-write"
+    assert native.call_args.kwargs["approval"] == "never"
 
 
 def test_non_implementation_codex_does_not_load_isolation_adapter(

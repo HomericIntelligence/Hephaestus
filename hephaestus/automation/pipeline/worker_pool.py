@@ -3552,12 +3552,21 @@ def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
     return fields
 
 
-def _is_codex_implementation_job(job: AgentJob) -> bool:
-    """Return true only for a Codex implementation-role job."""
+def _uses_codex_implementation_adapter(job: AgentJob) -> bool:
+    """Return true for a Codex implementation job with an adapter selection."""
     return bool(
         agent_runtime.requires_codex_implementation_isolation(job.agent)
         and job.execution_request is not None
         and job.execution_request.role is AgentRole.IMPLEMENTER
+        and any(
+            value is not None
+            for value in (
+                job.codex_isolation_adapter,
+                job.codex_isolation_deployment_lock,
+                job.codex_isolation_deployment_lock_sha256,
+                job.codex_isolation_request,
+            )
+        )
     )
 
 
@@ -4548,7 +4557,7 @@ class WorkerPool:
         try:
             remaining_timeout()
             cwd = validate_job_workspace(job)
-            if _is_codex_implementation_job(job):
+            if _uses_codex_implementation_adapter(job):
                 validate_agent_execution_support("codex", job.execution_request)
                 agent_result = self._run_codex_implementation(job, cwd)
                 session_id = agent_result.session_id or job.resume_session_id

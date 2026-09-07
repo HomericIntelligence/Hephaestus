@@ -993,7 +993,11 @@ def is_codex(agent: str) -> bool:
 
 
 def requires_codex_implementation_isolation(agent: str) -> bool:
-    """Return true when implementation must use the Codex isolation contract."""
+    """Return true when Codex implementation needs its publication scope checks.
+
+    External adapter selection is optional. A selected adapter must satisfy
+    the full isolation contract.
+    """
     return is_codex(agent)
 
 
@@ -5654,11 +5658,6 @@ def _redact_pi_exception_output(
     return None
 
 
-def _is_codex_implementation_request(request: ExecutionRequest | None) -> bool:
-    """Return true for one Codex implementation execution request."""
-    return request is not None and request.role is AgentRole.IMPLEMENTER
-
-
 def run_agent_text(
     agent: str,
     prompt: str,
@@ -5689,8 +5688,6 @@ def run_agent_text(
         pi_thinking = pi_selection.reasoning_effort
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        if _is_codex_implementation_request(execution_request):
-            raise CodexIsolationError("codex_adapter_not_selected")
         return run_codex_text(
             prompt,
             cwd=cwd,
@@ -5768,8 +5765,6 @@ def run_agent_session(
             )
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        if _is_codex_implementation_request(execution_request):
-            raise CodexIsolationError("codex_adapter_not_selected")
         return run_codex_session(
             prompt,
             cwd=cwd,
@@ -5868,8 +5863,6 @@ def resume_agent_session(
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        if _is_codex_implementation_request(execution_request):
-            raise CodexIsolationError("codex_adapter_not_selected")
         return resume_codex_session(
             session_id,
             prompt,

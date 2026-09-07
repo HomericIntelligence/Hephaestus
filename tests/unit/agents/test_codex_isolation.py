@@ -302,39 +302,6 @@ def _linux_elf(payload: bytes = b"locked") -> bytes:
     return bytes(header) + payload
 
 
-def test_missing_adapter_fails_before_profile_probe_or_process(tmp_path: Path) -> None:
-    """A missing selection stops implementation before a host side effect."""
-    from hephaestus.agents import runtime
-    from hephaestus.agents.codex_isolation import CodexIsolationError
-    from hephaestus.agents.execution_policy import (
-        AgentOperation,
-        AgentRole,
-        ExecutionRequest,
-        SessionLifecycle,
-    )
-
-    request = ExecutionRequest(
-        AgentRole.IMPLEMENTER,
-        AgentOperation.IMPLEMENT,
-        SessionLifecycle.START_NEW,
-    )
-    with (
-        patch("hephaestus.agents.runtime._codex_child_env") as profile,
-        patch("hephaestus.agents.runtime.run_codex_session") as process,
-        pytest.raises(CodexIsolationError, match="codex_adapter_not_selected"),
-    ):
-        runtime.run_agent_session(
-            "codex",
-            "implement",
-            cwd=tmp_path,
-            timeout=30,
-            execution_request=request,
-        )
-
-    profile.assert_not_called()
-    process.assert_not_called()
-
-
 def test_version_1_wire_and_adapter_contract_stays_frozen() -> None:
     """Production keeps the accepted version-1 contract exact."""
     iso = _module()
