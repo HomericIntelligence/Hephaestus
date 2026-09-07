@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import queue
@@ -51,6 +52,49 @@ from hephaestus.automation.worktree_manager import (
 )
 from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+
+
+def _proc_state_is_terminal(status_path: Path) -> bool:
+    """Return whether the observed process has terminated or disappeared."""
+    try:
+        state = status_path.read_text().split()[2]
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return state in {"X", "Z"}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError(errno.ENOENT, "process absent"),
+        ProcessLookupError(errno.ESRCH, "process gone"),
+    ],
+    ids=["enoent", "esrch"],
+)
+def test_proc_state_accepts_disappeared_process(error: OSError) -> None:
+    """A process that disappears during the read is no longer active."""
+    with patch.object(Path, "read_text", side_effect=error):
+        assert _proc_state_is_terminal(Path("/proc/123/stat"))
+
+
+@pytest.mark.parametrize("state", ["X", "Z", "R", "S", "D", "T"])
+def test_proc_state_distinguishes_terminal_from_live_states(state: str) -> None:
+    """Live and stopped processes must not satisfy the terminal check."""
+    with patch.object(Path, "read_text", return_value=f"123 (child) {state}"):
+        assert _proc_state_is_terminal(Path("/proc/123/stat")) is (state in {"X", "Z"})
+
+
+@pytest.mark.parametrize(
+    "error",
+    [PermissionError(errno.EACCES, "read denied"), OSError(errno.EIO, "read failed")],
+    ids=["permission", "io"],
+)
+def test_proc_state_propagates_unrelated_read_errors(error: OSError) -> None:
+    """An unrelated read failure cannot establish process termination."""
+    with patch.object(Path, "read_text", side_effect=error):
+        with pytest.raises(type(error)) as raised:
+            _proc_state_is_terminal(Path("/proc/123/stat"))
+    assert raised.value is error
 
 
 def _git(path: Path, *args: str) -> str:
@@ -280,11 +324,7 @@ time.sleep(30)
         limit = time.monotonic() + 1.0
         while time.monotonic() < limit:
             status_path = Path("/proc") / str(child_pid) / "stat"
-            try:
-                state = status_path.read_text().split()[2]
-            except FileNotFoundError:
-                break
-            if state in {"X", "Z"}:
+            if _proc_state_is_terminal(status_path):
                 break
             time.sleep(0.01)
         else:
@@ -375,10 +415,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         while monotonic() < child_deadline:
             status_path = Path("/proc") / str(pid) / "stat"
             if status_path.exists():
-                try:
-                    if status_path.read_text().split()[2] in {"X", "Z"}:
-                        break
-                except FileNotFoundError:
+                if _proc_state_is_terminal(status_path):
                     break
             else:
                 try:
@@ -470,10 +507,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         while monotonic() < child_deadline:
             status_path = Path("/proc") / str(pid) / "stat"
             if status_path.exists():
-                try:
-                    if status_path.read_text().split()[2] in {"X", "Z"}:
-                        break
-                except FileNotFoundError:
+                if _proc_state_is_terminal(status_path):
                     break
             else:
                 try:
