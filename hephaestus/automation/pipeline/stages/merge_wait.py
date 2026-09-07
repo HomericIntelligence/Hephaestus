@@ -135,6 +135,7 @@ class MergeWaitStage(Stage):
             request = RunMergeWaitCycleRequest(
                 issue_number=item.issue,
                 pr_number=item.pr,
+                bootstrap_proof=item.payload.get("host_verification_bootstrap_proof"),
                 reviewed_head_sha=reviewed_head,
                 proof_generation=proof_generation,
                 declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),

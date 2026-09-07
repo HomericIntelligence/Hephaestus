@@ -29,7 +29,11 @@ def _silence_logging(caplog: Any) -> None:
 
 
 def _run_main_capturing_config(
-    argv: list[str], *, rc: int = 0, resolved_agent: str = "claude"
+    argv: list[str],
+    *,
+    rc: int = 0,
+    resolved_agent: str = "claude",
+    repository: tuple[str, str] = ("acme", "widget"),
 ) -> dict[str, Any]:
     """Run ``main()`` with ``argv``, capturing the PipelineConfig passed to run_pipeline.
 
@@ -44,7 +48,7 @@ def _run_main_capturing_config(
 
     with (
         patch.object(sys, "argv", ["hephaestus-drive-prs-green", *argv]),
-        patch.object(ci_driver_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch.object(ci_driver_mod, "_resolve_repo", return_value=repository),
         patch.object(ci_driver_mod, "resolve_agent", return_value=resolved_agent),
         patch(
             # main() does ``from .pipeline.coordinator import run_pipeline`` at
@@ -260,3 +264,43 @@ def test_ci_wrapper_forwards_codex_writer_isolation(tmp_path: Path) -> None:
     assert config.codex_isolation_adapter == "test-adapter"
     assert config.codex_isolation_deployment_lock == lock
     assert config.codex_isolation_deployment_lock_sha256 == "a" * 64
+
+
+
+
+def test_bootstrap_comment_reaches_pipeline_config() -> None:
+    """The CLI supplies only the selected comment ID to the pipeline."""
+    captured = _run_main_capturing_config(
+        ["--prs", "3006", "--host-verification-bootstrap-comment", "123"],
+        repository=("HomericIntelligence", "Hephaestus"),
+    )
+    config = captured["config"]
+    assert config.host_verification_bootstrap_comment_id == 123
+    assert config.prs == [3006]
+    assert config.issues == []
+    assert config.drive_green_all is False
+
+
+@pytest.mark.parametrize("repository", [("acme", "Hephaestus"), ("HomericIntelligence", "Other")])
+def test_bootstrap_comment_rejects_other_repository(repository: tuple[str, str]) -> None:
+    """The target repository is checked before the pipeline starts."""
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "hephaestus-drive-prs-green",
+                "--prs",
+                "3006",
+                "--host-verification-bootstrap-comment",
+                "123",
+            ],
+        ),
+        patch.object(ci_driver_mod, "_resolve_repo", return_value=repository),
+        patch.object(ci_driver_mod, "resolve_agent", return_value="claude"),
+        patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run,
+    ):
+        with pytest.raises(SystemExit) as error:
+            ci_driver_mod.main()
+        assert error.value.code == 2
+        run.assert_not_called()

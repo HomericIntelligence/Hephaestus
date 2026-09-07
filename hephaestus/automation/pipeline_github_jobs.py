@@ -6,6 +6,10 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never, cast
 
+from hephaestus.automation.host_verification_bootstrap import (
+    read_fresh_bootstrap_proof,
+    revoke_bootstrap_go,
+)
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -948,6 +952,20 @@ class PipelineGitHubJobRunner:
                 return "merge_cycle_cancelled"
             return None
 
+        def bootstrap_outcome() -> str | None:
+            if request.bootstrap_proof is None or read_fresh_bootstrap_proof(
+                request.bootstrap_proof, github
+            ):
+                return None
+            cleared = revoke_bootstrap_go(
+                github, pr=request.pr_number, head_sha=request.reviewed_head_sha
+            )
+            return (
+                "host_verification_bootstrap_revoked"
+                if cleared
+                else "host_verification_bootstrap_revocation_unverified"
+            )
+
         def admit() -> tuple[dict[str, object], str] | str:
             nonlocal terminal_merge_sha
             try:
@@ -1052,6 +1070,9 @@ class PipelineGitHubJobRunner:
         admitted = admit()
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
+        bootstrap_status = bootstrap_outcome()
+        if bootstrap_status is not None:
+            return complete(bootstrap_status)
         state, _ = admitted
         if request.queue_admitted:
             return complete("merge_queue_wait")
@@ -1120,6 +1141,9 @@ class PipelineGitHubJobRunner:
         admitted = admit()
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
+        bootstrap_status = bootstrap_outcome()
+        if bootstrap_status is not None:
+            return complete(bootstrap_status)
         final_state, _ = admitted
 
         try:

@@ -1,5 +1,11 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.host_verification_bootstrap import (
+    BOOTSTRAP_PROOF_KEY,
+    BootstrapProof,
+    read_fresh_bootstrap_proof,
+    revoke_bootstrap_go,
+)
 from hephaestus.automation.review_audit import is_clean_go_review
 
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
@@ -666,6 +672,24 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item.payload.pop("reviewed_pr_head_sha", None)
                 item.payload.pop("reviewed_pr_node_id", None)
                 return Continue(next_state=REVIEW_WAIT)
+            if BOOTSTRAP_PROOF_KEY in item.payload:
+                proof = item.payload[BOOTSTRAP_PROOF_KEY]
+                if (
+                    not isinstance(proof, BootstrapProof)
+                    or proof.head_sha != reviewed_head
+                    or proof.pr != pr_number
+                    or proof.issue != item.issue
+                    or proof.base_sha != item.payload.get("reviewed_pr_base_sha")
+                    or not read_fresh_bootstrap_proof(proof, github)
+                ):
+                    cleared = revoke_bootstrap_go(github, pr=pr_number, head_sha=reviewed_head)
+                    item.payload.pop(BOOTSTRAP_PROOF_KEY, None)
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "host_verification_bootstrap_revoked"
+                        if cleared
+                        else "host_verification_bootstrap_revocation_unverified",
+                    )
             if not item.payload.get("pending_implementation_go_label_confirmed"):
                 github.mark_pr_implementation_go(pr_number)
             state = github.gh_pr_state(pr_number)

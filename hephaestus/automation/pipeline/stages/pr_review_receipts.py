@@ -62,3 +62,23 @@ __all__ = [
     "_host_verification_receipt_matches",
     "_host_verification_result_status",
 ]
+
+
+def _authentic_linux_bootstrap_receipt(
+    receipt: object, spec: _HostVerificationSpec, reviewed_head: str
+) -> bool:
+    """Recognize only the first fixed Linux unsupported-boundary result."""
+    return bool(
+        isinstance(receipt, dict)
+        and spec.descr == "review_python_ruff_check"
+        and spec.argv == ("uv", "run", "ruff", "check", "hephaestus/", "tests/")
+        and receipt.get("argv") == list(spec.argv)
+        and receipt.get("head_sha") == reviewed_head
+        and receipt.get("ok") is False
+        and receipt.get("status") == "skipped"
+        and receipt.get("immutable_source") is False
+        and receipt.get("failure_kind") == "runner"
+        and receipt.get("platform") == "linux"
+        and receipt.get("error") == UNSUPPORTED_HOST_VERIFICATION_ERROR
+        and receipt.get("bootstrap_unsupported_result") is True
+    )

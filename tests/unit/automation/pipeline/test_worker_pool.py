@@ -8762,6 +8762,7 @@ class TestGitOps:
                     MagicMock(stdout="d" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for stale base"),
                     MagicMock(stdout="stale.py\0"),
+                    MagicMock(stdout="M\0stale.py\0"),
                 ],
             ) as mock_run,
         ):
@@ -8775,6 +8776,7 @@ class TestGitOps:
             "base": "d" * 40,
             "diff": "checkout diff for stale base",
             "changed_paths": ["stale.py"],
+            "status_manifest": (("M", "stale.py"),),
         }
         assert mock_run.call_args_list[1].args[0] == [
             "git",
@@ -8829,6 +8831,7 @@ class TestGitOps:
                     MagicMock(stdout="b" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for A"),
                     MagicMock(stdout="old.py\0new.py\0"),
+                    MagicMock(stdout="D\0old.py\0A\0new.py\0"),
                 ],
             ) as mock_run,
         ):
@@ -8842,6 +8845,7 @@ class TestGitOps:
             "base": "b" * 40,
             "diff": "checkout diff for A",
             "changed_paths": ["old.py", "new.py"],
+            "status_manifest": (("A", "new.py"), ("D", "old.py")),
         }
         mock_sync.assert_called_once()
         assert mock_sync.call_args.args == (tmp_path, "70-existing")
@@ -15603,3 +15607,53 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
     assert journal_path.exists()
     assert ("Hephaestus", 7, str(predecessor.cwd)) in preserved
+
+
+def test_ordinary_review_keeps_noncanonical_bootstrap_filenames(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Ordinary review retains valid Git names that cannot enter the bootstrap map."""
+    from hephaestus.automation.host_verification_bootstrap import (
+        BootstrapGrantError,
+        authenticate_bootstrap_grant,
+    )
+
+    repo, _, base = _worker_repository(tmp_path)
+    name = "ordinary\nname\twith\\slash.py"
+    (repo / name).write_text("value = 1\n")
+    _git(repo, "add", "--", name)
+    _git(repo, "commit", "-m", "add ordinary file")
+    head = _git(repo, "rev-parse", "HEAD")
+    with (
+        patch.object(pool, "_sync_worktree_to_remote_branch"),
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+    ):
+        result = pool._git_verify_pr_review_checkout(
+            GitJob(
+                repo="Hephaestus",
+                op="verify_pr_review_checkout",
+                timeout_s=60,
+                kwargs={
+                    "worktree_path": str(repo),
+                    "branch": "main",
+                    "expected_head_sha": head,
+                    "expected_base_sha": base,
+                    "base_branch": "main",
+                    "pr_number": 77,
+                },
+            )
+        )
+    assert result.ok is True
+    assert result.value["changed_paths"] == [name]
+    assert result.value["status_manifest"] == (("A", name),)
+    with pytest.raises(BootstrapGrantError):
+        authenticate_bootstrap_grant(
+            [],
+            comment_id=123,
+            repository="HomericIntelligence/Hephaestus",
+            issue=2701,
+            pr=3006,
+            head_sha=head,
+            base_sha=base,
+            manifest=result.value["status_manifest"],
+        )

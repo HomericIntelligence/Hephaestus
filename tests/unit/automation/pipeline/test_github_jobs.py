@@ -1405,3 +1405,104 @@ def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
         attempted=False,
     )
     assert state_reads == [7]
+
+
+@pytest.mark.parametrize("revoke_at", [1, 2, 0])
+def test_bootstrap_merge_rechecks_grant_and_preserves_required_gates(revoke_at: int) -> None:
+    """A grant revoked before either admission read cannot send a merge request."""
+    import json
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.host_verification_bootstrap import (
+        BOOTSTRAP_MANIFEST,
+        BOOTSTRAP_MARKER,
+        authenticate_bootstrap_grant,
+    )
+    from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    body = {
+        "repository": "HomericIntelligence/Hephaestus",
+        "issue": 2701,
+        "pr": 3006,
+        "head_sha": "a" * 40,
+        "base_sha": "b" * 40,
+        "boundary": "linux-pyxis-enroot",
+        "state": "approved",
+        "manifest": [{"status": s, "path": p} for s, p in BOOTSTRAP_MANIFEST],
+    }
+    comment = IssueComment(
+        BOOTSTRAP_MARKER + "\n" + json.dumps(body),
+        author_login="operator",
+        author_association="MEMBER",
+        viewer_did_author=True,
+        database_id=123,
+    )
+    proof = authenticate_bootstrap_grant(
+        [comment],
+        comment_id=123,
+        repository="HomericIntelligence/Hephaestus",
+        issue=2701,
+        pr=3006,
+        head_sha="a" * 40,
+        base_sha="b" * 40,
+        manifest=BOOTSTRAP_MANIFEST,
+    )
+    request = RunMergeWaitCycleRequest(
+        pr_number=3006,
+        issue_number=2701,
+        reviewed_head_sha="a" * 40,
+        proof_generation=1,
+        declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30,
+        cancellation=threading.Event(),
+        bootstrap_proof=proof,
+    )
+    github = MagicMock()
+    github._repo_slug = "HomericIntelligence/Hephaestus"
+    state = {
+        "state": "OPEN",
+        "id": "PR_3006",
+        "headRefOid": "a" * 40,
+        "autoMergeRequest": None,
+        "baseRefName": "main",
+    }
+    github.gh_pr_state.return_value = state
+    github.pr_has_implementation_state_label.return_value = (True, False)
+    github.mark_pr_implementation_no_go.side_effect = lambda _: setattr(
+        github.pr_has_implementation_state_label, "return_value", (False, True)
+    )
+    reads = 0
+
+    def comments(_: int) -> list[IssueComment]:
+        nonlocal reads
+        reads += 1
+        return [] if revoke_at and reads >= revoke_at else [comment]
+
+    github.issue_comments.side_effect = comments
+    github.list_unresolved_review_threads.return_value = []
+    github.effective_merge_policy.return_value = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(),
+        strict_update_enforced=True,
+    )
+    github.gh_pr_merge_readiness.return_value = {
+        **state,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+    }
+    github.required_checks_pass_for_head.return_value = True
+    github.merge_pr_if_head.return_value = SimpleNamespace(dry_run=True)
+    result = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
+    if revoke_at:
+        assert result.outcome == "host_verification_bootstrap_revoked"
+        github.merge_pr_if_head.assert_not_called()
+        github.mark_pr_implementation_no_go.assert_called_once_with(3006)
+    else:
+        assert result.outcome == "conditional_merge_dry_run"
+        github.required_checks_pass_for_head.assert_called_once()
+        github.merge_pr_if_head.assert_called_once()
+    assert reads == (revoke_at or 2)

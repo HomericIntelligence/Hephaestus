@@ -48,6 +48,7 @@ from hephaestus.config.paths import resolve_projects_dir
 from ._review_utils import build_automation_parser
 from .agent_config import fallback_model, reviewer_model
 from .git_utils import get_repo_info
+from .host_verification_bootstrap import BOOTSTRAP_REPOSITORY
 from .pipeline.routing import PipelineScope, StageName
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,17 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--host-verification-bootstrap-comment",
+        type=positive_int,
+        default=None,
+        metavar="ID",
+        help=(
+            "Select an authenticated source-review grant comment for PR #3006. "
+            "Requires only --prs 3006 in HomericIntelligence/Hephaestus. "
+            "The selector does not grant authority."
+        ),
+    )
+    parser.add_argument(
         "--no-advise",
         action="store_true",
         help="Skip the advise step before loop review",
@@ -195,7 +207,11 @@ Examples:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments for the historical drive-green CLI."""
-    return _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.host_verification_bootstrap_comment is not None and (args.issues or args.prs != [3006]):
+        parser.error("--host-verification-bootstrap-comment requires only --prs 3006")
+    return args
 
 
 def _resolve_repo() -> tuple[str, str]:
@@ -249,6 +265,13 @@ def main() -> int:
 
     try:
         org, repo = _resolve_repo()
+        if (
+            args.host_verification_bootstrap_comment is not None
+            and f"{org}/{repo}" != BOOTSTRAP_REPOSITORY
+        ):
+            _build_parser().error(
+                "--host-verification-bootstrap-comment requires HomericIntelligence/Hephaestus"
+            )
 
         # Dedupe while preserving first-seen order (dict.fromkeys is the
         # canonical "ordered set" trick) so ``--issues 123 123`` / ``--prs 5 5``
@@ -264,6 +287,7 @@ def main() -> int:
         config = PipelineConfig(
             org=org,
             repos=[repo],
+            host_verification_bootstrap_comment_id=args.host_verification_bootstrap_comment,
             issues=issues,
             prs=prs,
             # A single loop pass is sufficient: in-loop review either applies

@@ -318,6 +318,9 @@ _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
 _ROUND_PAYLOAD_KEYS = (
+    "host_verification_bootstrap_proof",
+    "host_verification_bootstrap_json",
+    "review_status_manifest",
     "review_audit",
     "review_feedback",
     "review_text",
