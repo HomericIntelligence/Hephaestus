@@ -830,11 +830,14 @@ class TestPrReviewStageOnEnter:
         assert item.payload["reviewer_comment_validation_only"] is True
 
         item.state = REVIEW_CHECKOUT_WAIT
+        item.payload["pr_node_id"] = "PR_exact"
         item.payload["review_checkout_ready"] = True
         item.payload["review_checkout_expected_head"] = "a" * 40
         result = _complete_github_job(stage, item, ctx)
 
         assert result == Continue(next_state="VALIDATE_WAIT")
+        assert item.payload["reviewed_pr_node_id"] == "PR_exact"
+        assert item.payload["reviewed_pr_head_sha"] == "a" * 40
         assert "review_audit" not in item.payload
 
     def test_on_enter_fails_closed_when_existing_thread_read_fails(

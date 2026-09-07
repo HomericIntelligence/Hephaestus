@@ -8204,6 +8204,7 @@ class TestReadSurface:
                 return SimpleNamespace(
                     stdout=json.dumps(
                         {
+                            "id": "PR_exact",
                             "title": "docs(policy): current metadata",
                             "body": "Closes #1899\n",
                             "headRefOid": "a" * 40,
@@ -8221,6 +8222,7 @@ class TestReadSurface:
         )
 
         assert context == {
+            "pr_node_id": "PR_exact",
             "pr_title": "docs(policy): current metadata",
             "pr_description": "Closes #1899\n",
             "pr_head_sha": "a" * 40,
@@ -8233,7 +8235,7 @@ class TestReadSurface:
                 "view",
                 "1984",
                 "--json",
-                "title,body,headRefOid,baseRefOid,baseRefName",
+                "id,title,body,headRefOid,baseRefOid,baseRefName",
                 "--repo",
                 "org/repo-a",
             ],
@@ -8544,3 +8546,39 @@ class TestSeverityMarker:
         assert "<!-- hephaestus-severity: nitpick -->" not in result
         assert "Verdict: GO" not in result
         assert result.count("<!-- hephaestus-severity:") == 1
+
+
+@pytest.mark.parametrize("node_id", ["PR_exact", "PR_other"])
+def test_review_terminal_read_uses_node_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node_id: str
+) -> None:
+    """The review lifecycle read selects and validates the captured node."""
+    calls: list[list[str]] = []
+
+    def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "node": {
+                            "id": node_id,
+                            "state": "MERGED",
+                            "headRefOid": "a" * 40,
+                            "mergedAt": "2026-09-07T05:47:12Z",
+                        }
+                    }
+                }
+            ),
+        )
+
+    monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+    state = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).reviewed_pr_state(
+        "PR_exact"
+    )
+    assert (state is not None) == (node_id == "PR_exact")
+    assert len(calls) == 1
+    assert "id=PR_exact" in calls[0]
+    assert any("node(id:$id)" in arg for arg in calls[0])

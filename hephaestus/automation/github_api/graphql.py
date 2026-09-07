@@ -613,6 +613,22 @@ def _query[T](
     return GraphQLQuerySpec(operation, document, validator)
 
 
+def reviewed_pr_state_query(pull_request_id: str) -> GraphQLQuerySpec[dict[str, Any]]:
+    """Read the lifecycle record for one reviewed PR node."""
+
+    def validate(data: dict[str, Any]) -> dict[str, Any]:
+        node = data.get("node")
+        if not isinstance(node, dict) or node.get("id") != pull_request_id:
+            raise ValueError("PR node identity mismatch")
+        return node
+
+    return _query(
+        "reviewedPrState",
+        "query($id:ID!){node(id:$id){... on PullRequest{id state headRefOid mergedAt}}}",
+        validate,
+    )
+
+
 def issue_comment_ids_query(
     owner: str, name: str, issue_number: int
 ) -> GraphQLQuerySpec[list[dict[str, Any]]]:
