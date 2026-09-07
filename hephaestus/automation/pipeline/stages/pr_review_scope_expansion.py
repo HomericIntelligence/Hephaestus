@@ -260,6 +260,7 @@ class PrReviewScopeExpansionMixin:
             return StageOutcome(Disposition.FAIL_BACK, "scope_dependency_sync_required")
         if receipt.status == "fresh_review":
             item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop("reviewed_pr_node_id", None)
             item.payload["scope_dependency_force_fresh_review"] = True
             return Continue(next_state=REVIEW_WAIT)
         return StageOutcome(Disposition.BLOCKED, "scope_dependency_receipt_invalid")

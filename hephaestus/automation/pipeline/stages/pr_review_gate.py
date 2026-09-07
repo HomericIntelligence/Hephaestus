@@ -400,19 +400,10 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
     def _handle_error_verdict(
         self, item: WorkItem, verdict: Any, *, reason: str | None = None
     ) -> StepResult:
-        """Handle a missing/ERROR verdict: bounded RETRY, then fail back.
+        """Retry a missing or invalid audit within the consecutive-failure cap.
 
-        Reviewer-infrastructure failure: labels untouched, no round burned,
-        RETRY — bounded by the consecutive-failure cap (plan_review
-        pattern), then fail back ``agent_error`` (#911/#1554/#1794).
-
-        Args:
-            item: The work item under evaluation.
-            verdict: The stored verdict (None or an ERROR verdict).
-
-        Returns:
-            RETRY below the cap; the flagged agent_error fail-back at it.
-
+        Do not change labels or consume a review round. At the cap, return
+        the item to implementation with the agent_error failure class.
         """
         payload = item.payload
         reason = reason or (
@@ -485,6 +476,7 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         live_head = str(pr_state.get("headRefOid") or "")
         if not reviewed_head or not live_head or reviewed_head != live_head:
             item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop("reviewed_pr_node_id", None)
             return Continue(next_state=REVIEW_WAIT)
         return None
 
@@ -520,6 +512,7 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         live_head = str(state.get("headRefOid") or "") if isinstance(state, dict) else ""
         if not reviewed_head or not live_head or reviewed_head != live_head:
             item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop("reviewed_pr_node_id", None)
             return Continue(next_state=REVIEW_WAIT)
         try:
             live_threads = ctx.github.list_unresolved_review_threads(pr_number)
@@ -671,6 +664,7 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             live_head = str(state.get("headRefOid") or "")
             if not reviewed_head or reviewed_head != live_head:
                 item.payload.pop("reviewed_pr_head_sha", None)
+                item.payload.pop("reviewed_pr_node_id", None)
                 return Continue(next_state=REVIEW_WAIT)
             if not item.payload.get("pending_implementation_go_label_confirmed"):
                 github.mark_pr_implementation_go(pr_number)
@@ -684,6 +678,7 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 or str(state.get("headRefOid") or "") != reviewed_head
             ):
                 item.payload.pop("reviewed_pr_head_sha", None)
+                item.payload.pop("reviewed_pr_node_id", None)
                 return Continue(next_state=REVIEW_WAIT)
             if github.list_unresolved_review_threads(pr_number):
                 return StageOutcome(Disposition.FINISH_FAIL, "review_activity_changed")
