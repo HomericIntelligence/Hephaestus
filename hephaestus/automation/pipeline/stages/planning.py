@@ -66,6 +66,7 @@ from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
     RECOVERY_PROVENANCE_PREFIX,
     RecoveredRequirements,
+    RecoveryCommentIdentityError,
     RecoveryDisposition,
     RecoveryReview,
     RecoveryVerdict,
@@ -75,12 +76,12 @@ from hephaestus.automation.requirements_recovery import (
     has_contaminated_issue_body,
     is_semantic_disposition_candidate,
     parse_recovered_requirements,
-    parse_recovery_provenance,
     parse_recovery_review,
     recovered_requirements_for_context,
     recovered_requirements_json,
     render_obsolete_explanation,
     render_recovered_requirements,
+    select_recovery_comment,
     verified_finalized_plan,
 )
 from hephaestus.automation.review_journal import (
@@ -255,27 +256,21 @@ def _refresh_requirements_recovery_context(
         finalized = None
         contaminated = True
     finalized_invalidated = ATHENA_FINALIZED_PLAN_LABEL in labels and finalized is None
+    recovery_selection = select_recovery_comment(
+        ctx.github.issue_comments(item.issue),
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
     recovered = (
-        next(
-            (
-                restored
-                for comment in reversed(ctx.github.issue_comments(item.issue))
-                if comment.viewer_did_author
-                and (
-                    restored := recovered_requirements_for_context(
-                        comment.body,
-                        repository=item.repo,
-                        issue_number=item.issue,
-                        issue_title=title,
-                        source_body=body,
-                        repository_revision=_recovery_revision(item, None),
-                    )
-                )
-                is not None
-            ),
-            None,
+        recovered_requirements_for_context(
+            recovery_selection.comment.body,
+            repository=item.repo,
+            issue_number=item.issue,
+            issue_title=title,
+            source_body=body,
+            repository_revision=_recovery_revision(item, None),
         )
-        if finalized is None
+        if finalized is None and recovery_selection is not None
         else None
     )
     item.payload["issue_source_body"] = body
@@ -1304,6 +1299,13 @@ def _recovered_successor_is_current(
     recorded.  This lets a newly seeded work item resume review without
     trusting an unrelated canonical plan left by the contaminated epoch.
     """
+    recovery_selection = select_recovery_comment(
+        comments,
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
+    if recovery_selection is None:
+        return False
     if not (
         snapshot.current_plan
         and snapshot.recovery_source_digest == source_digest
@@ -1312,17 +1314,12 @@ def _recovered_successor_is_current(
     ):
         return False
     current_digest = plan_fingerprint(snapshot.current_plan)
-    for comment in reversed(comments):
-        if not comment.viewer_did_author:
-            continue
-        provenance = parse_recovery_provenance(comment.body)
-        if provenance is None or provenance.source_digest != source_digest:
-            continue
-        return (
-            provenance.successor_revision == snapshot.revision
-            and provenance.successor_plan_digest == current_digest
-        )
-    return False
+    provenance = recovery_selection.provenance
+    return (
+        provenance.source_digest == source_digest
+        and provenance.successor_revision == snapshot.revision
+        and provenance.successor_plan_digest == current_digest
+    )
 
 
 def _bind_recovered_successor(
@@ -1340,20 +1337,25 @@ def _bind_recovered_successor(
     source_body = item.payload.get("issue_source_body")
     if not isinstance(source_digest, str) or not isinstance(source_body, str):
         return False
-    for comment in reversed(ctx.github.issue_comments(item.issue)):
-        if not comment.viewer_did_author:
-            continue
-        provenance = parse_recovery_provenance(comment.body)
-        requirements = recovered_requirements_for_context(
-            comment.body,
-            repository=item.repo,
-            issue_number=item.issue,
-            issue_title=str(item.payload.get("issue_title") or ""),
-            source_body=source_body,
-            repository_revision=(provenance.repository_revision or "") if provenance else "",
-        )
-        if provenance is None or requirements is None:
-            continue
+    recovery_selection = select_recovery_comment(
+        ctx.github.issue_comments(item.issue),
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
+    if recovery_selection is None:
+        raise RecoveryCommentIdentityError("recovery successor comment is missing")
+    provenance = recovery_selection.provenance
+    requirements = recovered_requirements_for_context(
+        recovery_selection.comment.body,
+        repository=item.repo,
+        issue_number=item.issue,
+        issue_title=str(item.payload.get("issue_title") or ""),
+        source_body=source_body,
+        repository_revision=provenance.repository_revision or "",
+    )
+    if requirements is None:
+        raise RecoveryCommentIdentityError("recovery successor comment context is invalid")
+    try:
         ctx.github.upsert_issue_comment(
             item.issue,
             RECOVERY_PROVENANCE_PREFIX,
@@ -1368,8 +1370,11 @@ def _bind_recovered_successor(
                 repository_revision=provenance.repository_revision,
             ),
         )
-        return True
-    return False
+    except RuntimeError as exc:
+        raise RecoveryCommentIdentityError(
+            f"recovery successor comment write was not confirmed: {exc}"
+        ) from exc
+    return True
 
 
 def _plan_is_ready_for_verify(
@@ -1738,10 +1743,49 @@ def _plan_discovery_stop_outcome(
     return None
 
 
+def _resume_published_plan_or_retry(
+    item: WorkItem,
+    ctx: StageContext,
+) -> StageOutcome | None:
+    """Resume a published plan and bound a recovery successor conflict."""
+    try:
+        return _resume_published_plan_followup(item, ctx)
+    except (CommentJournalReadError, RecoveryCommentIdentityError) as exc:
+        return _retry_incomplete_requirements_snapshot(
+            item,
+            ctx,
+            f"recovery successor publication failed: {exc}",
+        )
+
+
+def _publish_candidate_plan_or_retry(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    requires_revision: bool,
+) -> StageOutcome | None:
+    """Publish a candidate plan and bound recovery publication conflicts."""
+    try:
+        return _publish_candidate_plan(item, ctx, requires_revision=requires_revision)
+    except CommentJournalReadError as exc:
+        return _retry_incomplete_requirements_snapshot(
+            item,
+            ctx,
+            f"plan journal read failed: {exc}",
+        )
+    except RecoveryCommentIdentityError as exc:
+        return _retry_incomplete_requirements_snapshot(
+            item,
+            ctx,
+            f"recovery successor publication failed: {exc}",
+        )
+
+
 def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     """Publish or recover the candidate plan, then authorize advancement by label."""
     assert item.issue is not None  # noqa: S101 - stage validates the issue
-    if followup_outcome := _resume_published_plan_followup(item, ctx):
+    followup_outcome = _resume_published_plan_or_retry(item, ctx)
+    if followup_outcome:
         return followup_outcome
 
     lookup = ctx.github.discover_plan(item.issue)
@@ -1758,18 +1802,11 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
         requires_revision = bool(item.payload.get("requires_plan_revision"))
         if requires_revision or lookup.status is PlanDiscoveryStatus.ABSENT:
             logger.info("planning:%d: publishing plan revision", item.issue)
-            try:
-                publication_outcome = _publish_candidate_plan(
-                    item,
-                    ctx,
-                    requires_revision=requires_revision,
-                )
-            except CommentJournalReadError as exc:
-                return _retry_incomplete_requirements_snapshot(
-                    item,
-                    ctx,
-                    f"plan journal read failed: {exc}",
-                )
+            publication_outcome = _publish_candidate_plan_or_retry(
+                item,
+                ctx,
+                requires_revision=requires_revision,
+            )
             if publication_outcome is not None:
                 return publication_outcome
             posted_plan = True
@@ -1998,11 +2035,14 @@ class PlanningStage(Stage):
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         recovered_artifact = bool(item.payload.get("requirements_recovered_comment"))
         recovered_source_digest = item.payload.get("requirements_recovery_source_digest")
-        recovered_successor = recovered_artifact and _recovered_successor_is_current(
-            comments,
-            snapshot,
-            source_digest=str(item.payload.get("issue_body_digest") or ""),
-        )
+        try:
+            recovered_successor = recovered_artifact and _recovered_successor_is_current(
+                comments,
+                snapshot,
+                source_digest=str(item.payload.get("issue_body_digest") or ""),
+            )
+        except RecoveryCommentIdentityError as exc:
+            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         recovered_restart = bool(
             recovered_artifact
             and snapshot.recovery_source_digest != recovered_source_digest
@@ -2015,12 +2055,16 @@ class PlanningStage(Stage):
             and not recovered_successor
         )
         if pending_recovered_successor:
-            if not _bind_recovered_successor(
-                item,
-                ctx,
-                plan=snapshot.current_plan,
-                revision=snapshot.revision,
-            ):
+            try:
+                successor_bound = _bind_recovered_successor(
+                    item,
+                    ctx,
+                    plan=snapshot.current_plan,
+                    revision=snapshot.revision,
+                )
+            except (CommentJournalReadError, RecoveryCommentIdentityError) as exc:
+                return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
+            if not successor_bound:
                 return StageOutcome(
                     Disposition.RETRY,
                     "recovered plan successor provenance was not confirmed",

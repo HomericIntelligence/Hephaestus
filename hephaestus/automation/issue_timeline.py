@@ -19,8 +19,7 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
-    RECOVERY_PROVENANCE_PREFIX,
-    parse_recovery_provenance,
+    select_recovery_comment,
 )
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER_PREFIX,
@@ -122,20 +121,8 @@ def _is_obsolete_automation_comment(body: str) -> bool:
         or HISTORY_RE.match(body) is not None
         or has_exact_leading_marker(body, SKIP_REASON_MARKER)
         or body.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
-        or body.startswith(RECOVERY_PROVENANCE_PREFIX)
         or body.startswith(OBSOLETE_EXPLANATION_MARKER)
     )
-
-
-def _validate_recovery_roles(comments: Sequence[IssueComment]) -> None:
-    """Reject malformed owned recovery provenance before a compaction delete."""
-    for comment in comments:
-        stripped = comment.body.lstrip()
-        if (
-            stripped.startswith(RECOVERY_PROVENANCE_PREFIX)
-            and parse_recovery_provenance(stripped) is None
-        ):
-            raise RuntimeError("malformed recovered requirements marker; manual review is required")
 
 
 def _latest_owned_role(comments: Sequence[IssueComment], marker: str) -> IssueComment | None:
@@ -227,6 +214,11 @@ def plan_issue_timeline_compaction(
     planning marker on another comment is an identity conflict, so compaction
     stops before it creates or updates a shadow artifact.
     """
+    recovery_selection = select_recovery_comment(
+        comments,
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
     validate_planning_comment_identities(
         comments,
         body_of=lambda comment: comment.body,
@@ -237,7 +229,6 @@ def plan_issue_timeline_compaction(
         return IssueTimelineCompaction()
 
     _validate_legacy_markers(owned)
-    _validate_recovery_roles(owned)
 
     # A current and legacy marker can each identify a real artifact. Reject
     # that ambiguity before parsing or planning a delete.
@@ -263,7 +254,7 @@ def plan_issue_timeline_compaction(
     # Parsing follows identity validation so no destructive compaction plan
     # can select a newest alias from an ambiguous journal.
     snapshot = journal_snapshot(owned)
-    target_recovery = _latest_owned_role(owned, RECOVERY_PROVENANCE_PREFIX)
+    target_recovery = recovery_selection.comment if recovery_selection is not None else None
     target_obsolete = _latest_owned_role(owned, OBSOLETE_EXPLANATION_MARKER)
 
     prior_fingerprints = list(snapshot.prior_plan_fingerprints)

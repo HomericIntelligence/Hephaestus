@@ -1568,7 +1568,14 @@ class TestPlanningStageStep:
         assert github.labels[1] == {STATE_PLAN_NO_GO}
         assert item.payload["requires_plan_revision"] is True
         assert github.gh_issue_json(1)["body"] == old_body
-        assert any(comment.startswith(RECOVERY_PROVENANCE_PREFIX) for comment in github.comments[1])
+        provenance_comment = next(
+            comment
+            for comment in github.comments[1]
+            if comment.startswith(RECOVERY_PROVENANCE_PREFIX)
+        )
+        provenance = parse_recovery_provenance(provenance_comment)
+        assert provenance is not None
+        assert provenance.version == 3
         assert "requirements_recovery_required" not in item.payload
         assert config.reset_plan_review_sessions == {1}
 
@@ -2875,6 +2882,131 @@ class TestPlanningStageStep:
             == 1
         )
         assert "published_plan_pending_followup" not in item.payload
+
+    def test_recovery_successor_conflict_uses_plan_budget_and_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A recovery successor conflict retries once without republishing the plan."""
+
+        class ConflictingRecoveryGitHub(FakeStageGitHub):
+            recovery_writes = 0
+
+            def upsert_issue_comment(
+                self,
+                issue_number: int,
+                marker: str,
+                body: str,
+                *,
+                legacy_marker: str | None = None,
+            ) -> None:
+                if marker == RECOVERY_PROVENANCE_PREFIX:
+                    self.recovery_writes += 1
+                    raise RuntimeError("recovery identity conflict after write")
+                super().upsert_issue_comment(
+                    issue_number,
+                    marker,
+                    body,
+                    legacy_marker=legacy_marker,
+                )
+
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        github = ConflictingRecoveryGitHub(
+            labels=[STATE_NEEDS_PLAN],
+            issue_body=source,
+            has_plan=False,
+        )
+        github.comments[76] = [_recovered_body(source, "Recovered requirements", issue=76)]
+        item = make_work_item(issue=76, state="VERIFY")
+        item.payload.update(
+            {
+                "issue_source_body": source,
+                "issue_title": "A task",
+                "issue_body_digest": hashlib.sha256(source.encode()).hexdigest(),
+                "requirements_recovered_comment": True,
+                "requires_plan_revision": True,
+                "plan_text": "Recovered successor plan",
+            }
+        )
+        _bind_recovery_revision(item)
+        ctx = make_ctx(github=github, budget_fn=lambda name: 2 if name == "plan" else 1)
+
+        first = PlanningStage().step(item, ctx)
+        assert isinstance(first, StageOutcome)
+        assert first.disposition is Disposition.RETRY
+        assert item.attempts["plan"] == 1
+        assert "published_plan_pending_followup" in item.payload
+
+        item.state = "VERIFY"
+        second = PlanningStage().step(item, ctx)
+
+        assert isinstance(second, StageOutcome)
+        assert second.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 2
+        assert github.recovery_writes == 2
+        assert (
+            sum(
+                mutation[0] == "gh_issue_upsert_comment" and mutation[1][1] == PLAN_CANONICAL_MARKER
+                for mutation in github.mutation_log
+            )
+            == 1
+        )
+        assert "published_plan_pending_followup" in item.payload
+        assert STATE_PLAN_NO_GO in github.labels[76]
+
+    @pytest.mark.parametrize(
+        "recovery_issue",
+        [None, 999],
+        ids=["missing-comment", "invalid-context"],
+    )
+    def test_unusable_recovery_successor_uses_plan_budget_and_receipt(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        recovery_issue: int | None,
+    ) -> None:
+        """A missing or invalid recovery comment cannot cause unlimited VERIFY retries."""
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        github = FakeStageGitHub(
+            labels=[STATE_NEEDS_PLAN],
+            issue_body=source,
+            has_plan=False,
+        )
+        if recovery_issue is not None:
+            github.comments[77] = [
+                _recovered_body(source, "Recovered requirements", issue=recovery_issue)
+            ]
+        item = make_work_item(issue=77, state="VERIFY")
+        item.payload.update(
+            {
+                "issue_source_body": source,
+                "issue_title": "A task",
+                "issue_body_digest": hashlib.sha256(source.encode()).hexdigest(),
+                "requirements_recovered_comment": True,
+                "requires_plan_revision": True,
+                "plan_text": "Recovered successor plan",
+            }
+        )
+        _bind_recovery_revision(item)
+        ctx = make_ctx(github=github, budget_fn=lambda name: 2 if name == "plan" else 1)
+
+        first = PlanningStage().step(item, ctx)
+        item.state = "VERIFY"
+        second = PlanningStage().step(item, ctx)
+
+        assert isinstance(first, StageOutcome)
+        assert first.disposition is Disposition.RETRY
+        assert isinstance(second, StageOutcome)
+        assert second.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 2
+        assert (
+            sum(
+                mutation[0] == "gh_issue_upsert_comment" and mutation[1][1] == PLAN_CANONICAL_MARKER
+                for mutation in github.mutation_log
+            )
+            == 1
+        )
+        assert "published_plan_pending_followup" in item.payload
+        assert STATE_PLAN_NO_GO in github.labels[77]
 
     @pytest.mark.parametrize(
         ("labels", "review", "expected_state"),
