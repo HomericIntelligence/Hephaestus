@@ -15,8 +15,10 @@ from hephaestus.automation.github_api.graphql import (
     GraphQLQuerySpec,
     GraphQLResponseError,
     GraphQLRetryableError,
+    MergeQueueAlreadyEnqueuedError,
     ReviewCommentNotEditableError,
     enqueue_pull_request_mutation,
+    pull_request_queue_entry_query,
     run_graphql,
     update_review_comment_mutation,
 )
@@ -219,6 +221,215 @@ def test_enqueue_pull_request_rejects_invalid_minimal_receipt(
         pytest.raises(GraphQLMutationOutcomeUnknownError),
     ):
         run_graphql(spec)
+
+
+@pytest.mark.parametrize("returncode", [0, 1], ids=("graphql-envelope", "nonzero-envelope"))
+def test_enqueue_already_queued_has_a_dedicated_typed_error(returncode: int) -> None:
+    """The sole exact rejection has a type that permits bounded reconciliation."""
+    spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
+    response = {
+        "data": {"enqueuePullRequest": None},
+        "errors": [
+            {
+                "type": "UNPROCESSABLE",
+                "message": "Pull request is already in the queue",
+            }
+        ],
+    }
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response), returncode=returncode),
+        ),
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+        pytest.raises(GraphQLMutationOutcomeUnknownError) as error,
+    ):
+        run_graphql(spec)
+
+    assert type(error.value) is MergeQueueAlreadyEnqueuedError
+    assert str(error.value) == "Pull request is already in the queue"
+    assert error.value.intent.operation == "enqueuePullRequest"
+
+
+@pytest.mark.parametrize(
+    ("spec_kind", "errors"),
+    [
+        (
+            "other-operation",
+            [{"type": "UNPROCESSABLE", "message": "Pull request is already in the queue"}],
+        ),
+        (
+            "enqueue",
+            [{"type": "FORBIDDEN", "message": "Pull request is already in the queue"}],
+        ),
+        (
+            "enqueue",
+            [{"type": "UNPROCESSABLE", "message": "Pull request is already queued"}],
+        ),
+        (
+            "enqueue",
+            [
+                {"type": "UNPROCESSABLE", "message": "Pull request is already in the queue"},
+                {"type": "FORBIDDEN", "message": "another error"},
+            ],
+        ),
+    ],
+    ids=("other-operation", "other-type", "other-message", "multiple-errors"),
+)
+@pytest.mark.parametrize("returncode", [0, 1], ids=("graphql-envelope", "nonzero-envelope"))
+def test_enqueue_already_queued_lookalikes_remain_outcome_unknown(
+    spec_kind: str,
+    errors: list[dict[str, str]],
+    returncode: int,
+) -> None:
+    """Text alone cannot grant permission for a queue-entry readback."""
+    spec = (
+        enqueue_pull_request_mutation("PR_node", "a" * 40)
+        if spec_kind == "enqueue"
+        else update_review_comment_mutation("COMMENT", "body")
+    )
+    response = {"data": {spec.operation: None}, "errors": errors}
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response), returncode=returncode),
+        ),
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+        pytest.raises(GraphQLMutationOutcomeUnknownError) as error,
+    ):
+        run_graphql(spec)
+
+    assert type(error.value) is GraphQLMutationOutcomeUnknownError
+
+
+def test_enqueue_already_queued_process_prose_remains_outcome_unknown() -> None:
+    """Unstructured process output cannot prove the exact GitHub error type."""
+    spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(
+                stderr="Pull request is already in the queue",
+                returncode=1,
+            ),
+        ),
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+        pytest.raises(GraphQLMutationOutcomeUnknownError) as error,
+    ):
+        run_graphql(spec)
+
+    assert type(error.value) is GraphQLMutationOutcomeUnknownError
+
+
+def test_enqueue_already_queued_transport_error_is_an_outcome_unknown_error() -> None:
+    """The transport classifier preserves GitHub's exact queue error text."""
+    spec = enqueue_pull_request_mutation("PR_node", "a" * 40)
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(
+                stdout="",
+                returncode=1,
+                stderr="UNPROCESSABLE: Pull request is already in the queue",
+            ),
+        ),
+        patch(
+            "hephaestus.automation.github_api.graphql.uuid.uuid4",
+            return_value=Mock(hex="queue-id"),
+        ),
+        pytest.raises(GraphQLMutationOutcomeUnknownError) as raised,
+    ):
+        run_graphql(spec)
+    assert str(raised.value).strip() == "UNPROCESSABLE: Pull request is already in the queue"
+
+
+def test_pull_request_queue_entry_query_binds_identity_and_head() -> None:
+    """Queue readback returns one validated pull request and queue entry."""
+    spec = pull_request_queue_entry_query("org", "repo", 7)
+    response = {
+        "data": {
+            "repository": {
+                "owner": {"login": "org"},
+                "name": "repo",
+                "pullRequest": {
+                    "id": "PR_node",
+                    "number": 7,
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "mergeQueueEntry": {"id": "MQE_node", "state": "AWAITING_CHECKS"},
+                },
+            }
+        }
+    }
+    with patch(
+        "hephaestus.automation.github_api.graphql._raw_gh_call",
+        return_value=completed(stdout=json.dumps(response)),
+    ):
+        result = run_graphql(spec, {"owner": "org", "name": "repo", "number": 7})
+
+    assert result["headRefOid"] == "a" * 40
+    assert result["mergeQueueEntry"] == {"id": "MQE_node", "state": "AWAITING_CHECKS"}
+
+
+@pytest.mark.parametrize(
+    "pull_request",
+    [
+        None,
+        {
+            "id": "PR_node",
+            "number": 7,
+            "state": "CLOSED",
+            "headRefOid": "a" * 40,
+            "mergeQueueEntry": {"id": "MQE_node", "state": "AWAITING_CHECKS"},
+        },
+        {
+            "id": "PR_node",
+            "number": 7,
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "mergeQueueEntry": None,
+        },
+        {
+            "id": "PR_node",
+            "number": 7,
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "mergeQueueEntry": {"id": "MQE_node", "state": "UNKNOWN"},
+        },
+    ],
+    ids=("missing-pr", "closed-pr", "missing-entry", "invalid-entry-state"),
+)
+def test_pull_request_queue_entry_query_rejects_invalid_readback(
+    pull_request: object,
+) -> None:
+    """A readback is valid only for one open pull request with a queue entry."""
+    spec = pull_request_queue_entry_query("org", "repo", 7)
+    response = {
+        "data": {
+            "repository": {
+                "owner": {"login": "org"},
+                "name": "repo",
+                "pullRequest": pull_request,
+            }
+        }
+    }
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response)),
+        ),
+        pytest.raises(GraphQLDeterministicError),
+    ):
+        run_graphql(spec, {"owner": "org", "name": "repo", "number": 7})
 
 
 def test_operation_kind_is_structural() -> None:

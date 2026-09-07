@@ -9,6 +9,7 @@ from hephaestus.automation.github_api import (
     GraphQLMutationOutcomeUnknownError,
     GraphQLResponseError,
     GraphQLRetryableError,
+    MergeQueueAlreadyEnqueuedError,
 )
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
@@ -19,21 +20,80 @@ from .pipeline_github_transport import *
 class PipelineGitHubMutations(PipelineGitHubIssueComments):
     """Own coordinator-approved non-review GitHub mutations."""
 
+    def _existing_queue_result(
+        self,
+        pr_number: int,
+        pull_request_id: str,
+        reviewed_sha: str,
+        deadline_s: float,
+        cancellation: Event | None,
+    ) -> ConditionalMergeResult | None:
+        """Read back a successful queue result for the exact open PR head."""
+        if cancellation is not None and cancellation.is_set():
+            return None
+        timeout = deadline_s - time.monotonic()
+        if timeout <= 0:
+            return None
+        owner, name = self._owner_name()
+        try:
+            pull_request = self._graphql_with_timeout(
+                github_api.pull_request_queue_entry_query(owner, name, pr_number),
+                timeout,
+                number=pr_number,
+            )
+        except (GraphQLResponseError, RuntimeError, OSError, subprocess.SubprocessError):
+            return None
+        if cancellation is not None and cancellation.is_set():
+            return None
+        if time.monotonic() >= deadline_s:
+            return None
+        entry = pull_request.get("mergeQueueEntry")
+        if (
+            pull_request.get("id") != pull_request_id
+            or pull_request.get("state") != "OPEN"
+            or pull_request.get("headRefOid") != reviewed_sha
+            or not isinstance(entry, dict)
+        ):
+            return None
+        return ConditionalMergeResult(
+            status=200,
+            body={"merged": False, "queue_entry_id": entry["id"]},
+            queued=True,
+        )
+
     def _enqueue_pr_if_head(
         self,
         pr_number: int,
         pull_request_id: str | None,
         reviewed_sha: str,
-        timeout: float,
+        deadline_s: float,
+        cancellation: Event | None,
     ) -> ConditionalMergeResult:
         """Request one exact-head queue admission without internal replay."""
         if not isinstance(pull_request_id, str) or not pull_request_id:
             return ConditionalMergeResult(status=None, body=None, malformed=True)
+        if cancellation is not None and cancellation.is_set():
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
+        timeout = deadline_s - time.monotonic()
+        if timeout <= 0:
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
         try:
             receipt = self._graphql_with_timeout(
                 github_api.enqueue_pull_request_mutation(pull_request_id, reviewed_sha),
                 timeout,
             )
+        except MergeQueueAlreadyEnqueuedError as exc:
+            logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
+            reconciled = self._existing_queue_result(
+                pr_number,
+                pull_request_id,
+                reviewed_sha,
+                deadline_s,
+                cancellation,
+            )
+            if reconciled is not None:
+                return reconciled
+            return ConditionalMergeResult(status=None, body=None, malformed=True)
         except GraphQLMutationOutcomeUnknownError as exc:
             logger.warning("PR #%s: merge-queue admission failed: %s", pr_number, exc)
             return ConditionalMergeResult(status=None, body=None, malformed=True)
@@ -80,12 +140,20 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         if cancellation is not None and cancellation.is_set():
             return ConditionalMergeResult(status=None, body=None, transport_error=True)
         timeout = float(self._gh_timeout)
+        operation_deadline_s = time.monotonic() + timeout
         if deadline_s is not None:
-            timeout = min(timeout, deadline_s - time.monotonic())
-            if timeout <= 0:
-                return ConditionalMergeResult(status=None, body=None, transport_error=True)
+            operation_deadline_s = min(operation_deadline_s, deadline_s)
+            timeout = operation_deadline_s - time.monotonic()
+        if timeout <= 0:
+            return ConditionalMergeResult(status=None, body=None, transport_error=True)
         if policy.merge_queue_required:
-            return self._enqueue_pr_if_head(pr_number, pull_request_id, reviewed_sha, timeout)
+            return self._enqueue_pr_if_head(
+                pr_number,
+                pull_request_id,
+                reviewed_sha,
+                operation_deadline_s,
+                cancellation,
+            )
         try:
             result = gh_call(
                 [

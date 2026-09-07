@@ -4,6 +4,7 @@
 - Date: 2026-09-05
 - Tracks: #2965
 - Amended: 2026-09-06 for #3015
+- Amended: 2026-09-07 for #3023
 - Supersedes: ADR-0038
 
 ## Context
@@ -40,8 +41,14 @@ It must not create or change native auto-merge.
    queue. GitHub tests the queued change with the latest base and the merge-group
    checks before it merges.
 5. After queue admission, the stage records the admitted head in the current
-   work item and polls lifecycle state. It does not replay the mutation. An
-   uncertain mutation outcome is terminal for the request.
+   work item and polls lifecycle state. It does not replay the mutation. If
+   GitHub returns the typed exact already-enqueued rejection, the adapter can
+   run one read-only query within the remaining operation deadline. The query
+   must prove the same open pull request node, exact reviewed head, and valid
+   queue entry. A matching entry is successful idempotent admission. A
+   canceled, late, unavailable, malformed, absent, or mismatched readback is
+   fail-closed. All other uncertain mutation outcomes are terminal for the
+   request.
 6. When no merge queue applies, a direct REST merge is valid only if effective
    strict-update protection applies and the current actor cannot bypass it. The
    request keeps `sha=<reviewed head>` and `merge_method=squash`.

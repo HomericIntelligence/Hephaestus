@@ -87,6 +87,10 @@ class GraphQLMutationOutcomeUnknownError(GraphQLResponseError):
         self.intent = intent
 
 
+class MergeQueueAlreadyEnqueuedError(GraphQLMutationOutcomeUnknownError):
+    """The exact queue rejection that permits read-only reconciliation."""
+
+
 class ReviewCommentNotEditableError(GraphQLMutationOutcomeUnknownError):
     """The one mutation rejection that permits a shadow comment fallback."""
 
@@ -137,6 +141,9 @@ class GraphQLMutationSpec[T]:
         return value in self.query
 
 
+type GraphQLSpec[T] = GraphQLQuerySpec[T] | GraphQLMutationSpec[T]
+
+
 @dataclass(frozen=True)
 class _PreparedGraphQLMutation[T]:
     spec: GraphQLMutationSpec[T]
@@ -145,6 +152,9 @@ class _PreparedGraphQLMutation[T]:
 
 
 _OPERATION_RE = re.compile(r"^\s*(query|mutation)\b", re.IGNORECASE)
+_MERGE_QUEUE_ENTRY_STATES = frozenset(
+    {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"}
+)
 _DETERMINISTIC_RE = re.compile(
     r"HTTP\s+(?:400|401|403|404|422)\b|"
     r"\b(?:unauthorized|forbidden)\b|"
@@ -265,6 +275,46 @@ def _require_prepared[T](
     return prepared
 
 
+def _already_enqueued_error[T](
+    spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+    prepared: _PreparedGraphQLMutation[T] | None,
+    errors: object,
+) -> MergeQueueAlreadyEnqueuedError | None:
+    """Return the typed exact queue rejection, or None for a lookalike."""
+    if (
+        not isinstance(spec, GraphQLMutationSpec)
+        or spec.operation != "enqueuePullRequest"
+        or prepared is None
+        or prepared.intent.operation != "enqueuePullRequest"
+        or not isinstance(errors, list)
+        or len(errors) != 1
+    ):
+        return None
+    error = errors[0]
+    if (
+        not isinstance(error, dict)
+        or error.get("type") != "UNPROCESSABLE"
+        or error.get("message") != "Pull request is already in the queue"
+    ):
+        return None
+    return MergeQueueAlreadyEnqueuedError(error["message"], intent=prepared.intent)
+
+
+def _already_enqueued_error_from_stdout[T](
+    spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+    prepared: _PreparedGraphQLMutation[T] | None,
+    stdout: str,
+) -> MergeQueueAlreadyEnqueuedError | None:
+    """Inspect only structured GraphQL output for the exact queue rejection."""
+    try:
+        envelope = json.loads(stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    return _already_enqueued_error(spec, prepared, envelope.get("errors"))
+
+
 def _classify_transport_error[T](  # noqa: C901
     spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
     prepared: _PreparedGraphQLMutation[T] | None,
@@ -338,6 +388,9 @@ def _classify_status[T](
     result: subprocess.CompletedProcess[str],
 ) -> None:
     """Raise the appropriate typed error for a nonzero process result."""
+    already_enqueued = _already_enqueued_error_from_stdout(spec, prepared, result.stdout or "")
+    if already_enqueued is not None:
+        raise already_enqueued
     text = "\n".join(value for value in (result.stdout, result.stderr) if isinstance(value, str))
     reset = _rate_limit_evidence(text)
     if reset is not None:
@@ -401,6 +454,9 @@ def _parse_envelope[T](  # noqa: C901
             if prepared is None:
                 raise GraphQLDeterministicError(message)
             raise _mutation_unknown(message, prepared)
+        already_enqueued = _already_enqueued_error(spec, prepared, errors)
+        if already_enqueued is not None:
+            raise already_enqueued
         messages = [str(error["message"]) for error in errors]
         all_rate_limited = all(
             str(error.get("type", "")).upper() == "RATE_LIMITED"
@@ -1442,12 +1498,11 @@ def enqueue_pull_request_mutation(
         payload: dict[str, Any], intent: GraphQLMutationIntent, _: dict[str, Any]
     ) -> dict[str, Any]:
         entry = payload.get("mergeQueueEntry")
-        queue_states = {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"}
         if (
             not isinstance(entry, dict)
             or not isinstance(entry.get("id"), str)
             or not entry["id"]
-            or entry.get("state") not in queue_states
+            or entry.get("state") not in _MERGE_QUEUE_ENTRY_STATES
         ):
             raise ValueError("merge-queue admission receipt was incomplete")
         return {"clientMutationId": intent.client_mutation_id, **entry}
@@ -1461,6 +1516,40 @@ def enqueue_pull_request_mutation(
         "enqueuePullRequest",
         required,
     )
+
+
+def pull_request_queue_entry_query(
+    owner: str, name: str, pr_number: int
+) -> GraphQLQuerySpec[dict[str, Any]]:
+    """Build an exact pull-request queue-entry readback query."""
+    document = (
+        "query PullRequestQueueEntry($owner:String!,$name:String!,$number:Int!){"
+        "repository(owner:$owner,name:$name){owner{login} name pullRequest(number:$number){"
+        "id number state headRefOid mergeQueueEntry{id state}}}}"
+    )
+
+    def validate(data: dict[str, Any]) -> dict[str, Any]:
+        repository = _repo_identity(data, owner, name)
+        pull_request = repository.get("pullRequest")
+        if (
+            not isinstance(pull_request, dict)
+            or pull_request.get("number") != pr_number
+            or not isinstance(pull_request.get("id"), str)
+            or pull_request.get("state") != "OPEN"
+            or not isinstance(pull_request.get("headRefOid"), str)
+        ):
+            raise ValueError("pull-request queue identity was malformed")
+        entry = pull_request.get("mergeQueueEntry")
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"]
+            or entry.get("state") not in _MERGE_QUEUE_ENTRY_STATES
+        ):
+            raise ValueError("pull-request queue entry was malformed")
+        return pull_request
+
+    return _query("pullRequestQueueEntry", document, validate)
 
 
 def github_schema_contract_query() -> GraphQLQuerySpec[dict[str, Any]]:
@@ -1483,6 +1572,8 @@ __all__ = [
     "GraphQLQuerySpec",
     "GraphQLResponseError",
     "GraphQLRetryableError",
+    "GraphQLSpec",
+    "MergeQueueAlreadyEnqueuedError",
     "ReviewCommentNotEditableError",
     "add_implementation_thread_reply_mutation",
     "add_reviewer_feedback_reply_mutation",
@@ -1501,6 +1592,7 @@ __all__ = [
     "issue_comments_query",
     "pipeline_thread_snapshot_page_query",
     "pipeline_unresolved_threads_page_query",
+    "pull_request_queue_entry_query",
     "resolve_thread_mutation",
     "review_receipts_page_query",
     "review_thread_snapshot_page_query",

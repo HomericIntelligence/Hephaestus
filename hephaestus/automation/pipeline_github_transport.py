@@ -27,7 +27,7 @@ from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.github_api.graphql import (
     GraphQLMutationSpec,
-    GraphQLQuerySpec,
+    GraphQLSpec,
     run_graphql,
 )
 from hephaestus.automation.pipeline.scope_retraction import (
@@ -73,6 +73,7 @@ from .pipeline_github_contract import _PipelineGitHubHost
 # ruff: noqa: F811
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+type _Scalar = int | str
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
@@ -279,7 +280,7 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
 
     def _graphql(
         self,
-        spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+        spec: GraphQLSpec[T],
         **fields: int | str,
     ) -> T:
         """Run a typed operation with repository identity owned by this adapter."""
@@ -303,8 +304,8 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
             call=_run_internal_graphql,
         )
 
-    def _graphql_with_timeout(self, spec: GraphQLMutationSpec[T], operation_timeout_s: float) -> T:
-        """Run one typed mutation within an aggregate operation deadline."""
+    def _graphql_with_timeout(self, spec: GraphQLSpec[T], timeout: float, **fields: _Scalar) -> T:
+        """Run one typed operation within an aggregate operation deadline."""
 
         def _run_internal_graphql(
             argv: list[str], **kwargs: Any
@@ -312,11 +313,22 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
             return gh_call(
                 argv,
                 _graphql_internal=True,
-                timeout=operation_timeout_s,
+                timeout=timeout,
                 **kwargs,
             )
 
-        return run_graphql(spec, call=_run_internal_graphql)
+        if isinstance(spec, GraphQLMutationSpec):
+            if fields:
+                raise ValueError("mutation variables are owned by the typed spec")
+            return run_graphql(spec, call=_run_internal_graphql)
+        owner, name = self._owner_name()
+        if "owner" in fields or "name" in fields:
+            raise ValueError("repository identity is owned by PipelineGitHub")
+        return run_graphql(
+            spec,
+            {"owner": owner, "name": name, **fields},
+            call=_run_internal_graphql,
+        )
 
     def _with_repo(self, argv: list[str]) -> list[str]:
         """Append an explicit repo selector when this accessor is repo-scoped."""

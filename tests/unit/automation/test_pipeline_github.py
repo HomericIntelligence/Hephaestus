@@ -3071,6 +3071,149 @@ class TestConditionalMerge:
         assert result.transport_error is False
         graphql.assert_called_once()
 
+    def test_idempotent_queue_readback_uses_remaining_merge_deadline(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A queue readback uses the time left in the merge cycle."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        intent = github_api_mod.GraphQLMutationIntent(
+            operation="enqueuePullRequest",
+            client_mutation_id="queue-id",
+            targets=(("pullRequestId", "PR_node"),),
+            content_hashes=(),
+        )
+        now = [100.0]
+
+        def graphql(spec: object, timeout: float, **fields: int | str) -> dict[str, object]:
+            if getattr(spec, "operation", "") == "enqueuePullRequest":
+                now[0] = 108.0
+                raise github_api_mod.MergeQueueAlreadyEnqueuedError(
+                    "Pull request is already in the queue",
+                    intent=intent,
+                )
+            assert timeout == pytest.approx(2.0)
+            assert fields == {"number": 7}
+            return {
+                "id": "PR_node",
+                "state": "OPEN",
+                "headRefOid": head,
+                "mergeQueueEntry": {"id": "ENTRY_node", "state": "AWAITING_CHECKS"},
+            }
+
+        graphql_mock = MagicMock(side_effect=graphql)
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql_mock)
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(15556494,),
+            merge_queue_method="SQUASH",
+        )
+
+        result = adapter.merge_pr_if_head(
+            7,
+            head,
+            policy=policy,
+            pull_request_id="PR_node",
+            deadline_s=110.0,
+            cancellation=threading.Event(),
+        )
+
+        assert result.queued is True
+        assert result.body == {"merged": False, "queue_entry_id": "ENTRY_node"}
+        assert graphql_mock.call_count == 2
+
+    def test_expired_queue_readback_budget_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An expired queue readback budget does not call GitHub again."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        intent = github_api_mod.GraphQLMutationIntent(
+            operation="enqueuePullRequest",
+            client_mutation_id="queue-id",
+            targets=(("pullRequestId", "PR_node"),),
+            content_hashes=(),
+        )
+        now = [100.0]
+
+        def finish_at_deadline(*_args: object, **_kwargs: object) -> None:
+            now[0] = 110.0
+            raise github_api_mod.MergeQueueAlreadyEnqueuedError(
+                "Pull request is already in the queue",
+                intent=intent,
+            )
+
+        graphql_mock = MagicMock(side_effect=finish_at_deadline)
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql_mock)
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(15556494,),
+            merge_queue_method="SQUASH",
+        )
+
+        result = adapter.merge_pr_if_head(
+            7,
+            head,
+            policy=policy,
+            pull_request_id="PR_node",
+            deadline_s=110.0,
+            cancellation=threading.Event(),
+        )
+
+        assert result.malformed is True
+        graphql_mock.assert_called_once()
+
+    def test_cancelled_queue_readback_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancellation prevents an idempotent queue readback."""
+        adapter.repo = "repo"
+        cancellation = threading.Event()
+        intent = github_api_mod.GraphQLMutationIntent(
+            operation="enqueuePullRequest",
+            client_mutation_id="queue-id",
+            targets=(("pullRequestId", "PR_node"),),
+            content_hashes=(),
+        )
+
+        def reject_after_admission(*_args: object) -> None:
+            cancellation.set()
+            raise github_api_mod.MergeQueueAlreadyEnqueuedError(
+                "Pull request is already in the queue",
+                intent=intent,
+            )
+
+        graphql_mock = MagicMock(side_effect=reject_after_admission)
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql_mock)
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(15556494,),
+            merge_queue_method="SQUASH",
+        )
+
+        result = adapter.merge_pr_if_head(
+            7,
+            "a" * 40,
+            policy=policy,
+            pull_request_id="PR_node",
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=cancellation,
+        )
+
+        assert result.malformed is True
+        graphql_mock.assert_called_once()
+
     def test_dry_run_returns_a_non_mutating_result_without_calling_github(
         self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
