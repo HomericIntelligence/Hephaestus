@@ -38,8 +38,8 @@ Pytest options:
 The GitHub lane only calls read endpoints (`rate_limit`, `repo view`, and
 `issue list`) through `gh_call`. Its negative case confirms a missing endpoint
 fails promptly without retrying a deterministic 404. The agent lane uses
-pytest's `tmp_path` as its working directory and a trivial prompt. The default
-model is intentionally inexpensive. Both lanes first require the corresponding
+pytest's `tmp_path` as its working directory and a trivial prompt. Both lanes
+first require the corresponding
 CLI to be installed and authenticated; missing credentials produce skips, not
 failures.
 

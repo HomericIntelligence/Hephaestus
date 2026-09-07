@@ -437,6 +437,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
             )
             stdout = agent_json_stdout(direct_result.stdout, direct_result.session_id)
         else:
+            base_model = parse_model_selection(model).model
             result = run(
                 [
                     "claude",
@@ -445,7 +446,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                     str(prompt_file),
                     "--output-format",
                     "json",
-                    *(["--model", parse_model_selection(model).model] if model else []),
+                    *(["--model", base_model] if base_model else []),
                 ],
                 cwd=worktree_path,
                 timeout=timeout,

@@ -78,7 +78,7 @@ operator action, and the mechanism or runbook that covers it:
 | GitHub API | 4xx/5xx responses, rate-limit exhaustion, circuit breaker open | Pause the automation loop; wait for the rate-limit window or breaker reset | `hephaestus/github/rate_limit.py`, `hephaestus/resilience/circuit_breaker.py`, [ci-driver-stall](runbooks/ci-driver-stall.md) |
 | GitHub Actions / merge gates | Required checks stuck queued or a merge gate never arms | Inspect the required-checks aggregator; re-run the workflow | ADR-0004 / ADR-0007, [ci-driver-stall](runbooks/ci-driver-stall.md) |
 | PyPI / TestPyPI | Publish step fails or the index is unreachable | Re-run the release workflow from the signed tag once the index recovers | `.github/workflows/release.yml` |
-| Anthropic (Claude) | HTTP 429 / quota exhaustion, model-cap 429 | Let the model-cap fallback and retry run; if persistent, pause the loop | Model fallback (PR #1794), `hephaestus/resilience/`, [claude-quota-exhausted](runbooks/claude-quota-exhausted.md) |
+| Anthropic (Claude) | HTTP 429 / quota exhaustion, model-cap 429 | Pause until quota resets; only calls without a session lifecycle can use an explicitly supplied fallback | Model fallback (PR #1794), `hephaestus/resilience/`, [claude-quota-exhausted](runbooks/claude-quota-exhausted.md) |
 | OpenAI (Codex) | API or Codex service failure, unavailable model, or exhausted quota | Pause the affected run or select another configured provider before retrying | `hephaestus/agents/runtime.py`, [OpenAI status](https://status.openai.com/) |
 | Astral / npm registry | CI install step fails to fetch a toolchain or CLI | Re-run the job (artifacts are cached); if persistent, wait for registry recovery | `actions/cache`, action SHA pins |
 

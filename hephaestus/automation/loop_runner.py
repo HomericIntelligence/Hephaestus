@@ -1099,14 +1099,22 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     configure_github_throttle_from_args(args)
     _setup_logging(args.verbose, args.log_format)
-    try:
-        agent, role_agents = resolve_role_agents(
-            args, ("planner", "implementer", "reviewer"), resolver=resolve_agent
+    phases = _validate_phases(args.phases)
+    active_roles = tuple(
+        role
+        for role, enabled in (
+            ("planner", "plan" in phases),
+            ("implementer", bool({"implement", "drive-green"}.intersection(phases))),
+            ("reviewer", bool(phases)),
         )
+        if enabled
+    )
+    try:
+        agent, role_agents = resolve_role_agents(args, active_roles, resolver=resolve_agent)
     except ValueError as exc:
         _build_parser().error(str(exc))
-
-    phases = _validate_phases(args.phases)
+    for role in ("planner", "implementer", "reviewer"):
+        role_agents.setdefault(role, getattr(args, f"{role}_agent") or agent)
 
     # Resolve org + repos using a 4-branch precedence ladder. Org is
     # always set explicitly here — there is no silent fallback to a

@@ -560,6 +560,7 @@ class TestPlanReviewStageStep:
         assert isinstance(first_job, AgentJob)
         assert first_job.execution_request is not None
         assert first_job.execution_request.lifecycle is SessionLifecycle.START_NEW
+        assert first_job.require_new_session is True
 
         stage.on_job_done(
             item,

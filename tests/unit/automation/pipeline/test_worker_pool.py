@@ -14315,3 +14315,104 @@ def test_sync_checkout_uses_explicit_gh_root_for_api_when_fixed_candidates_unava
         gh_command=expected_executable,
         timeout_s=120,
     )
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "pi", "opencode"])
+def test_worker_rejects_session_selection_before_agent_work(
+    pool: WorkerPool,
+    completion_q: CompletionQueue,
+    agent: str,
+) -> None:
+    """An incompatible session stops before prompt or provider work."""
+    error = "session tool or model changed; start a new session"
+    prompt = MagicMock(return_value="must not run")
+    job = _agent_job(
+        agent=agent,
+        model="MixedCase/ReviewModel:max",
+        resume_session_id="existing-session",
+        session_selection_error=error,
+        prompt_builder=prompt,
+    )
+    with (
+        patch(f"{_WP}.resolve_agent") as resolve,
+        patch(f"{_WP}.validate_job_workspace") as workspace,
+        patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as claude,
+        patch(f"{_WP}.run_agent_session") as start,
+        patch(f"{_WP}.resume_agent_session") as resume,
+    ):
+        pool.submit(job, StageName.PR_REVIEW)
+        handle, result = completion_q.get(timeout=10)
+
+    assert handle.job is job
+    assert result.ok is False
+    assert result.error == error
+    assert result.session_id is None
+    prompt.assert_not_called()
+    workspace.assert_not_called()
+    resolve.assert_not_called()
+    claude.assert_not_called()
+    start.assert_not_called()
+    resume.assert_not_called()
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "pi", "opencode"])
+def test_worker_rejects_session_selection_before_compaction(
+    pool: WorkerPool,
+    completion_q: CompletionQueue,
+    agent: str,
+) -> None:
+    """Compaction cannot use a session with a different selection."""
+    error = "session tool or model changed; start a new session"
+    job = CompactJob(
+        repo="test/repo",
+        issue=123,
+        agent=agent,
+        session_agent="reviewer",
+        model="MixedCase/ReviewModel:max",
+        cwd=_TEST_AGENT_CWD,
+        timeout_s=60,
+        session_id="existing-session",
+        session_selection_error=error,
+    )
+    with (
+        patch(f"{_WP}.resolve_agent") as resolve,
+        patch(f"{_WP}.compact_agent_session") as compact,
+    ):
+        pool.submit(job, StageName.PR_REVIEW)
+        handle, result = completion_q.get(timeout=10)
+
+    assert handle.job is job
+    assert result.ok is False
+    assert result.error == error
+    resolve.assert_not_called()
+    compact.assert_not_called()
+
+
+@pytest.mark.parametrize("fallback", [None, "MyProvider/FallbackModel:future-effort"])
+def test_worker_forwards_only_the_explicit_fallback_model(
+    pool: WorkerPool,
+    completion_q: CompletionQueue,
+    fallback: str | None,
+) -> None:
+    """The worker preserves an explicit fallback and keeps omission empty."""
+    job = _agent_job(
+        agent="claude",
+        model="PrimaryModel:max",
+        fallback_model=fallback,
+    )
+    with (
+        patch(f"{_WP}.resolve_agent", return_value="claude") as resolve,
+        patch(
+            f"{_WP}.claude_invoke.invoke_claude_with_session",
+            return_value=("output", "new-session"),
+        ) as invoke,
+    ):
+        pool.submit(job, StageName.IMPLEMENTATION)
+        _, result = completion_q.get(timeout=10)
+
+    assert result.ok is True
+    resolve.assert_called_once()
+    assert resolve.call_args.args == ("claude",)
+    invoke.assert_called_once()
+    assert invoke.call_args.kwargs["model"] == "PrimaryModel:max"
+    assert invoke.call_args.kwargs["fallback_model_value"] == fallback

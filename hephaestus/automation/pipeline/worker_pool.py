@@ -4064,6 +4064,7 @@ class WorkerPool:
                         prompt=prompt,
                         model=job.model,
                         fallback_model_value=job.fallback_model,
+                        require_new_session=job.require_new_session,
                         cwd=cwd,
                         timeout=remaining_timeout(),
                         output_format=job.output_format,

@@ -37,8 +37,9 @@ Operators must replace former aliases with IDs their selected tool accepts.
 Provider errors remain the authority for unavailable models. Durable review
 sessions need an explicit reset when their tool or model selection changes.
 
-A durable review cannot switch models on a quota failure, including its first
-request. The failure propagates so that the recorded selection stays valid.
+A call with a start-new or resume-required session lifecycle cannot switch
+models on a quota failure, including its first request. The failure propagates
+so that the recorded selection stays valid.
 
 The migration removes four legacy model-shim imports from implementation,
 comment classification, post-merge work, and PR review. The ADR-0017 import

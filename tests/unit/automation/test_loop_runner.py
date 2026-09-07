@@ -1101,3 +1101,68 @@ def test_main_wires_run_pre_pr_tests_to_pipeline_config(
     )
 
     assert config.run_pre_pr_tests is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("phase", "unused_role", "expected_roles"),
+    [
+        ("plan", "implementer", {"planner", "reviewer"}),
+        ("implement", "planner", {"implementer", "reviewer"}),
+        ("drive-green", "planner", {"implementer", "reviewer"}),
+    ],
+)
+def test_scoped_loop_admits_only_tools_used_by_selected_phases(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    unused_role: str,
+    expected_roles: set[str],
+) -> None:
+    """An excluded Pi role cannot block a scope that uses other tools."""
+    seen: set[str] = set()
+
+    def resolve(agent: str | None, **kwargs: object) -> str:
+        if agent == "pi":
+            raise ValueError("Pi admission is unavailable")
+        reference = cast(tuple[str, ...], kwargs["model_references"])[0]
+        seen.add(reference)
+        return agent or "codex"
+
+    monkeypatch.setattr(loop_runner, "resolve_agent", resolve)
+    config = _capture_config(
+        [
+            "--phases",
+            phase,
+            "--agent",
+            "codex",
+            f"--{unused_role}-agent",
+            "pi",
+            "--planner-model",
+            "planner",
+            "--implementer-model",
+            "implementer",
+            "--reviewer-model",
+            "reviewer",
+        ],
+        monkeypatch,
+    )
+    assert config is not None
+    assert seen == expected_roles
+
+
+@pytest.mark.parametrize("role", ["implementer", "reviewer"])
+def test_review_scope_still_admits_both_writer_and_reviewer(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """PR review must validate the writer because the stage can request fixes."""
+
+    def resolve(agent: str | None, **kwargs: object) -> str:
+        if agent == "pi":
+            raise ValueError("Pi admission is unavailable")
+        return agent or "codex"
+
+    monkeypatch.setattr(loop_runner, "resolve_agent", resolve)
+    with pytest.raises(SystemExit) as error:
+        _capture_config(
+            ["--phases", "drive-green", "--agent", "codex", f"--{role}-agent", "pi"], monkeypatch
+        )
+    assert error.value.code == 2

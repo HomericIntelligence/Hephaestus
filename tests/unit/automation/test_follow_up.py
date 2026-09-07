@@ -240,6 +240,16 @@ class TestRunFollowUpIssues:
     def _make_claude_output(self, payload: dict[str, Any]) -> str:
         return json.dumps({"result": json.dumps(payload)})
 
+    @pytest.mark.parametrize("model", ["", " ", ":default", ":max"])
+    def test_default_selection_omits_empty_model_argument(self, tmp_path: Path, model: str) -> None:
+        """A configured default must not become an empty CLI model argument."""
+        response = MagicMock(stdout=self._make_claude_output({"follow_ups": [], "rejected": []}))
+        with patch("hephaestus.automation.follow_up.run", return_value=response) as run:
+            run_follow_up_issues(
+                "session", tmp_path, 42, tmp_path, session_agent="claude", model=model
+            )
+        assert "--model" not in run.call_args.args[0]
+
     def test_files_one_consolidated_issue(self, tmp_path: Path) -> None:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()

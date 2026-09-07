@@ -63,6 +63,8 @@ class AgentJob:
     # Stable cycle-scoped identity.  Unlike ``session_agent`` this must not
     # be shared by separate issues or explicit planning cycles.
     session_key: str = ""
+    # Durable cycles must not adopt a transcript from a previous start.
+    require_new_session: bool = False
     # Direct-runner providers return an opaque session id.  The coordinator
     # stores it on the WorkItem and supplies it here on subsequent turns so
     # review/implementation context survives across loop iterations.

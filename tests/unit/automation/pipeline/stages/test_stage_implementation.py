@@ -5947,6 +5947,7 @@ class TestCommitPushAndPrCreate:
                     "agent": "codex",
                     "implementer_agent": "opencode",
                     "model": "Shared:max",
+                    "pi_dir": Path("/tmp/operator-pi"),
                 }
             ),
         )
@@ -5955,6 +5956,7 @@ class TestCommitPushAndPrCreate:
         assert retry_job.job.op == "prepare_remediation_recovery"
         assert retry_job.job.kwargs["agent"] == "opencode"
         assert retry_job.job.kwargs["agent_model"] == "Shared:max"
+        assert retry_job.job.kwargs["pi_dir"] == Path("/tmp/operator-pi")
         assert retry_job.job.deadline_s is not None
         first_prepare_deadline = retry_job.job.deadline_s
         assert retry_job.job.kwargs["repo_root"] == "/tmp/repo"

@@ -677,6 +677,8 @@ def _remediation_prepare_request(item: WorkItem, ctx: StageContext) -> StepResul
         "remediation_failure_diagnostic": diagnostic,
         **recovery_kwargs,
     }
+    if ctx.config.pi_dir is not None:
+        kwargs["pi_dir"] = ctx.config.pi_dir
     operation_timeout = stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)
     deadline_s = item.payload.get(_REMEDIATION_PREPARE_DEADLINE)
     if deadline_s is None:

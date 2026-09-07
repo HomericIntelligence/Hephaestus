@@ -802,6 +802,7 @@ class PlanReviewStage(Stage):
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLAN_REVIEWER,
                 session_key=review_session.session_key if review_session is not None else "",
+                require_new_session=review_session is not None,
                 resume_session_id=(
                     review_session.session_id if review_session is not None else None
                 ),

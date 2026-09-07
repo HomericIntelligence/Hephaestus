@@ -23,8 +23,8 @@ If you omit the tool, Hephaestus uses its existing tool detection. Claude has
 preference when available. Pi requires explicit selection and admission.
 If you omit both global and role model options, the selected tool uses its
 configured model default. Supply `--fallback-model` to enable an explicit
-fallback model. The global model does not supply the fallback. Durable review
-sessions retain their recorded model and do not use quota fallback.
+fallback model. The global model does not supply the fallback. Calls with a session lifecycle
+retain their recorded model and do not use quota fallback.
 
 Model spelling and case are preserved after whitespace handling. The final
 nonempty colon segment in `MODEL[:EFFORT]` is the effort. Thus, a colon in a

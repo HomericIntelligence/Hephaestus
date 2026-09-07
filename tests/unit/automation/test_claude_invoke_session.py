@@ -75,6 +75,35 @@ class TestCreateThenResume:
     must create the session, and later calls resume it.
     """
 
+    @pytest.mark.parametrize("agent", [AGENT_PLANNER, AGENT_PLAN_REVIEWER])
+    @pytest.mark.parametrize("require_new", [False, True])
+    def test_ordinary_retry_reuses_transcript_but_durable_start_rejects_it(
+        self, stub_run: MagicMock, fake_home: Path, agent: str, require_new: bool
+    ) -> None:
+        """Only a durable new cycle rejects an existing matching transcript."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        sid = session_uuid("repo", 1, agent, "Model", cwd=cwd)
+        _make_existing_jsonl(fake_home, cwd, sid)
+        kwargs: dict[str, Any] = {
+            "repo": "repo",
+            "issue": 1,
+            "agent": agent,
+            "prompt": "retry",
+            "model": "Model",
+            "cwd": cwd,
+            "session_lifecycle": "start_new",
+            "require_new_session": require_new,
+        }
+        if require_new:
+            with pytest.raises(AgentSessionLostError, match="collided"):
+                invoke_claude_with_session(**kwargs)
+            stub_run.assert_not_called()
+        else:
+            _, resumed_sid = invoke_claude_with_session(**kwargs)
+            assert resumed_sid == sid
+            assert "--resume" in _argv(stub_run.call_args)
+
     def test_resume_required_missing_transcript_fails_closed(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:

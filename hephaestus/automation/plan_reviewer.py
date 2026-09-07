@@ -130,7 +130,9 @@ class PlanReviewer:
             options: Plan reviewer configuration options.
 
         """
-        self.options = options
+        agent = options.reviewer_agent or options.agent
+        model = reviewer_model(options.reviewer_model or options.model or None, agent=agent)
+        self.options = options.model_copy(update={"agent": agent, "reviewer_model": model})
         self.status_tracker = StatusTracker(options.max_workers)
         self.lock = threading.Lock()
         # Per-instance cache for ``_fetch_issue_comments`` (#A3-009, #560).

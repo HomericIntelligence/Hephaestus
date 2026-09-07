@@ -1181,3 +1181,55 @@ class TestPlanReviewerAlreadyReviewedFlag:
         # issue 4 failed → rc=1, but the work report still reflects the 2 real reviews.
         assert rc == 1
         assert report.read_text(encoding="utf-8") == "2"
+
+
+@pytest.mark.parametrize(
+    ("agent", "reviewer_agent", "global_model", "role_model", "expected_agent", "expected_model"),
+    [
+        ("codex", "claude", "MixedModel:max", "", "claude", "MixedModel:max"),
+        ("claude", "codex", "MixedModel:max", "", "codex", "MixedModel:max"),
+        ("codex", "opencode", "GlobalModel", "RoleModel:high", "opencode", "RoleModel:high"),
+        ("codex", "", "", "", "codex", ""),
+    ],
+)
+def test_sdk_reviewer_selection_reaches_execution(
+    agent: str,
+    reviewer_agent: str,
+    global_model: str,
+    role_model: str,
+    expected_agent: str,
+    expected_model: str,
+) -> None:
+    """Direct Python callers receive the same selection precedence as the CLI."""
+    from hephaestus.agents.runtime import AgentRunResult
+
+    options = PlanReviewerOptions(
+        agent=agent,
+        reviewer_agent=reviewer_agent,
+        model=global_model,
+        reviewer_model=role_model,
+    )
+    with (
+        patch(
+            "hephaestus.automation.plan_reviewer.invoke_claude_with_session",
+            return_value=("review", "session"),
+        ) as claude,
+        patch(
+            "hephaestus.automation.plan_reviewer.run_agent_text",
+            return_value=AgentRunResult(stdout="review", stderr=""),
+        ) as direct,
+    ):
+        assert PlanReviewer(options)._run_claude_analysis(123, "Title", "Body", "Plan") == "review"
+    if expected_agent == "claude":
+        direct.assert_not_called()
+        assert claude.call_args.kwargs["model"] == expected_model
+    else:
+        claude.assert_not_called()
+        assert direct.call_args.kwargs["agent"] == expected_agent
+        assert direct.call_args.kwargs["model"] == expected_model
+
+
+def test_sdk_reviewer_rejects_unknown_role_tool() -> None:
+    """An unsupported role tool cannot silently execute the global tool."""
+    with pytest.raises(ValueError, match="Unsupported agent"):
+        PlanReviewer(PlanReviewerOptions(agent="claude", reviewer_agent="unknown"))
