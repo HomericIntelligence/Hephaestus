@@ -54,6 +54,21 @@ def test_publish_lease_failure_has_specific_durable_error_class() -> None:
             "agent_error",
             id="agent-execution",
         ),
+        pytest.param(
+            "agent_error: codex_tool_or_provider_failure: mcp_tool_call status=failed",
+            "codex_tool_or_provider_failure",
+            id="codex-tool-or-provider-failure",
+        ),
+        pytest.param(
+            "agent_error: unknown_provider_failure: secret-token-value",
+            "agent_error",
+            id="unknown-provider-failure",
+        ),
+        pytest.param(
+            "agent_error: codex_tool_or_provider_failure secret-token-value",
+            "agent_error",
+            id="provider-failure-without-delimiter",
+        ),
         pytest.param("parse failed: ValueError", "parse_error", id="agent-output-parser"),
         pytest.param("review-session-lost", "session_lost", id="lost-session"),
         pytest.param(
