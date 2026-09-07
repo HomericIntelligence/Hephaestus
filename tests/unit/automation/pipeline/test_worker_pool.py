@@ -676,7 +676,7 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
     push.assert_not_called()
 
 
-@pytest.mark.parametrize("model", ["", "default", "gpt-6-astra:max", "MyModel", "sol"])
+@pytest.mark.parametrize("model", ["", "default", "resume", "gpt-6-astra:max", "MyModel", "sol"])
 @pytest.mark.parametrize("replace_staged_after_return", [False, True])
 @pytest.mark.parametrize(
     ("lifecycle", "resume_session_id"),
@@ -916,7 +916,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         + json.dumps(list(expected_tools), separators=(",", ":"))
         in frozen.command
     )
-    assert ("resume" in frozen.command) is (lifecycle is SessionLifecycle.RESUME_REQUIRED)
+    assert (frozen.command[2:3] == ("resume",)) is (lifecycle is SessionLifecycle.RESUME_REQUIRED)
     if expected_sandbox == "read-only":
         assert str(worktree) in frozen.policy.read_only_mounts
         assert str(worktree) not in frozen.policy.read_write_mounts

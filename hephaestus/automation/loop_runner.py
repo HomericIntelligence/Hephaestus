@@ -492,10 +492,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         metavar="MODEL[:EFFORT]",
         help=(
-            "MODEL[:EFFORT] applied to every phase (planner, reviewer, implementer, advise) "
-            f"for child processes. {MODEL_REFERENCE_HELP} The /learn "
-            "step inherits its parent phase's model automatically. A per-phase flag below "
-            "overrides this for that phase."
+            "MODEL[:EFFORT] for planner, reviewer, and implementer child processes. "
+            f"{MODEL_REFERENCE_HELP} A role model option overrides this selection. "
+            "Host-owned advice and learning do not use this model."
         ),
     )
     p.add_argument(

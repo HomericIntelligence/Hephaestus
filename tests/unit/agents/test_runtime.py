@@ -338,6 +338,44 @@ def test_codex_rebase_tool_grant_is_closed(
             agent_runtime._validate_codex_session_authority(request, execution)
 
 
+@pytest.mark.parametrize("resume_session", [False, True])
+@pytest.mark.parametrize("wrong_session_argument", [False, True])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "resume",
+        "-c",
+        'hephaestus_automation.operation="implement"',
+        'hephaestus_automation.allowed_tools=["Bash","Edit","Glob","Grep","Read","Write"]',
+    ],
+)
+def test_codex_literal_resume_model_does_not_select_session_lifecycle(
+    tmp_path: Path, resume_session: bool, wrong_session_argument: bool, model: str
+) -> None:
+    """Model values cannot select a subcommand or supply the resume identity."""
+    request = _codex_implementation_request(tmp_path)
+    authority = json.loads(request.session)
+    lifecycle = SessionLifecycle.RESUME_REQUIRED if resume_session else SessionLifecycle.START_NEW
+    authority.update(
+        lifecycle=lifecycle.value, session_id="provider-session" if resume_session else None
+    )
+    request.session = json.dumps(authority)
+    prefix: tuple[str, ...] = ("codex", "exec")
+    if resume_session:
+        prefix += ("resume", "wrong-session" if wrong_session_argument else "provider-session")
+    model = "provider-session" if wrong_session_argument else model
+    request.command = (*prefix, "--model", model, *request.command[2:])
+    execution = ExecutionRequest(AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, lifecycle)
+    if resume_session and wrong_session_argument:
+        with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+            agent_runtime._validate_codex_session_authority(request, execution)
+    else:
+        assert (
+            agent_runtime._validate_codex_session_authority(request, execution)
+            == authority["session_id"]
+        )
+
+
 def test_codex_v1_session_field_binds_exact_lifecycle_and_resume_id(tmp_path: Path) -> None:
     """The existing V1 session field binds all host operation authority."""
     request = _codex_implementation_request(tmp_path)

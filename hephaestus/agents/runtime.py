@@ -2241,6 +2241,25 @@ def _codex_session_authority(
     )
 
 
+def _codex_implementation_config_arguments(command: tuple[str, ...]) -> tuple[str, ...]:
+    """Read configuration options without treating option values as switches."""
+    index = 4 if command[2:3] == ("resume",) else 2
+    configuration: list[str] = []
+    while index < len(command):
+        option = command[index]
+        if option in {"-c", "--config", "--model", "--cd", "--sandbox"}:
+            if index + 1 >= len(command):
+                raise CodexIsolationError("codex_adapter_request_mismatch")
+            if option in {"-c", "--config"}:
+                configuration.append(command[index + 1])
+            index += 2
+        elif option in {"--json", "-"}:
+            index += 1
+        else:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    return tuple(configuration)
+
+
 def _validate_codex_session_authority(
     request: CodexIsolationRequestV1,
     execution_request: ExecutionRequest,
@@ -2268,11 +2287,14 @@ def _validate_codex_session_authority(
     tools_config = "hephaestus_automation.allowed_tools=" + json.dumps(
         list(allowed_tools), separators=(",", ":")
     )
-    if request.command.count(operation_config) != 1 or request.command.count(tools_config) != 1:
+    configuration = _codex_implementation_config_arguments(request.command)
+    if configuration.count(operation_config) != 1 or configuration.count(tools_config) != 1:
         raise CodexIsolationError("codex_adapter_request_mismatch")
-    resumes = "resume" in request.command
+    if request.command[1:2] != ("exec",):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    resumes = request.command[2:3] == ("resume",)
     if execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
-        if session_id is None or not resumes or session_id not in request.command:
+        if session_id is None or not resumes or request.command[3:4] != (session_id,):
             raise CodexIsolationError("codex_adapter_request_mismatch")
     elif session_id is not None or resumes:
         raise CodexIsolationError("codex_adapter_request_mismatch")
@@ -3054,7 +3076,8 @@ def _run_admitted_codex_implementation_session(  # noqa: C901
             destroy_failure = exc
             raise
         if _codex_reasoning_effort_failure(result.output) is not None and any(
-            value.startswith("model_reasoning_effort=") for value in request.command
+            value.startswith("model_reasoning_effort=")
+            for value in _codex_implementation_config_arguments(request.command)
         ):
             # The finally block must prove cleanup before this retry signal escapes.
             raise _CodexReasoningEffortRejectedError("codex_unsupported_reasoning_effort")
