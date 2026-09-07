@@ -91,6 +91,9 @@ def test_reader_and_writer_authorization_is_exact() -> None:
     ("name", "valid", "invalid"),
     [
         ("PATH", "/usr/bin", ""),
+        ("UV_OFFLINE", "1", "0"),
+        ("UV_NO_SYNC", "1", "true"),
+        ("PYTHONDONTWRITEBYTECODE", "1", "false"),
         ("HOME", "/tmp/home", "relative/home"),
         ("CLAUDECODE", "", "1"),
         ("GH_TRACE_ID", "trace-123", "trace 123"),
@@ -106,3 +109,31 @@ def test_registry_validation_rules_are_executable(name: str, valid: str, invalid
     assert validate_environment_value(spec, valid)
     assert not validate_environment_value(spec, invalid)
     assert not validate_environment_value(spec, "contains\0nul")
+
+
+def test_nested_host_reader_has_only_exact_authority() -> None:
+    """The nested reader has no credential or wildcard authority."""
+    reader = "hephaestus.config.child_environments.build_nested_host_verification_env"
+    expected = {
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_CACHE_HOME",
+        "UV_CACHE_DIR",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_OFFLINE",
+        "UV_NO_SYNC",
+        "RUFF_CACHE_DIR",
+        "COVERAGE_FILE",
+        "PYTHONPYCACHEPREFIX",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTEST_ADDOPTS",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+    }
+    assert {name for name in APPROVED_ENV_BY_NAME if reader_is_authorized(name, reader)} == expected
+    for name in expected:
+        assert not reader_is_authorized(name, "build_nested_host_verification_env")
+        assert not reader_is_authorized(name, "hephaestus.config.child_environments.*")

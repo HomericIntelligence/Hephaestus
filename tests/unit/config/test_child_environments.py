@@ -254,3 +254,122 @@ def test_codex_implementation_environment_rejects_enabled_replace_objects(
             codex_home=tmp_path / "private-codex",
             fixed_git_environment=fixed,
         )
+
+
+@pytest.fixture
+def nested_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
+    """Install the finite host verification environment."""
+    scratch = tmp_path / "scratch"
+    values = child_environments.build_host_verification_env(
+        home=scratch / "home",
+        temporary=scratch / "tmp",
+        cache=scratch / "cache",
+        runtime_environment=tmp_path / "runtime",
+        executable=tmp_path / "bin" / "uv",
+    )
+    monkeypatch.setattr(os, "environ", values)
+    return values
+
+
+def test_nested_host_verification_preserves_registered_values(
+    nested_environment: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """Only the named host values and source path reach the child."""
+    expected = {
+        name: value for name, value in nested_environment.items() if name != "PYTEST_CURRENT_TEST"
+    }
+    nested_environment["GH_TOKEN"] = "private-test-value"  # noqa: S105 - test sentinel
+    nested_environment["UNRELATED"] = "unrelated"
+    source = tmp_path / "source"
+    environment = child_environments.build_nested_host_verification_env(source)
+    assert environment == {**expected, "PYTHONPATH": str(source.resolve())}
+    assert all(
+        validate_environment_value(APPROVED_ENV_BY_NAME[n], v) for n, v in environment.items()
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_CACHE_HOME",
+        "UV_CACHE_DIR",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_OFFLINE",
+        "UV_NO_SYNC",
+        "RUFF_CACHE_DIR",
+        "COVERAGE_FILE",
+        "PYTHONPYCACHEPREFIX",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTEST_ADDOPTS",
+        "PATH",
+    ],
+)
+def test_nested_host_verification_missing_required_value(
+    nested_environment: dict[str, str],
+    tmp_path: Path,
+    name: str,
+) -> None:
+    """An absent required value stops environment transfer."""
+    del nested_environment[name]
+    with pytest.raises(ValueError, match=r"^Invalid host verification environment[.]$"):
+        child_environments.build_nested_host_verification_env(tmp_path / "source")
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("COVERAGE_FILE", "relative"),
+        ("COVERAGE_FILE", "/outside/.coverage"),
+        ("TMP", "/outside/tmp"),
+        ("UV_OFFLINE", "0"),
+        ("UV_NO_SYNC", "true"),
+        ("PYTHONDONTWRITEBYTECODE", "0"),
+        ("PYTEST_ADDOPTS", "--override-ini=addopts="),
+        ("LANG", "private\0value"),
+        ("PATH", "private\0value"),
+        ("RUFF_CACHE_DIR", "/outside/ruff"),
+        ("UV_CACHE_DIR", "/outside/uv"),
+        ("PYTHONPYCACHEPREFIX", "/outside/pycache"),
+    ],
+)
+def test_nested_host_verification_invalid_value(
+    nested_environment: dict[str, str],
+    tmp_path: Path,
+    name: str,
+    value: str,
+) -> None:
+    """Invalid values and paths cannot pass the environment boundary."""
+    nested_environment[name] = value
+    with pytest.raises(ValueError, match=r"^Invalid host verification environment[.]$"):
+        child_environments.build_nested_host_verification_env(tmp_path / "source")
+
+
+@pytest.mark.parametrize(
+    "relation",
+    ["source_contains_scratch", "scratch_contains_source", "runtime_in_source", "symlink"],
+)
+def test_nested_host_verification_rejects_source_and_containment(
+    nested_environment: dict[str, str],
+    tmp_path: Path,
+    relation: str,
+) -> None:
+    """Source paths cannot become writable output paths."""
+    source = tmp_path / "source"
+    if relation == "source_contains_scratch":
+        source = tmp_path
+    elif relation == "scratch_contains_source":
+        source = tmp_path / "scratch" / "source"
+    elif relation == "runtime_in_source":
+        nested_environment["UV_PROJECT_ENVIRONMENT"] = str(source / ".venv")
+    else:
+        cache = tmp_path / "scratch" / "cache"
+        cache.mkdir(parents=True)
+        source.mkdir()
+        (cache / ".coverage").symlink_to(source / ".coverage")
+    with pytest.raises(ValueError, match=r"^Invalid host verification environment[.]$"):
+        child_environments.build_nested_host_verification_env(source)

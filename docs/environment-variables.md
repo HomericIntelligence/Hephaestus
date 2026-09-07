@@ -48,33 +48,42 @@ This table is generated from the ambient-reader projection. “Reader” is a st
 | `CLICOLOR` | operator-config | cli.colors | Disable ANSI color when set to zero. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
 | `CLICOLOR_FORCE` | operator-config | cli.colors | Force ANSI color when set to a non-zero value. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
 | `COMSPEC` | platform | config.child_environments | Windows command processor alias | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `COVERAGE_FILE` | child-process | config.child_environments | Isolated coverage output | public | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
 | `ComSpec` | platform | config.child_environments | Windows command processor | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `FORCE_COLOR` | operator-config | cli.colors | Force ANSI color when non-empty. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
 | `GH_TOKEN` | child-process | config.child_environments | GitHub CLI authentication bridge | secret | non-empty | input | `hephaestus/config/child_environments.py:build_gh_child_env:read` |
 | `GITHUB_STEP_SUMMARY` | workflow-input | ci/workflow helpers | GitHub step summary file | sensitive | string | input | `hephaestus/ci/precommit.py:write_step_summary:read` |
 | `GITHUB_TOKEN` | child-process | config.child_environments | GitHub authentication bridge | secret | non-empty | input | `hephaestus/config/child_environments.py:build_gh_child_env:read` |
 | `GPG_TTY` | child-process | config.child_environments | GPG signing terminal bridge | sensitive | path | input | `hephaestus/config/child_environments.py:build_git_signing_env:read` |
-| `HOME` | platform | config.child_environments | CLI home and configuration lookup | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
-| `LANG` | platform | config.child_environments | Locale stability | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
-| `LC_ALL` | platform | config.child_environments | Locale override | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `HOME` | platform | config.child_environments | CLI home and configuration lookup | sensitive | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `LANG` | platform | config.child_environments | Locale stability | public | string | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `LC_ALL` | platform | config.child_environments | Locale override | public | string | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `LC_CTYPE` | platform | config.child_environments | Character encoding | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `LOCALAPPDATA` | platform | config.child_environments | Windows application cache | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `LOGNAME` | platform | config.child_environments | Host identity hint | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `NO_COLOR` | operator-config | cli.colors | Disable ANSI color when non-empty. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
-| `PATH` | platform | config.child_environments | Command discovery | public | non-empty | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `PATH` | platform | config.child_environments | Command discovery | public | non-empty | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `PATHEXT` | platform | config.child_environments | Windows executable suffixes | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `PYTEST_ADDOPTS` | child-process | config.child_environments | Scoped pytest behavior | public | string | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
+| `PYTHONDONTWRITEBYTECODE` | child-process | config.child_environments | Disable child bytecode writes | public | literal-1 | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
+| `PYTHONPYCACHEPREFIX` | child-process | config.child_environments | Isolated bytecode cache | public | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
+| `RUFF_CACHE_DIR` | child-process | config.child_environments | Isolated Ruff cache | public | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
 | `SHELL` | platform | config.child_environments | Interactive shell hint | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `SSH_AUTH_SOCK` | child-process | config.child_environments | Git SSH authentication and signing bridge | secret | path | input | `hephaestus/config/child_environments.py:build_git_signing_env:read` |
 | `SYSTEMROOT` | platform | config.child_environments | Windows system root | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `SystemRoot` | platform | config.child_environments | Windows system root alias | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
-| `TEMP` | platform | config.child_environments | Windows temporary directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
-| `TMP` | platform | config.child_environments | Windows temporary directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
-| `TMPDIR` | platform | config.child_environments | Temporary and runtime directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read`, `hephaestus/github/rate_limit.py:_runtime_base_dir:read` |
+| `TEMP` | platform | config.child_environments | Windows temporary directory | sensitive | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `TMP` | platform | config.child_environments | Windows temporary directory | sensitive | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `TMPDIR` | platform | config.child_environments | Temporary and runtime directory | sensitive | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read`, `hephaestus/github/rate_limit.py:_runtime_base_dir:read` |
 | `TZ` | platform | config.child_environments | Timezone stability | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `USER` | platform | config.child_environments | Host identity hint | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `USERPROFILE` | platform | config.child_environments | Windows home directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `UV_CACHE_DIR` | child-process | config.child_environments | Isolated uv cache | public | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
+| `UV_NO_SYNC` | child-process | config.child_environments | Disable implicit uv synchronization | public | literal-1 | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
+| `UV_OFFLINE` | child-process | config.child_environments | Offline host verification | public | literal-1 | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
+| `UV_PROJECT_ENVIRONMENT` | child-process | config.child_environments | Host verification runtime | public | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read` |
 | `WINDIR` | platform | config.child_environments | Windows system directory | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
-| `XDG_CACHE_HOME` | platform | config.child_environments | Unix cache directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `XDG_CACHE_HOME` | platform | config.child_environments | Unix cache directory | sensitive | path | input | `hephaestus/config/child_environments.py:build_nested_host_verification_env:read`, `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `XDG_CONFIG_HOME` | platform | config.child_environments | Unix configuration directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `XDG_DATA_HOME` | platform | config.child_environments | Unix data directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 <!-- END GENERATED ENVIRONMENT VARIABLE INVENTORY -->
