@@ -2954,6 +2954,61 @@ class TestPlanningStageStep:
         assert STATE_PLAN_NO_GO in github.labels[76]
 
     @pytest.mark.parametrize(
+        "recovery_issue",
+        [None, 999],
+        ids=["missing-comment", "invalid-context"],
+    )
+    def test_unusable_recovery_successor_uses_plan_budget_and_receipt(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        recovery_issue: int | None,
+    ) -> None:
+        """A missing or invalid recovery comment cannot cause unlimited VERIFY retries."""
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        github = FakeStageGitHub(
+            labels=[STATE_NEEDS_PLAN],
+            issue_body=source,
+            has_plan=False,
+        )
+        if recovery_issue is not None:
+            github.comments[77] = [
+                _recovered_body(source, "Recovered requirements", issue=recovery_issue)
+            ]
+        item = make_work_item(issue=77, state="VERIFY")
+        item.payload.update(
+            {
+                "issue_source_body": source,
+                "issue_title": "A task",
+                "issue_body_digest": hashlib.sha256(source.encode()).hexdigest(),
+                "requirements_recovered_comment": True,
+                "requires_plan_revision": True,
+                "plan_text": "Recovered successor plan",
+            }
+        )
+        _bind_recovery_revision(item)
+        ctx = make_ctx(github=github, budget_fn=lambda name: 2 if name == "plan" else 1)
+
+        first = PlanningStage().step(item, ctx)
+        item.state = "VERIFY"
+        second = PlanningStage().step(item, ctx)
+
+        assert isinstance(first, StageOutcome)
+        assert first.disposition is Disposition.RETRY
+        assert isinstance(second, StageOutcome)
+        assert second.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 2
+        assert (
+            sum(
+                mutation[0] == "gh_issue_upsert_comment" and mutation[1][1] == PLAN_CANONICAL_MARKER
+                for mutation in github.mutation_log
+            )
+            == 1
+        )
+        assert "published_plan_pending_followup" in item.payload
+        assert STATE_PLAN_NO_GO in github.labels[77]
+
+    @pytest.mark.parametrize(
         ("labels", "review", "expected_state"),
         [
             (

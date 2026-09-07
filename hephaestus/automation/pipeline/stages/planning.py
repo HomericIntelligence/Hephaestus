@@ -1343,7 +1343,7 @@ def _bind_recovered_successor(
         owned_of=lambda comment: comment.viewer_did_author,
     )
     if recovery_selection is None:
-        return False
+        raise RecoveryCommentIdentityError("recovery successor comment is missing")
     provenance = recovery_selection.provenance
     requirements = recovered_requirements_for_context(
         recovery_selection.comment.body,
@@ -1354,7 +1354,7 @@ def _bind_recovered_successor(
         repository_revision=provenance.repository_revision or "",
     )
     if requirements is None:
-        return False
+        raise RecoveryCommentIdentityError("recovery successor comment context is invalid")
     try:
         ctx.github.upsert_issue_comment(
             item.issue,
