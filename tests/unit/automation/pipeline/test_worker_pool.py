@@ -126,6 +126,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
     consume_implementation_writer_authority,
 )
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
@@ -10994,6 +10995,7 @@ class TestGitOps:
         remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         with (
+            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
             patch(
                 "hephaestus.automation.git_utils.commit_if_changes", return_value=True
             ) as mock_commit,
@@ -11038,7 +11040,14 @@ class TestGitOps:
             remote_config=remote_config,
         )
         assert result.ok is True
-        assert result.value == {"pushed": True, "head_sha": "b" * 40}
+        assert result.value == {
+            "publication_state": "published",
+            "pushed": True,
+            "head_sha": "b" * 40,
+            "baseline_remote_sha": "a" * 40,
+            "observed_remote_sha": "b" * 40,
+            "refresh_phase": None,
+        }
 
     @pytest.mark.parametrize(
         "changed_kind",
@@ -12370,6 +12379,7 @@ class TestGitOps:
         remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         with (
+            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
             patch.object(pool, "_read_publish_head", return_value=head),
             patch.object(
                 pool,
@@ -12422,6 +12432,7 @@ class TestGitOps:
         remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         with (
+            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
             patch(
                 "hephaestus.automation.git_utils.run",
                 return_value=MagicMock(stdout=" M pending.py\n"),
@@ -12468,7 +12479,14 @@ class TestGitOps:
             remote_config=remote_config,
         )
         assert result.ok is True
-        assert result.value == {"pushed": True, "head_sha": "b" * 40}
+        assert result.value == {
+            "publication_state": "published",
+            "pushed": True,
+            "head_sha": "b" * 40,
+            "baseline_remote_sha": "a" * 40,
+            "observed_remote_sha": "b" * 40,
+            "refresh_phase": None,
+        }
 
     @pytest.mark.requires_posix
     @pytest.mark.skipif(os.name != "posix", reason="Git hook tests require POSIX")
@@ -12816,6 +12834,7 @@ class TestGitOps:
             kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
         )
         with (
+            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch(
                 "hephaestus.automation.git_utils.has_unpushed_commits", return_value=True
@@ -12837,7 +12856,14 @@ class TestGitOps:
             remote_config=ANY,
         )
         assert result.ok is True
-        assert result.value == {"pushed": True, "head_sha": "b" * 40}
+        assert result.value == {
+            "publication_state": "published",
+            "pushed": True,
+            "head_sha": "b" * 40,
+            "baseline_remote_sha": "a" * 40,
+            "observed_remote_sha": "b" * 40,
+            "refresh_phase": None,
+        }
 
     def test_commit_push_does_not_publish_dirty_worktree_after_failed_commit(
         self,
@@ -14981,3 +15007,261 @@ def test_sync_checkout_uses_explicit_gh_root_for_api_when_fixed_candidates_unava
         gh_command=expected_executable,
         timeout_s=120,
     )
+
+
+@pytest.mark.parametrize(
+    "observed,state",
+    [
+        ("b" * 40, "remote_at_source"),
+        ("c" * 40, "remote_changed"),
+        ("a" * 40, "remote_unchanged"),
+        (None, "probe_failed"),
+    ],
+)
+def test_ordinary_publication_uses_remote_facts(
+    pool: WorkerPool, tmp_path: Path, observed: str | None, state: str
+) -> None:
+    """Untrusted push diagnostics do not select the publication result."""
+    job = GitJob(repo="example/project", op="commit_push", timeout_s=60, kwargs={})
+    probe = observed if observed is not None else JobResult(ok=False, error="probe failed")
+    with (
+        patch.object(pool, "_read_publish_head", return_value="b" * 40),
+        patch.object(pool, "_read_remote_branch_head", return_value=probe),
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        patch(
+            f"{_WP}.git_utils.run", return_value=subprocess.CompletedProcess([], 0, stdout="a" * 40)
+        ),
+        patch(
+            f"{_WP}.git_utils.push_branch",
+            side_effect=subprocess.CalledProcessError(1, "git", stderr="untrusted"),
+        ),
+    ):
+        result = pool._publish_commit_push(job, "writer", tmp_path)
+    assert result.ok is (state == "remote_at_source")
+    assert result.value == {
+        "publication_state": state,
+        "head_sha": "b" * 40,
+        "baseline_remote_sha": "a" * 40,
+        "observed_remote_sha": observed,
+        "pushed": state == "remote_at_source",
+        "refresh_phase": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "case", ["success", "conflict", "second_advance", "before_fetch", "transient", "lost"]
+)
+def test_commit_push_refreshes_stale_writer_and_publishes_signed_descendant(
+    pool: WorkerPool, tmp_path: Path, case: str
+) -> None:
+    """One signed replay preserves remote work and stops on conflict or drift."""
+    root, _, base = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(
+        root, repository="example/project", base_dir=root / "build" / ".worktrees"
+    )
+    create = GitJob(
+        repo="example/project",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 9,
+            "branch_name": "writer",
+            "repo_root": str(root),
+            "source_lane": "impl",
+            "base_sha": base,
+        },
+    )
+    with patch.object(
+        pool,
+        "_authenticated_remote_git_configuration",
+        return_value=(build_git_child_env(), ("-c", "protocol.file.allow=always")),
+    ):
+        created = pool._git_create_worktree(create)
+    assert created.ok, created.error
+    repo = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    manager.add_obligation(9, SourceLane.IMPLEMENTATION, "review")
+    original = manager._require_receipt(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "push", "-u", "origin", "writer")
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "--branch", "writer", str(tmp_path / "remote.git"), str(other))
+    _git(other, "config", "user.name", "Other User")
+    _git(other, "config", "user.email", "other@example.invalid")
+    local_file = "tracked.txt" if case == "conflict" else "local.txt"
+    remote_file = "tracked.txt" if case == "conflict" else "remote.txt"
+    (repo / local_file).write_text("local change\n", encoding="utf-8")
+    _git(repo, "add", local_file)
+    (other / remote_file).write_text("remote change\n", encoding="utf-8")
+    _git(other, "add", remote_file)
+    _git(other, "commit", "-m", "fix: remote change")
+    _git(other, "push", "origin", "writer")
+    remote = _git(other, "rev-parse", "HEAD")
+    key = tmp_path / "signing-key"
+    subprocess.run(
+        ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key)], check=True, capture_output=True
+    )
+    job = GitJob(
+        repo="example/project",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={
+            "issue_number": 9,
+            "repo_root": str(root),
+            "source_lane": "impl",
+            "worktree_path": str(repo),
+            "branch": "writer",
+            "agent": "codex",
+            "allowed_paths": (local_file,),
+            "scope_history_base_sha": base,
+        },
+    )
+    advanced: str = remote
+    real_push = git_utils.push_head_to_branch
+    real_rebase = git_utils.rebase_worktree_onto
+    commits = 0
+
+    def commit(*args: Any, **kwargs: Any) -> bool:
+        nonlocal commits
+        commits += 1
+        with (
+            pytest.raises(LockUnavailableError),
+            file_lock(
+                manager._lane_lock_path(9, SourceLane.IMPLEMENTATION),
+                blocking=False,
+                require_exclusive=True,
+            ),
+        ):
+            pass
+        _git(repo, "commit", "-m", "fix: local change")
+        return True
+
+    def advance_remote() -> str:
+        (other / "later.txt").write_text("later remote change\n", encoding="utf-8")
+        _git(other, "add", "later.txt")
+        _git(other, "commit", "-m", "fix: later remote change")
+        _git(other, "push", "origin", "writer")
+        return _git(other, "rev-parse", "HEAD")
+
+    def replay(*args: Any, **kwargs: Any) -> bool:
+        nonlocal advanced
+        if case == "before_fetch":
+            advanced = advance_remote()
+        return real_rebase(*args, **kwargs)
+
+    attempts = 0
+
+    def publish(*args: Any, **kwargs: Any) -> None:
+        nonlocal attempts, advanced
+        attempts += 1
+        if case == "second_advance":
+            advanced = advance_remote()
+        if case == "transient" and attempts == 1:
+            raise RuntimeError("transport unavailable")
+        real_push(*args, **kwargs)
+        if case == "lost":
+            raise RuntimeError("result lost")
+
+    with (
+        patch.object(pool, "_commit_if_changes_with_controlled_signing", side_effect=commit),
+        patch(f"{_WP}.git_utils.push_head_to_branch", side_effect=publish),
+        patch(
+            f"{_WP}.git_utils.rebase_worktree_onto",
+            side_effect=replay,
+        ) as rebase,
+        patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=(build_git_child_env(), ("-c", "protocol.file.allow=always")),
+        ),
+        patch(
+            f"{_WP}._read_host_git_signing_config",
+            return_value={
+                "user.name": "Test User",
+                "user.email": "test@example.invalid",
+                "gpg.format": "ssh",
+                "user.signingkey": str(key),
+            },
+        ),
+    ):
+        first = pool._git_commit_push(job)
+        source = _git(repo, "rev-parse", "HEAD")
+        first_receipt = manager._require_receipt(9, SourceLane.IMPLEMENTATION)
+        assert first_receipt.revision == source
+        assert first_receipt.generation == original.generation + 1
+        assert first_receipt.obligations == ("review",)
+        assert first.value == {
+            "publication_state": "remote_changed",
+            "head_sha": source,
+            "baseline_remote_sha": base,
+            "observed_remote_sha": remote,
+            "pushed": False,
+            "refresh_phase": None,
+        }
+        refresh = replace(
+            job,
+            kwargs={
+                **job.kwargs,
+                "writer_refresh": {
+                    "phase": "rebase",
+                    "source_sha": source,
+                    "expected_remote_sha": remote,
+                },
+            },
+        )
+        result = pool._git_commit_push(refresh)
+        if case == "conflict":
+            assert result.value == {"writer_refresh_failure": "conflict"}
+            assert _git(repo, "rev-parse", "HEAD") == source
+            assert _git(repo, "status", "--porcelain") == ""
+            assert _git(repo, "ls-remote", "origin", "refs/heads/writer").split()[0] == remote
+            assert attempts == 0
+            return
+        if case in {"second_advance", "before_fetch"}:
+            assert result.ok is False
+            assert result.value["publication_state"] == "remote_changed"
+            assert result.value["observed_remote_sha"] == advanced
+            assert _git(repo, "rev-parse", "HEAD") != source
+            assert _git(repo, "ls-remote", "origin", "refs/heads/writer").split()[0] == advanced
+            assert attempts == (0 if case == "before_fetch" else 1)
+            assert rebase.call_count == 1
+            final_receipt = manager._require_receipt(9, SourceLane.IMPLEMENTATION)
+            assert final_receipt.revision == _git(repo, "rev-parse", "HEAD")
+            assert final_receipt.generation == original.generation + 2
+            assert final_receipt.obligations == ("review",)
+            assert commits == 1
+            return
+        if case == "transient":
+            assert result.value["publication_state"] == "remote_unchanged"
+            rewritten = result.value["head_sha"]
+            assert manager._require_receipt(9, SourceLane.IMPLEMENTATION).revision == rewritten
+            retry = replace(
+                refresh,
+                kwargs={
+                    **refresh.kwargs,
+                    "writer_refresh": {
+                        "phase": "publish",
+                        "source_sha": rewritten,
+                        "expected_remote_sha": remote,
+                    },
+                },
+            )
+            result = pool._git_commit_push(retry)
+            assert attempts == 2
+            assert result.value["head_sha"] == rewritten
+        assert result.value["publication_state"] == (
+            "remote_at_source" if case == "lost" else "published"
+        )
+        assert rebase.call_count == 1
+    assert result.ok, result.error
+    assert commits == 1
+    final_receipt = manager._require_receipt(9, SourceLane.IMPLEMENTATION)
+    assert final_receipt.generation == original.generation + 2
+    assert final_receipt.obligations == ("review",)
+    head = _git(repo, "rev-parse", "HEAD")
+    assert result.value["head_sha"] == head
+    assert _git(repo, "merge-base", "--is-ancestor", remote, head) == ""
+    assert _git(repo, "ls-remote", "origin", "refs/heads/writer").split()[0] == head
+    assert (repo / "remote.txt").read_text() == "remote change\n"
+    assert (repo / "local.txt").read_text() == "local change\n"
+    commit_text = _git(repo, "cat-file", "commit", head)
+    assert "gpgsig -----BEGIN SSH SIGNATURE-----" in commit_text
+    assert "Signed-off-by: Test User <test@example.invalid>" in commit_text

@@ -814,7 +814,30 @@ class SourceWorkspaceManager:
     def implementation_publication(
         self, item_number: int, *, branch: str, path: Path
     ) -> Iterator[Callable[[str, str], WorkspaceBinding]]:
-        """Hold the lane while a host publishes and records one writer commit."""
+        """Record a controlled commit only after exact remote publication."""
+        with self.implementation_local_commit(item_number, branch=branch, path=path) as record:
+            active = True
+            consumed = False
+
+            def advance(head: str, remote_head: str) -> WorkspaceBinding:
+                nonlocal consumed
+                if not active or consumed:
+                    raise SourceWorkspaceError("implementation publication authority expired")
+                consumed = True
+                if remote_head != head:
+                    raise SourceWorkspaceError("implementation publication head changed")
+                return record(head)
+
+            try:
+                yield advance
+            finally:
+                active = False
+
+    @contextmanager
+    def implementation_local_commit(
+        self, item_number: int, *, branch: str, path: Path
+    ) -> Iterator[Callable[[str], WorkspaceBinding]]:
+        """Record one controlled local commit without claiming remote publication."""
         lane = SourceLane.IMPLEMENTATION
         with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
             original = self._require_receipt(item_number, lane)
@@ -833,7 +856,7 @@ class SourceWorkspaceManager:
             active = True
             consumed = False
 
-            def advance(head: str, remote_head: str) -> WorkspaceBinding:
+            def advance(head: str) -> WorkspaceBinding:
                 nonlocal consumed
                 if not active or consumed:
                     raise SourceWorkspaceError("implementation publication authority expired")
@@ -845,7 +868,6 @@ class SourceWorkspaceManager:
                 )
                 if (
                     re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None
-                    or remote_head != head
                     or self._read_receipt(item_number, lane) != original
                     or not self._physical_matches_receipt(successor)
                 ):

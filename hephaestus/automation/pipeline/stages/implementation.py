@@ -72,9 +72,9 @@ import secrets
 import shlex
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -152,7 +152,7 @@ from ..github_jobs import (
     ReplyJournalAppended,
     bind_delivery_request,
 )
-from ..jobs import WORKTREE_MATERIALIZED_KEY
+from ..jobs import WORKTREE_MATERIALIZED_KEY, _writer_publication_matches_refresh
 from ..reply_handoff import (
     IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP,
     IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
@@ -700,6 +700,99 @@ def _scope_retraction_kwargs(item: WorkItem) -> dict[str, object] | StageOutcome
     return {"scope_retraction_paths": paths, "scope_retraction_base_sha": base_sha}
 
 
+_COMMIT_PUSH_REFRESH = "_commit_push_refresh"
+_COMMIT_PUSH_TERMINAL = "_commit_push_terminal"
+
+
+def _valid_writer_refresh(value: object) -> bool:
+    """Accept only one exact host publication retry request."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"phase", "source_sha", "expected_remote_sha"}
+        and isinstance(value["phase"], str)
+        and value["phase"] in {"rebase", "publish"}
+        and is_full_commit_sha(value["source_sha"])
+        and is_full_commit_sha(value["expected_remote_sha"])
+    )
+
+
+def _valid_writer_publication_receipt(
+    item: WorkItem, receipt: dict[str, Any], refresh: Any
+) -> bool:
+    """Require closed facts and exact agreement with the pending retry."""
+    if not _writer_publication_matches_refresh(receipt, refresh):
+        return False
+    return DIRECT_SCOPE_RESERVATION_KEY not in item.payload and not (
+        item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY) is not None
+        and not item.payload.get("existing_pr")
+    )
+
+
+def _consume_writer_publication(item: WorkItem, result: JobResult) -> JobResult:
+    """Validate ordinary publication facts before selecting a retry."""
+    receipt = result.value if isinstance(result.value, dict) else {}
+    refresh = item.payload.get(_COMMIT_PUSH_REFRESH)
+    failure = receipt.get("writer_refresh_failure")
+    if failure is not None:
+        cause = (
+            {
+                "conflict": "commit_push_refresh_conflict",
+                "remote_changed_again": "commit_push_remote_changed_again",
+            }.get(failure, "commit_push_refresh_invalid")
+            if isinstance(failure, str)
+            else "commit_push_refresh_invalid"
+        )
+        item.payload[_COMMIT_PUSH_TERMINAL] = cause
+        return result
+    if "publication_state" not in receipt:
+        if refresh is not None or (result.error or "").startswith(
+            "source_workspace_ownership_unavailable:"
+        ):
+            item.payload[_COMMIT_PUSH_TERMINAL] = "commit_push_refresh_invalid"
+        return result
+    state = receipt.get("publication_state")
+    head = receipt.get("head_sha")
+    observed = receipt.get("observed_remote_sha")
+    success = isinstance(state, str) and state in {"published", "remote_at_source"}
+    valid = _valid_writer_publication_receipt(item, receipt, refresh) and result.ok is success
+    if not valid:
+        item.payload[_COMMIT_PUSH_TERMINAL] = "commit_push_refresh_invalid"
+        return replace(result, ok=False)
+    if success:
+        item.payload.pop(_COMMIT_PUSH_REFRESH, None)
+        item.payload.pop("git_error", None)
+        return replace(result, ok=True)
+    if state == "remote_changed":
+        if refresh is not None:
+            item.payload[_COMMIT_PUSH_TERMINAL] = "commit_push_remote_changed_again"
+        else:
+            item.payload[_COMMIT_PUSH_REFRESH] = {
+                "phase": "rebase",
+                "source_sha": head,
+                "expected_remote_sha": observed,
+            }
+    elif refresh is not None:
+        item.payload[_COMMIT_PUSH_REFRESH] = {
+            "phase": "publish",
+            "source_sha": head,
+            "expected_remote_sha": refresh["expected_remote_sha"],
+        }
+    return replace(result, ok=False)
+
+
+def _add_writer_refresh(
+    item: WorkItem, kwargs: dict[str, object], recovery: dict[str, Any]
+) -> StageOutcome | None:
+    """Copy only a valid ordinary refresh into the next Git job."""
+    if _COMMIT_PUSH_REFRESH not in item.payload:
+        return None
+    refresh = item.payload[_COMMIT_PUSH_REFRESH]
+    if not _valid_writer_refresh(refresh) or recovery or "expected_remote_sha" in kwargs:
+        return StageOutcome(Disposition.FINISH_FAIL, "commit_push_refresh_invalid")
+    kwargs["writer_refresh"] = dict(refresh)
+    return None
+
+
 def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
     """Build one commit-and-push job from validated stage-owned data."""
     issue = _issue_number(item)
@@ -755,6 +848,8 @@ def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
     if isinstance(retraction_scope, StageOutcome):
         return retraction_scope
     kwargs.update(retraction_scope)
+    if refresh_error := _add_writer_refresh(item, kwargs, recovery_kwargs):
+        return refresh_error
     push_job = GitJob(
         repo=item.repo,
         op="commit_push",
@@ -2779,6 +2874,9 @@ class ImplementationStage(Stage):
     @staticmethod
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
         """Record commit+push success, no-commit skip, or git failure."""
+        result = _consume_writer_publication(item, result)
+        if _COMMIT_PUSH_TERMINAL in item.payload:
+            return
         if result.ok:
             item.payload.pop("remediation_recovery_commit_sha", None)
             receipt = result.value if isinstance(result.value, dict) else {}
@@ -3597,6 +3695,10 @@ class ImplementationStage(Stage):
         """
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if terminal := item.payload.pop(_COMMIT_PUSH_TERMINAL, None):
+            item.payload.pop(_COMMIT_PUSH_REFRESH, None)
+            item.payload.pop("git_error", None)
+            return StageOutcome(Disposition.FINISH_FAIL, str(terminal))
         if item.payload.pop("remediation_reply_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
 
