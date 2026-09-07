@@ -40,7 +40,9 @@ if _typing.TYPE_CHECKING:
         _STANDALONE_VERDICT_LINE_RE,
         _CompatCallable,
         _compat,
+        _parse_included_http_response as _parse_included_http_response,
         _rate_budget_ok_impl,
+        _with_severity_marker as _with_severity_marker,
         annotations,
         blocked_audit_recovery_body,
         close_issue_as_covered,
@@ -89,41 +91,11 @@ from .pipeline_github_reviews import PipelineGitHubReviews
 from .pipeline_github_scope_expansion import PipelineGitHubScopeExpansion
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
-_STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
-_HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
 _IMPLEMENTATION_REPLY_BODY_RE = re.compile(
     r"(?s)\A(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->\n"
     r"<!-- hephaestus-implementation-batch:([0-9a-f]{32}) -->\Z"
 )
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
-
-
-def _parse_included_http_response(
-    stdout: str,
-) -> tuple[int | None, dict[str, Any] | None, bool]:
-    """Parse the final status and JSON object from ``gh api --include`` output.
-
-    A missing HTTP status means the CLI did not provide enough evidence to
-    classify the request. A received non-object or invalid body is explicitly
-    malformed so callers fail closed rather than treating it as transport
-    ambiguity.
-    """
-    matches = list(_HTTP_STATUS_RE.finditer(stdout))
-    if not matches:
-        return None, None, False
-    status = int(matches[-1].group(1))
-    headers_end = re.search(r"\r?\n\r?\n", stdout[matches[-1].start() :])
-    if headers_end is None:
-        return status, None, True
-    body_start = matches[-1].start() + headers_end.end()
-    body = stdout[body_start:].strip()
-    if not body:
-        return status, None, True
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError:
-        return status, None, True
-    return (status, parsed, False) if isinstance(parsed, dict) else (status, None, True)
 
 
 def rate_limit_remaining(*, timeout: int | None = None) -> tuple[int, int] | None:
@@ -177,33 +149,6 @@ def rate_budget_ok(
         return True, 0.0
     now = time.time() if now_epoch is None else now_epoch
     return False, max(0.0, reset_epoch - now + 5.0)
-
-
-def _with_severity_marker(comment: dict[str, Any]) -> str:
-    """Publish a visible reviewer prefix and durable severity marker (#1856).
-
-    An absent/unknown severity is written as ``major`` (blocking) so an
-    unclassifiable thread never silently unblocks a GO, and so the pre-#1856
-    all-blocking behavior is reproduced until the reviewer's severity is seeded.
-    """
-    sev = str(comment.get("severity") or "").strip().lower()
-    if sev not in VALID_SEVERITIES:
-        sev = "major"
-    body = str(comment.get("body") or "")
-    body = "\n".join(
-        line
-        for line in body.splitlines()
-        if not line.strip().startswith(SEVERITY_MARKER_PREFIX)
-        and not line.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
-        and not _STANDALONE_VERDICT_LINE_RE.match(line)
-    )
-    if body.startswith("[Review] "):
-        body = body.removeprefix("[Review] ")
-    paths = normalize_scope_retraction_paths(comment.get("scope_retraction_paths"))
-    markers = [f"{SEVERITY_MARKER_PREFIX} {sev} -->"]
-    if paths:
-        markers.append(scope_retraction_marker(paths))
-    return "\n".join([f"[Review] {body}", *markers])
 
 
 class PipelineGitHub(
