@@ -18,6 +18,7 @@ from hephaestus.automation.pyxis_artifact_io import (
     validate_private_capacity_root,
     validate_private_squashfs_file,
 )
+from hephaestus.config.child_environments import build_host_verification_env
 
 DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE = Path("build/host-verification/hephaestus-ci.sqsh")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -150,19 +151,19 @@ def build_pyxis_environment(*, source: Path, scratch: Path) -> dict[str, str]:
     scratch_path = scratch.expanduser().resolve()
     temporary = scratch_path / "tmp"
     cache = scratch_path / "cache"
-    return {
-        "HOME": str((scratch_path / "home").resolve()),
-        "TMPDIR": str(temporary),
-        "TMP": str(temporary),
-        "TEMP": str(temporary),
-        "XDG_CACHE_HOME": str(cache),
-        "UV_CACHE_DIR": str((cache / "uv").resolve()),
-        "UV_PROJECT_ENVIRONMENT": "/opt/hephaestus-venv",
-        "UV_OFFLINE": "1",
-        "UV_NO_SYNC": "1",
-        "PYTHONPATH": str(source_path),
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-    }
+    home = scratch_path / "home"
+    for directory in (home, temporary, cache):
+        directory.mkdir(parents=True, exist_ok=True)
+    environment = build_host_verification_env(
+        home=home,
+        temporary=temporary,
+        cache=cache,
+        runtime_environment=Path("/opt/hephaestus-venv"),
+        executable=Path("/usr/local/bin/uv"),
+    )
+    environment["PYTHONPATH"] = str(source_path)
+    environment["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    return environment
 
 
 def build_pyxis_srun_command(

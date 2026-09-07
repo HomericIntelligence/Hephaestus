@@ -94,7 +94,15 @@ Pyxis/Enroot container. The host mounts the candidate source and Git metadata
 read-only. It mounts scratch and Pi logs from an owner-private filesystem whose
 total capacity is not more than 1 GiB. Slurm enforces the CPU, memory, process,
 file-size, and wall-clock limits. The container has no network namespace and
-receives a scrubbed offline environment.
+receives a scrubbed offline environment. Home, temporary files, and tool
+caches use the disposable scratch paths. The coverage runner writes raw data
+under `build/host-coverage/`, through the writable build alias.
+
+Linux applies a process limit of 64 for the real user ID. This limit includes
+other processes and threads for that user on the submission and execution
+hosts. Use a dedicated verification account with sufficient process capacity.
+A busy account can fail to launch a check. The worker keeps the limit in force
+and reports the failure; it does not remove the limit to retry.
 
 The preparation command builds an exact committed Git tree. It exports the
 immutable local OCI image ID, not a mutable tag. It writes an owner-read-only

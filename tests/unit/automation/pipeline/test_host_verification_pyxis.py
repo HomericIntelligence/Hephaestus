@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -573,8 +574,12 @@ def test_retained_quota_binding_revalidates_the_filesystem(
         binding.close()
 
 
-def test_build_pyxis_environment_is_scrubbed_and_source_bound(tmp_path: Path) -> None:
+def test_build_pyxis_environment_is_scrubbed_and_source_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The container receives only fixed offline variables and source path."""
+    monkeypatch.delenv("LANG", raising=False)
+    monkeypatch.delenv("LC_ALL", raising=False)
     source = tmp_path / "source"
     scratch = tmp_path / "scratch"
     environment = build_pyxis_environment(source=source, scratch=scratch)
@@ -589,11 +594,32 @@ def test_build_pyxis_environment_is_scrubbed_and_source_bound(tmp_path: Path) ->
         "UV_PROJECT_ENVIRONMENT": "/opt/hephaestus-venv",
         "UV_OFFLINE": "1",
         "UV_NO_SYNC": "1",
+        "RUFF_CACHE_DIR": str((scratch / "cache" / "ruff").resolve()),
+        "COVERAGE_FILE": str((scratch / "cache" / ".coverage").resolve()),
+        "PYTHONPYCACHEPREFIX": str((scratch / "cache" / "pycache").resolve()),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTEST_ADDOPTS": "-p no:cacheprovider",
         "PYTHONPATH": str(source.resolve()),
         "PATH": "/usr/local/bin:/usr/bin:/bin",
     }
     assert "GH_TOKEN" not in environment
     assert "GITHUB_TOKEN" not in environment
+
+
+def test_build_pyxis_environment_prepares_writable_runtime_paths(tmp_path: Path) -> None:
+    """Tools can write temporary files and caches within the declared scratch."""
+    scratch = tmp_path / "scratch"
+    environment = build_pyxis_environment(source=tmp_path / "source", scratch=scratch)
+
+    for name in ("HOME", "TMPDIR", "XDG_CACHE_HOME"):
+        directory = Path(environment[name])
+        with tempfile.TemporaryFile(dir=directory) as stream:
+            stream.write(b"runtime output")
+        assert directory.is_relative_to(scratch)
+    assert Path(environment["COVERAGE_FILE"]).is_relative_to(scratch)
+    assert Path(environment["RUFF_CACHE_DIR"]).is_relative_to(scratch)
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert environment["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
 
 
 def test_linux_pyxis_receipt_requires_exact_image_digest(tmp_path: Path) -> None:
