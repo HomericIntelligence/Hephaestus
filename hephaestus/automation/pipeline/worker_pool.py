@@ -73,7 +73,7 @@ from hephaestus.agents.runtime import (
     validate_agent_execution_support,
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
-from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
+from hephaestus.agents.workspace import SourceLane, WorkspaceKind, validate_workspace_binding
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
@@ -7808,7 +7808,59 @@ class WorkerPool:
     def _git_commit_push(self, job: GitJob) -> JobResult:
         """Commit and publish while private recovery metadata remains live."""
         with ExitStack() as recovery_stack:
-            return self._git_commit_push_inner(job, recovery_stack)
+            if job.kwargs.get("source_lane") != SourceLane.IMPLEMENTATION.value:
+                return self._git_commit_push_inner(job, recovery_stack)
+            root = job.kwargs.get("repo_root")
+            issue = job.kwargs.get("issue_number")
+            path = job.kwargs.get("worktree_path")
+            branch = job.kwargs.get("branch")
+            if (
+                not isinstance(root, str)
+                or not Path(root).is_absolute()
+                or isinstance(issue, bool)
+                or not isinstance(issue, int)
+                or not isinstance(path, (str, Path))
+                or not Path(path).is_absolute()
+                or not isinstance(branch, str)
+                or not branch
+                or job.op != "commit_push"
+                or "expected_recovery_head" in job.kwargs
+            ):
+                return JobResult(
+                    ok=False,
+                    error="source_workspace_ownership_unavailable: publication binding invalid",
+                )
+            manager = SourceWorkspaceManager(
+                Path(root),
+                repository=job.repo or job.transport_repository,
+                base_dir=Path(root) / "build" / ".worktrees",
+            )
+            try:
+                advance = recovery_stack.enter_context(
+                    manager.implementation_publication(issue, branch=branch, path=Path(path))
+                )
+                result = self._git_commit_push_inner(job, recovery_stack)
+                if not result.ok:
+                    return result
+                head = result.value.get("head_sha") if isinstance(result.value, dict) else None
+                if not isinstance(head, str):
+                    raise SourceWorkspaceError("implementation publication head is unavailable")
+                remote_head = self._read_remote_branch_head(
+                    Path(path),
+                    remote="origin",
+                    branch=branch,
+                    expected_repo=job.transport_repository,
+                    timeout=job.timeout_s,
+                )
+                if not isinstance(remote_head, str):
+                    raise SourceWorkspaceError("implementation publication remote is unavailable")
+                advance(head, remote_head)
+                return result
+            except (SourceWorkspaceError, OSError, subprocess.SubprocessError):
+                return JobResult(
+                    ok=False,
+                    error="source_workspace_ownership_unavailable: publication binding invalid",
+                )
 
     def _git_commit_push_inner(  # noqa: C901
         self,
