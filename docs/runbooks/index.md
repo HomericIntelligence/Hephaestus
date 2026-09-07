@@ -17,6 +17,7 @@ needs operator action.
 | [Pi rollout and recovery](pi-rollout.md) | You need to enable, verify, omit, or recover the managed Pi provider. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
 | [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0013). |
+| [Recover the local CI Podman machine](local-ci-podman.md) | The macOS local CI runner cannot connect to Podman and uses the native fallback. |
 | [Compacting issue timelines](compact-issue-timelines.md) | An upgraded release appended plan/review history to linked issues and you want to migrate that history off the issue timeline. |
 
 ## Before you start
