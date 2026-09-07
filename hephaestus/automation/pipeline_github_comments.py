@@ -21,7 +21,12 @@ from hephaestus.automation.requirements_recovery import (
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
-from .review_journal import has_exact_leading_marker
+from .review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    has_exact_leading_marker,
+    normalize_issue_comments,
+)
 
 
 def _validate_shared_planning_identities(
@@ -182,11 +187,20 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
 
         def select(
             comments: list[dict[str, Any]],
-        ) -> RecoveryCommentSelection[dict[str, Any]] | None:
+        ) -> RecoveryCommentSelection[IssueComment] | None:
+            try:
+                normalized = normalize_issue_comments(
+                    comments,
+                    viewer_login=self._viewer_login(),
+                )
+            except CommentJournalReadError as exc:
+                raise RecoveryCommentIdentityError(
+                    f"recovery comment journal is not correct: {exc}"
+                ) from exc
             return select_recovery_comment(
-                comments,
-                body_of=lambda comment: str(comment.get("body", "")),
-                owned_of=self._comment_owned_by_viewer,
+                normalized,
+                body_of=lambda comment: comment.body,
+                owned_of=lambda comment: comment.viewer_did_author,
             )
 
         outgoing = select_recovery_comment(
@@ -196,7 +210,7 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         )
         if outgoing is None:
             raise RecoveryCommentIdentityError(
-                "recovery comment body did not contain a valid provenance marker"
+                "recovery comment body did not contain a correct provenance marker"
             )
         if self._skip(f"upsert {RECOVERY_PROVENANCE_PREFIX!r} comment on #{issue_number}"):
             return
@@ -205,18 +219,18 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         if target is None:
             self._post_issue_comment(issue_number, body)
             target = select(self._repo_issue_comments(issue_number))
-            if target is None or str(target.comment.get("body", "")) != body:
+            if target is None or target.comment.body != body:
                 raise RecoveryCommentIdentityError(
-                    f"created recovery comment on #{issue_number} was not confirmed"
+                    f"The recovery comment readback for #{issue_number} "
+                    "did not show the specified body"
                 )
 
-        target_id = target.comment.get("databaseId")
+        target_id = target.comment.database_id
         if target_id is None:
             raise RecoveryCommentIdentityError(
                 f"recovery comment on #{issue_number} has no database id"
             )
-        target_id = int(target_id)
-        if str(target.comment.get("body", "")) != body:
+        if target.comment.body != body:
             owner, name = (
                 self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
             )
@@ -224,11 +238,12 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             confirmed = select(self._repo_issue_comments(issue_number))
             if (
                 confirmed is None
-                or confirmed.comment.get("databaseId") != target_id
-                or str(confirmed.comment.get("body", "")) != body
+                or confirmed.comment.database_id != target_id
+                or confirmed.comment.body != body
             ):
                 raise RecoveryCommentIdentityError(
-                    f"updated recovery comment {target_id} on #{issue_number} was not confirmed"
+                    f"The recovery comment readback did not show the update "
+                    f"for comment {target_id} on #{issue_number}"
                 )
 
     def _post_issue_comment(self, issue_number: int, body: str) -> None:

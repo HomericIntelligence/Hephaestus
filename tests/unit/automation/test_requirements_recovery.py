@@ -352,7 +352,7 @@ def test_provenance_round_trip_binds_all_three_digests() -> None:
 
 
 def _recovery_body(version: int = 3) -> str:
-    """Return a valid recovery body for selector tests."""
+    """Return a correct recovery body for selector tests."""
     body = render_recovered_requirements(
         "source requirements",
         "recovered requirements",

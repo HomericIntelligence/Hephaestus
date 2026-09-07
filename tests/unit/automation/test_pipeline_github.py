@@ -68,7 +68,7 @@ _BATCH_NONCE = "b" * 32
 
 
 def _recovery_body(version: int = 3) -> str:
-    """Return a valid versioned recovery body for upsert tests."""
+    """Return a correct versioned recovery body for upsert tests."""
     if version < 3:
         body = render_recovered_requirements("source", "recovered", "b" * 64)
         return body.replace(":v=2:", f":v={version}:", 1) if version == 1 else body
@@ -81,33 +81,31 @@ def _recovery_body(version: int = 3) -> str:
     )
 
 
+def _recovery_comment(
+    body: object,
+    *,
+    comment_id: object = 2,
+    login: str = "hephaestus-bot",
+) -> dict[str, object]:
+    """Return production-shaped REST metadata for one recovery comment."""
+    return {"id": comment_id, "body": body, "user": {"login": login}}
+
+
 def _recovery_conflict(
     body: str,
     kind: str,
 ) -> list[dict[str, object]]:
     """Build one post-write recovery identity conflict."""
     if kind == "foreign":
-        return [{"body": body, "databaseId": 2, "viewerDidAuthor": False}]
+        return [_recovery_comment(body, login="another-user")]
     if kind == "malformed":
-        return [
-            {
-                "body": body.replace(":v=3:", ":v=9:", 1),
-                "databaseId": 2,
-                "viewerDidAuthor": True,
-            }
-        ]
+        return [_recovery_comment(body.replace(":v=3:", ":v=9:", 1))]
     if kind == "repeated":
         marker = body.split("\n", 1)[0]
-        return [
-            {
-                "body": f"{body}\n\n{marker}\n\nrepeated",
-                "databaseId": 2,
-                "viewerDidAuthor": True,
-            }
-        ]
+        return [_recovery_comment(f"{body}\n\n{marker}\n\nrepeated")]
     return [
-        {"body": body, "databaseId": 2, "viewerDidAuthor": True},
-        {"body": body, "databaseId": 3, "viewerDidAuthor": True},
+        _recovery_comment(body),
+        _recovery_comment(body, comment_id=3),
     ]
 
 
@@ -4264,6 +4262,7 @@ class TestMutatorMapping:
         conflict: str,
     ) -> None:
         """A recovery create conflict stops without cleanup or a second write."""
+        adapter._viewer_login_cache = "hephaestus-bot"
         body = _recovery_body()
         fetch = MagicMock(side_effect=[[], _recovery_conflict(body, conflict)])
         post = MagicMock()
@@ -4286,9 +4285,10 @@ class TestMutatorMapping:
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A recovery create requires one actor-owned exact-body readback with an ID."""
+        """A recovery create can use only one actor-owned exact-body readback with an ID."""
+        adapter._viewer_login_cache = "hephaestus-bot"
         body = _recovery_body()
-        created = {"body": body, "databaseId": 73, "viewerDidAuthor": True}
+        created = _recovery_comment(body, comment_id=73)
         fetch = MagicMock(side_effect=[[], [created]])
         post = MagicMock()
         patch_comment = MagicMock()
@@ -4312,11 +4312,12 @@ class TestMutatorMapping:
         monkeypatch: pytest.MonkeyPatch,
         conflict: str,
     ) -> None:
-        """A recovery update conflict preserves the selected stable comment ID."""
+        """A recovery update conflict keeps the selected stable comment ID."""
         adapter.repo = "repo"
+        adapter._viewer_login_cache = "hephaestus-bot"
         old_body = _recovery_body(version=2)
         new_body = _recovery_body()
-        old = {"body": old_body, "databaseId": 1, "viewerDidAuthor": True}
+        old = _recovery_comment(old_body, comment_id=1)
         fetch = MagicMock(side_effect=[[old], _recovery_conflict(new_body, conflict)])
         post = MagicMock()
         patch_comment = MagicMock()
@@ -4332,6 +4333,75 @@ class TestMutatorMapping:
         post.assert_not_called()
         patch_comment.assert_called_once_with(1, new_body, repo=("org", "repo"))
         delete_comment.assert_not_called()
+
+    def test_recovery_update_preserves_comment_id_across_version_migration(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The pipeline adapter updates a v1 recovery comment in place to v3."""
+        adapter.repo = "repo"
+        adapter._viewer_login_cache = "hephaestus-bot"
+        old_body = _recovery_body(version=1)
+        new_body = _recovery_body()
+        old = _recovery_comment(old_body, comment_id=17)
+        updated = _recovery_comment(new_body, comment_id=17)
+        fetch = MagicMock(side_effect=[[old], [updated]])
+        post = MagicMock()
+        patch_comment = MagicMock()
+        delete_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
+
+        adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, new_body)
+
+        assert fetch.call_args_list == [call(5), call(5)]
+        post.assert_not_called()
+        patch_comment.assert_called_once_with(17, new_body, repo=("org", "repo"))
+        delete_comment.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "comment",
+        [
+            _recovery_comment(None),
+            _recovery_comment(_recovery_body(), comment_id="not-an-integer"),
+            _recovery_comment(_recovery_body(), comment_id=True),
+            _recovery_comment(_recovery_body(), comment_id=1.5),
+            _recovery_comment(_recovery_body(), comment_id=0),
+            _recovery_comment(_recovery_body(), comment_id=-1),
+            {"id": 2, "body": _recovery_body(), "user": {}},
+        ],
+        ids=[
+            "body",
+            "database-id-text",
+            "database-id-bool",
+            "database-id-fraction",
+            "database-id-zero",
+            "database-id-negative",
+            "author",
+        ],
+    )
+    def test_recovery_upsert_rejects_malformed_rest_metadata_before_mutation(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        comment: dict[str, object],
+    ) -> None:
+        """A REST journal with missing data cannot authorize a recovery mutation."""
+        adapter._viewer_login_cache = "hephaestus-bot"
+        post = MagicMock()
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", MagicMock(return_value=[comment]))
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+
+        with pytest.raises(RuntimeError, match=r"comment|journal|database|author|body"):
+            adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, _recovery_body())
+
+        post.assert_not_called()
+        patch_comment.assert_not_called()
 
     def test_upsert_rejects_foreign_canonical_marker_without_shadow_comment(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
