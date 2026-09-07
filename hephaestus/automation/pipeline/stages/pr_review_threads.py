@@ -359,6 +359,8 @@ def _clear_round_review_state(item: WorkItem) -> None:
     for key in _ROUND_PAYLOAD_KEYS:
         item.payload.pop(key, None)
     item.payload.pop("reviewed_pr_head_sha", None)
+    item.payload.pop("reviewed_pr_node_id", None)
+    item.payload.pop("pr_node_id", None)
     item.payload.pop("pr_diff", None)
     item.payload.pop("review_changed_paths", None)
 
@@ -373,12 +375,7 @@ def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
     answer. An unfenced response must be exactly one JSON object. Returns None
     when the final verdict does not parse — callers fail closed.
 
-    Args:
-        raw: The validation job's stored output (str, dict, or anything).
-
-    Returns:
-        The parsed verdict dict, or None when unparseable/absent.
-
+    Return the parsed verdict dict, or None if parsing fails.
     """
     if isinstance(raw, dict):
         return raw

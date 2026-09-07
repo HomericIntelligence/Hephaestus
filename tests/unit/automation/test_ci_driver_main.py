@@ -238,3 +238,25 @@ def test_literal_claude_model_reaches_pipeline_configuration(model: str) -> None
     )
     assert captured["rc"] == 0
     assert captured["config"].reviewer_model == model
+
+
+def test_ci_wrapper_forwards_codex_writer_isolation(tmp_path: Path) -> None:
+    """Review remediation receives the operator's exact Codex adapter inputs."""
+    lock = tmp_path / "deployment-lock.json"
+    config = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--implementer-agent",
+            "codex",
+            "--codex-isolation-adapter",
+            "test-adapter",
+            "--codex-isolation-deployment-lock",
+            str(lock),
+            "--codex-isolation-deployment-lock-sha256",
+            "a" * 64,
+        ]
+    )["config"]
+    assert config.codex_isolation_adapter == "test-adapter"
+    assert config.codex_isolation_deployment_lock == lock
+    assert config.codex_isolation_deployment_lock_sha256 == "a" * 64

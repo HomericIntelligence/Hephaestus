@@ -810,6 +810,81 @@ class SourceWorkspaceManager:
                 raise SourceWorkspaceError(str(exc)) from exc
         return binding
 
+    @contextmanager
+    def implementation_publication(
+        self, item_number: int, *, branch: str, path: Path
+    ) -> Iterator[Callable[[str, str], WorkspaceBinding]]:
+        """Record a controlled commit only after exact remote publication."""
+        with self.implementation_local_commit(item_number, branch=branch, path=path) as record:
+            active = True
+            consumed = False
+
+            def advance(head: str, remote_head: str) -> WorkspaceBinding:
+                nonlocal consumed
+                if not active or consumed:
+                    raise SourceWorkspaceError("implementation publication authority expired")
+                consumed = True
+                if remote_head != head:
+                    raise SourceWorkspaceError("implementation publication head changed")
+                return record(head)
+
+            try:
+                yield advance
+            finally:
+                active = False
+
+    @contextmanager
+    def implementation_local_commit(
+        self, item_number: int, *, branch: str, path: Path
+    ) -> Iterator[Callable[[str], WorkspaceBinding]]:
+        """Record one controlled local commit without claiming remote publication."""
+        lane = SourceLane.IMPLEMENTATION
+        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+            original = self._require_receipt(item_number, lane)
+            self._reject_foreign_owner(original, item_number, lane)
+            if (
+                original.detached
+                or original.branch != branch
+                or original.path != self._implementation_path(item_number)
+                or path != original.path
+                or path.is_symlink()
+                or not self._path_is_registered_to_repository(path)
+                or self._head_branch(path) != f"refs/heads/{branch}"
+                or self._head_revision(path) != original.revision
+            ):
+                raise SourceWorkspaceError("implementation publication binding changed")
+            active = True
+            consumed = False
+
+            def advance(head: str) -> WorkspaceBinding:
+                nonlocal consumed
+                if not active or consumed:
+                    raise SourceWorkspaceError("implementation publication authority expired")
+                consumed = True
+                successor = replace(
+                    original,
+                    revision=head,
+                    generation=original.generation + (head != original.revision),
+                )
+                if (
+                    re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None
+                    or self._read_receipt(item_number, lane) != original
+                    or not self._physical_matches_receipt(successor)
+                ):
+                    raise SourceWorkspaceError("implementation publication head changed")
+                if successor != original:
+                    self._write_receipt(successor)
+                if self._read_receipt(
+                    item_number, lane
+                ) != successor or not self._physical_matches_receipt(successor):
+                    raise SourceWorkspaceError("implementation publication receipt changed")
+                return self._binding(successor)
+
+            try:
+                yield advance
+            finally:
+                active = False
+
     def authorize_direct_implementation_writer_transition(
         self,
         item_number: int,

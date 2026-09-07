@@ -1442,6 +1442,14 @@ An ambiguous crash-left claim becomes terminal `failed` with
 `outcome_unknown`; it is not submitted twice. Learning failure is ancillary
 and cannot change a confirmed main result.
 
+Dependency preparation runs frozen synchronization and package checks in a
+private source export. The final sandbox command runs the prepared
+environment's absolute Python interpreter with `scripts/validate_plugins.py`
+from the candidate directory. It does not run `uv` or discover parent projects.
+Input, artifact, and runtime checks remain mandatory before and after
+validation. The sandbox denies network access to the validator and its
+children and permits writes only in scratch space.
+
 A live claim held by another process ejects the duplicate item. The owner keeps
 the claim, the main result, and the cleanup obligation. A terminal learning
 record stays recoverable until `finished` records a bounded cleanup result.
@@ -1902,7 +1910,14 @@ Each role model overrides `--model`, even when the role selects a different
 tool. Omitted models use the selected tool's configured default. Model names
 are literal strings. Hephaestus has no model catalog, alias translation, or
 model-tier assignment. `--fallback-model` is explicit and does not inherit
-`--model`. See [ADR-0042](adr/0042-independent-tool-model-selection.md).
+`--model`. See [ADR-0044](adr/0044-independent-tool-model-selection.md).
+
+When a Codex implementation adapter is selected, its private configuration
+supplies omitted model and effort defaults. It does not import ambient Codex
+configuration. Without an adapter, the native runner uses its configured
+defaults. Supply model and effort explicitly when both paths must use the same
+selection. See [ADR-0042](adr/0042-codex-implementation-process-boundary.md) and
+[ADR-0043](adr/0043-optional-codex-adapter-until-production-ready.md).
 
 The default pipeline accepts `--loops`, `--parallel-repos`, and the staged
 `--issue-limit` selector, which advances 1 → 2 → 4 → 8 → all only after the
@@ -2144,7 +2159,21 @@ Exit-code priority is:
   to retry one exact pre-work unsupported-effort rejection without the effort.
   See [ADR-0036](adr/0036-free-form-model-effort-selection.md).
 - **Review posture** — the falsification-first rubric prefix [`REVIEW POSTURE`](../hephaestus/prompts/templates/default/review_rubrics/reviewer.j2); combined with anti-inflation grading rules, the max grade is `C` for any dimension the reviewer did not actively attempt to falsify (#2302).
-- **Push retry** — [`_git_retry(item, "commit_push failed")`](../hephaestus/automation/pipeline/stages/implementation.py) re-attempts a transient push before PR_CREATE; the retry is budget-untouched so the next `implement` attempt remains available (#2274).
+- **Push retry** — The ordinary writer records its local tracking head before
+  publication. After a failed push, an authenticated remote probe classifies
+  the result. A remote head equal to the local source proves publication
+  (`remote_at_source`). An unchanged remote or failed probe permits the existing
+  bounded transient retry without using the implementation budget. A first
+  confirmed remote change permits one signed rebase onto that exact remote
+  head, followed by an exact-lease push. The host checks the original edit
+  scope before rebase and the same allowed paths against the accepted remote
+  base after rebase. Later transient retries publish only the same rewritten
+  commit. A conflict or second remote change stops the item before PR creation
+  and preserves the failed writer. The source-lane receipt records controlled
+  local commits under its ownership lock, including commits whose publication
+  failed. This local ownership record does not prove remote publication.
+  Receipt uncertainty stops retry. Direct-scope reservation publication retains
+  its existing ownership pin and does not use this refresh path.
 
 - **Review-thread GO gate** — every unresolved review thread, regardless of
  severity marker, prevents a `pr_review` round from advancing. Severity

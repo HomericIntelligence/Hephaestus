@@ -54,4 +54,6 @@ numbered, and listed here.
 | [0039](0039-policy-selected-server-merge-route.md) | Policy-selected server merge route | Accepted |
 | [0040](0040-detached-default-branch-planning-source.md) | Detached default-branch source for planning | Accepted |
 | [0041](0041-versioned-recovery-comment-identity.md) | Versioned recovery-comment identity | Accepted |
-| [0042](0042-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |
+| [0042](0042-codex-implementation-process-boundary.md) | Fail-closed Codex implementation adapter | Mandatory selection superseded by 0043 |
+| [0043](0043-optional-codex-adapter-until-production-ready.md) | Optional Codex adapter until production readiness | Accepted |
+| [0044](0044-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |

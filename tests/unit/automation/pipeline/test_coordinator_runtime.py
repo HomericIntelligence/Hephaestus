@@ -54,12 +54,33 @@ def test_publish_lease_failure_has_specific_durable_error_class() -> None:
             "agent_error",
             id="agent-execution",
         ),
+        pytest.param(
+            "agent_error: codex_tool_or_provider_failure: mcp_tool_call status=failed",
+            "codex_tool_or_provider_failure",
+            id="codex-tool-or-provider-failure",
+        ),
+        pytest.param(
+            "agent_error: unknown_provider_failure: secret-token-value",
+            "agent_error",
+            id="unknown-provider-failure",
+        ),
+        pytest.param(
+            "agent_error: codex_tool_or_provider_failure secret-token-value",
+            "agent_error",
+            id="provider-failure-without-delimiter",
+        ),
         pytest.param("parse failed: ValueError", "parse_error", id="agent-output-parser"),
         pytest.param("review-session-lost", "session_lost", id="lost-session"),
         pytest.param(
             "host_verification_failed: sandbox unavailable",
             "host_verification",
             id="host-verification",
+        ),
+        pytest.param(
+            "source_workspace_ownership_unavailable: "
+            "implementation writer branch is an unowned existing branch",
+            "source_workspace_ownership_unavailable",
+            id="source-workspace-ownership-unavailable",
         ),
         pytest.param("rc=75", "process_exit", id="subprocess-exit"),
         pytest.param(
@@ -92,6 +113,7 @@ def test_specific_worker_error_class_precedes_generic_failure_kind() -> None:
 @pytest.mark.parametrize(
     "error",
     [
+        "source_workspace_ownership_unavailable secret-token-value",
         "unexpected failure",
         "provider returned secret-token-value",
         "checkout /private/operator/path is dirty",

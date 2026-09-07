@@ -3,6 +3,7 @@
 import json
 import subprocess
 
+from .github_api.graphql import reviewed_pr_state_query
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 from .remediation_recovery import REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES
@@ -475,7 +476,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                     "view",
                     str(pr_number),
                     "--json",
-                    "title,body,headRefOid,baseRefOid,baseRefName",
+                    "id,title,body,headRefOid,baseRefOid,baseRefName",
                 ]
             )
             body_data = json.loads(body_result.stdout or "{}")
@@ -501,6 +502,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         ):
             return None
         return {
+            **({"pr_node_id": body_data["id"]} if isinstance(body_data.get("id"), str) else {}),
             "pr_title": github_api.strip_null_bytes(title),
             "pr_description": github_api.strip_null_bytes(body),
             "pr_head_sha": head,
@@ -593,20 +595,18 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         """Return complete current snapshots for every unresolved review thread."""
         return self._unresolved_threads(pr_number)
 
-    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Read shared PR state for seed, implementation, and merge_wait.
+    def reviewed_pr_state(self, pull_request_id: str) -> dict[str, Any] | None:
+        """Read one PR node through the validated GraphQL transport."""
+        try:
+            return self._graphql(reviewed_pr_state_query(pull_request_id), id=pull_request_id)
+        except (subprocess.SubprocessError, RuntimeError, OSError, ValueError):
+            return None
 
-        One ``gh pr view`` returns the PR node ID, head and base OIDs,
-        lifecycle state, base name, and native auto-merge state. ``None``
-        signals a read failure.
-        Seed and implementation paths use the result for terminal-state
-        checks before branch adoption or label routing, while pr_review and
-        merge_wait use it to bind and verify a reviewed head on a confirmed,
-        unarmed PR. It deliberately excludes
-        GitHub merge-readiness and check-status fields: this accessor does not
-        use CI/CD as structural-review authorization, and no queue stage uses
-        it to mutate or poll auto-merge. The separate
-        :meth:`required_checks_pass_for_head` method is the final merge gate.
+    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+        """Read PR identity, revisions, lifecycle, base, and native auto-merge state.
+
+        Return None if the read fails. This record supplies structural review
+        evidence, not merge authority. Required checks use a separate read.
         """
         try:
             result = self._gh(

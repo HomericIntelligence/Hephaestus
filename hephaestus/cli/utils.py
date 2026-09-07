@@ -254,7 +254,13 @@ def resolve_repo_root(args: argparse.Namespace) -> Path:
     return args.repo_root if args.repo_root is not None else get_repo_root()
 
 
-def configure_cli_logging(*, verbose: bool = False, log_format: str = "text") -> None:
+def configure_cli_logging(
+    *,
+    verbose: bool = False,
+    log_format: str = "text",
+    quiet: bool = False,
+    log_file: str | None = None,
+) -> None:
     """Configure standard stderr-safe logging for a ``hephaestus-*`` CLI.
 
     Centralizes the logging setup boilerplate repeated across
@@ -264,13 +270,16 @@ def configure_cli_logging(*, verbose: bool = False, log_format: str = "text") ->
     Args:
         verbose: When True, set the root level to ``DEBUG``; otherwise ``INFO``.
         log_format: ``"text"`` for standard logs or ``"json"`` for structured logs.
+        quiet: Use WARNING level, including when verbose is true.
+        log_file: File destination. Omit console output when set.
 
     """
     setup_logging(
-        level=logging.DEBUG if verbose else logging.INFO,
+        level=logging.WARNING if quiet else logging.DEBUG if verbose else logging.INFO,
+        log_file=log_file,
         format_string=AUTOMATION_LOG_FORMAT,
         datefmt=LOG_DATEFMT,
-        primary_stream="stderr",
+        primary_stream=None if log_file else "stderr",
         json_format=log_format == "json",
     )
 

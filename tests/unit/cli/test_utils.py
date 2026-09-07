@@ -250,6 +250,31 @@ class TestConfigureCliLogging:
         assert "cli parser warning" in messages
         assert "cli parser error" in messages
 
+    @pytest.mark.parametrize("log_format", ["text", "json"])
+    @pytest.mark.parametrize(
+        ("quiet", "verbose", "level"),
+        [(False, False, 20), (False, True, 10), (True, False, 30), (True, True, 30)],
+    )
+    def test_file_destination_and_level_options(
+        self,
+        log_format: str,
+        quiet: bool,
+        verbose: bool,
+        level: int,
+    ) -> None:
+        """Keep format independent of the file destination and level."""
+        with patch("hephaestus.cli.utils.setup_logging") as setup:
+            configure_cli_logging(
+                quiet=quiet,
+                verbose=verbose,
+                log_format=log_format,
+                log_file="exact.log",
+            )
+        assert setup.call_args.kwargs["level"] == level
+        assert setup.call_args.kwargs["log_file"] == "exact.log"
+        assert setup.call_args.kwargs["primary_stream"] is None
+        assert setup.call_args.kwargs["json_format"] == (log_format == "json")
+
     def test_default_uses_info_level(self) -> None:
         """Without verbose, setup_logging is called at INFO level."""
         with patch("hephaestus.cli.utils.setup_logging") as setup:

@@ -31,6 +31,8 @@ _DURABLE_ERROR_CLASSES = {
     "review-session-lost": "session_lost",
 }
 _DURABLE_ERROR_PREFIXES = (
+    ("source_workspace_ownership_unavailable:", "source_workspace_ownership_unavailable"),
+    ("agent_error: codex_tool_or_provider_failure:", "codex_tool_or_provider_failure"),
     ("agent_error:", "agent_error"),
     ("parse failed:", "parse_error"),
     ("host_verification_", "host_verification"),

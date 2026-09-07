@@ -474,6 +474,10 @@ class StageGitHub(Protocol):
 
     # -- merge_wait surface (#1816) ------------------------------------------
 
+    def reviewed_pr_state(self, pull_request_id: str) -> dict[str, Any] | None:
+        """Read terminal state by the captured review node identity."""
+        ...
+
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Read shared PR state for seed, stage, and merge decisions.
 
@@ -860,6 +864,33 @@ def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJo
         },
         descr=descr,
     )
+
+
+def _reviewed_terminal_pr_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+    """Finish only from a terminal record for the exact dispatched review."""
+    node_id = item.payload.get("reviewed_pr_node_id")
+    head = item.payload.get("reviewed_pr_head_sha")
+    if not isinstance(node_id, str) or not node_id or not isinstance(head, str):
+        return None
+    if len(head) != 40 or any(char not in "0123456789abcdef" for char in head):
+        return None
+    if item.pr is None:
+        return None
+    try:
+        state = ctx.github.reviewed_pr_state(node_id)
+    except Exception:
+        return None
+    if not isinstance(state, dict) or state.get("id") != node_id or state.get("headRefOid") != head:
+        return None
+    if (
+        state.get("state") == "MERGED"
+        and isinstance(state.get("mergedAt"), str)
+        and state["mergedAt"]
+    ):
+        return StageOutcome(Disposition.FINISH_PASS, "merged")
+    if state.get("state") == "CLOSED" and "mergedAt" in state and state["mergedAt"] is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "closed")
+    return None
 
 
 def _terminal_pr_outcome(pr_state: dict[str, Any] | None, pr_number: int) -> StageOutcome | None:

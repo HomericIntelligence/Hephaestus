@@ -61,6 +61,11 @@ through installed `hephaestus-*` console scripts.
   autonomous queue always passes it. Linked-worktree Git metadata
   is mounted read-only so versioning and Git-aware scans inspect the candidate
   commit. `just`, ShellCheck, and Bats all run in the pinned CI image.
+  The host must supply `python3` and `zstd` on `PATH`. The `build` subset uses
+  these tools to provision and extract the fixed Codex artifact before it
+  starts the network-free test container.
+- **`provision_codex_sigstore_fixture.py`** — Provision and validate the fixed
+  offline Codex release evidence for the required artifact test lane.
 
 ### Disaster recovery
 

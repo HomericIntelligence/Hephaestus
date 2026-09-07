@@ -318,6 +318,13 @@ The package currently installs 58 console scripts from `[project.scripts]`.
 
 ### Automation
 
+Codex implementation uses the native direct runner when no isolation adapter
+is selected. This temporary path uses shared host state in `HOME/.codex`.
+An explicit adapter selection still requires complete, valid deployment
+evidence and never falls back after failure. See
+[ADR-0043](docs/adr/0043-optional-codex-adapter-until-production-ready.md) and
+[the production adapter issue](https://github.com/HomericIntelligence/Hephaestus/issues/3062).
+
 | Command | Description |
 |---|---|
 | `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code, Codex, or an explicitly admitted Pi host adapter (repo → planning → plan_review → implementation → pr_review → merge_wait → finished; restarted implementation-GO inputs re-enter `merge_wait` with their loop-owned approval label) |

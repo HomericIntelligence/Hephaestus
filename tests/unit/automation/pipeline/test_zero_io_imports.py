@@ -40,7 +40,14 @@ _FORBIDDEN_PREFIXES = (
 # These closed worker-side modules execute I/O. The main pool owns general
 # jobs. The auxiliary pool owns host learning and cleanup only. git_cleanup
 # is the shared low-level implementation of its two accepted Git operations.
-_ALLOWLIST = frozenset({"auxiliary_worker_pool.py", "git_cleanup.py", "worker_pool.py"})
+_ALLOWLIST = frozenset(
+    {
+        "auxiliary_worker_pool.py",
+        "codex_worktree_boundary.py",
+        "git_cleanup.py",
+        "worker_pool.py",
+    }
+)
 
 # Capability-scoped exemptions: seeding.py and admission.py are the sanctioned
 # "thin fetch over github_api" layer (epic #1809 PR-4): they READ GitHub facts

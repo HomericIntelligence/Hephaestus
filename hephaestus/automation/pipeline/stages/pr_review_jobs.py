@@ -26,7 +26,7 @@ from ..github_jobs import (
     ReplyHandoffAttempted,
 )
 from ..summary import record_review_run
-from .base import source_workspace_binding, stage_timeout
+from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
@@ -64,6 +64,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         """
         if item.pr is not None:
             item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop("reviewed_pr_node_id", None)
             arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
             if arm_outcome is not None:
                 return arm_outcome
@@ -114,6 +115,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if scope_retraction_paths:
             item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
             item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop("reviewed_pr_node_id", None)
             return None
 
         item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
@@ -174,6 +176,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             # bound.  The normal checkout path obtains the only valid clean
             # review proof; do not reuse this negative-only head binding.
             item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop("reviewed_pr_node_id", None)
             item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
             return None
         snapshots = _validation_thread_snapshots(live_threads, receipts)
@@ -296,6 +299,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift"),
             )
         item.payload["reviewed_pr_head_sha"] = expected_head
+        item.payload["reviewed_pr_node_id"] = item.payload.get("pr_node_id")
         prior_generation = item.payload.get("reviewed_pr_proof_generation", 0)
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
             prior_generation = 0
@@ -495,6 +499,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             )
             pr_context = ctx.github.pr_review_context(item.pr)
         except Exception as error:
+            if terminal := _reviewed_terminal_pr_outcome(item, ctx):
+                return terminal
             logger.warning(
                 "pr_review:%s: could not fetch validation receipts (%s)",
                 item.issue,
@@ -911,6 +917,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 # Preserve the existing no-commit gate while requiring it to
                 # re-confirm the unchanged remote head before a negative write.
                 item.payload.pop("reviewed_pr_head_sha", None)
+                item.payload.pop("reviewed_pr_node_id", None)
             item.payload["push_no_commit"] = not produced_commit
             return
         if is_review_result and result.value is not None:

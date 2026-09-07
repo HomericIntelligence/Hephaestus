@@ -265,6 +265,9 @@ class LoopConfig:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    codex_isolation_adapter: str | None = None
+    codex_isolation_deployment_lock: Path | None = None
+    codex_isolation_deployment_lock_sha256: str | None = None
     issues: list[int] = field(default_factory=list)
     reset_plan_review_session: bool = False
     prs: list[int] = field(default_factory=list)
@@ -799,8 +802,24 @@ def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) ->
 # ---------------------------------------------------------------------------
 
 
-def _setup_logging(verbose: bool, log_format: str = "text") -> None:
-    configure_cli_logging(verbose=verbose, log_format=log_format)
+def _setup_logging(
+    verbose: bool,
+    log_format: str = "text",
+    *,
+    quiet: bool = False,
+    log_file: str | None = None,
+) -> None:
+    try:
+        configure_cli_logging(
+            verbose=verbose,
+            log_format=log_format,
+            quiet=quiet,
+            log_file=log_file,
+        )
+    except OSError as exc:
+        raise SystemExit(
+            f"Cannot open log file {log_file!r}: {exc}. Check the parent directory and permissions."
+        ) from exc
 
 
 def _resolve_org_and_repos(
@@ -943,6 +962,9 @@ def _build_pipeline_config(
         auth_status_timeout=cfg.auth_status_timeout,
         pi_isolation_adapter=cfg.pi_isolation_adapter,
         pi_dir=cfg.pi_dir,
+        codex_isolation_adapter=cfg.codex_isolation_adapter,
+        codex_isolation_deployment_lock=cfg.codex_isolation_deployment_lock,
+        codex_isolation_deployment_lock_sha256=cfg.codex_isolation_deployment_lock_sha256,
         model=cfg.model,
         planner_agent=cfg.planner_agent,
         implementer_agent=cfg.implementer_agent,
@@ -1098,7 +1120,12 @@ def main(argv: list[str] | None = None) -> int:
     """Console-script entry point. Returns the process exit code."""
     args = _parse_args(argv)
     configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose, args.log_format)
+    _setup_logging(
+        args.verbose,
+        args.log_format,
+        quiet=args.quiet,
+        log_file=args.log_file,
+    )
     phases = _validate_phases(args.phases)
     active_roles = tuple(
         role
@@ -1150,6 +1177,9 @@ def main(argv: list[str] | None = None) -> int:
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
         pi_dir=args.pi_dir,
+        codex_isolation_adapter=args.codex_isolation_adapter,
+        codex_isolation_deployment_lock=args.codex_isolation_deployment_lock,
+        codex_isolation_deployment_lock_sha256=args.codex_isolation_deployment_lock_sha256,
         issues=args.issues or [],
         reset_plan_review_session=args.reset_plan_review_session,
         prs=args.prs or [],

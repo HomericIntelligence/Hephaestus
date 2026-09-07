@@ -1,4 +1,4 @@
-# ADR-0042: Independent tool and model selection
+# ADR-0044: Independent tool and model selection
 
 - Status: Accepted
 - Date: 2026-09-07
@@ -21,6 +21,12 @@ provider's effort transport. Use a fallback model only when explicitly supplied.
 Implementation helpers inherit the implementation selection. Session records
 must retain compatible tool and model identity. Preserve provider admission,
 unsupported-operation checks, and host ownership of advice and learning.
+
+When an isolation adapter is selected, Codex implementation uses the private
+configuration from ADR-0042. An omitted model uses that isolated tool's default.
+It does not import ambient Codex configuration. Without an adapter, ADR-0043
+retains the native runner and its configured defaults. Set a model explicitly
+to use the same model across isolated and ordinary execution.
 
 This decision supersedes model catalogs and alias translation in ADR-0035 and
 ADR-0036. Their effort transport decisions remain applicable.

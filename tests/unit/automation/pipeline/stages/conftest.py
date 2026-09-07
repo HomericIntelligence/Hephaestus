@@ -670,6 +670,10 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_impl_state = (False, True)
         self._log("mark_pr_implementation_no_go", pr_number)
 
+    def reviewed_pr_state(self, pull_request_id: str) -> dict[str, Any] | None:
+        """Return no terminal proof unless the test supplies it."""
+        return None
+
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed

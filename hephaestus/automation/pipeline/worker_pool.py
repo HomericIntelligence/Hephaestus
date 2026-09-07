@@ -34,17 +34,34 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import Any, TypeGuard, cast
 
+import hephaestus.agents.runtime as agent_runtime
 import hephaestus.automation.claude_invoke as claude_invoke
+import hephaestus.automation.codex_adapter_admission as codex_adapter_admission
 import hephaestus.automation.git_utils as git_utils
+import hephaestus.automation.pipeline.codex_worktree_boundary as codex_worktree_boundary
 import hephaestus.automation.subprocess_registry as subprocess_registry
+from hephaestus.agents.codex_isolation import (
+    CodexExecutionPolicyV1,
+    CodexGitReceiptV1,
+    CodexIsolationAdapterV1,
+    CodexIsolationError,
+    CodexIsolationRequestV1,
+    StagedLinuxExecutable,
+    canonical_sha256,
+    close_staged_linux_executable,
+    new_run_nonce,
+    stage_linux_executable,
+)
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
     ExecutionPolicyError,
     ExecutionRequest,
+    FilesystemMode,
     SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.model_selection import AgentModelSelection, resolve_codex_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -56,7 +73,7 @@ from hephaestus.agents.runtime import (
     validate_agent_execution_support,
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
-from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
+from hephaestus.agents.workspace import SourceLane, WorkspaceKind, validate_workspace_binding
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
@@ -140,6 +157,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
 )
 from hephaestus.config.child_environments import (
+    build_codex_implementation_child_env,
     build_git_child_env,
     build_git_signing_env,
     build_host_verification_env,
@@ -158,12 +176,18 @@ from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import source_worktree_name
 
+from .jobs import _writer_publication_matches_refresh
+
 logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _DIRTY_CONTENT_SNAPSHOT_KEYS = frozenset({"index_sha256", "worktree_sha256", "untracked_sha256"})
+_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
+_CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
+_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS = 1.0
+_CODEX_IMPLEMENTATION_PROVIDER_RELAY = "vsock://2:443"
 
 
 def _remediation_review_input(
@@ -3530,6 +3554,451 @@ def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
     return fields
 
 
+def _uses_codex_implementation_adapter(job: AgentJob) -> bool:
+    """Return true for a Codex implementation job with an adapter selection."""
+    return bool(
+        agent_runtime.requires_codex_implementation_isolation(job.agent)
+        and job.execution_request is not None
+        and job.execution_request.role is AgentRole.IMPLEMENTER
+        and any(
+            value is not None
+            for value in (
+                job.codex_isolation_adapter,
+                job.codex_isolation_deployment_lock,
+                job.codex_isolation_deployment_lock_sha256,
+                job.codex_isolation_request,
+            )
+        )
+    )
+
+
+@contextmanager
+def _codex_git_boundary(cwd: Path) -> Iterator[codex_worktree_boundary.CodexWorktreeBoundary]:
+    """Map Git receipt failures to one stable adapter error."""
+    try:
+        with codex_worktree_boundary.capture_codex_worktree_boundary(cwd) as boundary:
+            yield boundary
+    except codex_worktree_boundary.CodexWorktreeBoundaryError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+
+
+def _codex_implementation_command(
+    *,
+    executable: Path,
+    worktree: Path,
+    model: str,
+    session_id: str | None,
+    sandbox: str,
+    operation: AgentOperation,
+    allowed_tools: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Build one exact guest command from frozen worker inputs."""
+    command = [str(executable), "exec"]
+    if session_id:
+        command.extend(("resume", session_id))
+    selection = resolve_codex_model_selection(model)
+    if selection.model:
+        command.extend(("--model", selection.model))
+    if selection.reasoning_effort not in {"", "default"}:
+        command.extend(("-c", f"model_reasoning_effort={json.dumps(selection.reasoning_effort)}"))
+    if session_id:
+        command.extend(
+            (
+                "-c",
+                f"sandbox_mode={json.dumps(sandbox)}",
+                "-c",
+                'approval_policy="never"',
+            )
+        )
+    else:
+        command.extend(
+            (
+                "--cd",
+                str(worktree),
+                "--sandbox",
+                sandbox,
+                "-c",
+                'approval_policy="never"',
+            )
+        )
+    command.extend(
+        (
+            "-c",
+            f"hephaestus_automation.operation={json.dumps(operation.value)}",
+            "-c",
+            "hephaestus_automation.allowed_tools="
+            + json.dumps(list(allowed_tools), separators=(",", ":")),
+            "--json",
+            "-",
+        )
+    )
+    return tuple(command)
+
+
+_CODEX_TOOL_CAPABILITIES = {
+    "Bash": "bash",
+    "Edit": "edit",
+    "Glob": "find",
+    "Grep": "grep",
+    "Read": "read",
+    "Write": "write",
+}
+_CODEX_NON_APPLICABLE_TOOLS = {
+    AgentOperation.ADDRESS_REVIEW: frozenset({"Skill", "Task"}),
+}
+_CODEX_OPERATION_TOOLS = {
+    AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
+    AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+}
+
+
+def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], bool]:
+    """Resolve and validate the operation-specific Codex grants."""
+    execution = job.execution_request
+    if execution is None or execution.role is not AgentRole.IMPLEMENTER:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    try:
+        operation_policy = resolve_policy(execution)
+    except ExecutionPolicyError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    workspace_write = operation_policy.filesystem is FilesystemMode.WORKTREE_RW
+    sandbox = "workspace-write" if workspace_write else "read-only"
+    if job.sandbox != sandbox:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    expected_tools = _CODEX_OPERATION_TOOLS.get(execution.operation)
+    if expected_tools is None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    declared_tools = {
+        value.strip()
+        for value in (job.allowed_tools or ",".join(expected_tools)).split(",")
+        if value.strip()
+    }
+    non_applicable = _CODEX_NON_APPLICABLE_TOOLS.get(execution.operation, frozenset())
+    allowed_tools = tuple(sorted(declared_tools - non_applicable))
+    capabilities = {_CODEX_TOOL_CAPABILITIES.get(value, "") for value in allowed_tools}
+    rebase_tools = ("Edit", "Glob", "Grep", "Read", "Write")
+    rebase_grant = execution.operation is AgentOperation.IMPLEMENT and allowed_tools == rebase_tools
+    if (
+        (allowed_tools != expected_tools and not rebase_grant)
+        or "" in capabilities
+        or not capabilities <= operation_policy.builtins
+    ):
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    return sandbox, allowed_tools, workspace_write
+
+
+def _reject_codex_terminal_cleanup_tombstone(profiles: Path) -> None:
+    """Reject a session store while terminal cleanup is incomplete."""
+    terminal_cleanup = profiles.with_name(profiles.name + ".terminal-cleanup")
+    try:
+        terminal_cleanup.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise CodexIsolationError("codex_adapter_inventory_uncertain") from None
+    raise CodexIsolationError("codex_adapter_inventory_uncertain")
+
+
+def _codex_private_profile(job: AgentJob, build_root: Path) -> Path:
+    """Return one durable profile that is bound to the issue and cycle."""
+    logical_session = job.session_key or job.session_agent
+    if not logical_session:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    identity = canonical_sha256(
+        (job.repo, int(job.issue), logical_session, str(job.cwd.resolve(strict=True)), job.model)
+    )
+    worktree = job.cwd.resolve(strict=True)
+    profiles = worktree.parent / f".{worktree.name}-codex-sessions"
+    _reject_codex_terminal_cleanup_tombstone(profiles)
+    descriptor = -1
+    try:
+        with suppress(FileExistsError):
+            profiles.mkdir(mode=0o700)
+        lexical = profiles.lstat()
+        descriptor = os.open(
+            profiles,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(lexical.st_mode)
+            or lexical.st_uid != os.geteuid()
+            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise OSError("invalid Codex profile root")
+        os.fchmod(descriptor, 0o700)
+        canonical_profiles = profiles.resolve(strict=True)
+        if canonical_profiles != profiles.absolute():
+            raise OSError("Codex profile root is not canonical")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if canonical_profiles.is_relative_to(worktree) or not build_root.is_relative_to(worktree):
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    profile = canonical_profiles / identity
+    if profile.is_symlink():
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    receipt_paths = (profile / ".active.json", profile / ".quarantine.json")
+    if any(path.exists() or path.is_symlink() for path in receipt_paths):
+        raise CodexIsolationError("codex_adapter_inventory_uncertain")
+    try:
+        with suppress(FileExistsError):
+            profile.mkdir(mode=0o700)
+        profile_status = profile.lstat()
+        if (
+            not stat.S_ISDIR(profile_status.st_mode)
+            or profile_status.st_uid != os.geteuid()
+            or stat.S_IMODE(profile_status.st_mode) != 0o700
+        ):
+            raise OSError("invalid Codex durable store")
+        runs = profile / ".runs"
+        with suppress(FileExistsError):
+            runs.mkdir(mode=0o700)
+        runs_status = runs.lstat()
+        if (
+            not stat.S_ISDIR(runs_status.st_mode)
+            or runs_status.st_uid != os.geteuid()
+            or stat.S_IMODE(runs_status.st_mode) != 0o700
+        ):
+            raise OSError("invalid Codex run store")
+    except OSError:
+        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+    return profile
+
+
+def _initialize_codex_adapter(
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+) -> CodexIsolationAdapterV1:
+    """Initialize one admitted adapter and check its locked identity."""
+    factory = admission.factory
+    if (
+        not callable(factory)
+        or getattr(factory, "codex_isolation_api_version", None)
+        != admission.lock.adapter_api_version
+    ):
+        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+    try:
+        adapter = factory()
+        admission.validate_adapter_identity(
+            distribution=getattr(adapter, "adapter_distribution", ""),
+            version=getattr(adapter, "adapter_version", ""),
+            installed_tree_sha256=getattr(adapter, "installed_tree_sha256", ""),
+        )
+    except CodexIsolationError:
+        raise
+    except BaseException:
+        raise CodexIsolationError("codex_adapter_initialization_failed") from None
+    return cast(CodexIsolationAdapterV1, adapter)
+
+
+@contextmanager
+def _owned_codex_adapter(
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+) -> Iterator[CodexIsolationAdapterV1]:
+    """Close one admitted helper on all initialization and execution paths."""
+    adapter: CodexIsolationAdapterV1 | None = None
+    try:
+        adapter = _initialize_codex_adapter(admission)
+        yield adapter
+    finally:
+        owner = adapter if adapter is not None else admission.factory
+        close_adapter = getattr(owner, "_close", None)
+        if callable(close_adapter):
+            close_adapter()
+
+
+def _validate_staged_codex_executable(executable: StagedLinuxExecutable) -> None:
+    """Recheck the staged path identity and bytes without following a link."""
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            executable.path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        value = os.fstat(descriptor)
+        identity = (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_uid,
+            value.st_size,
+            value.st_mtime_ns,
+        )
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+        if identity != executable.file_identity or digest.hexdigest() != executable.digest:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    except CodexIsolationError:
+        raise
+    except OSError:
+        raise CodexIsolationError("codex_adapter_request_mismatch") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _run_isolated_codex_effort_attempts(
+    execute: Callable[[str], agent_runtime.AgentRunResult], model: str
+) -> agent_runtime.AgentRunResult:
+    """Retry one verified pre-work effort failure through the admitted boundary."""
+    selection = resolve_codex_model_selection(model)
+    try:
+        return execute(selection.reference)
+    except agent_runtime._CodexReasoningEffortRejectedError:
+        if selection.reasoning_effort in {"", "default"}:
+            raise
+    return execute(AgentModelSelection(selection.model, "default"))
+
+
+def _codex_implementation_request(
+    *,
+    job: AgentJob,
+    worktree: Path,
+    prompt: str,
+    private_profile: Path,
+    admission: codex_adapter_admission.CodexAdapterAdmission,
+    git_receipt: CodexGitReceiptV1,
+    executable: StagedLinuxExecutable,
+    model_reference: str | None = None,
+    deadline_s: float | None = None,
+) -> CodexIsolationRequestV1:
+    """Build the complete frozen request for one admitted adapter."""
+    lock = admission.lock
+    execution = job.execution_request
+    if execution is None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    sandbox, allowed_tools, workspace_write = _codex_implementation_grants(job)
+    if executable.digest != lock.extracted_elf_sha256:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    run_nonce = new_run_nonce()
+    ephemeral_profile = private_profile / ".runs" / run_nonce / "profile"
+    fixed_git_environment = dict(git_receipt.fixed_environment)
+    environment = tuple(
+        sorted(
+            build_codex_implementation_child_env(
+                codex_home=ephemeral_profile,
+                fixed_git_environment=fixed_git_environment,
+            ).items()
+        )
+    )
+    if execution.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+        if job.resume_binding is not None:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+        session_id = job.resume_session_id
+        if not session_id:
+            raise CodexIsolationError("codex_adapter_request_mismatch")
+    elif job.resume_binding is not None or job.resume_session_id is not None:
+        raise CodexIsolationError("codex_adapter_request_mismatch")
+    else:
+        session_id = None
+    session = json.dumps(
+        {
+            "allowed_tools": list(allowed_tools),
+            "lifecycle": execution.lifecycle.value,
+            "operation": execution.operation.value,
+            "session_id": session_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    command = _codex_implementation_command(
+        executable=executable.path,
+        worktree=worktree,
+        model=job.model if model_reference is None else model_reference,
+        session_id=session_id,
+        sandbox=sandbox,
+        operation=execution.operation,
+        allowed_tools=allowed_tools,
+    )
+    profile_read_only, profile_read_write = agent_runtime._codex_profile_policy_paths(
+        ephemeral_profile,
+        run_nonce,
+    )
+    read_only_mounts = {
+        *git_receipt.read_only_paths,
+        str(executable.path),
+        *profile_read_only,
+    }
+    read_write_mounts = set(profile_read_write)
+    if workspace_write:
+        read_write_mounts.update(git_receipt.read_write_paths)
+    else:
+        read_only_mounts.update(git_receipt.read_write_paths)
+    policy = CodexExecutionPolicyV1(
+        schema_version=1,
+        read_only_mounts=tuple(sorted(read_only_mounts)),
+        read_write_mounts=tuple(sorted(read_write_mounts)),
+        protected_overlay_mounts=tuple(sorted(git_receipt.protected_paths)),
+        provider_relay=_CODEX_IMPLEMENTATION_PROVIDER_RELAY,
+        command_network="deny",
+        max_output_bytes=_CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES,
+        term_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        kill_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        pipe_close_grace_seconds=_CODEX_IMPLEMENTATION_GRACE_SECONDS,
+        inventory_quiescence_seconds=_CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS,
+        total_deadline=float(job.timeout_s),
+    )
+    worktree_identity = git_receipt.canonical_worktree
+    model = job.model
+    issue = int(job.issue)
+    session_identity = (
+        job.repo,
+        issue,
+        "implementer",
+        worktree_identity,
+        model,
+        session,
+    )
+    return CodexIsolationRequestV1(
+        schema_version=1,
+        run_nonce=run_nonce,
+        entry_point_name=lock.entry_point_name,
+        adapter_api_version=lock.adapter_api_version,
+        package_version=lock.adapter_version,
+        deployment_lock_digest=admission.deployment_lock_sha256,
+        wheel_digest=lock.wheel_sha256,
+        installed_tree_digest=lock.installed_tree_sha256,
+        command=command,
+        command_digest=canonical_sha256(command),
+        executable_platform="linux",
+        executable_target=lock.codex_target,
+        executable_release=lock.codex_release_tag,
+        executable_asset_name=lock.codex_archive_asset,
+        executable_path=str(executable.path),
+        executable_digest=executable.digest,
+        executable_file_identity=executable.file_identity,
+        guest_image_digest=lock.guest_image_sha256,
+        environment=environment,
+        environment_digest=canonical_sha256(environment),
+        prompt=prompt,
+        prompt_digest=canonical_sha256(prompt),
+        worktree_path=str(worktree),
+        private_profile_path=str(ephemeral_profile),
+        policy=policy,
+        policy_digest=canonical_sha256(policy),
+        git_receipt=git_receipt,
+        git_receipt_digest=canonical_sha256(git_receipt),
+        repository=job.repo,
+        issue=issue,
+        role="implementer",
+        worktree_identity=worktree_identity,
+        model=model,
+        session=session,
+        session_identity_digest=canonical_sha256(session_identity),
+        monotonic_deadline=(time.monotonic() + job.timeout_s if deadline_s is None else deadline_s),
+    )
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -3988,6 +4457,97 @@ class WorkerPool:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
 
+    @staticmethod
+    def _run_codex_implementation(job: AgentJob, cwd: Path) -> agent_runtime.AgentRunResult:
+        """Run one implementation job through the selected external adapter."""
+        if (
+            not job.codex_isolation_adapter
+            or job.codex_isolation_deployment_lock is None
+            or job.codex_isolation_deployment_lock_sha256 is None
+        ):
+            raise CodexIsolationError("codex_adapter_not_selected")
+        deadline = time.monotonic() + job.timeout_s
+        if job.deadline_s is not None:
+            deadline = min(deadline, job.deadline_s)
+        with _agent_workspace_lease(job) as leased:
+            if leased != cwd:
+                raise CodexIsolationError("codex_adapter_request_mismatch")
+            with _codex_git_boundary(cwd) as boundary:
+                try:
+                    admission = codex_adapter_admission.admit_codex_adapter(
+                        lock_path=job.codex_isolation_deployment_lock,
+                        expected_sha256=job.codex_isolation_deployment_lock_sha256,
+                        selected_entry_point=job.codex_isolation_adapter,
+                    )
+                except codex_adapter_admission.CodexAdapterAdmissionError:
+                    raise CodexIsolationError("codex_adapter_initialization_failed") from None
+                with _owned_codex_adapter(admission) as adapter:
+                    build_root = cwd / "build"
+                    if build_root.is_symlink():
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                    try:
+                        build_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        canonical_build_root = build_root.resolve(strict=True)
+                    except OSError:
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch") from None
+                    if not canonical_build_root.is_relative_to(cwd):
+                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                    private_profile = _codex_private_profile(job, canonical_build_root)
+                    with tempfile.TemporaryDirectory(
+                        prefix="codex-implementation-",
+                        dir=canonical_build_root,
+                    ) as temporary:
+                        job_root = Path(temporary)
+                        job_root.chmod(0o700)
+                        executable = stage_linux_executable(
+                            Path(admission.lock.extracted_elf_path),
+                            job_root,
+                        )
+                        try:
+                            with plugin_skills_context(job.plugin_skills_dir):
+                                prompt = job.prompt_builder(**job.prompt_kwargs)
+
+                            def execute(model_reference: str) -> agent_runtime.AgentRunResult:
+                                """Run one fresh request within the original deadline."""
+                                if time.monotonic() >= deadline:
+                                    raise CodexIsolationError("codex_adapter_timeout")
+                                request = _codex_implementation_request(
+                                    job=job,
+                                    worktree=cwd,
+                                    prompt=prompt,
+                                    private_profile=private_profile,
+                                    admission=admission,
+                                    git_receipt=boundary.receipt,
+                                    executable=executable,
+                                    model_reference=model_reference,
+                                    deadline_s=deadline,
+                                )
+                                boundary.verify_before_launch()
+                                _validate_staged_codex_executable(executable)
+                                try:
+                                    execution_request = job.execution_request
+                                    if execution_request is None:
+                                        raise CodexIsolationError("codex_adapter_request_mismatch")
+                                    terminal_reaper = getattr(adapter, "_close", None)
+                                    if not callable(terminal_reaper):
+                                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                                    return agent_runtime._run_admitted_codex_implementation_session(
+                                        adapter=adapter,
+                                        request=request,
+                                        execution_request=execution_request,
+                                        executable_descriptor=executable.descriptor,
+                                        terminal_reaper=cast(Callable[[], None], terminal_reaper),
+                                    )
+                                finally:
+                                    try:
+                                        _validate_staged_codex_executable(executable)
+                                    finally:
+                                        boundary.verify_after_return()
+
+                            return _run_isolated_codex_effort_attempts(execute, job.model)
+                        finally:
+                            close_staged_linux_executable(executable)
+
     def _run_agent(  # noqa: C901 - provider and session dispatch are one atomic boundary
         self, job: AgentJob
     ) -> JobResult:
@@ -4028,6 +4588,34 @@ class WorkerPool:
         try:
             remaining_timeout()
             cwd = validate_job_workspace(job)
+            if _uses_codex_implementation_adapter(job):
+                validate_agent_execution_support("codex", job.execution_request)
+                agent_result = self._run_codex_implementation(job, cwd)
+                session_id = agent_result.session_id or job.resume_session_id
+                if session_id is not None and job.session_checkpoint is not None:
+                    job.session_checkpoint(session_id, agent_result.session_binding)
+                stdout = agent_result.stdout or ""
+                value = None
+                if job.parse is not None:
+                    try:
+                        value = job.parse(stdout)
+                    except Exception as exc:
+                        logger.exception("Parse callable raised for Codex implementation job")
+                        return JobResult(
+                            ok=False,
+                            error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                            stdout_tail=stdout[-_TAIL:],
+                            session_id=session_id,
+                            session_binding=agent_result.session_binding,
+                        )
+                return JobResult(
+                    ok=True,
+                    value=value if value is not None else stdout,
+                    stdout_tail=stdout[-_TAIL:],
+                    session_id=session_id,
+                    session_binding=agent_result.session_binding,
+                    observed_skill_invocations=agent_result.observed_skill_invocations,
+                )
             agent = resolve_agent(
                 job.agent,
                 cwd=cwd,
@@ -4180,6 +4768,8 @@ class WorkerPool:
                 observed_skill_invocations=observed_skill_invocations,
             )
 
+        except CodexIsolationError as exc:
+            return JobResult(ok=False, error=exc.code)
         except CircuitBreakerOpenError:
             return JobResult(ok=False, error="circuit_open")
         except subprocess.TimeoutExpired:
@@ -7262,7 +7852,84 @@ class WorkerPool:
     def _git_commit_push(self, job: GitJob) -> JobResult:
         """Commit and publish while private recovery metadata remains live."""
         with ExitStack() as recovery_stack:
-            return self._git_commit_push_inner(job, recovery_stack)
+            if job.kwargs.get("source_lane") != SourceLane.IMPLEMENTATION.value:
+                return self._git_commit_push_inner(job, recovery_stack)
+            root = job.kwargs.get("repo_root")
+            issue = job.kwargs.get("issue_number")
+            path = job.kwargs.get("worktree_path")
+            branch = job.kwargs.get("branch")
+            if (
+                not isinstance(root, str)
+                or not Path(root).is_absolute()
+                or isinstance(issue, bool)
+                or not isinstance(issue, int)
+                or not isinstance(path, (str, Path))
+                or not Path(path).is_absolute()
+                or not isinstance(branch, str)
+                or not branch
+                or job.op != "commit_push"
+                or "expected_recovery_head" in job.kwargs
+            ):
+                return JobResult(
+                    ok=False,
+                    error="source_workspace_ownership_unavailable: publication binding invalid",
+                )
+            manager = SourceWorkspaceManager(
+                Path(root),
+                repository=job.repo or job.transport_repository,
+                base_dir=Path(root) / "build" / ".worktrees",
+            )
+            try:
+                if "expected_remote_sha" not in job.kwargs:
+                    record = recovery_stack.enter_context(
+                        manager.implementation_local_commit(issue, branch=branch, path=Path(path))
+                    )
+                    result = self._git_commit_push_inner(job, recovery_stack)
+                    receipt = result.value if isinstance(result.value, dict) else {}
+                    head = receipt.get("head_sha")
+                    classified = _writer_publication_matches_refresh(
+                        receipt, job.kwargs.get("writer_refresh")
+                    ) and result.ok is receipt.get("pushed")
+                    if not classified:
+                        if not result.ok:
+                            if "writer_refresh_failure" in receipt:
+                                return result
+                            raise SourceWorkspaceError(
+                                "implementation publication result unavailable"
+                            )
+                        if (
+                            set(receipt) != {"pushed", "head_sha"}
+                            or receipt.get("pushed") is not False
+                            or not _is_full_commit_sha(head)
+                        ):
+                            raise SourceWorkspaceError("implementation publication result invalid")
+                    record(cast(str, head))
+                    return result
+                advance = recovery_stack.enter_context(
+                    manager.implementation_publication(issue, branch=branch, path=Path(path))
+                )
+                result = self._git_commit_push_inner(job, recovery_stack)
+                if not result.ok:
+                    return result
+                head = result.value.get("head_sha") if isinstance(result.value, dict) else None
+                if not isinstance(head, str):
+                    raise SourceWorkspaceError("implementation publication head is unavailable")
+                remote_head = self._read_remote_branch_head(
+                    Path(path),
+                    remote="origin",
+                    branch=branch,
+                    expected_repo=job.transport_repository,
+                    timeout=job.timeout_s,
+                )
+                if not isinstance(remote_head, str):
+                    raise SourceWorkspaceError("implementation publication remote is unavailable")
+                advance(head, remote_head)
+                return result
+            except (SourceWorkspaceError, OSError, subprocess.SubprocessError):
+                return JobResult(
+                    ok=False,
+                    error="source_workspace_ownership_unavailable: publication binding invalid",
+                )
 
     def _git_commit_push_inner(  # noqa: C901
         self,
@@ -7312,6 +7979,20 @@ class WorkerPool:
         if recovery_bound and not branch:
             return JobResult(ok=False, error="commit publication branch is unavailable")
         worktree = Path(worktree_path)
+        if "writer_refresh" in job.kwargs:
+            return self._refresh_writer_publication(job, worktree, branch)
+        allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+        scope_check = self._verify_implementation_edit_scope(
+            job,
+            worktree,
+            allowed_paths=allowed_paths,
+        )
+        if scope_check is not None:
+            return scope_check
+        if allowed_paths is not None and job.kwargs.get("scope_retraction_paths"):
+            allowed_paths = tuple(
+                sorted(set(allowed_paths).union(job.kwargs["scope_retraction_paths"]))
+            )
         retry_recovery_commit = False
         selected_recovery_commit: str | None = None
         recovery_paths: CommitPaths | None = None
@@ -7538,7 +8219,6 @@ class WorkerPool:
             worktree,
             str(job.kwargs.get("agent", "claude")),
         )
-        allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         changed: bool | str | JobResult = False
@@ -7649,6 +8329,13 @@ class WorkerPool:
             )
             if status.stdout.strip():
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
+        scope_check = self._verify_implementation_edit_scope(
+            job,
+            worktree,
+            allowed_paths=allowed_paths,
+        )
+        if scope_check is not None:
+            return scope_check
         if not recovery_bound:
             scope_retraction = self._verify_scope_retraction(job, worktree)
             if scope_retraction is not None:
@@ -8066,6 +8753,77 @@ class WorkerPool:
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     @staticmethod
+    def _verify_implementation_edit_scope(
+        job: GitJob,
+        worktree: Path,
+        *,
+        allowed_paths: Collection[str] | None,
+    ) -> JobResult | None:
+        """Reject dirty and committed edits outside the host-approved scope."""
+        if allowed_paths is None:
+            if agent_runtime.requires_codex_implementation_isolation(
+                str(job.kwargs.get("agent", ""))
+            ):
+                return JobResult(ok=False, error="implementation approved scope is unavailable")
+            return None
+        if not allowed_paths or not all(
+            is_safe_scope_retraction_path(path) for path in allowed_paths
+        ):
+            return JobResult(ok=False, error="implementation approved scope is unavailable")
+        history_base_sha = job.kwargs.get("scope_history_base_sha")
+        if not _is_full_commit_sha(history_base_sha):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        probes = (
+            ["git", "diff", "--no-renames", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{history_base_sha}..HEAD",
+            ],
+        )
+        try:
+            changed: set[str] = set()
+            untracked: set[str] = set()
+            for argv in probes:
+                result = git_utils.run(
+                    argv,
+                    cwd=worktree,
+                    capture_output=True,
+                    timeout=job.timeout_s,
+                )
+                paths = {path for path in str(result.stdout or "").split("\0") if path}
+                changed.update(paths)
+                if "ls-files" in argv:
+                    untracked = paths
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        permitted = set(allowed_paths)
+        retractions = job.kwargs.get("scope_retraction_paths")
+        if retractions is not None:
+            if (
+                not isinstance(retractions, tuple)
+                or not retractions
+                or not all(is_safe_scope_retraction_path(path) for path in retractions)
+                or untracked.intersection(retractions)
+            ):
+                return JobResult(ok=False, error="scope retraction verification unavailable")
+            restoration = WorkerPool._verify_scope_retraction(job, worktree, include_worktree=True)
+            if restoration is not None:
+                return restoration
+            permitted.update(retractions)
+        if not changed.issubset(permitted):
+            return JobResult(
+                ok=False,
+                error="implementation changed paths outside approved scope",
+            )
+        return None
+
+    @staticmethod
     def _commit_if_changes_with_controlled_signing(
         job: GitJob,
         commit_args: tuple[int, Path, str],
@@ -8155,6 +8913,7 @@ class WorkerPool:
         worktree_path: Path,
         *,
         git_env: dict[str, str] | None = None,
+        include_worktree: bool = False,
     ) -> JobResult | None:
         """Reject publication unless host-designated paths match the reviewed base.
 
@@ -8192,9 +8951,11 @@ class WorkerPool:
                     "git",
                     "--literal-pathspecs",
                     "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
                     "--name-only",
                     base_sha,
-                    "HEAD",
+                    *(() if include_worktree else ("HEAD",)),
                     "--",
                     *paths,
                 ],
@@ -8280,15 +9041,278 @@ class WorkerPool:
                 worktree_path,
                 **strict_push_kwargs,
             )
+        elif publication_bound:
+            git_utils.push_branch(
+                branch,
+                worktree_path,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                source_sha=source_sha,
+            )
         else:
-            push_kwargs: dict[str, Any] = {
-                "timeout": job.timeout_s,
-                "env": remote_env,
-                "remote_config": remote_config,
-                "source_sha": source_sha,
-            }
-            git_utils.push_branch(branch, worktree_path, **push_kwargs)
+            return self._publish_ordinary_writer(
+                job, branch, worktree_path, source_sha, remote_env, remote_config
+            )
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
+
+    def _publish_ordinary_writer(
+        self,
+        job: GitJob,
+        branch: str,
+        worktree_path: Path,
+        source_sha: str,
+        remote_env: dict[str, str],
+        remote_config: tuple[str, ...],
+    ) -> JobResult:
+        """Keep the tracking baseline through one ordinary publication attempt."""
+        baseline = self._writer_tracking_head(worktree_path, branch, timeout=job.timeout_s)
+        if isinstance(baseline, JobResult):
+            return baseline
+        try:
+            git_utils.push_branch(
+                branch,
+                worktree_path,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                source_sha=source_sha,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return self._writer_publication_failure(
+                job, worktree_path, branch, source_sha, baseline, refresh_phase=None
+            )
+        return self._writer_publication_receipt("published", source_sha, baseline, source_sha)
+
+    def _refresh_writer_publication(self, job: GitJob, worktree: Path, branch: str) -> JobResult:
+        """Replay one bounded local change and publish with an exact lease."""
+        refresh = job.kwargs.get("writer_refresh")
+        invalid = JobResult(
+            ok=False, value={"writer_refresh_failure": "invalid"}, error="writer refresh invalid"
+        )
+        if (
+            not isinstance(refresh, dict)
+            or set(refresh) != {"phase", "source_sha", "expected_remote_sha"}
+            or not isinstance(refresh.get("phase"), str)
+            or refresh.get("phase") not in {"rebase", "publish"}
+            or not _is_full_commit_sha(refresh.get("source_sha"))
+            or not _is_full_commit_sha(refresh.get("expected_remote_sha"))
+            or "expected_remote_sha" in job.kwargs
+            or "expected_recovery_head" in job.kwargs
+            or not branch
+        ):
+            return invalid
+        expected = refresh["expected_remote_sha"]
+        source = refresh["source_sha"]
+        try:
+            branch_check = git_utils.run(
+                ["git", "check-ref-format", "--branch", branch],
+                cwd=worktree,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            if branch_check.returncode != 0 or not git_utils.is_clean_working_tree(
+                worktree, timeout=job.timeout_s
+            ):
+                return invalid
+            if self._read_publish_head(worktree, timeout=job.timeout_s) != source:
+                return invalid
+            scope_job = (
+                job
+                if refresh["phase"] == "rebase"
+                else replace(job, kwargs={**job.kwargs, "scope_history_base_sha": expected})
+            )
+            allowed = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+            if (
+                self._verify_implementation_edit_scope(scope_job, worktree, allowed_paths=allowed)
+                is not None
+            ):
+                return invalid
+            revalidate = self._authenticated_remote_revalidator(
+                cwd=worktree, expected_repo=job.transport_repository, timeout=job.timeout_s
+            )
+            remote_env, remote_config = revalidate()
+            if refresh["phase"] == "rebase":
+                rewritten = self._rebase_publication_writer(
+                    job, worktree, branch, expected, remote_env, remote_config
+                )
+                if isinstance(rewritten, JobResult):
+                    return rewritten
+                source = rewritten
+            scope_job = replace(job, kwargs={**job.kwargs, "scope_history_base_sha": expected})
+            if (
+                self._verify_implementation_edit_scope(scope_job, worktree, allowed_paths=allowed)
+                is not None
+                or self._verify_scope_retraction(job, worktree) is not None
+                or not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s)
+            ):
+                return invalid
+            if self._read_publish_head(worktree, timeout=job.timeout_s) != source:
+                return invalid
+            try:
+                git_utils.push_head_to_branch(
+                    branch,
+                    expected,
+                    worktree,
+                    source_sha=source,
+                    timeout=job.timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                    revalidate_remote=revalidate,
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                return self._writer_publication_failure(
+                    job, worktree, branch, source, expected, refresh_phase="publish"
+                )
+            return self._writer_publication_receipt(
+                "published", source, expected, source, refresh_phase="publish"
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return invalid
+
+    def _rebase_publication_writer(
+        self,
+        job: GitJob,
+        worktree: Path,
+        branch: str,
+        expected: str,
+        remote_env: dict[str, str],
+        remote_config: tuple[str, ...],
+    ) -> str | JobResult:
+        """Create one signed replay and require its exact fetched base."""
+        signing_env = _required_git_signing_env(worktree, timeout=job.timeout_s)
+        rebased = git_utils.rebase_worktree_onto(
+            worktree,
+            base_branch=branch,
+            timeout=job.timeout_s,
+            env=signing_env,
+            fetch_env=remote_env,
+            fetch_config=remote_config,
+        )
+        if not rebased:
+            return JobResult(
+                ok=False,
+                value={"writer_refresh_failure": "conflict"},
+                error="writer refresh conflict",
+            )
+        source = self._read_publish_head(worktree, timeout=job.timeout_s)
+        if isinstance(source, JobResult):
+            return JobResult(
+                ok=False,
+                value={"writer_refresh_failure": "invalid"},
+                error="writer refresh invalid",
+            )
+        fetched = self._writer_tracking_head(worktree, branch, timeout=job.timeout_s)
+        if fetched != expected:
+            if not isinstance(fetched, str):
+                return JobResult(
+                    ok=False,
+                    value={"writer_refresh_failure": "invalid"},
+                    error="writer refresh invalid",
+                )
+            scope_job = replace(job, kwargs={**job.kwargs, "scope_history_base_sha": fetched})
+            if (
+                self._verify_implementation_edit_scope(
+                    scope_job,
+                    worktree,
+                    allowed_paths=cast(Collection[str] | None, job.kwargs.get("allowed_paths")),
+                )
+                is not None
+                or self._verify_scope_retraction(job, worktree) is not None
+                or not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s)
+                or self._read_publish_head(worktree, timeout=job.timeout_s) != source
+            ):
+                return JobResult(
+                    ok=False,
+                    value={"writer_refresh_failure": "invalid"},
+                    error="writer refresh invalid",
+                )
+            return self._writer_publication_receipt(
+                "remote_changed", source, expected, fetched, refresh_phase="publish"
+            )
+        return source
+
+    @staticmethod
+    def _writer_tracking_head(
+        worktree: Path, branch: str, *, timeout: int
+    ) -> str | JobResult | None:
+        """Read the local tracking baseline without a fetch."""
+        try:
+            result = git_utils.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+                cwd=worktree,
+                check=False,
+                capture_output=True,
+                timeout=timeout,
+                env=_controlled_git_env(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return JobResult(ok=False, error="writer tracking baseline unavailable")
+        if result.returncode == 1:
+            return None
+        head = str(result.stdout or "").strip()
+        if result.returncode != 0 or not _is_full_commit_sha(head):
+            return JobResult(ok=False, error="writer tracking baseline unavailable")
+        return head
+
+    @staticmethod
+    def _writer_publication_receipt(
+        state: str,
+        head: str,
+        baseline: str | None,
+        observed: str | None,
+        *,
+        refresh_phase: str | None = None,
+    ) -> JobResult:
+        """Return closed Git facts without diagnostic text."""
+        published = state in {"published", "remote_at_source"}
+        return JobResult(
+            ok=published,
+            error=None if published else "writer publication unavailable",
+            value={
+                "publication_state": state,
+                "head_sha": head,
+                "baseline_remote_sha": baseline,
+                "observed_remote_sha": observed,
+                "pushed": published,
+                "refresh_phase": refresh_phase,
+            },
+        )
+
+    def _writer_publication_failure(
+        self,
+        job: GitJob,
+        worktree: Path,
+        branch: str,
+        head: str,
+        baseline: str | None,
+        *,
+        refresh_phase: str | None,
+    ) -> JobResult:
+        """Classify a failed push from an authoritative remote read."""
+        try:
+            observed = self._read_remote_branch_head(
+                worktree,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            observed = JobResult(ok=False)
+        if isinstance(observed, JobResult):
+            state, remote_head = "probe_failed", None
+        else:
+            remote_head = observed
+            state = (
+                "remote_at_source"
+                if observed == head
+                else ("remote_unchanged" if observed == baseline else "remote_changed")
+            )
+        return self._writer_publication_receipt(
+            state, head, baseline, remote_head, refresh_phase=refresh_phase
+        )
 
     @staticmethod
     def _read_publish_head(

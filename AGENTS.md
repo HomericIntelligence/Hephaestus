@@ -680,7 +680,7 @@ The automation loop selects tools and model strings independently. Use
 does not clear the global model. Omitted models use the selected tool default.
 There is no model catalog or alias translation. Implementation helpers inherit
 the implementation tool and model. Supply `--fallback-model` explicitly to
-select a fallback. See ADR-0042.
+select a fallback. See ADR-0044.
 
 The automation loop model options accept `MODEL[:EFFORT]`. The final nonempty
 colon segment is a free-form effort. The runtime maps it to Codex

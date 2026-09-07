@@ -33,6 +33,18 @@ tool default. The provider owns effort validation. Claude uses only the base
 model; Codex receives reasoning effort; OpenCode receives a variant; Pi receives
 thinking effort. The bounded Codex unsupported-effort retry remains available.
 
+## Codex implementation
+
+When an isolation adapter is selected, Codex implementation uses private tool
+configuration. Omitted model and effort settings use its defaults, without
+reading ambient Codex configuration. Without an adapter, the native runner
+uses its configured defaults. Set model and effort explicitly when both paths
+must use the same selection. See
+[ADR-0042](adr/0042-codex-implementation-process-boundary.md) for isolation,
+[ADR-0043](adr/0043-optional-codex-adapter-until-production-ready.md) for optional
+adapter selection, and
+[ADR-0044](adr/0044-independent-tool-model-selection.md) for model selection.
+
 ## Migration from aliases
 
 Former Hephaestus aliases are now literal model names. Replace `astra` with

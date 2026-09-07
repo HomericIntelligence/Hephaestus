@@ -36,6 +36,11 @@ Optional (extras) runtime dependencies
 These packages are installed only when the corresponding extra is requested
 (e.g. `pip install HomericIntelligence-Hephaestus[github]`):
 
+  automation extra
+    markdown-it-py  MIT
+    pydantic        MIT
+    sigstore        Apache-2.0
+
   nats extra
     nats-py     Apache-2.0
 

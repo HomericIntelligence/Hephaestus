@@ -178,6 +178,33 @@ def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:
     assert captured["config"].pi_dir == tmp_path
 
 
+def test_codex_isolation_inputs_thread_into_pipeline_config(tmp_path: Path) -> None:
+    """The implementer keeps all explicit Codex isolation inputs typed."""
+    lock_path = (tmp_path / "deployment-lock.json").absolute()
+    digest = "b" * 64
+    captured = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--agent",
+            "codex",
+            "--codex-isolation-adapter",
+            "production",
+            "--codex-isolation-deployment-lock",
+            str(lock_path),
+            "--codex-isolation-deployment-lock-sha256",
+            digest,
+        ],
+        tmp_path,
+        resolved_agent="codex",
+    )
+
+    config = captured["config"]
+    assert config.codex_isolation_adapter == "production"
+    assert config.codex_isolation_deployment_lock == lock_path
+    assert config.codex_isolation_deployment_lock_sha256 == digest
+
+
 @pytest.mark.parametrize("agent", ["opencode", "pi"])
 def test_provider_owned_defaults_remain_empty(tmp_path: Path, agent: str) -> None:
     """The implementer wrapper must not inject Claude defaults into direct providers."""

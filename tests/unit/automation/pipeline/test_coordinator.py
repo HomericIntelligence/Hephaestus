@@ -4200,6 +4200,30 @@ class TestPipelineScopeWiring:
 
         assert coordinator._stage_config.force is True
 
+    def test_codex_isolation_inputs_are_propagated_to_stage_context(self, tmp_path: Path) -> None:
+        """The stage receives each typed Codex isolation input."""
+        lock_path = (tmp_path / "deployment-lock.json").absolute()
+        digest = "c" * 64
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[1],
+            loops=1,
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            codex_isolation_adapter="production",
+            codex_isolation_deployment_lock=lock_path,
+            codex_isolation_deployment_lock_sha256=digest,
+        )
+
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._stage_config.codex_isolation_adapter == "production"
+        assert coordinator._stage_config.codex_isolation_deployment_lock == lock_path
+        assert coordinator._stage_config.codex_isolation_deployment_lock_sha256 == digest
+
     def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
         """--force must NOT pull a PRE-scope stage forward into the scope.
 

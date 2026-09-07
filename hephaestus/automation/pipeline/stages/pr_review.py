@@ -4,6 +4,7 @@ import typing as _typing
 
 from hephaestus.automation.review_audit import is_clean_go_review
 
+from .base import _reviewed_terminal_pr_outcome
 from .pr_review_audit import PrReviewAudit
 from .pr_review_gate import PrReviewGate
 from .pr_review_jobs import PrReviewJobs
@@ -102,6 +103,10 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
             # an existing PR review.
             return self._adopt_direct_pr_worktree(item, ctx)
 
+        if item.state in {"VALIDATE_WAIT", "EVAL", "POST", "POST_APPLY", "GO_AUDIT_RECEIPT"} and (
+            terminal := _reviewed_terminal_pr_outcome(item, ctx)
+        ):
+            return terminal
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
             handler = cast(
