@@ -9651,6 +9651,71 @@ class TestGitOps:
         assert result.value == receipt.return_value
         assert result.error == "mechanical rebase hit conflicts; resolution required"
 
+    def test_mnemosyne_writer_rebase_conflict_uses_verified_current_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Mnemosyne can continue from its unchanged verified writer head."""
+        expected_head = "a" * 40
+        job = GitJob(
+            repo="Mnemosyne",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": expected_head,
+            },
+        )
+        with (
+            patch(
+                "hephaestus.automation.git_utils.rebase_worktree_onto",
+                return_value=False,
+            ),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch(f"{_WP}.git_utils.run") as run,
+            patch.object(
+                pool,
+                "_verify_noop_writer_rebase",
+                return_value=JobResult(
+                    ok=True,
+                    value={
+                        "rebased": False,
+                        "published": False,
+                        "head_sha": expected_head,
+                    },
+                ),
+            ) as verify,
+        ):
+            run.side_effect = [
+                MagicMock(returncode=0),
+                MagicMock(returncode=1),
+                MagicMock(returncode=0),
+            ]
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "rebased": False,
+            "published": False,
+            "head_sha": expected_head,
+            "rebase_fallback": "verified-current-head",
+            "rebase_policy": "mnemosyne-current-head-v1",
+        }
+        verify.assert_called_once_with(
+            tmp_path,
+            remote="origin",
+            branch="7-auto-impl",
+            expected_repo=job.transport_repository,
+            expected_remote_sha=expected_head,
+            timeout=60,
+        )
+
     def test_clean_rebase_revalidates_destination_after_commit_hooks(
         self,
         pool: WorkerPool,

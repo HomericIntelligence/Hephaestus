@@ -4973,6 +4973,34 @@ class WorkerPool:
                     value=False,
                     error="mechanical rebase hit conflicts; aborted",
                 )
+            policy = self._select_rebase_policy(job.repo)
+            if policy is not None and policy.allow_unrebased_writer_fallback:
+                aborted = git_utils.run(
+                    ["git", "rebase", "--abort"],
+                    cwd=cwd,
+                    check=False,
+                    timeout=job.timeout_s,
+                    env=signing_env,
+                )
+                if aborted.returncode != 0:
+                    return JobResult(
+                        ok=False,
+                        error="cannot abort writer rebase for current-head fallback",
+                    )
+                fallback = self._verify_noop_writer_rebase(
+                    cwd,
+                    remote=remote,
+                    branch=branch,
+                    expected_repo=job.transport_repository,
+                    expected_remote_sha=expected_remote_sha,
+                    timeout=job.timeout_s,
+                )
+                if not fallback.ok:
+                    return fallback
+                value = dict(fallback.value) if isinstance(fallback.value, dict) else {}
+                value["rebase_fallback"] = "verified-current-head"
+                value["rebase_policy"] = policy.name
+                return replace(fallback, value=value)
             receipt = self._conflict_receipt(
                 cwd,
                 remote=remote,

@@ -18,6 +18,7 @@ class RebaseValidationPolicy:
     name: str
     semantic_validator: RebaseSemanticValidator
     structural_test_argv: tuple[str, ...]
+    allow_unrebased_writer_fallback: bool = False
 
 
 RebasePolicySelector = Callable[[str], RebaseValidationPolicy | None]

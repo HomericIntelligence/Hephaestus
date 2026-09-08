@@ -56,8 +56,8 @@ def _mutate_policy_name(policy: RebaseValidationPolicy) -> None:
     policy.name = "other"  # type: ignore[misc]
 
 
-def test_policy_selector_matches_only_hephaestus_repository() -> None:
-    """The selector accepts only the exact Hephaestus repository identity."""
+def test_policy_selector_matches_the_exact_hephaestus_repository() -> None:
+    """The selector applies the ADR policy to the Hephaestus identity."""
     selector = _selector()
     bound = partial(selector, "HomericIntelligence")
 
@@ -68,6 +68,20 @@ def test_policy_selector_matches_only_hephaestus_repository() -> None:
         _mutate_policy_name(selected)
     assert bound("Hephaestus-extra") is None
     assert partial(selector, "OtherOrg")("Hephaestus") is None
+
+
+def test_policy_selector_allows_current_head_fallback_only_for_mnemosyne() -> None:
+    """Only Mnemosyne can continue after a writer rebase conflict."""
+    selector = _selector()
+
+    mnemosyne = selector("HomericIntelligence", "Mnemosyne")
+    hephaestus = selector("HomericIntelligence", "Hephaestus")
+
+    assert mnemosyne is not None
+    assert mnemosyne.name == "mnemosyne-current-head-v1"
+    assert mnemosyne.allow_unrebased_writer_fallback is True
+    assert hephaestus is not None
+    assert hephaestus.allow_unrebased_writer_fallback is False
 
 
 def test_policy_selector_returns_none_for_unconfigured_target() -> None:
