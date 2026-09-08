@@ -2007,6 +2007,7 @@ class TestPrReviewStageStep:
         review = stage._submit_review_job(item, ctx)
         validation = stage.step(item, ctx)
 
+        assert isinstance(review, JobRequest)
         assert isinstance(review.job, AgentJob)
         assert isinstance(validation, JobRequest)
         assert isinstance(validation.job, AgentJob)
@@ -2067,13 +2068,14 @@ class TestPrReviewStageStep:
         assert result == Continue(next_state="EVAL")
         assert item.payload["review_audit_failure"] is True
 
+    @pytest.mark.parametrize("issue_number", [1, 3007])
     def test_checkout_runs_registered_host_verification_before_primary_reviewer(
-        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any, issue_number: int
     ) -> None:
         """A changed regression receives only hermetic host checks first."""
         stage = PrReviewStage()
         ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item = make_work_item(issue=issue_number, pr=1001, state=REVIEW_CHECKOUT_WAIT)
         item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
@@ -8027,3 +8029,119 @@ def test_existing_pr_compacts_the_stored_writer_session(
     assert isinstance(result.job, CompactJob)
     assert result.job.session_agent == key
     assert result.job.session_id == "writer-session"
+
+
+@pytest.mark.parametrize(
+    "grant_state",
+    ["approved", "revoked", "wrong_head", "wrong_manifest", "unrelated_pr", "wrong_platform"],
+)
+def test_pr_3006_linux_bootstrap_reaches_source_review(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, monkeypatch: Any, grant_state: str
+) -> None:
+    """An authenticated exact grant permits source review without running the candidate."""
+    from hephaestus.automation.host_verification_bootstrap import (
+        BOOTSTRAP_MANIFEST,
+        BOOTSTRAP_MARKER,
+    )
+    from hephaestus.automation.review_journal import IssueComment
+
+    stage = PrReviewStage()
+    ctx = make_ctx(
+        org="HomericIntelligence", config_overrides={"host_verification_bootstrap_comment_id": 123}
+    )
+    item = make_work_item(issue=2701, pr=3006, state=REVIEW_CHECKOUT_WAIT)
+    item.repo = "Hephaestus"
+    item.worktree = _make_hephaestus_checkout(tmp_path)
+    item.payload.update(
+        review_checkout_expected_head="a" * 40,
+        review_checkout_ready=True,
+        reviewed_pr_base_sha="b" * 40,
+        review_status_manifest=BOOTSTRAP_MANIFEST,
+        pr_diff="diff --git a/hephaestus/a.py b/hephaestus/a.py\n",
+    )
+    grant = {
+        "repository": "HomericIntelligence/Hephaestus",
+        "issue": 2701,
+        "pr": 3006,
+        "head_sha": "a" * 40,
+        "base_sha": "b" * 40,
+        "boundary": "linux-pyxis-enroot",
+        "state": "approved",
+        "manifest": [{"status": s, "path": p} for s, p in BOOTSTRAP_MANIFEST],
+    }
+    if grant_state == "revoked":
+        grant["state"] = "revoked"
+    elif grant_state == "wrong_head":
+        grant["head_sha"] = "c" * 40
+    elif grant_state == "wrong_manifest":
+        grant["manifest"] = []
+    elif grant_state == "unrelated_pr":
+        item.pr = 3007
+        item.issue = 3007
+    monkeypatch.setattr(
+        type(ctx.github), "_repo_slug", property(lambda _: "HomericIntelligence/Hephaestus")
+    )
+    ctx.github.issue_comments = lambda _: [
+        IssueComment(
+            body=BOOTSTRAP_MARKER + "\n" + json.dumps(grant),
+            author_login="operator",
+            author_association="MEMBER",
+            viewer_did_author=True,
+            database_id=123,
+        )
+    ]
+    first = stage.step(item, ctx)
+    assert isinstance(first, JobRequest) and isinstance(first.job, BuildTestJob)
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=False,
+            error="unsupported_host_verification_boundary",
+            value={
+                "head_sha": "a" * 40,
+                "immutable_source": False,
+                "status": "skipped",
+                "platform": "linux" if grant_state != "wrong_platform" else "win32",
+                "failure_kind": "runner",
+            },
+        ),
+        ctx,
+    )
+    item.state = "HOST_VERIFICATION_WAIT"
+    with patch.object(
+        stage,
+        "_route_threads_before_broad_review",
+        return_value=Continue(next_state="SOURCE_REVIEW"),
+    ):
+        result = stage.step(item, ctx)
+    if grant_state == "approved":
+        assert isinstance(result, Continue) and result.next_state == "SOURCE_REVIEW"
+        submitted = stage._submit_review_job(item, ctx)
+        assert isinstance(submitted, JobRequest) and isinstance(submitted.job, AgentJob)
+        assert (
+            json.loads(submitted.job.prompt_kwargs["host_verification_bootstrap_json"])[
+                "local_execution_evidence"
+            ]
+            is False
+        )
+        grant["state"] = "revoked"
+        with patch.object(
+            stage,
+            "_handle_host_verification_failure",
+            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
+        ):
+            rejected = stage._submit_review_job(item, ctx)
+        assert isinstance(rejected, StageOutcome) and rejected.note == "revoked"
+        with patch.object(
+            stage,
+            "_handle_host_verification_failure",
+            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
+        ):
+            validation_rejected = stage._validate_wait(item, ctx)
+        assert (
+            isinstance(validation_rejected, StageOutcome) and validation_rejected.note == "revoked"
+        )
+
+    else:
+        assert not isinstance(result, Continue) or result.next_state != "SOURCE_REVIEW"
+    assert item.payload["host_verification_receipts"][0]["ok"] is False

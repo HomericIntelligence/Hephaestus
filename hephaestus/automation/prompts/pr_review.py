@@ -259,6 +259,7 @@ def get_pr_review_analysis_prompt(
     host_verifications_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
+    host_verification_bootstrap_json: str = "",
 ) -> str:
     """Get the `$athena:pr-review` analysis prompt for inline review comments.
 
@@ -299,6 +300,7 @@ def get_pr_review_analysis_prompt(
         pr_description=pr_description,
         advise_findings=advise_findings,
         host_verifications_json=host_verifications_json,
+        host_verification_bootstrap_json=host_verification_bootstrap_json,
         include_nitpicks=include_nitpicks,
         review_context_kind=review_context_kind,
         fenced=fence_content(),
@@ -314,11 +316,14 @@ def _render_pr_review_analysis_prompt(
     pr_description: str,
     advise_findings: str,
     host_verifications_json: str,
+    host_verification_bootstrap_json: str,
     include_nitpicks: bool,
     review_context_kind: str,
     fenced: FencedContent,
 ) -> str:
     """Render an analysis prompt with one caller-owned fence nonce."""
+    if len(host_verification_bootstrap_json) > 4096:
+        raise PrReviewPromptSizeError("bootstrap prompt exceeds its size limit")
     nitpick_template = (
         "pr_review/nitpick_include.j2" if include_nitpicks else "pr_review/nitpick_suppress.j2"
     )
@@ -337,6 +342,9 @@ def _render_pr_review_analysis_prompt(
         host_verifications_block=fenced.fence(
             "HOST_VERIFICATIONS",
             host_verifications_json or "[]",
+        ),
+        host_verification_bootstrap_block=fenced.fence(
+            "HOST_VERIFICATION_BOOTSTRAP", host_verification_bootstrap_json or "{}"
         ),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
@@ -363,6 +371,7 @@ def build_bounded_pr_review_analysis_prompt(
     host_verifications_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
+    host_verification_bootstrap_json: str = "",
 ) -> str:
     """Render a direct analysis prompt within the provider-safe limit."""
     fenced = fence_content()
@@ -383,6 +392,7 @@ def build_bounded_pr_review_analysis_prompt(
             pr_description=description,
             advise_findings=advise,
             host_verifications_json=receipts,
+            host_verification_bootstrap_json=host_verification_bootstrap_json,
             include_nitpicks=include_nitpicks,
             review_context_kind=review_context_kind,
             fenced=fenced,
@@ -436,6 +446,7 @@ def get_review_validation_prompt(
     pr_title: str = "",
     pr_description: str = "",
     review_context_kind: str = "issue",
+    host_verification_bootstrap_json: str = "",
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
 
@@ -473,6 +484,7 @@ def get_review_validation_prompt(
         prior_comments_json=prior_comments_json,
         diff_text=diff_text,
         host_verifications_json=host_verifications_json,
+        host_verification_bootstrap_json=host_verification_bootstrap_json,
         pr_title=pr_title,
         pr_description=pr_description,
         review_context_kind=review_context_kind,
@@ -487,12 +499,15 @@ def _render_review_validation_prompt(
     prior_comments_json: str,
     diff_text: str,
     host_verifications_json: str,
+    host_verification_bootstrap_json: str,
     pr_title: str,
     pr_description: str,
     review_context_kind: str,
     fenced: FencedContent,
 ) -> str:
     """Render a validation prompt with one caller-owned fence nonce."""
+    if len(host_verification_bootstrap_json) > 4096:
+        raise PrReviewPromptSizeError("bootstrap prompt exceeds its size limit")
     return PromptCatalog.current().render(
         "pr_review/validation.j2",
         pr_number=pr_number,
@@ -505,6 +520,9 @@ def _render_review_validation_prompt(
             host_verifications_json or "[]",
         ),
         pr_title_block=fenced.fence("PR_TITLE", pr_title),
+        host_verification_bootstrap_block=fenced.fence(
+            "HOST_VERIFICATION_BOOTSTRAP", host_verification_bootstrap_json or "{}"
+        ),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
@@ -520,6 +538,7 @@ def build_bounded_review_validation_prompt(
     pr_title: str = "",
     pr_description: str = "",
     review_context_kind: str = "issue",
+    host_verification_bootstrap_json: str = "",
 ) -> str:
     """Render a validation prompt within the provider-safe limit."""
     fenced = fence_content()
@@ -531,6 +550,7 @@ def build_bounded_review_validation_prompt(
             prior_comments_json=context["prior_comments_json"],
             diff_text=diff,
             host_verifications_json=context["host_verifications_json"],
+            host_verification_bootstrap_json=host_verification_bootstrap_json,
             pr_title=context["pr_title"],
             pr_description=context["pr_description"],
             review_context_kind=review_context_kind,

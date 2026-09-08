@@ -27,6 +27,11 @@ from ..github_jobs import (
 )
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
+from .pr_review_bootstrap import (
+    admit_bootstrap_receipt,
+    bootstrap_review_failure,
+    store_host_verification_result,
+)
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
@@ -339,7 +344,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             on_done_state=HOST_VERIFICATION_WAIT,
         )
 
-    def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+    def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Create the agent job after the checkout/head barrier succeeds."""
         issue = _issue_number(item)
         round_index = item.payload.get("pr_review_round", 0)
@@ -349,6 +354,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             round_index,
             item.pr,
         )
+        if failure := bootstrap_review_failure(item, ctx, self._handle_host_verification_failure):
+            return failure
         workspace = source_workspace_binding(
             item,
             ctx,
@@ -389,6 +396,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
+                ),
+                "host_verification_bootstrap_json": item.payload.get(
+                    "host_verification_bootstrap_json", ""
                 ),
                 "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
@@ -531,6 +541,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             validation_threads, ensure_ascii=False, sort_keys=True
         )
         logger.info("pr_review:%d: requesting validation job", issue)
+        if failure := bootstrap_review_failure(item, ctx, self._handle_host_verification_failure):
+            return failure
         workspace = source_workspace_binding(
             item,
             ctx,
@@ -563,6 +575,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 "diff_text": item.payload.get("pr_diff", ""),
                 "pr_title": pr_title,
                 "pr_description": pr_description,
+                "host_verification_bootstrap_json": item.payload.get(
+                    "host_verification_bootstrap_json", ""
+                ),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
@@ -584,6 +599,14 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 None,
                 "host_verification_receipt_invalid",
             )
+        try:
+            admitted = admit_bootstrap_receipt(item, ctx, receipts, verifications, reviewed_head)
+        except Exception:
+            return self._handle_host_verification_failure(
+                item, ctx, verifications[0], "host_verification_bootstrap_invalid"
+            )
+        if admitted:
+            return self._route_threads_before_broad_review(item, ctx)
         matched_receipts = cast(list[dict[str, Any]], receipts)
         for verification, receipt in zip(verifications, matched_receipts, strict=False):
             if not _host_verification_receipt_matches(receipt, verification, reviewed_head):
@@ -967,6 +990,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         review_diff = value.get("diff") if isinstance(value, dict) else None
         review_base = value.get("base") if isinstance(value, dict) else None
         changed_paths = value.get("changed_paths") if isinstance(value, dict) else None
+        item.payload.pop("review_status_manifest", None)
+        if ready and isinstance(value, dict) and isinstance(value.get("status_manifest"), tuple):
+            item.payload["review_status_manifest"] = value["status_manifest"]
         if ready and not isinstance(review_diff, str):
             item.payload["review_checkout_error"] = "checkout job returned no bound diff"
             ready = False
@@ -987,43 +1013,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         del result
         return item.payload.pop(_HOST_VERIFICATION_PENDING, None) is not None
 
-    @staticmethod
-    def _store_host_verification_result(item: WorkItem, result: JobResult) -> None:
-        """Append a bounded, head-bound receipt from the fixed host plan."""
-        specs = _payload_host_verification_specs(item.payload)
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        receipts = item.payload.get("host_verification_receipts")
-        if (
-            not specs
-            or not is_full_commit_sha(reviewed_head)
-            or not isinstance(receipts, list)
-            or len(receipts) >= len(specs)
-        ):
-            item.payload.pop("host_verification_receipts", None)
-            return
-        spec = specs[len(receipts)]
-        result_value = result.value if isinstance(result.value, dict) else {}
-        status, platform = _host_verification_result_status(
-            result.value, result.ok, result.error, reviewed_head
-        )
-        receipts.append(
-            {
-                "argv": list(spec.argv),
-                "head_sha": reviewed_head,
-                "immutable_source": bool(
-                    isinstance(result.value, dict)
-                    and result.value.get("head_sha") == reviewed_head
-                    and result.value.get("immutable_source") is True
-                ),
-                "failure_kind": _host_verification_failure_kind(result_value),
-                "ok": result.ok,
-                "error": redact_diagnostic_text(result.error or "")[:500],
-                "platform": platform,
-                "status": status,
-                "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
-                "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
-            }
-        )
+    _store_host_verification_result = staticmethod(store_host_verification_result)
 
     def _consume_failed_job(
         self, item: WorkItem, result: JobResult, is_review_result: bool

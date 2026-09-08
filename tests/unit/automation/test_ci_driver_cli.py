@@ -115,3 +115,44 @@ def test_help_omits_force_run_and_loop_env(
     assert issues_lines, "no --issues line in help output"
     for line in issues_lines:
         assert "required" not in line.lower()
+
+
+def test_bootstrap_selector_defaults_to_disabled() -> None:
+    """An ordinary invocation does not select a bootstrap grant."""
+    assert ci_driver._parse_args([]).host_verification_bootstrap_comment is None
+
+
+def test_bootstrap_selector_accepts_one_direct_target() -> None:
+    """The parser transports a positive comment ID for the target PR."""
+    args = ci_driver._parse_args(["--prs", "3006", "--host-verification-bootstrap-comment", "123"])
+    assert args.host_verification_bootstrap_comment == 123
+    assert args.prs == [3006]
+
+
+@pytest.mark.parametrize("identifier", ["0", "-1", "invalid"])
+def test_bootstrap_selector_rejects_invalid_id(identifier: str) -> None:
+    """A selector must be a positive integer."""
+    with pytest.raises(SystemExit) as error:
+        ci_driver._parse_args(
+            ["--prs", "3006", "--host-verification-bootstrap-comment", identifier]
+        )
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        [],
+        ["--prs"],
+        ["--prs", "3005"],
+        ["--prs", "3006", "3007"],
+        ["--prs", "3006", "3006"],
+        ["--issues", "2701"],
+        ["--prs", "3006", "--issues", "2701"],
+    ],
+)
+def test_bootstrap_selector_rejects_other_scopes(scope: list[str]) -> None:
+    """A grant selector cannot select discovery, issues, or multiple PRs."""
+    with pytest.raises(SystemExit) as error:
+        ci_driver._parse_args([*scope, "--host-verification-bootstrap-comment", "123"])
+    assert error.value.code == 2

@@ -97,6 +97,46 @@ unavailable or defective, stop queue-driven merging and use the normal
 branch-protected manual process; do not restore label-only merging or change
 native auto-merge.
 
+## Linux review bootstrap for PR #3006
+
+An unsupported host-verification boundary has two recovery paths. Use the
+supported macOS host for ordinary immutable review, or use the narrow
+[ADR-0046 protocol](../adr/0046-review-host-verification-bootstrap.md) for
+PR #3006. Other PRs cannot use this exception.
+
+1. Review and merge #3007 on the supported macOS host from clean, signed
+   `main`. Do not use the new exception to review its own implementation.
+2. Install that merged revision on the Linux review host.
+3. Have the PR #3006 owner remove the two #3035 coverage deltas against a base
+   with the coverage repair. The observed 32-record head
+   `c81cc334232abebd6621915627a3fc5ab5734361` is not eligible. Require the exact
+   30-record map, with every row present and no extra operations or paths.
+4. Obtain a fresh review and a separate authenticated operator grant for the
+   new head and checkout-derived branch point. The grant must use the exact
+   marker and closed raw JSON schema in ADR-0046. Do not copy an old grant or
+   treat this runbook, an observed diff, or a CI result as approval.
+5. From the Hephaestus checkout, select the existing grant comment ID:
+
+   ```bash
+   uv run hephaestus-drive-prs-green --prs 3006 \
+     --host-verification-bootstrap-comment <COMMENT_ID>
+   ```
+
+The ID must be positive. Do not combine this option with `--issues`, discovery,
+or additional PR values. The pipeline authenticates the current actor and
+comment association. It reads the grant again before source review, GO, and
+each merge request. A Linux skip remains failed verification evidence; it
+cannot claim that the fixed commands passed. Normal review, required checks,
+and protected merge admission remain necessary.
+
+To disable use, omit the option. To revoke the grant, its authenticated owner
+sets `state` to `revoked` or deletes the comment. If GO already exists, the
+pipeline must guard the exact open, unarmed head, apply NO-GO, and confirm GO
+is absent before returning without a merge request. If these reads fail,
+preserve the PR and repair the evidence source. A restart discards the local
+proof and requires fresh grant validation and review. Revoke the grant after
+PR #3006 merges.
+
 ## See Also
 
 - [Automation loop crashed mid-issue](automation-loop-crash.md)

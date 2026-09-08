@@ -70,6 +70,26 @@ def host_verification_failure_comment(
             _indented_diagnostic(diagnostic.get("error")),
         ]
     )
+    if diagnostic.get("error") in {
+        "unsupported_host_verification_boundary",
+        "host_verification_bootstrap_invalid",
+        "host_verification_bootstrap_revoked",
+    }:
+        sections.extend(
+            [
+                "",
+                "**Recovery**",
+                "",
+                "Run immutable review on the supported macOS host. For issue #2701 and "
+                "PR #3006 in HomericIntelligence/Hephaestus only, the authenticated operator "
+                "can supply an exact-head bootstrap comment and select its ID with "
+                "`--host-verification-bootstrap-comment ID --prs 3006`. This permits source "
+                "review only; skipped commands remain missing execution evidence. See "
+                "`docs/runbooks/ci-driver-stall.md`. A changed head needs a fresh grant. "
+                "Revoke or delete the grant to stop use; the exact-head NOGO readback must "
+                "remove stale GO before any later merge request.",
+            ]
+        )
     stdout_tail = str(diagnostic.get("stdout_tail") or "")
     if stdout_tail:
         sections.extend(["", "**Standard output (tail)**", "", _indented_diagnostic(stdout_tail)])

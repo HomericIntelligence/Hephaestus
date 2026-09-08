@@ -315,6 +315,8 @@ class PipelineConfig:
     # Set only by the standalone PR-review wrapper. Marks direct requests so
     # stale implementation labels do not route a retry into remediation first.
     explicit_pr_review: bool = False
+    # This selector is not grant authority. Keep new fields at the end.
+    host_verification_bootstrap_comment_id: int | None = None
 
     @property
     def enable_advise(self) -> bool:

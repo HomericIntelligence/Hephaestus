@@ -1167,6 +1167,17 @@ a blocking host-verification gap. It is not passing execution evidence, and it
 cannot grant implementation authority. Add a Linux or Windows backend as a
 separately reviewed isolation implementation; there is no unsandboxed fallback.
 
+A narrow source-review exception for PR #3006 is specified in
+[ADR-0046](adr/0046-review-host-verification-bootstrap.md). An authenticated
+operator comment must bind the exact head, checkout branch point, and complete
+30-record operation map. The CLI comment ID only selects that grant. The
+Linux skip remains failed host evidence; a separate process-local proof
+permits source review. Fresh grant checks precede source-review submission,
+the GO-label write, and every protected merge request. The exception cannot
+review its own #3007 implementation, which requires the existing macOS path.
+The current 32-record PR #3006 head is ineligible until its owner removes the
+two #3035 coverage deltas and obtains a fresh exact-head grant.
+
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is
 keyed by reviewed head and fixed verification ID, so an identical retry updates

@@ -75,6 +75,10 @@ from hephaestus.agents.runtime import (
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import SourceLane, WorkspaceKind, validate_workspace_binding
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
+from hephaestus.automation.host_verification_bootstrap import (
+    BootstrapGrantError,
+    parse_status_manifest,
+)
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -7543,6 +7547,16 @@ class WorkerPool:
         if not isinstance(changed_paths_output, str):
             return JobResult(ok=False, error="review checkout path manifest unavailable")
         changed_paths = [path for path in changed_paths_output.split("\0") if path]
+        try:
+            status_manifest = parse_status_manifest(
+                git_utils.run(
+                    ["git", "diff", "--no-renames", "--name-status", "-z", f"{base}...{head}"],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                ).stdout
+            )
+        except BootstrapGrantError:
+            return JobResult(ok=False, error="review checkout status manifest unavailable")
         return JobResult(
             ok=True,
             value={
@@ -7551,6 +7565,7 @@ class WorkerPool:
                 "base": base,
                 "diff": diff,
                 "changed_paths": changed_paths,
+                "status_manifest": status_manifest,
             },
         )
 

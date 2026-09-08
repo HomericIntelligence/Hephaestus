@@ -2,6 +2,7 @@
 # ruff: noqa: F403, F405
 from hephaestus.automation.review_audit import is_clean_go_review
 
+from .pr_review_bootstrap import bootstrap_go_failure
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
@@ -666,6 +667,8 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item.payload.pop("reviewed_pr_head_sha", None)
                 item.payload.pop("reviewed_pr_node_id", None)
                 return Continue(next_state=REVIEW_WAIT)
+            if failure := bootstrap_go_failure(item, github, pr_number, reviewed_head):
+                return failure
             if not item.payload.get("pending_implementation_go_label_confirmed"):
                 github.mark_pr_implementation_go(pr_number)
             state = github.gh_pr_state(pr_number)

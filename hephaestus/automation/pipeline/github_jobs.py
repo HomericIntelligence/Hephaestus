@@ -15,6 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
+from hephaestus.automation.host_verification_bootstrap import (
+    BootstrapProof,
+    is_process_bootstrap_proof,
+)
 from hephaestus.automation.pipeline.scope_retraction import (
     scope_retraction_paths_from_body,
 )
@@ -361,9 +365,17 @@ class RunMergeWaitCycleRequest:
     cancellation: threading.Event
     issue_number: int | None = None
     queue_admitted: bool = False
+    bootstrap_proof: BootstrapProof | None = None
 
     def __post_init__(self) -> None:
         """Validate the exact-head merge proof and readiness fingerprint."""
+        if self.bootstrap_proof is not None and (
+            not is_process_bootstrap_proof(self.bootstrap_proof)
+            or self.bootstrap_proof.pr != self.pr_number
+            or self.bootstrap_proof.issue != self.issue_number
+            or self.bootstrap_proof.head_sha != self.reviewed_head_sha
+        ):
+            raise ValueError("bootstrap proof must match this process and merge target")
         _positive_identifier(self.pr_number, "pr_number")
         _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
         if (
