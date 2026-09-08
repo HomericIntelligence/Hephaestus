@@ -1109,7 +1109,10 @@ class TestGate:
             source_workspaces=manager,
         )
 
-        result = stage.step(item, make_ctx(paths=paths))
+        with patch.object(
+            implementation_module, "_new_pretest_input", return_value=_routing_pretest_input(item)
+        ):
+            result = stage.step(item, make_ctx(paths=paths))
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
@@ -3446,7 +3449,10 @@ class TestImplementBudget:
             }
         )
 
-        result = stage.step(item, ctx)
+        with patch.object(
+            implementation_module, "_new_pretest_input", return_value=_routing_pretest_input(item)
+        ):
+            result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
@@ -3494,7 +3500,10 @@ class TestImplementBudget:
             }
         )
 
-        result = stage.step(item, ctx)
+        with patch.object(
+            implementation_module, "_new_pretest_input", return_value=_routing_pretest_input(item)
+        ):
+            result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
@@ -3514,6 +3523,9 @@ class TestImplementBudget:
                     "replies": {"thread-1": "[Response] Removed."},
                 },
             }
+        )
+        item.payload.update(
+            remediation_pretest_ready=True, remediation_pretest_record_sha256="c" * 64
         )
         item.state = "COMMIT_PUSH_WAIT"
         push = stage.step(item, ctx)
@@ -5300,7 +5312,10 @@ class TestCommitPushAndPrCreate:
         )
         github._states.append({"state": "OPEN", "headRefOid": "c" * 40, "autoMergeRequest": None})
 
-        stale_result = _drive_github_jobs(stage, stale, ctx)
+        with patch.object(
+            implementation_module, "_new_pretest_input", return_value=_routing_pretest_input(stale)
+        ):
+            stale_result = _drive_github_jobs(stage, stale, ctx)
 
         assert isinstance(stale_result, JobRequest)
         assert stale_result.job.descr == "address_review"
@@ -6889,3 +6904,402 @@ def test_terminal_writer_failure_stops_without_git_retry(
     assert item.payload["source_workspace_terminal"] == reference
     assert item.worktree == "/missing/writer"
     assert not item.payload.get("git_error_retries")
+
+
+def test_successful_adopted_dirty_candidate_is_persisted_before_tests(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A real adopted writer needs durable recovery evidence before its first test."""
+    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+    from tests.unit.automation.pipeline.test_worker_pool import _git, _worker_repository
+
+    repo, _, head = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+    binding = manager.prepare(7, SourceLane.IMPLEMENTATION, head, branch="7-adopted-writer")
+    _git(repo, "push", "origin", "7-adopted-writer:7-adopted-writer")
+    receipt_before = manager._receipt_path(7, SourceLane.IMPLEMENTATION).read_bytes()
+    stage = ImplementationStage()
+    item = make_work_item(repo="Hephaestus", issue=7, pr=8, state="IMPLEMENT_WAIT")
+    item.worktree = str(binding.cwd)
+    item.branch = "7-adopted-writer"
+    item.payload.update(
+        implementation_remediation=True,
+        remediation_thread_snapshots=[
+            {
+                "id": "thread-1",
+                "comments": [{"id": "comment-1", "author": "reviewer", "body": "Fix."}],
+            }
+        ],
+        _impl_source_revision=head,
+    )
+    ctx = make_ctx(
+        org="HomericIntelligence", paths=SimpleNamespace(repo_root=repo, source_workspaces=manager)
+    )
+    with patch.object(
+        ctx.github,
+        "discover_plan",
+        return_value=PlanDiscoveryResult.found("## Files to Modify\n- `tracked.txt`\n"),
+    ):
+        item.payload["remediation_pretest_input"] = implementation_module._new_pretest_input(
+            item, ctx
+        )
+    item.payload["remediation_pretest_nonce"] = "f" * 32
+    (binding.cwd / "tracked.txt").write_text("successful remediation\n")
+    stage.on_job_done(
+        item,
+        JobResult(ok=True, value={"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}}),
+        ctx,
+    )
+    item.state = "TEST_WAIT"
+    request = stage.step(item, ctx)
+
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitJob), "Tests must wait for durable candidate persistence."
+    assert request.job.op == "persist_remediation_pretest_candidate"
+    assert manager._receipt_path(7, SourceLane.IMPLEMENTATION).read_bytes() == receipt_before
+    assert (binding.cwd / "tracked.txt").read_text() == "successful remediation\n"
+
+
+def _pretest_stage_item(tmp_path: Path, make_work_item: Any) -> Any:
+    """Bind stage routing to one immutable successful-job input."""
+    from hephaestus.automation.pipeline.jobs import RemediationPretestInput
+    from hephaestus.automation.remediation_prepublication import (
+        RemediationPretestCandidate,
+        canonical_source_receipt_json,
+    )
+    from tests.unit.automation.test_remediation_recovery import _pretest_payload
+
+    candidate = RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    inputs = RemediationPretestInput(
+        candidate.repository,
+        candidate.issue_number,
+        candidate.pr_number,
+        candidate.branch,
+        candidate.expected_remote_sha,
+        canonical_source_receipt_json(candidate.source_receipt),
+        candidate.source_receipt_sha256,
+        candidate.thread_snapshot_json,
+        candidate.batch_nonce,
+        ("a.py",),
+        "a" * 64,
+        1,
+        None,
+    )
+    item = make_work_item(repo="project", issue=9, pr=10, state="IMPLEMENT_WAIT")
+    item.branch = candidate.branch
+    item.worktree = candidate.worktree_path
+    item.payload.update(
+        implementation_remediation=True,
+        remediation_thread_snapshots=json.loads(candidate.thread_snapshot_json),
+        _impl_source_revision=candidate.expected_remote_sha,
+        remediation_pretest_input=inputs,
+        remediation_pretest_nonce="f" * 32,
+    )
+    return item
+
+
+def test_pretest_stage_persists_before_dispatching_tests(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Only the exact host persistence result permits a test job."""
+    item = _pretest_stage_item(tmp_path, make_work_item)
+    ctx = make_ctx(org="example", config_overrides={"run_pre_pr_tests": True})
+    stage = ImplementationStage()
+    stage.on_job_done(
+        item,
+        JobResult(ok=True, value={"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}}),
+        ctx,
+    )
+    item.state = "TEST_WAIT"
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest) and isinstance(request.job, GitJob)
+    assert request.job.op == "persist_remediation_pretest_candidate"
+    assert item.state == "PRETEST_PERSIST_WAIT"
+    stage.on_job_done(
+        item, JobResult(ok=True, value={"record_sha256": "c" * 64, "sequence": 1}), ctx
+    )
+    item.state = request.on_done_state
+    tests = stage.step(item, ctx)
+    assert isinstance(tests, JobRequest) and isinstance(tests.job, BuildTestJob)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        JobResult(ok=False, error="store failed"),
+        JobResult(ok=True, value={"record_sha256": "bad", "sequence": 1}),
+        JobResult(ok=True, value={"record_sha256": "c" * 64, "sequence": 2}),
+    ],
+)
+def test_pretest_stage_stops_when_persistence_is_unproven(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, result: JobResult
+) -> None:
+    """Store failures cannot be retried as tests or source replacement."""
+    item = _pretest_stage_item(tmp_path, make_work_item)
+    item.state = "PRETEST_PERSIST_WAIT"
+    stage = ImplementationStage()
+    ctx = make_ctx()
+    stage.on_job_done(item, result, ctx)
+    item.state = "TEST_WAIT"
+    outcome = stage.step(item, ctx)
+    assert isinstance(outcome, StageOutcome) and outcome.disposition == Disposition.FINISH_FAIL
+    assert item.worktree is not None
+
+
+def test_pretest_stage_invalidates_before_test_fix(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """The candidate becomes invalidated before a provider can change it."""
+    item = _pretest_stage_item(tmp_path, make_work_item)
+    item.state = "TESTFIX_WAIT"
+    item.payload["remediation_pretest_record_sha256"] = "c" * 64
+    item.payload["remediation_pretest_ready"] = True
+    request = ImplementationStage().step(item, make_ctx())
+    assert isinstance(request, JobRequest) and isinstance(request.job, GitJob)
+    assert request.job.op == "invalidate_remediation_pretest_candidate"
+    assert item.state == "PRETEST_INVALIDATE_WAIT"
+
+
+def _routing_pretest_input(item: Any) -> Any:
+    """Supply typed source pins for tests of unrelated stage routing."""
+    from hephaestus.automation.pipeline.jobs import RemediationPretestInput
+    from hephaestus.automation.remediation_prepublication import (
+        canonical_source_receipt_json,
+        source_receipt_digest,
+    )
+    from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
+
+    receipt = SourceWorkspaceReceipt(
+        repository=item.repo,
+        repository_identity=item.repo + ":fixture",
+        ownership_key=f"{item.repo}:fixture:{item.issue}:impl",
+        item_number=item.issue,
+        lane=SourceLane.IMPLEMENTATION,
+        path=Path(item.worktree or "/tmp/repo/worktree"),
+        revision=item.payload.get("_impl_source_revision", "a" * 40),
+        generation=1,
+        detached=False,
+        branch=item.branch or "fixture-branch",
+    )
+    threads = [
+        {"id": "thread-1", "comments": [{"id": "comment-1", "author": "reviewer", "body": "Fix."}]}
+    ]
+    return RemediationPretestInput(
+        f"test-org/{item.repo}".casefold(),
+        item.issue,
+        item.pr,
+        str(receipt.branch),
+        receipt.revision,
+        canonical_source_receipt_json(receipt),
+        source_receipt_digest(receipt),
+        RemediationReviewInput.canonical_thread_snapshot(threads),
+        "a" * 32,
+        ("a.py",),
+        "b" * 64,
+        1,
+        None,
+    )
+
+
+def test_pretest_testfix_replaces_input_after_invalidation_and_persists_none_result(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A test-fix keeps prior replies and persists its actual successful null result."""
+    from hephaestus.automation.pipeline.jobs import remediation_pretest_result_digest
+
+    stage = ImplementationStage()
+    item = _pretest_stage_item(tmp_path, make_work_item)
+    ctx = make_ctx(paths=SimpleNamespace(repo_root=tmp_path))
+    previous = item.payload["remediation_pretest_input"]
+    replies = {"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}}
+    item.payload.update(
+        remediation_output=replies,
+        remediation_pretest_ready=True,
+        remediation_pretest_record_sha256="c" * 64,
+    )
+    item.state = "TESTFIX_WAIT"
+    invalidation = stage.step(item, ctx)
+    assert isinstance(invalidation, JobRequest) and isinstance(invalidation.job, GitJob)
+    stage.on_job_done(
+        item, JobResult(ok=True, value={"record_sha256": "d" * 64, "sequence": 1}), ctx
+    )
+    item.state = invalidation.on_done_state
+    fix = stage.step(item, ctx)
+    assert isinstance(fix, JobRequest) and isinstance(fix.job, AgentJob)
+    assert fix.job.parse is None
+    assert fix.job.remediation_pretest_input is not None
+    assert fix.job.remediation_pretest_input.candidate_sequence == 2
+    assert fix.job.remediation_pretest_input.expected_previous_record_sha256 == "d" * 64
+    assert fix.job.remediation_pretest_input.batch_nonce == previous.batch_nonce
+    assert fix.job.workspace is not None and fix.job.workspace.revision == "a" * 40
+    assert fix.job.remediation_pretest_nonce != "f" * 32
+    stage.on_job_done(item, JobResult(ok=True, value=None), ctx)
+    item.state = fix.on_done_state
+    persist = stage.step(item, ctx)
+    assert isinstance(persist, JobRequest) and isinstance(persist.job, GitJob)
+    assert persist.job.op == "persist_remediation_pretest_candidate"
+    assert persist.job.kwargs[
+        "remediation_pretest_result_sha256"
+    ] == remediation_pretest_result_digest(None)
+    assert item.payload["remediation_output"] == replies
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "head", "sequence", "reply", "receipt", "foreign-owner"]
+)
+def test_pretest_recovery_routes_only_exact_worker_evidence_to_tests(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, mutation: str | None
+) -> None:
+    """Successful restart evidence restores test routing without another agent job."""
+    stage = ImplementationStage()
+    item = _pretest_stage_item(tmp_path, make_work_item)
+    inputs = item.payload["remediation_pretest_input"]
+    envelope = {
+        "worktree_path": item.worktree,
+        "source_receipt": json.loads(inputs.source_receipt_json),
+        "remediation_pretest_input": inputs,
+        "record_sha256": "b" * 64,
+        "sequence": 1,
+        "addressed_replies": {"thread-1": "Fixed."},
+    }
+    if mutation == "foreign-owner":
+        from dataclasses import replace
+
+        from hephaestus.automation.remediation_prepublication import (
+            canonical_source_receipt_json,
+            source_receipt_digest,
+        )
+        from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
+
+        source = replace(
+            SourceWorkspaceReceipt.from_dict(json.loads(inputs.source_receipt_json)),
+            repository="project",
+        )
+        envelope["source_receipt"] = source.to_dict()
+        envelope["remediation_pretest_input"] = replace(
+            inputs,
+            repository="other/project",
+            source_receipt_json=canonical_source_receipt_json(source),
+            source_receipt_sha256=source_receipt_digest(source),
+        )
+    elif mutation == "head":
+        item.payload["_impl_source_revision"] = "c" * 40
+    elif mutation == "sequence":
+        envelope["sequence"] = True
+    elif mutation == "reply":
+        envelope["addressed_replies"] = {"other": "Fixed."}
+    elif mutation == "receipt":
+        cast(dict[str, Any], envelope["source_receipt"])["generation"] = 7
+    item.state = "WORKTREE_WAIT"
+    ctx = make_ctx(org="example", config_overrides={"run_pre_pr_tests": True})
+    value = {"path": item.worktree, "successful_remediation_pretest_recovery": envelope}
+    stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    item.state = "DIRTY_DECISION_WAIT"
+    route = stage.step(item, ctx)
+    if mutation is not None:
+        assert isinstance(route, StageOutcome) and route.disposition == Disposition.FINISH_FAIL
+    else:
+        assert route == Continue(next_state="TEST_WAIT")
+        item.state = "TEST_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest) and isinstance(request.job, BuildTestJob)
+        assert not item.payload.get("test_receipt")
+        assert item.payload["remediation_output"]["replies"] == {"thread-1": "Fixed."}
+
+
+def test_pretest_publication_failure_does_not_refresh_writer(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A possibly consumed candidate stops after publication failure."""
+    item = _pretest_stage_item(tmp_path, make_work_item)
+    item.state = "COMMIT_PUSH_WAIT"
+    stage = ImplementationStage()
+    ctx = make_ctx()
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=False,
+            error="network failed",
+            value={
+                "publication_state": "remote_changed",
+                "head_sha": "b" * 40,
+                "observed_remote_sha": "c" * 40,
+            },
+        ),
+        ctx,
+    )
+    item.state = "PR_CREATE"
+    outcome = stage.step(item, ctx)
+    assert outcome == StageOutcome(
+        Disposition.FINISH_FAIL, "remediation_pretest_publication_failed"
+    )
+    assert not item.payload.get("_commit_push_writer_refresh")
+    assert ctx.github.mutation_log == []
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        None,
+        "successful_job_id",
+        "head_sha",
+        "source_receipt_sha256",
+        "successful_result_sha256",
+        "sequence",
+        "extra",
+        "existing-record",
+        "later-sequence",
+    ],
+)
+def test_pretest_clean_completion_keeps_normal_test_route(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, changed: str | None
+) -> None:
+    """Only the exact clean completion permits tests without a durable record."""
+    from dataclasses import replace
+
+    item = _pretest_stage_item(tmp_path, make_work_item)
+    ctx = make_ctx(org="example", config_overrides={"run_pre_pr_tests": True})
+    stage = ImplementationStage()
+    replies = {"addressed": ["thread-1"], "replies": {"thread-1": "No change needed."}}
+    stage.on_job_done(item, JobResult(ok=True, value=replies), ctx)
+    item.state = "TEST_WAIT"
+    stage.step(item, ctx)
+    inputs = item.payload["remediation_pretest_input"]
+    value: dict[str, object] = {
+        "outcome": "clean",
+        "sequence": 1,
+        "successful_job_id": item.payload["remediation_pretest_nonce"],
+        "successful_result_sha256": item.payload["remediation_pretest_result_sha256"],
+        "source_receipt_sha256": inputs.source_receipt_sha256,
+        "head_sha": inputs.expected_remote_sha,
+    }
+    if changed == "existing-record":
+        item.payload["remediation_pretest_record_sha256"] = "c" * 64
+    elif changed == "later-sequence":
+        item.payload["remediation_pretest_input"] = replace(inputs, candidate_sequence=2)
+    elif changed:
+        value[changed] = 2 if changed == "sequence" else "wrong"
+    stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    item.state = "TEST_WAIT"
+    route = stage.step(item, ctx)
+    if changed:
+        assert isinstance(route, StageOutcome) and route.disposition == Disposition.FINISH_FAIL
+        return
+    assert isinstance(route, JobRequest) and isinstance(route.job, BuildTestJob)
+    assert item.payload["remediation_output"] == replies
+    assert (
+        item.payload["remediation_pretest_clean_completion"]["head_sha"]
+        == inputs.expected_remote_sha
+    )
+    assert not item.payload.get("remediation_pretest_ready")
+    assert "remediation_pretest_input" not in item.payload
+    assert implementation_module._pretest_commit_kwargs(item) == {}
+    item.state = "TESTFIX_WAIT"
+    fix = stage.step(item, ctx)
+    assert isinstance(fix, JobRequest) and isinstance(fix.job, AgentJob)
+    assert "remediation_pretest_clean_completion" not in item.payload
+    assert fix.job.remediation_pretest_input is None
+    stage.on_job_done(item, JobResult(ok=True, value=None), ctx)
+    item.state = "TEST_WAIT"
+    again = stage.step(item, ctx)
+    assert isinstance(again, JobRequest) and isinstance(again.job, BuildTestJob)

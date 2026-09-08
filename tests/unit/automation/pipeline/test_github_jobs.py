@@ -1610,3 +1610,223 @@ def test_dirty_direct_read_bounds_plan_journal() -> None:
             None,
             plan_journal=FrozenJson.snapshot(["x" * (1024 * 1024)]),
         )
+
+
+def _adopted_read_threads() -> list[dict[str, Any]]:
+    """Return two complete unresolved threads for the adopted read contract."""
+    return [
+        {
+            "id": f"thread-{index}",
+            "isResolved": False,
+            "path": "a.py",
+            "line": index,
+            "side": "RIGHT",
+            "comments": [
+                {"id": f"comment-{index}", "author": "reviewer", "body": "Correct the test."}
+            ],
+        }
+        for index in (1, 2)
+    ]
+
+
+def _adopted_read_job(tmp_path: Path) -> GitHubJob:
+    """Build a closed request for the exact current adopted candidate."""
+    from hephaestus.automation.pipeline.github_jobs import InspectAdoptedRemediationPrStateRequest
+
+    return GitHubJob(
+        repo="repo",
+        repo_root=tmp_path,
+        descr="Read adopted remediation state",
+        request=InspectAdoptedRemediationPrStateRequest(
+            "org/repo",
+            9,
+            10,
+            "writer-branch",
+            "a" * 40,
+            RemediationReviewInput.canonical_thread_snapshot(_adopted_read_threads()),
+        ),
+    )
+
+
+class _AdoptedReadAccessor:
+    def __init__(
+        self, org: str, *, repo: str, calls: list[list[str]], fault: str | None, **kwargs: object
+    ) -> None:
+        assert (org, repo) == ("org", "repo")
+        self.fault = fault
+        self.events: list[str] = []
+        self.state_reads = 0
+        calls.append(self.events)
+
+    def gh_pr_state(self, number: int) -> object:
+        assert number == 10
+        self.events.append("state")
+        self.state_reads += 1
+        if self.fault == "missing-state":
+            return None
+        if self.fault == "malformed-state":
+            return {"state": "OPEN"}
+        state = "CLOSED" if self.fault == "closed" else "OPEN"
+        head = (
+            "b" * 40
+            if self.fault == "head" or (self.fault == "head-drift" and self.state_reads == 2)
+            else "a" * 40
+        )
+        return {"number": 10, "state": state, "headRefOid": head}
+
+    def get_pr_head_branch(self, number: int) -> str:
+        self.events.append("branch")
+        return "other" if self.fault == "branch" else "writer-branch"
+
+    def pr_head_is_writable(self, number: int) -> object:
+        self.events.append("writable")
+        if self.fault in {"fork", "unwritable"}:
+            return False
+        return 1 if self.fault == "malformed-writable" else True
+
+    def find_pr_for_issue(self, number: int) -> object:
+        assert number == 9
+        self.events.append("carrier")
+        if self.fault == "carrier":
+            return 11
+        return 10.0 if self.fault == "malformed-carrier" else 10
+
+    def list_unresolved_review_threads(self, number: int) -> object:
+        assert number == 10
+        self.events.append("threads")
+        if self.fault == "partial-error":
+            raise RuntimeError("review thread page is incomplete")
+        if self.fault == "malformed-threads":
+            return {"nodes": []}
+        threads = _adopted_read_threads()
+        if self.fault == "partial-threads":
+            return threads[:1]
+        if self.fault == "thread-drift":
+            threads[0]["comments"][0]["body"] = "Changed review request."
+        return threads
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"Unexpected accessor operation: {name}")
+
+
+def _adopted_read_accessor(
+    monkeypatch: pytest.MonkeyPatch, *, fault: str | None = None
+) -> list[list[str]]:
+    """Install a read-only accessor that records every attempted operation."""
+    from functools import partial
+
+    from hephaestus.automation import pipeline_github_jobs as module
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        module, "PipelineGitHub", partial(_AdoptedReadAccessor, calls=calls, fault=fault)
+    )
+    return calls
+
+
+def test_adopted_read_uses_fresh_complete_read_only_accessors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each read binds fresh PR facts around the complete thread result."""
+    from dataclasses import FrozenInstanceError
+
+    from hephaestus.automation import pipeline_github_jobs as module
+    from hephaestus.automation.pipeline.github_jobs import AdoptedRemediationPrStateRead
+
+    calls = _adopted_read_accessor(monkeypatch)
+    runner = module.PipelineGitHubJobRunner(org="org", dry_run=False)
+    for _ in range(2):
+        receipt = runner.run(_adopted_read_job(tmp_path))
+        assert isinstance(receipt, AdoptedRemediationPrStateRead)
+        assert (
+            receipt.repository,
+            receipt.issue_number,
+            receipt.pr_number,
+            receipt.branch,
+            receipt.head,
+            receipt.state,
+        ) == ("org/repo", 9, 10, "writer-branch", "a" * 40, "OPEN")
+        assert receipt.origin_writable is True and receipt.complete is True
+        assert receipt.thread_snapshot_json == RemediationReviewInput.canonical_thread_snapshot(
+            _adopted_read_threads()
+        )
+        with pytest.raises(FrozenInstanceError):
+            cast(Any, receipt).complete = False
+    expected = [
+        "state",
+        "branch",
+        "writable",
+        "carrier",
+        "threads",
+        "state",
+        "branch",
+        "writable",
+        "carrier",
+    ]
+    assert calls == [expected, expected]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing-state",
+        "malformed-state",
+        "closed",
+        "head",
+        "branch",
+        "carrier",
+        "fork",
+        "unwritable",
+        "malformed-writable",
+        "malformed-carrier",
+        "head-drift",
+        "partial-error",
+        "malformed-threads",
+        "partial-threads",
+        "thread-drift",
+    ],
+)
+def test_adopted_read_refuses_changed_or_incomplete_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """No incomplete or mismatched result can produce a successful readback."""
+    from hephaestus.automation import pipeline_github_jobs as module
+
+    calls = _adopted_read_accessor(monkeypatch, fault=fault)
+    with pytest.raises((ValueError, RuntimeError)):
+        module.PipelineGitHubJobRunner(org="org", dry_run=False).run(_adopted_read_job(tmp_path))
+    assert len(calls) == 1
+    assert set(calls[0]) <= {"state", "branch", "writable", "carrier", "threads"}
+
+
+def test_adopted_read_rejects_wrong_repository_before_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repository mismatch cannot create an accessor or issue a read."""
+    from hephaestus.automation import pipeline_github_jobs as module
+
+    calls = _adopted_read_accessor(monkeypatch)
+    with pytest.raises(ValueError, match="repository"):
+        module.PipelineGitHubJobRunner(org="other", dry_run=False).run(_adopted_read_job(tmp_path))
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("issue_number", True),
+        ("pr_number", 0),
+        ("expected_head", "short"),
+        ("repository", "Org/repo"),
+        ("branch", "../branch"),
+        ("expected_thread_snapshot_json", "[]"),
+    ],
+)
+def test_adopted_read_request_rejects_invalid_pins(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """The request boundary rejects malformed identity before dispatch."""
+    from dataclasses import replace
+
+    with pytest.raises(ValueError):
+        replace(cast(Any, _adopted_read_job(tmp_path).request), **{field: value})

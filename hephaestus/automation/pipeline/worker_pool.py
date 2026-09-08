@@ -101,9 +101,11 @@ from hephaestus.automation.pipeline.git_jobs import (
     IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
 )
 from hephaestus.automation.pipeline.github_jobs import (
+    AdoptedRemediationPrStateRead,
     DirtyDirectPrStateRead,
     GitHubJob,
     GitHubJobRunner,
+    InspectAdoptedRemediationPrStateRequest,
     InspectDirtyDirectPrStateRequest,
 )
 from hephaestus.automation.pipeline.jobs import (
@@ -115,6 +117,8 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobHandle,
     JobResult,
+    RemediationPretestInput,
+    remediation_pretest_result_digest,
     validate_job_workspace,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -135,12 +139,16 @@ from hephaestus.automation.pipeline.tool_scopes import (
 )
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.remediation_prepublication import (
+    RemediationPretestCandidate,
+    canonical_source_receipt_json,
     load_prepublication_intent,
     load_prepublication_receipt,
+    load_pretest_candidate,
     prepublication_private_git_dir,
     read_prepublication_private_head,
     save_prepublication_intent,
     save_prepublication_receipt,
+    save_pretest_candidate,
 )
 from hephaestus.automation.remediation_recovery import (
     RemediationRecoveryReceipt,
@@ -163,6 +171,7 @@ from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
+    SourceWorkspaceReceipt,
     SourceWorkspaceRecovery,
     SourceWorkspaceTerminalError,
 )
@@ -3454,6 +3463,20 @@ def _codex_implementation_request(
     )
 
 
+@dataclass
+class _PretestSuccess:
+    """Keep one pool-owned completion separate from coordinator data."""
+
+    job: AgentJob
+    inputs: RemediationPretestInput
+    claim_key: str
+    owner_id: int
+    predecessor: RemediationPretestCandidate | None = None
+    replies: tuple[tuple[str, str], ...] | None = None
+    result_sha256: str | None = None
+    in_use: bool = False
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -3522,6 +3545,10 @@ class WorkerPool:
         self._athena_skill_executor = athena_skill_executor
         self._rebase_policy_selector = rebase_policy_selector
         self._evidence_receipt_dir = evidence_receipt_dir
+        self._pretest_lock = threading.Lock()
+        self._pretest_successes: dict[str, _PretestSuccess] = {}
+        self._pretest_capacity = size
+        self._pretest_closed = False
 
     @contextmanager
     def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
@@ -3577,6 +3604,7 @@ class WorkerPool:
         *,
         claim_key: str = "",
         claim_stage: str = "",
+        remediation_owner_id: int | None = None,
     ) -> JobHandle:
         """Submit a job for execution.
 
@@ -3597,7 +3625,9 @@ class WorkerPool:
         # Capture the caller's ContextVar snapshot so worker-thread prompt
         # builders see the same CLI-selected prompt catalog as the coordinator.
         context = copy_context()
-        future = self._executor.submit(context.run, self._run, job, claim_key, claim_stage)
+        future = self._executor.submit(
+            context.run, self._run, job, claim_key, claim_stage, remediation_owner_id
+        )
         future.add_done_callback(lambda f: self._on_future_done(handle, f))
         return handle
 
@@ -3614,6 +3644,9 @@ class WorkerPool:
         interpreter open at exit — the #2059 leak). Terminating tracked process
         groups frees those workers promptly.
         """
+        with self._pretest_lock:
+            self._pretest_closed = True
+            self._pretest_successes.clear()
         if mark_interrupted:
             self._shutdown.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
@@ -3686,6 +3719,7 @@ class WorkerPool:
         job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
         claim_key: str = "",
         claim_stage: str = "",
+        remediation_owner_id: int | None = None,
     ) -> JobResult:
         """Execute a job and return its result.
 
@@ -3697,6 +3731,7 @@ class WorkerPool:
         killed job as success).
         """
         start = time.monotonic()
+        pretest_entry: _PretestSuccess | None = None
         worker_id = threading.current_thread().name
         logger.info(
             "worker_claim: worker_id=%s item=%s stage=%s job=%s repo=%s descr=%s",
@@ -3720,6 +3755,9 @@ class WorkerPool:
                 if isinstance(job, AthenaSkillJob):
                     result = self._run_athena_skill(job)
                 elif isinstance(job, AgentJob):
+                    pretest_entry = self._reserve_pretest_success(
+                        job, claim_key, remediation_owner_id
+                    )
                     result = self._run_agent(job)
                 elif isinstance(job, BuildTestJob):
                     result = self._run_build_test(job)
@@ -3765,6 +3803,7 @@ class WorkerPool:
             logger.error("failed to persist pipeline evidence receipt: %s", type(exc).__name__)
             result = replace(result, ok=False, error="evidence_receipt_failed")
 
+        result = self._complete_pretest_success(job, result, pretest_entry)
         return replace(
             result,
             duration_s=time.monotonic() - start,
@@ -3772,6 +3811,427 @@ class WorkerPool:
             stderr_tail=result.stderr_tail[-_TAIL:] if result.stderr_tail else "",
             worker_id=worker_id,
         )
+
+    def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
+        """Release completion authority when its coordinator permit ends."""
+        with self._pretest_lock:
+            for nonce, entry in tuple(self._pretest_successes.items()):
+                if (
+                    entry.claim_key == claim_key
+                    and entry.owner_id == owner_id
+                    and entry.result_sha256 is not None
+                    and not entry.in_use
+                ):
+                    del self._pretest_successes[nonce]
+
+    def _reserve_pretest_success(
+        self, job: AgentJob, claim_key: str, owner_id: int | None
+    ) -> _PretestSuccess | None:
+        """Capture exact typed inputs before the provider can run."""
+        inputs = job.remediation_pretest_input
+        nonce = job.remediation_pretest_nonce
+        if inputs is None and nonce is None:
+            return None
+        if not isinstance(inputs, RemediationPretestInput) or not isinstance(nonce, str):
+            raise ValueError("remediation pretest job input is unavailable")
+        if not claim_key or type(owner_id) is not int or owner_id <= 0:
+            raise ValueError("remediation pretest permit owner is unavailable")
+        receipt = SourceWorkspaceReceipt.from_dict(json.loads(inputs.source_receipt_json))
+        workspace = job.workspace
+        request = job.execution_request
+        if (
+            type(job.issue) is not int
+            or job.issue != inputs.issue_number
+            or job.repo.casefold() not in {inputs.repository, inputs.repository.rsplit("/", 1)[-1]}
+            or request is None
+            or request.role is not AgentRole.IMPLEMENTER
+            or request.operation not in {AgentOperation.ADDRESS_REVIEW, AgentOperation.TEST_FIX}
+            or workspace is None
+            or workspace.cwd != receipt.path
+            or job.cwd != receipt.path
+            or workspace.revision != receipt.revision
+            or workspace.generation != receipt.generation
+            or workspace.repository != receipt.repository
+            or workspace.item_number != receipt.item_number
+            or workspace.lane != receipt.lane
+            or workspace.detached != receipt.detached
+            or workspace.ownership_key != receipt.ownership_key
+            or workspace.reusable_root is None
+        ):
+            raise ValueError("remediation pretest job does not match its source")
+        predecessor = None
+        if request.operation is AgentOperation.TEST_FIX:
+            if inputs.candidate_sequence <= 1 or inputs.expected_previous_record_sha256 is None:
+                raise ValueError("remediation pretest fix predecessor is unavailable")
+            predecessor = load_pretest_candidate(
+                repo_root=workspace.reusable_root, pr_number=inputs.pr_number
+            )
+            if (
+                predecessor is None
+                or predecessor.phase != "invalidated"
+                or predecessor.digest != inputs.expected_previous_record_sha256
+                or not self._pretest_candidate_matches_input(
+                    predecessor, inputs, sequence=inputs.candidate_sequence - 1
+                )
+            ):
+                raise ValueError("remediation pretest predecessor is unavailable")
+            manager = SourceWorkspaceManager(workspace.reusable_root, repository=job.repo)
+            with manager.implementation_writer_handoff(inputs.issue_number):
+                source = self._pretest_source(manager, inputs)
+                snapshot, _status, tree, diff, paths = _inspect_candidate_with_private_git(
+                    source.path,
+                    source.revision,
+                    timeout=int(job.timeout_s),
+                    linked_env=_linked_worktree_git_env(manager.repo_root, source.path),
+                )
+                if (
+                    tree != predecessor.candidate_tree_sha
+                    or diff.text != predecessor.diff
+                    or diff.sha256 != predecessor.diff_sha256
+                    or tuple(sorted(snapshot.snapshot.items())) != predecessor.content_snapshot
+                    or paths is None
+                    or tuple(paths.add_paths) != predecessor.add_paths
+                    or tuple(paths.update_paths) != predecessor.update_paths
+                    or load_pretest_candidate(
+                        repo_root=manager.repo_root, pr_number=inputs.pr_number
+                    )
+                    != predecessor
+                ):
+                    raise ValueError("remediation pretest fix candidate changed before provider")
+        elif inputs.candidate_sequence != 1:
+            raise ValueError("remediation pretest first completion has a predecessor")
+        with self._pretest_lock:
+            if (
+                self._pretest_closed
+                or nonce in self._pretest_successes
+                or len(self._pretest_successes) >= self._pretest_capacity
+            ):
+                raise ValueError("remediation pretest success capacity is unavailable")
+            entry = _PretestSuccess(job, inputs, claim_key, owner_id, predecessor=predecessor)
+            self._pretest_successes[nonce] = entry
+            return entry
+
+    @staticmethod
+    def _pretest_candidate_matches_input(
+        candidate: RemediationPretestCandidate,
+        inputs: RemediationPretestInput,
+        *,
+        sequence: int,
+    ) -> bool:
+        """Compare the frozen host pins with one durable candidate."""
+        return (
+            candidate.repository == inputs.repository
+            and candidate.issue_number == inputs.issue_number
+            and candidate.pr_number == inputs.pr_number
+            and candidate.branch == inputs.branch
+            and candidate.expected_remote_sha == inputs.expected_remote_sha
+            and canonical_source_receipt_json(candidate.source_receipt)
+            == inputs.source_receipt_json
+            and candidate.source_receipt_sha256 == inputs.source_receipt_sha256
+            and candidate.thread_snapshot_json == inputs.thread_snapshot_json
+            and candidate.batch_nonce == inputs.batch_nonce
+            and candidate.candidate_sequence == sequence
+        )
+
+    def _complete_pretest_success(
+        self, job: object, result: JobResult, reserved: _PretestSuccess | None
+    ) -> JobResult:
+        """Register only the actual bounded successful parsed completion."""
+        if not isinstance(job, AgentJob) or reserved is None:
+            return result
+        nonce = job.remediation_pretest_nonce
+        if nonce is None:
+            return result
+        from hephaestus.automation.address_review_core import parse_addressed_replies
+
+        with self._pretest_lock:
+            entry = self._pretest_successes.get(nonce)
+            if entry is not reserved or entry.job is not job:
+                return replace(result, ok=False, error="remediation_pretest_success_unavailable")
+            if not result.ok or result.interrupted or self._pretest_closed:
+                del self._pretest_successes[nonce]
+                return result
+            threads = json.loads(entry.inputs.thread_snapshot_json)
+            replies = (
+                dict(entry.predecessor.addressed_replies)
+                if entry.predecessor is not None
+                else parse_addressed_replies(result.value, threads)
+            )
+            if replies is None:
+                del self._pretest_successes[nonce]
+                return replace(result, ok=False, error="remediation_pretest_reply_invalid")
+            values = tuple(sorted(replies.items()))
+            try:
+                digest = remediation_pretest_result_digest(result.value)
+            except ValueError:
+                del self._pretest_successes[nonce]
+                return replace(result, ok=False, error="remediation_pretest_result_limit")
+            entry.replies = values
+            entry.result_sha256 = digest
+            return result
+
+    def _pretest_source(
+        self, manager: SourceWorkspaceManager, inputs: RemediationPretestInput
+    ) -> SourceWorkspaceReceipt:
+        """Require the exact attached writer while its lane lock is held."""
+        receipt = manager._require_receipt(inputs.issue_number, SourceLane.IMPLEMENTATION)
+        manager._reject_foreign_owner(receipt, inputs.issue_number, SourceLane.IMPLEMENTATION)
+        if (
+            canonical_source_receipt_json(receipt) != inputs.source_receipt_json
+            or receipt.path != manager.path_for(inputs.issue_number, SourceLane.IMPLEMENTATION)
+            or receipt.path.is_symlink()
+            or not manager._path_is_registered_to_repository(receipt.path)
+            or manager._head_branch(receipt.path) != f"refs/heads/{inputs.branch}"
+            or manager._head_revision(receipt.path) != inputs.expected_remote_sha
+        ):
+            raise SourceWorkspaceError("remediation pretest source changed")
+        return receipt
+
+    def _pretest_live_pr(
+        self, job: GitJob, repo_root: Path, inputs: RemediationPretestInput
+    ) -> None:
+        """Require complete fresh PR facts through the closed host runner."""
+        if self._github_job_runner is None:
+            raise SourceWorkspaceError("remediation pretest GitHub runner is unavailable")
+        receipt = self._github_job_runner.run(
+            GitHubJob(
+                repo=job.repo,
+                repo_root=repo_root,
+                descr="inspect_adopted_remediation_pr_state",
+                request=InspectAdoptedRemediationPrStateRequest(
+                    inputs.repository,
+                    inputs.issue_number,
+                    inputs.pr_number,
+                    inputs.branch,
+                    inputs.expected_remote_sha,
+                    inputs.thread_snapshot_json,
+                ),
+            )
+        )
+        expected = AdoptedRemediationPrStateRead(
+            inputs.repository,
+            inputs.issue_number,
+            inputs.pr_number,
+            inputs.branch,
+            inputs.expected_remote_sha,
+            "OPEN",
+            True,
+            inputs.thread_snapshot_json,
+            True,
+        )
+        if not isinstance(receipt, AdoptedRemediationPrStateRead) or receipt != expected:
+            raise SourceWorkspaceError("remediation pretest PR facts changed")
+
+    def _pretest_inspect(
+        self,
+        job: GitJob,
+        manager: SourceWorkspaceManager,
+        inputs: RemediationPretestInput,
+        *,
+        allow_clean: bool = False,
+    ) -> tuple[SourceWorkspaceReceipt, _DirtySnapshotEvidence, str, _BoundedGitOutput, CommitPaths]:
+        """Inspect exact local bytes and recheck source after fresh remote facts."""
+        source = self._pretest_source(manager, inputs)
+        scope_job = replace(job, kwargs={"scope_history_base_sha": inputs.expected_remote_sha})
+        if (
+            self._verify_implementation_edit_scope(
+                scope_job, source.path, allowed_paths=inputs.allowed_paths
+            )
+            is not None
+        ):
+            raise SourceWorkspaceError("remediation pretest scope changed")
+        linked = _linked_worktree_git_env(manager.repo_root, source.path)
+        before = _inspect_candidate_with_private_git(
+            source.path, source.revision, timeout=job.timeout_s, linked_env=linked
+        )
+        remote = self._read_remote_branch_head(
+            source.path,
+            remote="origin",
+            branch=inputs.branch,
+            expected_repo=inputs.repository,
+            timeout=job.timeout_s,
+        )
+        if remote != inputs.expected_remote_sha:
+            raise SourceWorkspaceError("remediation pretest remote head changed")
+        self._pretest_live_pr(job, manager.repo_root, inputs)
+        self._pretest_source(manager, inputs)
+        after = _inspect_candidate_with_private_git(
+            source.path, source.revision, timeout=job.timeout_s, linked_env=linked
+        )
+        if before != after:
+            raise SourceWorkspaceError("remediation pretest candidate changed")
+        if after[4] is None or after[0].changed_file_count == 0:
+            if (
+                not allow_clean
+                or after[4] is not None
+                or after[0].changed_file_count != 0
+                or after[1].text.strip()
+                or after[2] != source.revision
+                or after[3].text
+                or after[3].byte_count != 0
+            ):
+                raise SourceWorkspaceError("remediation pretest candidate is not clean")
+            tree = self._pretest_clean_tree(job, source, linked)
+            return source, after[0], tree, after[3], CommitPaths((), ())
+        if not after[4].add_paths and not after[4].update_paths:
+            raise SourceWorkspaceError("remediation pretest candidate changed or is empty")
+        return source, after[0], after[2], after[3], after[4]
+
+    @staticmethod
+    def _pretest_clean_tree(
+        job: GitJob, source: SourceWorkspaceReceipt, linked: dict[str, str]
+    ) -> str:
+        """Prove that the private index has the unchanged source tree."""
+        with _private_linked_worktree_git_env(linked, detached_head=source.revision) as env:
+            tree = git_utils.run(
+                ["git", "write-tree"],
+                cwd=source.path,
+                timeout=job.timeout_s,
+                env=env,
+            ).stdout.strip()
+            expected = git_utils.run(
+                ["git", "rev-parse", f"{source.revision}^{{tree}}"],
+                cwd=source.path,
+                timeout=job.timeout_s,
+                env=env,
+            ).stdout.strip()
+        if not _is_full_commit_sha(tree) or tree != expected:
+            raise SourceWorkspaceError("remediation pretest clean tree changed")
+        return tree
+
+    def _git_persist_pretest_candidate(self, job: GitJob) -> JobResult:
+        """Persist one actual completed job before the stage can submit tests."""
+        nonce = job.kwargs.get("remediation_pretest_nonce")
+        inputs = job.kwargs.get("remediation_pretest_input")
+        result_digest = job.kwargs.get("remediation_pretest_result_sha256")
+        if not isinstance(nonce, str) or not isinstance(inputs, RemediationPretestInput):
+            raise ValueError("remediation pretest persistence input is unavailable")
+        with self._pretest_lock:
+            entry = self._pretest_successes.get(nonce)
+            if (
+                self._pretest_closed
+                or entry is None
+                or entry.in_use
+                or entry.inputs != inputs
+                or entry.result_sha256 != result_digest
+                or entry.result_sha256 is None
+                or entry.replies is None
+                or entry.job.repo != job.repo
+            ):
+                raise ValueError("remediation pretest successful job is unavailable")
+            entry.in_use = True
+        try:
+            binding = entry.job.workspace
+            if binding is None or binding.reusable_root is None:
+                raise ValueError("remediation pretest source root is unavailable")
+            root = binding.reusable_root
+            manager = SourceWorkspaceManager(root, repository=job.repo)
+            with manager.implementation_writer_handoff(inputs.issue_number):
+                self._reject_pretest_legacy_conflict(root, inputs)
+                allow_clean = (
+                    inputs.candidate_sequence == 1
+                    and inputs.expected_previous_record_sha256 is None
+                    and load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number) is None
+                )
+                source, snapshot, tree, diff, paths = self._pretest_inspect(
+                    job, manager, inputs, allow_clean=allow_clean
+                )
+                if not paths.add_paths and not paths.update_paths:
+                    if (
+                        load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number)
+                        is not None
+                    ):
+                        raise SourceWorkspaceError("remediation pretest clean authority changed")
+                    with self._pretest_lock:
+                        if self._pretest_closed or self._pretest_successes.get(nonce) is not entry:
+                            raise SourceWorkspaceError("remediation pretest completion expired")
+                        del self._pretest_successes[nonce]
+                    return JobResult(
+                        ok=True,
+                        value={
+                            "outcome": "clean",
+                            "sequence": 1,
+                            "successful_job_id": nonce,
+                            "successful_result_sha256": entry.result_sha256,
+                            "source_receipt_sha256": inputs.source_receipt_sha256,
+                            "head_sha": source.revision,
+                        },
+                    )
+                candidate = RemediationPretestCandidate(
+                    phase="ready",
+                    repository=inputs.repository,
+                    issue_number=inputs.issue_number,
+                    pr_number=inputs.pr_number,
+                    repo_root=str(root),
+                    worktree_path=str(source.path),
+                    branch=inputs.branch,
+                    expected_remote_sha=inputs.expected_remote_sha,
+                    source_receipt=source,
+                    source_receipt_sha256=inputs.source_receipt_sha256,
+                    source_repository_identity=source.repository_identity,
+                    source_ownership_key=source.ownership_key,
+                    source_generation=source.generation,
+                    candidate_tree_sha=tree,
+                    add_paths=tuple(paths.add_paths),
+                    update_paths=tuple(paths.update_paths),
+                    diff=diff.text,
+                    diff_sha256=diff.sha256,
+                    content_snapshot=tuple(sorted(snapshot.snapshot.items())),
+                    thread_snapshot_json=inputs.thread_snapshot_json,
+                    batch_nonce=inputs.batch_nonce,
+                    candidate_sequence=inputs.candidate_sequence,
+                    successful_job_id=nonce,
+                    successful_result_sha256=entry.result_sha256,
+                    addressed_replies=entry.replies,
+                )
+                digest = save_pretest_candidate(
+                    repo_root=root,
+                    candidate=candidate,
+                    expected_digest=inputs.expected_previous_record_sha256,
+                    previous_successful_job_id=(
+                        entry.predecessor.successful_job_id if entry.predecessor else None
+                    ),
+                )
+                if load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number) != candidate:
+                    raise ValueError("remediation pretest write readback failed")
+            with self._pretest_lock:
+                if self._pretest_successes.get(nonce) is entry:
+                    del self._pretest_successes[nonce]
+            return JobResult(
+                ok=True, value={"record_sha256": digest, "sequence": inputs.candidate_sequence}
+            )
+        finally:
+            with self._pretest_lock:
+                entry.in_use = False
+
+    def _git_invalidate_pretest_candidate(self, job: GitJob) -> JobResult:
+        """Retire exact ready recovery authority before intentional mutation."""
+        inputs = job.kwargs.get("remediation_pretest_input")
+        digest = job.kwargs.get("remediation_pretest_record_sha256")
+        root_value = job.kwargs.get("repo_root")
+        if not isinstance(inputs, RemediationPretestInput) or not isinstance(root_value, str):
+            raise ValueError("remediation pretest invalidation input is unavailable")
+        root = Path(root_value)
+        manager = SourceWorkspaceManager(root, repository=job.repo)
+        with manager.implementation_writer_handoff(inputs.issue_number):
+            self._pretest_source(manager, inputs)
+            candidate = load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number)
+            if (
+                candidate is None
+                or candidate.phase != "ready"
+                or candidate.digest != digest
+                or not self._pretest_candidate_matches_input(
+                    candidate, inputs, sequence=inputs.candidate_sequence
+                )
+            ):
+                raise ValueError("remediation pretest ready candidate changed")
+            invalidated = replace(candidate, phase="invalidated")
+            result = save_pretest_candidate(
+                repo_root=root, candidate=invalidated, expected_digest=digest
+            )
+            return JobResult(
+                ok=True, value={"record_sha256": result, "sequence": inputs.candidate_sequence}
+            )
 
     def _persist_evidence_receipt(
         self,
@@ -4559,6 +5019,12 @@ class WorkerPool:
         """
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
+
+        elif job.op == "persist_remediation_pretest_candidate":
+            return self._git_persist_pretest_candidate(job)
+
+        elif job.op == "invalidate_remediation_pretest_candidate":
+            return self._git_invalidate_pretest_candidate(job)
 
         elif job.op == "publish_dirty_direct_continuation":
             return self._git_publish_dirty_direct_continuation(job)
@@ -6268,6 +6734,9 @@ class WorkerPool:
         )
         try:
             with source_manager.implementation_writer_handoff(item_number) as handoff:
+                pretest = self._recover_pretest_candidate(job, source_manager)
+                if pretest is not None:
+                    return pretest
                 recovered = self._recover_prepared_remediation_worktree(job, repo_root)
                 if recovered is not None:
                     return recovered
@@ -6307,6 +6776,103 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error=f"source_workspace_ownership_unavailable: {exc}",
+            )
+
+    def _reject_pretest_legacy_conflict(self, root: Path, inputs: RemediationPretestInput) -> None:
+        """Refuse concurrent old and new recovery authority for one PR."""
+        if (
+            load_prepublication_intent(
+                repo_root=root,
+                repository=inputs.repository,
+                issue_number=inputs.issue_number,
+                pr_number=inputs.pr_number,
+                branch=inputs.branch,
+                expected_remote_sha=inputs.expected_remote_sha,
+                thread_snapshot_json=inputs.thread_snapshot_json,
+            )
+            is not None
+            or load_prepublication_receipt(
+                repo_root=root,
+                repository=inputs.repository,
+                issue_number=inputs.issue_number,
+                pr_number=inputs.pr_number,
+                branch=inputs.branch,
+                expected_remote_sha=inputs.expected_remote_sha,
+                thread_snapshot_json=inputs.thread_snapshot_json,
+            )
+            is not None
+        ):
+            raise SourceWorkspaceError("remediation pretest recovery authority conflicts")
+
+    def _recover_pretest_candidate(
+        self, job: GitJob, manager: SourceWorkspaceManager
+    ) -> JobResult | None:
+        """Restore only exact ready evidence before normal adopted creation."""
+        if job.kwargs.get("recover_prepared_remediation") is not True:
+            return None
+        pr = job.kwargs.get("remediation_pr_number")
+        if type(pr) is not int or pr <= 0:
+            return None
+        preserved = manager.path_for(job.kwargs["issue_number"], SourceLane.IMPLEMENTATION)
+        try:
+            candidate = load_pretest_candidate(repo_root=manager.repo_root, pr_number=pr)
+            if candidate is None:
+                return None
+            if candidate.phase != "ready":
+                raise SourceWorkspaceError("remediation pretest candidate is not ready")
+            inputs = RemediationPretestInput(
+                repository=job.kwargs["remediation_repository"].casefold(),
+                issue_number=job.kwargs["issue_number"],
+                pr_number=pr,
+                branch=job.kwargs["branch_name"],
+                expected_remote_sha=job.kwargs["implementation_adoption_head"],
+                source_receipt_json=canonical_source_receipt_json(candidate.source_receipt),
+                source_receipt_sha256=candidate.source_receipt_sha256,
+                thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(
+                    job.kwargs["remediation_thread_snapshots"]
+                ),
+                batch_nonce=candidate.batch_nonce,
+                allowed_paths=job.kwargs["remediation_pretest_allowed_paths"],
+                approved_scope_sha256=job.kwargs["remediation_pretest_scope_sha256"],
+                candidate_sequence=candidate.candidate_sequence,
+                expected_previous_record_sha256=None,
+            )
+            self._reject_pretest_legacy_conflict(manager.repo_root, inputs)
+            source, snapshot, tree, diff, paths = self._pretest_inspect(job, manager, inputs)
+            if (
+                candidate.repo_root != str(manager.repo_root)
+                or not self._pretest_candidate_matches_input(
+                    candidate, inputs, sequence=inputs.candidate_sequence
+                )
+                or candidate.candidate_tree_sha != tree
+                or candidate.diff != diff.text
+                or candidate.diff_sha256 != diff.sha256
+                or candidate.add_paths != tuple(paths.add_paths)
+                or candidate.update_paths != tuple(paths.update_paths)
+                or candidate.content_snapshot != tuple(sorted(snapshot.snapshot.items()))
+                or load_pretest_candidate(repo_root=manager.repo_root, pr_number=pr) != candidate
+            ):
+                raise SourceWorkspaceError("remediation pretest recovery candidate changed")
+            return JobResult(
+                ok=True,
+                value={
+                    "path": str(source.path),
+                    "impl_source_revision": source.revision,
+                    "successful_remediation_pretest_recovery": {
+                        "worktree_path": str(source.path),
+                        "source_receipt": source.to_dict(),
+                        "remediation_pretest_input": inputs,
+                        "record_sha256": candidate.digest,
+                        "sequence": candidate.candidate_sequence,
+                        "addressed_replies": dict(candidate.addressed_replies),
+                    },
+                },
+            )
+        except (OSError, RuntimeError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+            return JobResult(
+                ok=False,
+                error="remediation_pretest_recovery_unavailable",
+                value={"source_workspace_preserve": True, "preserved_worktree": str(preserved)},
             )
 
     def _recover_prepared_remediation_worktree(  # noqa: C901
@@ -6657,6 +7223,8 @@ class WorkerPool:
         kwargs.pop("remediation_repository", None)
         kwargs.pop("remediation_pr_number", None)
         kwargs.pop("remediation_thread_snapshots", None)
+        kwargs.pop("remediation_pretest_allowed_paths", None)
+        kwargs.pop("remediation_pretest_scope_sha256", None)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
@@ -7733,6 +8301,11 @@ class WorkerPool:
                 base_dir=Path(root) / "build" / ".worktrees",
             )
             try:
+                if (
+                    "remediation_pretest_input" in job.kwargs
+                    or "remediation_pretest_record_sha256" in job.kwargs
+                ):
+                    return self._git_commit_pretest_candidate(job, manager, recovery_stack)
                 if "expected_remote_sha" not in job.kwargs:
                     record = recovery_stack.enter_context(
                         manager.implementation_local_commit(issue, branch=branch, path=Path(path))
@@ -7778,6 +8351,110 @@ class WorkerPool:
                     error="source_workspace_ownership_unavailable: publication binding invalid",
                 )
 
+    def _git_commit_pretest_candidate(
+        self, job: GitJob, manager: SourceWorkspaceManager, recovery_stack: ExitStack
+    ) -> JobResult:
+        """Advance local accounting once before publication of a ready candidate."""
+        inputs = job.kwargs.get("remediation_pretest_input")
+        expected_digest = job.kwargs.get("remediation_pretest_record_sha256")
+        if (
+            not isinstance(inputs, RemediationPretestInput)
+            or job.kwargs.get("issue_number") != inputs.issue_number
+            or job.kwargs.get("branch") != inputs.branch
+            or job.transport_repository.casefold() != inputs.repository
+            or "expected_remote_sha" in job.kwargs
+            or "writer_refresh" in job.kwargs
+        ):
+            raise SourceWorkspaceError("remediation pretest publication input is invalid")
+        path = manager.path_for(inputs.issue_number, SourceLane.IMPLEMENTATION)
+        if str(path) != str(job.kwargs.get("worktree_path")):
+            raise SourceWorkspaceError("remediation pretest publication path changed")
+        advance = recovery_stack.enter_context(
+            manager.implementation_local_commit(
+                inputs.issue_number, branch=inputs.branch, path=path
+            )
+        )
+        self._reject_pretest_legacy_conflict(manager.repo_root, inputs)
+        source, snapshot, tree, diff, paths = self._pretest_inspect(job, manager, inputs)
+        candidate = load_pretest_candidate(repo_root=manager.repo_root, pr_number=inputs.pr_number)
+        if (
+            candidate is None
+            or candidate.phase != "ready"
+            or candidate.digest != expected_digest
+            or not self._pretest_candidate_matches_input(
+                candidate, inputs, sequence=inputs.candidate_sequence
+            )
+            or candidate.candidate_tree_sha != tree
+            or candidate.diff != diff.text
+            or candidate.diff_sha256 != diff.sha256
+            or candidate.add_paths != tuple(paths.add_paths)
+            or candidate.update_paths != tuple(paths.update_paths)
+            or candidate.content_snapshot != tuple(sorted(snapshot.snapshot.items()))
+        ):
+            raise SourceWorkspaceError("remediation pretest publication candidate changed")
+        committed_head: str | None = None
+
+        def before_publish(head: str) -> None:
+            """Consume exact ready evidence after one verified source advance."""
+            nonlocal committed_head
+            if committed_head is not None:
+                raise SourceWorkspaceError("remediation pretest callback was reused")
+            self._pretest_live_pr(job, manager.repo_root, inputs)
+            remote = self._read_remote_branch_head(
+                path,
+                remote="origin",
+                branch=inputs.branch,
+                expected_repo=inputs.repository,
+                timeout=job.timeout_s,
+            )
+            if (
+                remote != inputs.expected_remote_sha
+                or manager._require_receipt(inputs.issue_number, SourceLane.IMPLEMENTATION)
+                != source
+                or manager._head_revision(path) != head
+                or manager._head_branch(path) != f"refs/heads/{inputs.branch}"
+                or not self._is_exact_recovery_commit(
+                    path,
+                    head,
+                    parent=source.revision,
+                    tree=candidate.candidate_tree_sha,
+                    timeout=job.timeout_s,
+                )
+                or not git_utils.is_clean_working_tree(path, timeout=job.timeout_s)
+                or self._verify_implementation_edit_scope(
+                    replace(job, kwargs={"scope_history_base_sha": source.revision}),
+                    path,
+                    allowed_paths=inputs.allowed_paths,
+                )
+                is not None
+                or load_pretest_candidate(repo_root=manager.repo_root, pr_number=inputs.pr_number)
+                != candidate
+            ):
+                raise SourceWorkspaceError("remediation pretest signed child is unconfirmed")
+            # A failed advance or retirement must never permit a second callback.
+            committed_head = head
+            advance(head)
+            consumed = replace(candidate, phase="consumed", consumed_head=head)
+            save_pretest_candidate(
+                repo_root=manager.repo_root, candidate=consumed, expected_digest=candidate.digest
+            )
+            if (
+                load_pretest_candidate(repo_root=manager.repo_root, pr_number=inputs.pr_number)
+                != consumed
+            ):
+                raise SourceWorkspaceError("remediation pretest retirement readback failed")
+
+        result = self._git_commit_push_inner(job, recovery_stack, before_publish=before_publish)
+        if committed_head is None:
+            return JobResult(ok=False, error="remediation_pretest_candidate_was_not_committed")
+        if manager._head_revision(path) != committed_head:
+            raise SourceWorkspaceError("remediation pretest local publication head changed")
+        if result.ok and (
+            not isinstance(result.value, dict) or result.value.get("head_sha") != committed_head
+        ):
+            raise SourceWorkspaceError("remediation pretest publication result changed")
+        return result
+
     def _verify_direct_publication_head(
         self,
         job: GitJob,
@@ -7819,6 +8496,8 @@ class WorkerPool:
         self,
         job: GitJob,
         recovery_stack: ExitStack,
+        *,
+        before_publish: Callable[[str], None] | None = None,
     ) -> JobResult:
         """Commit pending changes in a worktree, then push its branch.
 
@@ -8254,6 +8933,11 @@ class WorkerPool:
                         value={"recovery_commit_sha": selected_recovery_commit},
                         error=f"remediation recovery journal is unavailable: {exc}",
                     )
+            if before_publish is not None:
+                publication_head = self._read_publish_head(worktree, timeout=job.timeout_s)
+                if isinstance(publication_head, JobResult):
+                    return publication_head
+                before_publish(publication_head)
             publication = self._publish_commit_push(job, branch, worktree)
             if not publication.ok or remediation_artifacts is None:
                 return publication

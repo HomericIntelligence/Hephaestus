@@ -9,6 +9,8 @@ must stay off the coordinator thread), so :class:`AgentJob` carries a
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from collections.abc import Callable
@@ -44,6 +46,19 @@ class JobWorkspaceError(RuntimeError):
     """Raised when a job attempts to use an unbound source checkout."""
 
 
+def remediation_pretest_result_digest(value: object) -> str:
+    """Hash the actual bounded JSON result without adding response fields."""
+    try:
+        encoded = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError("remediation pretest result is invalid") from exc
+    if len(encoded) > 1024 * 1024:
+        raise ValueError("remediation pretest result exceeds its byte limit")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class DirtyDirectPlanInput:
     """Keep the host-approved plan inputs separate from the workspace claim."""
@@ -53,6 +68,106 @@ class DirtyDirectPlanInput:
     review_revision: int
     review: str
     allowed_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RemediationPretestInput:
+    """Freeze host source, review, and scope pins before remediation starts."""
+
+    repository: str
+    issue_number: int
+    pr_number: int
+    branch: str
+    expected_remote_sha: str
+    source_receipt_json: str
+    source_receipt_sha256: str
+    thread_snapshot_json: str
+    batch_nonce: str
+    allowed_paths: tuple[str, ...]
+    approved_scope_sha256: str
+    candidate_sequence: int
+    expected_previous_record_sha256: str | None
+
+    def __post_init__(self) -> None:
+        """Reject mutable, malformed, or inconsistent host inputs."""
+        from hephaestus.automation.remediation_prepublication import (
+            canonical_source_receipt_json,
+            source_receipt_digest,
+        )
+        from hephaestus.automation.remediation_recovery import RemediationReviewInput
+        from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
+
+        if any(
+            type(n) is not int or n <= 0
+            for n in (self.issue_number, self.pr_number, self.candidate_sequence)
+        ):
+            raise ValueError("pretest identifiers must be positive integers")
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", self.repository) is None
+        ):
+            raise ValueError("pretest repository must be canonical")
+        if (
+            not isinstance(self.branch, str)
+            or not self.branch
+            or self.branch.startswith(("-", "/"))
+            or ".." in self.branch
+            or any(ord(c) < 32 for c in self.branch)
+        ):
+            raise ValueError("pretest branch is invalid")
+        for value, pattern in (
+            (self.expected_remote_sha, r"[0-9a-f]{40}(?:[0-9a-f]{24})?"),
+            (self.batch_nonce, r"[0-9a-f]{32}"),
+            (self.source_receipt_sha256, r"[0-9a-f]{64}"),
+            (self.approved_scope_sha256, r"[0-9a-f]{64}"),
+        ):
+            if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+                raise ValueError("pretest digest or nonce is invalid")
+        previous = self.expected_previous_record_sha256
+        if (self.candidate_sequence == 1 and previous is not None) or (
+            previous is not None
+            and (not isinstance(previous, str) or re.fullmatch(r"[0-9a-f]{64}", previous) is None)
+        ):
+            raise ValueError("pretest predecessor is invalid")
+        if (
+            not isinstance(self.allowed_paths, tuple)
+            or not self.allowed_paths
+            or len(set(self.allowed_paths)) != len(self.allowed_paths)
+            or any(
+                not isinstance(p, str)
+                or not p
+                or "\0" in p
+                or Path(p).is_absolute()
+                or Path(p).as_posix() != p
+                or any(part in {".", "..", ".git"} for part in Path(p).parts)
+                for p in self.allowed_paths
+            )
+        ):
+            raise ValueError("pretest approved paths are invalid")
+        if any(
+            not isinstance(s, str) or len(s.encode("utf-8")) > 1024 * 1024
+            for s in (self.source_receipt_json, self.thread_snapshot_json)
+        ):
+            raise ValueError("pretest source or threads exceed their bound")
+        receipt = SourceWorkspaceReceipt.from_dict(json.loads(self.source_receipt_json))
+        if (
+            canonical_source_receipt_json(receipt) != self.source_receipt_json
+            or source_receipt_digest(receipt) != self.source_receipt_sha256
+            or receipt.item_number != self.issue_number
+            or receipt.branch != self.branch
+            or receipt.revision != self.expected_remote_sha
+            or receipt.detached
+            or receipt.lane.value != "impl"
+            or receipt.repository.casefold() not in {self.repository, self.repository.split("/")[1]}
+            or receipt.dirty_claim is not None
+            or receipt.ownership_key != f"{receipt.repository_identity}:{self.issue_number}:impl"
+        ):
+            raise ValueError("pretest source identity is invalid")
+        if (
+            RemediationReviewInput.canonical_thread_snapshot(json.loads(self.thread_snapshot_json))
+            != self.thread_snapshot_json
+        ):
+            raise ValueError("pretest threads are not canonical")
 
 
 @dataclass(frozen=True)
@@ -112,9 +227,19 @@ class AgentJob:
     deadline_s: float | None = None
     retryable: bool = True
     dirty_plan: DirtyDirectPlanInput | None = None
+    remediation_pretest_nonce: str | None = None
+    remediation_pretest_input: RemediationPretestInput | None = None
 
     def __post_init__(self) -> None:
         """Validate an optional operation-wide monotonic deadline."""
+        if (self.remediation_pretest_nonce is None) != (self.remediation_pretest_input is None):
+            raise ValueError("pretest nonce and input must be supplied together")
+        if self.remediation_pretest_nonce is not None and (
+            not isinstance(self.remediation_pretest_nonce, str)
+            or re.fullmatch(r"[0-9a-f]{32}", self.remediation_pretest_nonce) is None
+            or not isinstance(self.remediation_pretest_input, RemediationPretestInput)
+        ):
+            raise ValueError("pretest job identity is invalid")
         if self.deadline_s is not None and (
             isinstance(self.deadline_s, bool)
             or not isinstance(self.deadline_s, (int, float))

@@ -626,6 +626,16 @@ class SourceWorkspaceManager:
         """Return the repository-qualified internal ownership key."""
         return f"{self.repository_identity}:{item_number}:{lane.value}"
 
+    def snapshot_implementation_receipt(self, item_number: int) -> SourceWorkspaceReceipt:
+        """Read the immutable implementation receipt under its lane lock."""
+        if type(item_number) is not int or item_number <= 0:
+            raise SourceWorkspaceError("implementation receipt item number is invalid")
+        lane = SourceLane.IMPLEMENTATION
+        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+            receipt = self._require_receipt(item_number, lane)
+            self._reject_foreign_owner(receipt, item_number, lane)
+            return receipt
+
     @contextmanager
     def implementation_writer_handoff(
         self, item_number: int

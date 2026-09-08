@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.github_jobs import ImplementationReplyProgress
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
@@ -1010,3 +1011,370 @@ def test_normal_journal_format_two_is_unchanged() -> None:
     payload = json.loads(rendered[1].split("\n", 1)[1].removeprefix("<!-- ").removesuffix(" -->"))
     assert payload["format"] == 2
     assert "review_input" not in payload
+
+
+def _pretest_payload(tmp_path: Path) -> dict[str, Any]:
+    """Return one complete successful candidate payload."""
+    receipt = {
+        "schema_version": 1,
+        "repository": "example/project",
+        "repository_identity": "example/project:0123456789abcdef",
+        "ownership_key": "example/project:0123456789abcdef:9:impl",
+        "item_number": 9,
+        "lane": "impl",
+        "path": str(tmp_path / "build/writer"),
+        "revision": "a" * 40,
+        "generation": 6,
+        "detached": False,
+        "branch": "writer-branch",
+        "obligations": [],
+    }
+    diff = "diff --git a/a.py b/a.py\n+value = 2\n"
+    return {
+        "phase": "ready",
+        "repository": "example/project",
+        "issue_number": 9,
+        "pr_number": 10,
+        "repo_root": str(tmp_path),
+        "worktree_path": receipt["path"],
+        "branch": "writer-branch",
+        "expected_remote_sha": "a" * 40,
+        "source_receipt": receipt,
+        "source_receipt_sha256": hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "source_repository_identity": receipt["repository_identity"],
+        "source_ownership_key": receipt["ownership_key"],
+        "source_generation": 6,
+        "candidate_tree_sha": "b" * 40,
+        "add_paths": [],
+        "update_paths": ["a.py"],
+        "diff": diff,
+        "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
+        "content_snapshot": [
+            [key, "c" * 64] for key in ("index_sha256", "worktree_sha256", "untracked_sha256")
+        ],
+        "thread_snapshot_json": RemediationReviewInput.canonical_thread_snapshot(_threads()),
+        "batch_nonce": "d" * 32,
+        "candidate_sequence": 1,
+        "successful_job_id": "job-1",
+        "successful_result_sha256": "e" * 64,
+        "addressed_replies": {"thread-1": "Corrected the test."},
+        "consumed_head": None,
+    }
+
+
+def test_pretest_store_preserves_candidate_through_compare_and_swap(tmp_path: Path) -> None:
+    """Invalidation keeps evidence and permits only the next bound candidate."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    digest = store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == ready
+    assert store.save_pretest_candidate(repo_root=tmp_path, candidate=ready) == digest
+    invalidated = replace(ready, phase="invalidated")
+    invalid_digest = store.save_pretest_candidate(
+        repo_root=tmp_path, candidate=invalidated, expected_digest=digest
+    )
+    with pytest.raises(ValueError):
+        store.save_pretest_candidate(repo_root=tmp_path, candidate=ready, expected_digest=digest)
+    refreshed = replace(
+        ready, candidate_sequence=2, successful_job_id="job-2", successful_result_sha256="f" * 64
+    )
+    store.save_pretest_candidate(
+        repo_root=tmp_path,
+        candidate=refreshed,
+        expected_digest=invalid_digest,
+        previous_successful_job_id="job-1",
+    )
+    assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == refreshed
+    history = tmp_path / DEFAULT_STATE_DIR / "remediation-prepublication"
+    assert (history / f"pr-10-pretest-{digest}.json").read_bytes() == ready.canonical_bytes
+    assert not (history / "pr-10.json").exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("candidate_sequence", True),
+        ("source_generation", 0),
+        ("phase", "failed"),
+        ("successful_result_sha256", "invalid"),
+        ("source_receipt_sha256", "0" * 64),
+        ("update_paths", ["../outside"]),
+        ("addressed_replies", {"other": "Done."}),
+        ("consumed_head", "a" * 40),
+        ("source_ownership_key", "different"),
+    ],
+)
+def test_pretest_candidate_rejects_invalid_contract(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """Candidate fields cannot replace source, path or reply evidence."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    payload = _pretest_payload(tmp_path)
+    payload[field] = value
+    with pytest.raises(ValueError):
+        store.RemediationPretestCandidate.from_dict(payload)
+
+
+def test_pretest_candidate_rejects_unknown_fields(tmp_path: Path) -> None:
+    """A failed-result field cannot enter the successful record."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    payload = _pretest_payload(tmp_path)
+    payload["failure_diagnostic"] = "not successful evidence"
+    with pytest.raises(ValueError):
+        store.RemediationPretestCandidate.from_dict(payload)
+
+
+def test_pretest_store_rejects_missing_lineage_and_retains_consumed(tmp_path: Path) -> None:
+    """Phase changes need exact evidence and consumed records stay terminal."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    digest = store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    invalid = replace(ready, phase="invalidated")
+    invalid_digest = store.save_pretest_candidate(
+        repo_root=tmp_path, candidate=invalid, expected_digest=digest
+    )
+    next_ready = replace(
+        ready, candidate_sequence=2, successful_job_id="new-job", successful_result_sha256="f" * 64
+    )
+    with pytest.raises(ValueError):
+        store.save_pretest_candidate(
+            repo_root=tmp_path, candidate=next_ready, expected_digest=invalid_digest
+        )
+    assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == invalid
+    next_digest = store.save_pretest_candidate(
+        repo_root=tmp_path,
+        candidate=next_ready,
+        expected_digest=invalid_digest,
+        previous_successful_job_id=ready.successful_job_id,
+    )
+    consumed = replace(next_ready, phase="consumed", consumed_head="f" * 40)
+    consumed_digest = store.save_pretest_candidate(
+        repo_root=tmp_path, candidate=consumed, expected_digest=next_digest
+    )
+    with pytest.raises(ValueError):
+        store.save_pretest_candidate(
+            repo_root=tmp_path, candidate=next_ready, expected_digest=consumed_digest
+        )
+    assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == consumed
+
+
+@pytest.mark.parametrize(
+    "kind", ["symlink", "fifo", "malformed", "version", "unknown", "whitespace"]
+)
+def test_pretest_store_refuses_invalid_existing_records(tmp_path: Path, kind: str) -> None:
+    """Invalid evidence remains intact and cannot become recovery authority."""
+    import os
+
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    path = tmp_path / DEFAULT_STATE_DIR / "remediation-prepublication" / "pr-10-pretest.json"
+    path.unlink()
+    if kind == "symlink":
+        target = tmp_path / "outside.json"
+        target.write_bytes(ready.canonical_bytes)
+        path.symlink_to(target)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "malformed":
+        path.write_text("{")
+    elif kind == "whitespace":
+        path.write_bytes(ready.canonical_bytes + b"\n")
+    else:
+        record = json.loads(ready.canonical_bytes)
+        if kind == "version":
+            record[0] = True
+        else:
+            record[2]["unexpected"] = True
+        path.write_text(json.dumps(record))
+    before = path.lstat()
+    with pytest.raises((ValueError, OSError)):
+        store.load_pretest_candidate(repo_root=tmp_path, pr_number=10)
+    with pytest.raises((ValueError, OSError)):
+        store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    assert path.lstat().st_ino == before.st_ino
+
+
+def test_pretest_store_refuses_symlink_directory(tmp_path: Path) -> None:
+    """The private store cannot follow a redirected path component."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "build").symlink_to(outside, target_is_directory=True)
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    with pytest.raises(OSError):
+        store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    assert not list(outside.iterdir())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("batch_nonce", "1" * 32),
+        ("thread_snapshot_json", "changed"),
+        ("candidate_sequence", 3),
+        ("source_generation", 7),
+    ],
+)
+def test_pretest_store_refuses_changed_refresh_lineage(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """A new batch or source cannot replace an invalidated candidate."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    digest = store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    invalid = replace(ready, phase="invalidated")
+    invalid_digest = store.save_pretest_candidate(
+        repo_root=tmp_path, candidate=invalid, expected_digest=digest
+    )
+    payload = ready.as_dict()
+    payload.update(
+        candidate_sequence=2, successful_job_id="next", successful_result_sha256="f" * 64
+    )
+    payload[field] = value
+    with pytest.raises(ValueError):
+        refreshed = store.RemediationPretestCandidate.from_dict(payload)
+        store.save_pretest_candidate(
+            repo_root=tmp_path,
+            candidate=refreshed,
+            expected_digest=invalid_digest,
+            previous_successful_job_id=ready.successful_job_id,
+        )
+    assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == invalid
+
+
+def test_pretest_store_serializes_competing_first_writes(tmp_path: Path) -> None:
+    """Only one distinct candidate can win the initial compare-and-swap."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    other = replace(ready, successful_job_id="other")
+
+    def save(candidate: store.RemediationPretestCandidate) -> str | None:
+        try:
+            return store.save_pretest_candidate(repo_root=tmp_path, candidate=candidate)
+        except ValueError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(save, (ready, other)))
+    assert sum(value is not None for value in results) == 1
+    saved = store.load_pretest_candidate(repo_root=tmp_path, pr_number=10)
+    assert saved in (ready, other)
+    assert saved is not None and saved.digest in results
+
+
+def test_pretest_store_archives_before_failed_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement failure keeps both original authority and archived bytes."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    digest = store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+
+    def fail_replace(*args: object, **kwargs: object) -> None:
+        raise OSError("simulated replacement failure")
+
+    monkeypatch.setattr("hephaestus.automation.remediation_prepublication.os.replace", fail_replace)
+    with pytest.raises(OSError):
+        store.save_pretest_candidate(
+            repo_root=tmp_path,
+            candidate=replace(ready, phase="invalidated"),
+            expected_digest=digest,
+        )
+    assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == ready
+    directory = tmp_path / DEFAULT_STATE_DIR / "remediation-prepublication"
+    assert (directory / f"pr-10-pretest-{digest}.json").read_bytes() == ready.canonical_bytes
+    assert list(directory.glob("*.next"))
+
+
+def test_pretest_source_digest_uses_complete_canonical_receipt(tmp_path: Path) -> None:
+    """Whitespace in the source file does not define its canonical digest."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    payload = _pretest_payload(tmp_path)
+    payload["source_receipt"]["repository"] = "project"
+    receipt = payload["source_receipt"]
+    canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+    payload["source_receipt_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    candidate = store.RemediationPretestCandidate.from_dict(payload)
+    assert store.canonical_source_receipt_json(candidate.source_receipt) == canonical
+    assert store.source_receipt_digest(candidate.source_receipt) == payload["source_receipt_sha256"]
+    payload["source_receipt_sha256"] = hashlib.sha256(
+        json.dumps(receipt, indent=2).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError):
+        store.RemediationPretestCandidate.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("generation", True),
+        ("detached", 0),
+        ("item_number", "9"),
+        ("branch", "other"),
+        ("revision", "b" * 40),
+        ("lane", "review"),
+    ],
+)
+def test_pretest_candidate_rejects_coerced_or_changed_source(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """A matching recomputed hash cannot replace the source identity."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    payload = _pretest_payload(tmp_path)
+    payload["source_receipt"][field] = value
+    payload["source_receipt_sha256"] = hashlib.sha256(
+        json.dumps(payload["source_receipt"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError):
+        store.RemediationPretestCandidate.from_dict(payload)
+
+
+def test_pretest_store_rejects_oversized_or_missing_compare_record(tmp_path: Path) -> None:
+    """A size overflow or missing predecessor cannot create a new authority."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    with pytest.raises(ValueError):
+        store.save_pretest_candidate(repo_root=tmp_path, candidate=ready, expected_digest="f" * 64)
+    store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    path = tmp_path / DEFAULT_STATE_DIR / "remediation-prepublication" / "pr-10-pretest.json"
+    path.write_bytes(b" " * (1024 * 1024 + 1))
+    with pytest.raises(ValueError):
+        store.load_pretest_candidate(repo_root=tmp_path, pr_number=10)
+    assert path.stat().st_size == 1024 * 1024 + 1
+
+
+def test_pretest_refresh_accepts_equal_result_digest_from_new_job(tmp_path: Path) -> None:
+    """Distinct successful jobs can return the same result while lineage stays exact."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    ready = store.RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
+    first = store.save_pretest_candidate(repo_root=tmp_path, candidate=ready)
+    invalid = replace(ready, phase="invalidated")
+    second = store.save_pretest_candidate(
+        repo_root=tmp_path, candidate=invalid, expected_digest=first
+    )
+    refreshed = replace(ready, candidate_sequence=2, successful_job_id="next-job")
+    store.save_pretest_candidate(
+        repo_root=tmp_path,
+        candidate=refreshed,
+        expected_digest=second,
+        previous_successful_job_id=ready.successful_job_id,
+    )
+    assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == refreshed

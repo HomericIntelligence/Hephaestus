@@ -31,6 +31,8 @@ GIT_OPS: frozenset[str] = frozenset(
         "prepare_remediation_recovery",
         "publish_remediation_recovery",
         "verify_remediation_journal",
+        "persist_remediation_pretest_candidate",
+        "invalidate_remediation_pretest_candidate",
         "release_branch_reservation",
     }
 )
