@@ -635,8 +635,8 @@ host creates one deterministic child issue and keeps the source PR in the
 exclusive implementation-NO-GO state. The host reconciles that child before a
 later review checkout. An open child parks the source PR without review-budget
 cost. A closed child without merged implementation needs operator action. A
-merged child causes a host-only source-branch synchronization and then a fresh
-broad review. No agent receives the expansion as source-branch implementation
+merged child that is absent from the source branch requires a manual rebase.
+The source PR then needs a fresh broad review. No agent receives the expansion as source-branch implementation
 work. In a mixed audit, only a validated scope retraction can go to the writer
 before the source PR parks.
 

@@ -606,9 +606,46 @@ class AdoptedRemediationPrStateRead:
             raise ValueError("adopted PR state is invalid")
 
 
+@dataclass(frozen=True)
+class InspectRebaseConflictRequest:
+    """Read GO and conflict state for the exact replay inputs."""
+
+    repository: str
+    pr_number: int
+    reviewed_head_sha: str
+    base_sha: str
+
+    def __post_init__(self) -> None:
+        """Validate the repository, PR, and exact commits."""
+        if not isinstance(self.repository, str) or len(self.repository.split("/")) != 2:
+            raise ValueError("rebase repository must be OWNER/REPOSITORY")
+        if not all(self.repository.split("/")):
+            raise ValueError("rebase repository must be OWNER/REPOSITORY")
+        _positive_identifier(self.pr_number, "pr_number")
+        _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
+        _full_sha(self.base_sha, "base_sha")
+
+
+@dataclass(frozen=True)
+class RebaseConflictInspected:
+    """Return read-only admission for one exact head and base."""
+
+    request: InspectRebaseConflictRequest
+    admitted: bool
+    reason: str
+
+    def __post_init__(self) -> None:
+        """Require a typed admission result."""
+        if not isinstance(self.request, InspectRebaseConflictRequest):
+            raise TypeError("rebase admission request is invalid")
+        if type(self.admitted) is not bool or not isinstance(self.reason, str) or not self.reason:
+            raise ValueError("rebase admission result is invalid")
+
+
 type GitHubRequest = (
     InspectAdoptedRemediationPrStateRequest
     | InspectDirtyDirectPrStateRequest
+    | InspectRebaseConflictRequest
     | RecoverReplyJournalRequest
     | RecoverRemediationReplyJournalRequest
     | AppendReplyJournalRequest
@@ -640,6 +677,7 @@ class GitHubJob:
             (
                 InspectAdoptedRemediationPrStateRequest,
                 InspectDirtyDirectPrStateRequest,
+                InspectRebaseConflictRequest,
                 RecoverReplyJournalRequest,
                 RecoverRemediationReplyJournalRequest,
                 AppendReplyJournalRequest,
@@ -653,7 +691,11 @@ class GitHubJob:
             raise TypeError("request must be a supported GitHub request")
         if isinstance(
             self.request,
-            (InspectDirtyDirectPrStateRequest, InspectAdoptedRemediationPrStateRequest),
+            (
+                InspectDirtyDirectPrStateRequest,
+                InspectAdoptedRemediationPrStateRequest,
+                InspectRebaseConflictRequest,
+            ),
         ) and (self.request.repository.rsplit("/", 1)[-1].casefold() != self.repo.casefold()):
             raise ValueError("dirty direct request repository does not match the job")
         if not isinstance(self.descr, str) or not self.descr:
@@ -875,6 +917,7 @@ class ScopeExpansionDependenciesReconciled:
 type GitHubReceipt = (
     AdoptedRemediationPrStateRead
     | DirtyDirectPrStateRead
+    | RebaseConflictInspected
     | ReplyJournalRecovered
     | RemediationReplyJournalRecovered
     | ReplyJournalAppended

@@ -254,10 +254,8 @@ class PrReviewScopeExpansionMixin:
         if receipt.status == "operator_required":
             return StageOutcome(Disposition.BLOCKED, "scope_expansion_operator_required")
         if receipt.status == "sync_required":
-            item.payload["post_review_rebase_required"] = True
-            item.payload["scope_dependency_sync_required"] = True
             item.payload["scope_dependency_merge_shas"] = list(receipt.merge_shas)
-            return StageOutcome(Disposition.FAIL_BACK, "scope_dependency_sync_required")
+            return StageOutcome(Disposition.BLOCKED, "scope_dependency_manual_rebase_required")
         if receipt.status == "fresh_review":
             item.payload.pop("reviewed_pr_head_sha", None)
             item.payload.pop("reviewed_pr_node_id", None)

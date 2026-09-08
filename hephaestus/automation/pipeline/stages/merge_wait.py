@@ -223,7 +223,7 @@ class MergeWaitStage(Stage):
             return self._park_for_readiness(item, ctx)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
-        if outcome in {"merge_conflicting", "post_review_rebase_required"}:
+        if outcome == "merge_conflicting":
             return self._post_review_rebase(item, outcome)
         if outcome == "readiness_wait":
             if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
@@ -245,8 +245,9 @@ class MergeWaitStage(Stage):
 
     @staticmethod
     def _post_review_rebase(item: WorkItem, reason: str) -> StageOutcome:
-        """Send a reviewed stale/conflicting head to implementation ownership."""
+        """Send an exact-head review conflict to the implementation stage."""
         item.payload["post_review_rebase_required"] = True
+        item.payload["rebase_reason"] = "review_conflict"
         return StageOutcome(Disposition.FAIL_BACK, reason)
 
     @staticmethod

@@ -585,6 +585,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _version_spec(),
     ),
     "loop_runner": (
+        _store_true(
+            "--update-plan",
+            "update_plan",
+            "Update each selected issue plan from current origin/main, then continue the loop",
+        ),
+        _store_true(
+            "--rebase",
+            "rebase",
+            "Rebase each selected worktree against origin/main, then continue the loop",
+        ),
         _dry_run_spec(
             _dry_help(
                 "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."

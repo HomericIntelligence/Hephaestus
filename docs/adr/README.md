@@ -59,3 +59,4 @@ numbered, and listed here.
 | [0044](0044-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |
 | [0045](0045-one-use-dirty-direct-writer-continuation.md) | One-use dirty direct-writer continuation | Draft |
 | [0046](0046-review-host-verification-bootstrap.md) | Target-specific source-review bootstrap | Accepted |
+| [0047](0047-automation-rebase-triggers.md) | Automation rebase triggers | Accepted |

@@ -9,6 +9,7 @@ Provides helpers for:
 
 import logging
 import os
+import re
 import subprocess
 from collections.abc import Callable, Collection
 from pathlib import Path
@@ -1158,97 +1159,69 @@ def _commit_policy_rebase_command(base_ref: str) -> list[str]:
     ]
 
 
-def ensure_branch_commit_metadata(
-    cwd: Path,
-    base_branch: str = "main",
-    *,
-    remote: str = "origin",
-    timeout: int | None = None,
-) -> None:
-    """Rewrite branch commits so each carries a verified signature and DCO trailer."""
-    base_ref = f"{remote}/{base_branch}"
-    run(["git", "fetch", remote, base_branch], cwd=cwd, **_timeout_kw(timeout))
-    _remove_untracked_files_tracked_by_ref(cwd, base_ref, timeout=timeout)
-    try:
-        run(_commit_policy_rebase_command(base_ref), cwd=cwd, **_timeout_kw(timeout))
-    except subprocess.CalledProcessError:
-        # Leave the worktree ready for the caller's next automation attempt.
-        # ``check=False`` preserves the original rebase failure signal.
-        run(["git", "rebase", "--abort"], cwd=cwd, check=False, **_timeout_kw(timeout))
-        raise
-
-
 def rebase_worktree_onto(
     cwd: Path,
     base_branch: str = "main",
     *,
     remote: str = "origin",
     preserve_conflicts: bool = False,
+    base_sha: str | None = None,
     timeout: int | None = None,
     env: dict[str, str] | None = None,
     fetch_env: dict[str, str] | None = None,
     fetch_config: tuple[str, ...] = (),
 ) -> bool:
-    """Mechanically rebase the worktree at ``cwd`` onto ``<remote>/<base_branch>``.
+    """Rebase a worktree and sign each replayed commit.
 
-    This is the cheap, deterministic path for PRs that are merely *behind* the
-    base branch (or have textually non-overlapping changes): a policy-aware
-    ``git rebase --force-rebase --exec`` resolves them with no agent involvement while
-    re-signing each replayed commit and adding a DCO sign-off. Only when the
-    rebase hits a real conflict do we hand off to the CI-fix agent.
-
-    Two steps in ``cwd``:
-
-    1. ``git fetch <remote> <base_branch>`` — refresh the remote-tracking ref so
-       the rebase target is current.
-    2. ``git rebase --force-rebase <remote>/<base_branch> --exec ...`` —
-       replay the PR's commits on top of the latest base and run
-       ``git commit --amend --no-edit -S -s`` after each replayed commit. On
-       conflict, the default ``git rebase --abort`` restores the pre-rebase
-       HEAD. ``preserve_conflicts=True`` instead leaves the host-owned rebase
-       paused so an edit-only agent can change file contents before the host
-       validates and continues it.
-
-    The caller is expected to push the rebased HEAD with
-    :func:`push_current_branch_with_lease_on_divergence` (the rebase rewrites
-    history, so a lease push is required).
+    Fetch the base unless the caller supplies an exact fetched ``base_sha``.
+    Abort on failure unless ``preserve_conflicts`` is set. With that option,
+    leave the rebase paused for the host conflict-resolution process.
 
     Args:
-        cwd: Worktree path (already synced to the PR head).
-        base_branch: Branch to rebase onto (default ``main``).
-        remote: Remote name (default ``origin``).
-        preserve_conflicts: Leave a conflicted rebase paused for a later
-            host-owned continuation instead of aborting it.
-        timeout: Optional timeout in seconds for each git command.
-        env: Optional controlled environment for the rebase commands.
-        fetch_env: Optional controlled environment for the remote fetch.
-        fetch_config: Trusted Git configuration arguments for the remote fetch.
+        cwd: Worktree path.
+        base_branch: Base branch name.
+        remote: Remote name.
+        preserve_conflicts: Leave failed replay state for host continuation.
+        base_sha: Exact fetched commit. When set, do not fetch again.
+        timeout: Time limit for each Git command, in seconds.
+        env: Controlled environment for replay commands.
+        fetch_env: Controlled environment for the fetch.
+        fetch_config: Trusted Git configuration for the fetch.
 
     Returns:
-        ``True`` if the rebase applied cleanly. ``False`` if the rebase hit
-        conflicts and was aborted, signalling the caller to fall back to the
-        agent.
+        True if the rebase completes. False if replay fails.
 
     Raises:
-        subprocess.CalledProcessError: If the ``git fetch`` fails. A fetch
-            failure is a hard error (no current base to rebase onto); the conflict
-            case is handled internally and returns ``False`` rather than raising.
+        subprocess.CalledProcessError: If the fetch fails.
+        ValueError: If the supplied base SHA is invalid.
 
     """
-    base_ref = f"{remote}/{base_branch}"
+    base_ref = base_sha or f"{remote}/{base_branch}"
     run_kwargs = _timeout_kw(timeout)
     if env is not None:
         run_kwargs["env"] = env
     fetch_kwargs = _timeout_kw(timeout)
     if fetch_env is not None:
         fetch_kwargs["env"] = fetch_env
-    run(["git", *fetch_config, "fetch", remote, base_branch], cwd=cwd, **fetch_kwargs)
+    if base_sha is None:
+        run(["git", *fetch_config, "fetch", remote, base_branch], cwd=cwd, **fetch_kwargs)
+    elif re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise ValueError("rebase base must be a full commit SHA")
     _remove_untracked_files_tracked_by_ref(cwd, base_ref, timeout=timeout)
     try:
         run(_commit_policy_rebase_command(base_ref), cwd=cwd, **run_kwargs)
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:
+        if base_sha is not None:
+            conflicts = run(
+                ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
+                cwd=cwd,
+                **run_kwargs,
+            )
+            if not conflicts.stdout:
+                run(["git", "rebase", "--abort"], cwd=cwd, check=False, **run_kwargs)
+                raise
         if not preserve_conflicts:
             # ``check=False`` because an abort error must not mask the original
             # conflict signal.

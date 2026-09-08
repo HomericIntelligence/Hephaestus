@@ -129,7 +129,6 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "force_merge_on_stall",
                 "include_bot_prs",
                 "include_all_authors",
-                "enable_mechanical_rebase",
                 "agent_timeout",
                 "advise_timeout",
                 "learn_timeout",
