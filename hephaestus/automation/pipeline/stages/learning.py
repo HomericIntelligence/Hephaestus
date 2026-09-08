@@ -102,7 +102,6 @@ class LearningStage:
             ctx,
             SourceLane.IMPLEMENTATION,
             revision=revision or None,
-            branch=item.branch or None,
         )
         return JobRequest(
             AthenaSkillJob(

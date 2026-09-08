@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,11 +27,23 @@ from hephaestus.automation.pipeline.work_item import (
     LearningIntentKind,
 )
 from hephaestus.automation.review_journal import plan_fingerprint, render_current_plan
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.automation.worktree_manager import WorktreeManager
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 _APPROVED_PLAN = "Use the approved plan."
 _APPROVED_FINGERPRINT = plan_fingerprint(_APPROVED_PLAN)
+
+
+def _git(path: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _approved_github(issue: int = 2705, revision: int = 8) -> FakeStageGitHub:
@@ -199,7 +212,7 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
 ) -> None:
     """A restored direct item retains enough revision evidence for learning."""
     revision = "a" * 40
-    prepared: list[str] = []
+    prepared: list[tuple[str, str | None]] = []
 
     class SourceWorkspaces:
         def prepare(
@@ -210,8 +223,7 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
             *,
             branch: str | None = None,
         ) -> Any:
-            del branch
-            prepared.append(target)
+            prepared.append((target, branch))
             return SimpleNamespace(cwd=tmp_path, revision=target)
 
     journal = LearningJournalStore(lambda: tmp_path)
@@ -256,7 +268,114 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
     request = stage.step(item, ctx)
 
     assert isinstance(request, JobRequest)
-    assert prepared == [revision]
+    assert prepared == [(revision, None)]
+
+
+def test_direct_plan_learning_then_writer_uses_the_pinned_revision(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A direct plan-learning turn leaves the pinned writer admission available."""
+    repo = tmp_path / "repository"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "commit", "--allow-empty", "-m", "first")
+    revision = _git(repo, "rev-parse", "HEAD")
+    base_dir = tmp_path / "worktrees"
+    source_manager = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=base_dir,
+    )
+    paths = SimpleNamespace(
+        repo_root=repo,
+        worktree=repo,
+        source_workspaces=source_manager,
+    )
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(
+        learning_journal=journal,
+        github=_approved_github(),
+        paths=paths,
+    )
+    item = make_work_item(issue=2705, state="ENTER")
+    item.branch = "2705-auto-impl"
+    item.payload["_direct_scope_base_sha"] = revision
+    intent = LearningIntent.approved_plan(
+        repo=item.repo,
+        issue=2705,
+        plan_revision=8,
+        plan_fingerprint=_APPROVED_FINGERPRINT,
+    )
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.IMPLEMENTATION
+
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    item.state = "CLAIM"
+    request = stage.step(item, ctx)
+
+    assert isinstance(request, JobRequest)
+    assert request.job.request.workspace is not None
+    assert request.job.request.workspace.detached is True
+    assert request.job.request.workspace.revision == revision
+    assert request.job.request.cwd == base_dir / "auto-2705-impl"
+    assert _git(repo, "branch", "--format=%(refname:short)").splitlines() == ["main"]
+
+    writer_manager = WorktreeManager(base_dir=base_dir, repo_root=repo)
+    writer = writer_manager.create_worktree(
+        2705,
+        item.branch,
+        base_sha=revision,
+        remote_branch_reserved=True,
+    )
+
+    assert writer == base_dir / "issue-2705"
+    assert _git(repo, "rev-parse", item.branch) == revision
+
+
+def test_post_merge_learning_uses_cleanup_revision_without_writer_branch(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Post-merge learning keeps its captured revision in a detached lane."""
+    revision = "b" * 40
+    prepared: list[tuple[str, str | None]] = []
+
+    class SourceWorkspaces:
+        def prepare(
+            self,
+            _item_number: int,
+            _lane: Any,
+            target: str,
+            *,
+            branch: str | None = None,
+        ) -> Any:
+            prepared.append((target, branch))
+            return SimpleNamespace(cwd=tmp_path, revision=target, detached=True)
+
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(
+        learning_journal=journal,
+        paths=SimpleNamespace(
+            repo_root=tmp_path,
+            worktree=tmp_path,
+            source_workspaces=SourceWorkspaces(),
+        ),
+    )
+    item = make_work_item(issue=2705, state="ENTER")
+    item.branch = "2705-auto-impl"
+    item.payload["_worktree_cleanup_head_sha"] = revision
+    item.learning_intents.append(LearningIntent.post_merge(repo=item.repo, issue=2705, pr=99))
+    item.learning_resume_stage = StageName.FINISHED
+
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    item.state = "CLAIM"
+    request = stage.step(item, ctx)
+
+    assert isinstance(request, JobRequest)
+    assert prepared == [(revision, None)]
 
 
 def _claimed_learning(

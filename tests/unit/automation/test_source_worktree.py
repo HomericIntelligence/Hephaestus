@@ -2271,6 +2271,56 @@ def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -
     assert "one/project" in captured.value.recovery.manual_action
 
 
+def test_detached_implementation_learning_lane_does_not_block_direct_writer(
+    tmp_path: Path,
+) -> None:
+    """A detached learning lane leaves the pinned direct writer available."""
+    repo, _, second = _repository(tmp_path)
+    base_dir = tmp_path / "worktrees"
+    source_manager = SourceWorkspaceManager(
+        repo,
+        repository="example/project",
+        base_dir=base_dir,
+    )
+
+    learning = source_manager.prepare(42, SourceLane.IMPLEMENTATION, second)
+    assert _git(repo, "branch", "--format=%(refname:short)").splitlines() == ["main"]
+
+    writer_manager = WorktreeManager(base_dir=base_dir, repo_root=repo)
+    writer = writer_manager.create_worktree(
+        42,
+        "42-auto-impl",
+        base_sha=second,
+        remote_branch_reserved=True,
+    )
+
+    assert learning.detached is True
+    assert _git(learning.cwd, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+    assert writer == base_dir / "issue-42"
+    assert set(_git(repo, "branch", "--format=%(refname:short)").splitlines()) == {
+        "42-auto-impl",
+        "main",
+    }
+    assert _git(repo, "rev-parse", "42-auto-impl") == second
+
+
+def test_preexisting_direct_writer_branch_remains_rejected(tmp_path: Path) -> None:
+    """A local direct writer branch remains a fail-closed stale predicate."""
+    repo, _, second = _repository(tmp_path)
+    _git(repo, "branch", "42-auto-impl", second)
+    manager = WorktreeManager(base_dir=tmp_path / "worktrees", repo_root=repo)
+
+    with pytest.raises(RuntimeError, match="local ref"):
+        manager.create_worktree(
+            42,
+            "42-auto-impl",
+            base_sha=second,
+            remote_branch_reserved=True,
+        )
+
+    assert not (tmp_path / "worktrees" / "issue-42").exists()
+
+
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:
     """A review lane created with the current deterministic name is removable."""
     repo, _, second = _repository(tmp_path)
