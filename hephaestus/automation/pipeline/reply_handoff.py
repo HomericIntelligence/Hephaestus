@@ -917,7 +917,10 @@ def _legacy_batch_is_disjoint(
             or not set(progress.replied_thread_ids).issubset(replies)
             or (progress.active_thread_id is not None and progress.active_thread_id not in replies)
             or any(
-                receipt.get(key) not in replies
+                not isinstance(receipt[key], str)
+                or not receipt[key]
+                or any(char.isspace() or ord(char) < 32 for char in receipt[key])
+                or receipt[key] not in replies
                 for receipt in progress.receipts
                 for key in ("id", "thread_id")
                 if key in receipt

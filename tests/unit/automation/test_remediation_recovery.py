@@ -1586,3 +1586,19 @@ def test_disjoint_legacy_progress_is_retained_without_mutation() -> None:
     body = marker + "\n<!-- " + json.dumps(payload) + " -->"
     assert _read_legacy_batch(body) is None
     assert body == marker + "\n<!-- " + json.dumps(payload) + " -->"
+
+
+@pytest.mark.parametrize("alternate", [[], {}, None, 1, "", " old-thread", "old thread"])
+def test_legacy_progress_rejects_invalid_alternate_thread_id(alternate: object) -> None:
+    """An invalid alternate receipt ID raises a controlled validation error."""
+    marker, encoded = _disjoint_legacy_body().split("\n", 1)
+    payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
+    payload["progress"] = ImplementationReplyProgress(
+        phase="post_replies",
+        pull_request_id="pr",
+        replied_thread_ids=("old-thread",),
+        receipts=({"id": "old-thread", "thread_id": alternate},),
+    ).as_dict()
+    body = marker + "\n<!-- " + json.dumps(payload) + " -->"
+    with pytest.raises(ValueError, match="legacy reply journal progress is invalid"):
+        _read_legacy_batch(body)
