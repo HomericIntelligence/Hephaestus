@@ -7,8 +7,26 @@ from typing import Any
 import pytest
 
 from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import StageOutcome
+from hephaestus.automation.pipeline.stages import Continue, StageOutcome
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
+from hephaestus.automation.review_audit import ReviewAudit
+from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+
+def _blocked_audit(
+    summary: str = "The validation runner did not supply required evidence.",
+    *,
+    findings: tuple[dict[str, object], ...] = (),
+) -> ReviewAudit:
+    """Build one valid blocked review audit."""
+    return ReviewAudit(
+        grade="F",
+        verdict="BLOCKED",
+        summary=summary,
+        findings=findings,
+        raw_feedback="",
+        valid=True,
+    )
 
 
 class _RecordingGitHub:
@@ -209,3 +227,137 @@ def test_missing_current_node_cannot_reuse_old_metadata(make_work_item: Any, mak
     assert "pr_node_id" not in item.payload
     assert "reviewed_pr_node_id" not in item.payload
     assert "reviewed_pr_head_sha" not in item.payload
+
+
+@pytest.mark.parametrize("round_number", [0, 2, 5])
+@pytest.mark.parametrize("summary", ["Evidence is missing.", "x" * 400])
+def test_zero_artifact_blocked_review_is_terminal_without_source_retry(
+    make_work_item: Any,
+    make_ctx: Any,
+    round_number: int,
+    summary: str,
+) -> None:
+    """A zero-artifact block does not consume a source-review round."""
+    github = FakeStageGitHub()
+    item = make_work_item(issue=3089, pr=1001, state="EVAL")
+    item.payload.update(
+        review_audit=_blocked_audit(summary),
+        review_error_retries=2,
+        pr_review_round=round_number,
+    )
+    item.attempts.update(pr_review_iter=round_number, pr_review_hard=1)
+    before_attempts = dict(item.attempts)
+
+    for _ in range(2):
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.BLOCKED
+        assert result.note.startswith(f"review_evidence_blocked {'a' * 40} ")
+        assert len(result.note) <= 320
+        if len(summary) > 200:
+            assert result.note.endswith("...")
+        else:
+            assert summary in result.note
+    assert item.payload["pr_review_round"] == round_number
+    assert item.payload["review_error_retries"] == 2
+    assert item.attempts == before_attempts
+    assert github.mutation_log == []
+
+
+@pytest.mark.parametrize(
+    "audit,thread_counts",
+    [
+        (ReviewAudit("F", "No source details.", (), "", True, verdict="NOGO"), (0, 0, 0)),
+        (
+            _blocked_audit(
+                findings=(
+                    {
+                        "path": "gate.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "major",
+                        "body": "Fix this source finding.",
+                    },
+                )
+            ),
+            (0, 0, 0),
+        ),
+        (_blocked_audit(), (1, 0, 0)),
+    ],
+    ids=["nogo", "blocked-finding", "blocked-thread"],
+)
+def test_actionable_review_uses_existing_source_retry(
+    make_work_item: Any,
+    make_ctx: Any,
+    audit: ReviewAudit,
+    thread_counts: tuple[int, int, int],
+) -> None:
+    """A source artifact keeps the current non-GO route."""
+    github = FakeStageGitHub(by_severity=[thread_counts])
+    item = make_work_item(issue=3089, pr=1001, state="EVAL")
+    item.payload["review_audit"] = audit
+
+    result = PrReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state="REVIEW_WAIT")
+    assert item.payload["pr_review_round"] == 1
+    assert item.attempts["pr_review_iter"] == 1
+    assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+
+
+@pytest.mark.parametrize(
+    "pr_state,expected",
+    [
+        (
+            {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+            Continue(next_state="REVIEW_WAIT"),
+        ),
+        (
+            {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": {}},
+            StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed"),
+        ),
+        (
+            {"state": "CLOSED", "headRefOid": "a" * 40, "autoMergeRequest": None},
+            StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified"),
+        ),
+        (
+            {"state": "UNKNOWN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+            StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified"),
+        ),
+        (None, StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")),
+    ],
+    ids=["head-drift", "auto-merge", "closed", "invalid", "unavailable"],
+)
+def test_zero_artifact_block_requires_current_unarmed_head(
+    make_work_item: Any,
+    make_ctx: Any,
+    pr_state: dict[str, Any] | None,
+    expected: Continue | StageOutcome,
+) -> None:
+    """A terminal block needs the current open and unarmed reviewed head."""
+    github = FakeStageGitHub(pr_state=pr_state)
+    item = make_work_item(issue=3089, pr=1001, state="EVAL")
+    item.payload["review_audit"] = _blocked_audit()
+
+    result = PrReviewStage().step(item, make_ctx(github=github))
+
+    assert result == expected
+    assert github.mutation_log == []
+    if expected == Continue(next_state="REVIEW_WAIT"):
+        assert "reviewed_pr_head_sha" not in item.payload
+
+
+def test_zero_artifact_block_without_reviewed_head_requests_new_review(
+    make_work_item: Any, make_ctx: Any
+) -> None:
+    """A missing reviewed head cannot produce a terminal block."""
+    github = FakeStageGitHub()
+    item = make_work_item(issue=3089, pr=1001, state="EVAL")
+    item.payload.update(review_audit=_blocked_audit())
+    item.payload.pop("reviewed_pr_head_sha")
+
+    result = PrReviewStage().step(item, make_ctx(github=github))
+
+    assert result == Continue(next_state="REVIEW_WAIT")
+    assert github.mutation_log == []
