@@ -110,6 +110,10 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+    HOST_VERIFICATION_CPU_MAX_S as _HOST_VERIFICATION_CPU_MAX_S,
+    HOST_VERIFICATION_OPEN_FILES_MAX as _HOST_VERIFICATION_OPEN_FILES_MAX,
+    HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS as _HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS,
+    HOST_VERIFICATION_PROCESS_HEADROOM as _HOST_VERIFICATION_PROCESS_HEADROOM,
     PyxisExecutionPlacement,
     build_pyxis_environment as _build_pyxis_environment,
     build_pyxis_srun_command as _build_pyxis_srun_command,
@@ -883,12 +887,8 @@ _HOST_VERIFICATION_SCRATCH_MAX_BYTES = 512 * 1024 * 1024
 # 1 MiB for the full unit suite, so retain a per-file ceiling with enough room
 # for that verifier-owned artifact. The separately mounted 512 MiB volume is
 # still the non-bypassable aggregate quota for every PR-visible write.
-_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 131_072
-_HOST_VERIFICATION_CPU_MAX_S = 240
-_HOST_VERIFICATION_PROCESS_HEADROOM = 64
 _HOST_VERIFICATION_POLL_S = 0.05
 _HOST_VERIFICATION_SETUP_TIMEOUT_S = 30
-_HOST_VERIFICATION_OPEN_FILES_MAX = 1024
 _LINUX_RESOURCE_LIMIT_BOOTSTRAP = (
     "import os, resource, sys\n"
     "limits = ((resource.RLIMIT_CPU, int(sys.argv[1])), "

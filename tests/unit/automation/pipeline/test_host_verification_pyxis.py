@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -446,6 +448,12 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
         "--inh-caps=-all",
         "--ambient-caps=-all",
         "--",
+        "/usr/bin/prlimit",
+        "--cpu=240:240",
+        "--fsize=67108864:67108864",
+        "--nproc=64:64",
+        "--nofile=1024:1024",
+        "--",
         "/usr/local/bin/uv",
         "run",
         "pytest",
@@ -780,3 +788,49 @@ def test_pyxis_placement_adds_only_explicit_scheduler_pair(tmp_path: Path, node:
     assert explicit[index : index + 2] == pair
     assert index < explicit.index(f"--container-image={metadata.path}")
     assert explicit[:index] + explicit[index + 2 :] == default
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux resource limits")
+@pytest.mark.parametrize("low_hard_limit", [False, True])
+def test_execution_node_resource_limits(tmp_path: Path, low_hard_limit: bool) -> None:
+    """The child receives hard ceilings, or does not start if setup fails."""
+    image, digest = _image(tmp_path)
+    authority = _authority(image, digest)
+    command = build_pyxis_srun_command(
+        image=validate_pyxis_image(image, expected_sha256=digest, provenance=authority),
+        source=tmp_path,
+        git_metadata=tmp_path,
+        scratch=tmp_path,
+        pi_smoke_logs=tmp_path,
+        argv=(
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            "import json, resource; print(json.dumps([resource.getrlimit(r) for r in "
+            "(resource.RLIMIT_CPU, resource.RLIMIT_FSIZE, resource.RLIMIT_NPROC, "
+            "resource.RLIMIT_NOFILE)]))",
+        ),
+        environment={},
+        timeout_s=20,
+    )
+    # Run the execution-node limit stage without a Slurm allocation.
+    child = command[command.index("/usr/bin/prlimit") :]
+    if low_hard_limit:
+        child = (
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            "import os, resource, sys; "
+            "resource.setrlimit(resource.RLIMIT_NOFILE, (512, 512)); "
+            "os.execv(sys.argv[1], sys.argv[1:])",
+            *child,
+        )
+    result = subprocess.run(child, capture_output=True, text=True, timeout=10, check=False)
+    if low_hard_limit:
+        assert result.returncode != 0
+        assert not result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [[20, 20], [67108864, 67108864], [64, 64], [1024, 1024]]

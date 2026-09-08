@@ -205,8 +205,17 @@ def test_linux_pyxis_host_verification_boundary(
         program = f"""
 from pathlib import Path
 import os
+import resource
 import socket
 import subprocess
+
+for resource_id, expected in (
+    (resource.RLIMIT_CPU, 240),
+    (resource.RLIMIT_FSIZE, 67108864),
+    (resource.RLIMIT_NPROC, 64),
+    (resource.RLIMIT_NOFILE, 1024),
+):
+    assert resource.getrlimit(resource_id) == (expected, expected)
 
 for name, host_namespace in {host_namespaces!r}.items():
     assert os.readlink('/proc/self/ns/' + name) != host_namespace

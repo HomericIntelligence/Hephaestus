@@ -37,6 +37,10 @@ HOST_KEYS = [
 ]
 PYXIS_AUTHORITY_SCHEMA = "hephaestus-host-verification-pyxis-v2"
 PYXIS_WRITABLE_FILESYSTEM_MAX_BYTES = 1024 * 1024 * 1024
+HOST_VERIFICATION_CPU_MAX_S = 240
+HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 131_072
+HOST_VERIFICATION_PROCESS_HEADROOM = 64
+HOST_VERIFICATION_OPEN_FILES_MAX = 1024
 
 
 def pyxis_receipt_metadata_matches(receipt: Mapping[str, object]) -> bool:
@@ -312,6 +316,15 @@ def build_pyxis_srun_command(
         "--bounding-set=-all",
         "--inh-caps=-all",
         "--ambient-caps=-all",
+        "--",
+        # Slurm propagates soft limits only. Set hard ceilings on this node.
+        "/usr/bin/prlimit",
+        f"--cpu={min(timeout_s, HOST_VERIFICATION_CPU_MAX_S)}:"
+        f"{min(timeout_s, HOST_VERIFICATION_CPU_MAX_S)}",
+        f"--fsize={HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS * 512}:"
+        f"{HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS * 512}",
+        f"--nproc={HOST_VERIFICATION_PROCESS_HEADROOM}:{HOST_VERIFICATION_PROCESS_HEADROOM}",
+        f"--nofile={HOST_VERIFICATION_OPEN_FILES_MAX}:{HOST_VERIFICATION_OPEN_FILES_MAX}",
         "--",
         *container_argv,
     )
