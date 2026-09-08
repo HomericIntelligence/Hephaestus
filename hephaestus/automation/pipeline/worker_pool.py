@@ -110,6 +110,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+    PyxisExecutionPlacement,
     build_pyxis_environment as _build_pyxis_environment,
     build_pyxis_srun_command as _build_pyxis_srun_command,
     pyxis_help_supports_namespace_isolation as _pyxis_help_supports_namespace_isolation,
@@ -3595,6 +3596,7 @@ class WorkerPool:
         host_verification_pyxis_sha256: str | None = None,
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
+        host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -3621,6 +3623,7 @@ class WorkerPool:
             host_verification_pyxis_sha256: Independent expected image digest.
             host_verification_pyxis_authority: Host-owned image provenance file.
             host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
+            host_verification_pyxis_placement: Optional host-selected allocation and node.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -3647,6 +3650,7 @@ class WorkerPool:
         self._host_verification_pyxis_sha256 = host_verification_pyxis_sha256
         self._host_verification_pyxis_authority = host_verification_pyxis_authority
         self._host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
+        self._host_verification_pyxis_placement = host_verification_pyxis_placement
 
     @contextmanager
     def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
@@ -5126,6 +5130,7 @@ class WorkerPool:
                                     argv=job.argv,
                                     environment=environment,
                                     timeout_s=job.timeout_s,
+                                    placement=self._host_verification_pyxis_placement,
                                 )
 
                                 def revalidate_launch_paths() -> None:

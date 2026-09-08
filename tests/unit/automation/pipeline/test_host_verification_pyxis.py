@@ -676,3 +676,77 @@ def test_pyxis_help_requires_exact_option(help_text: str, expected: bool) -> Non
     )
 
     assert pyxis_help_supports_namespace_isolation(help_text) is expected
+
+
+@pytest.mark.parametrize(
+    "allocation_id", ["", "0", "-1", "+1", "01", "1_2", "1,2", "１２", 1, None]
+)
+def test_pyxis_placement_rejects_invalid_allocation(allocation_id: object) -> None:
+    """Placement requires one positive ASCII decimal allocation ID."""
+    from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+
+    with pytest.raises(ValueError, match="allocation"):
+        PyxisExecutionPlacement(allocation_id=allocation_id, node="node-1")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        "",
+        "node[1-2]",
+        "node1,node2",
+        "node1 node2",
+        "node/1",
+        "-node",
+        "node-",
+        "node..example",
+        "node\n",
+        "é",
+        "a" * 64,
+        ".node",
+        "node.",
+        None,
+        1,
+    ],
+)
+def test_pyxis_placement_rejects_invalid_node(node: object) -> None:
+    """Placement accepts one hostname without scheduler list syntax."""
+    from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+
+    with pytest.raises(ValueError, match="node"):
+        PyxisExecutionPlacement(allocation_id="123", node=node)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("node", ["node-1", "node1.cluster.example"])
+def test_pyxis_placement_adds_only_explicit_scheduler_pair(tmp_path: Path, node: str) -> None:
+    """Explicit placement adds two flags and preserves the default command."""
+    from dataclasses import FrozenInstanceError
+    from functools import partial
+
+    from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+
+    placement = PyxisExecutionPlacement(allocation_id="123", node=node)
+    with pytest.raises(FrozenInstanceError):
+        placement.node = "other"  # type: ignore[misc]
+    image, digest = _image(tmp_path)
+    metadata = validate_pyxis_image(
+        image, expected_sha256=digest, provenance=_authority(image, digest)
+    )
+    build_command = partial(
+        build_pyxis_srun_command,
+        image=metadata,
+        source=tmp_path,
+        git_metadata=tmp_path,
+        scratch=tmp_path,
+        pi_smoke_logs=tmp_path,
+        argv=("true",),
+        environment={},
+        timeout_s=30,
+    )
+    default = build_command()
+    explicit = build_command(placement=placement)
+    pair = ("--jobid=123", f"--nodelist={node}")
+    index = explicit.index(pair[0])
+    assert explicit[index : index + 2] == pair
+    assert index < explicit.index(f"--container-image={metadata.path}")
+    assert explicit[:index] + explicit[index + 2 :] == default
