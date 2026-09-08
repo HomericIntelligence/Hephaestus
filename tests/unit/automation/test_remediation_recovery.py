@@ -1378,3 +1378,211 @@ def test_pretest_refresh_accepts_equal_result_digest_from_new_job(tmp_path: Path
         previous_successful_job_id=ready.successful_job_id,
     )
     assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == refreshed
+
+
+def _disjoint_legacy_body() -> str:
+    """Render an ordinary journal for a different thread at the current head."""
+    old = _threads()
+    old[0]["id"] = "old-thread"
+    handoff = implementation_reply_handoff("c" * 40, old, {"old-thread": "Fixed."}, "d" * 32)
+    assert handoff is not None
+    entry = implementation_reply_handoff_journal_entry(3010, handoff)
+    assert entry is not None
+    return entry[1]
+
+
+def _read_legacy_batch(body: str, threads: list[dict[str, Any]] | None = None) -> object:
+    """Read an ordinary journal through the public remediation selector."""
+    inputs = _review_input()
+    return journaled_implementation_remediation_reply_handoff(
+        [IssueComment(body=body, viewer_did_author=True)],
+        repository=inputs.repository,
+        issue_number=inputs.issue_number,
+        pr_number=inputs.pr_number,
+        branch=inputs.branch,
+        current_remote_head=inputs.recovery_commit_sha,
+        threads=_threads() if threads is None else threads,
+    )
+
+
+def test_disjoint_current_head_legacy_batch_is_not_recovery_authority() -> None:
+    """An ordinary old batch cannot block a different live thread batch."""
+    assert _read_legacy_batch(_disjoint_legacy_body()) is None
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("position", ["only", "before", "after"])
+def test_valid_disjoint_legacy_keeps_exact_current_format_three(
+    version: int, position: str
+) -> None:
+    """Legacy selection does not alter a current format-three recovery result."""
+    marker, encoded = _disjoint_legacy_body().split("\n", 1)
+    payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
+    payload["format"] = version
+    if version == 1:
+        del payload["armed"]
+    legacy = IssueComment(
+        body=marker + "\n<!-- " + json.dumps(payload) + " -->", viewer_did_author=True
+    )
+    inputs = _review_input()
+    handoff = implementation_remediation_reply_handoff(inputs, _reply_result(inputs), "e" * 32)
+    assert handoff is not None
+    rendered = implementation_remediation_reply_handoff_journal_entry(3010, handoff)
+    assert rendered is not None
+    current = IssueComment(body=rendered[1], viewer_did_author=True)
+    kwargs: dict[str, Any] = {
+        "repository": inputs.repository,
+        "issue_number": inputs.issue_number,
+        "pr_number": inputs.pr_number,
+        "branch": inputs.branch,
+        "current_remote_head": inputs.recovery_commit_sha,
+        "threads": _threads(),
+    }
+    expected = journaled_implementation_remediation_reply_handoff([current], **kwargs)
+    comments = (
+        [legacy]
+        if position == "only"
+        else [legacy, current]
+        if position == "before"
+        else [current, legacy]
+    )
+    actual = journaled_implementation_remediation_reply_handoff(comments, **kwargs)
+    assert actual == (None if position == "only" else expected)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "bool_format",
+        "unknown_format",
+        "bool_pr",
+        "wrong_pr",
+        "wrong_head",
+        "wrong_batch",
+        "unarmed",
+        "extra",
+        "fingerprint",
+        "empty_replies",
+        "blank_id",
+        "spaced_id",
+        "internal_space_id",
+        "normalized_duplicate",
+        "blank_reply",
+        "nonstring_reply",
+        "large_reply",
+        "duplicate_json",
+        "progress_invalid",
+        "progress_foreign",
+        "progress_receipt_foreign",
+        "progress_extra",
+    ],
+)
+def test_malformed_disjoint_legacy_cannot_be_ignored(case: str) -> None:
+    """Invalid legacy evidence must stop selection even for different IDs."""
+    marker, encoded = _disjoint_legacy_body().split("\n", 1)
+    payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
+    edits: dict[str, tuple[str, object]] = {
+        "bool_format": ("format", True),
+        "unknown_format": ("format", 4),
+        "bool_pr": ("pr_number", True),
+        "wrong_pr": ("pr_number", 3011),
+        "wrong_head": ("head_sha", "b" * 40),
+        "wrong_batch": ("batch_nonce", "e" * 32),
+        "unarmed": ("armed", False),
+        "extra": ("unexpected", 1),
+        "fingerprint": ("thread_snapshot_sha256", "bad"),
+        "empty_replies": ("replies", {}),
+        "blank_id": ("replies", {"": "Fixed."}),
+        "spaced_id": ("replies", {" old-thread ": "Fixed."}),
+        "internal_space_id": ("replies", {"old thread": "Fixed."}),
+        "normalized_duplicate": ("replies", {"old-thread": "Fixed.", " old-thread": "Fixed."}),
+        "blank_reply": ("replies", {"old-thread": " "}),
+        "nonstring_reply": ("replies", {"old-thread": 1}),
+        "large_reply": ("replies", {"old-thread": "x" * 4001}),
+        "progress_invalid": ("progress", {}),
+        "progress_foreign": (
+            "progress",
+            ImplementationReplyProgress(
+                phase="verify_reply", pull_request_id="pr", active_thread_id="foreign"
+            ).as_dict(),
+        ),
+        "progress_receipt_foreign": (
+            "progress",
+            ImplementationReplyProgress(
+                phase="post_replies",
+                pull_request_id="pr",
+                replied_thread_ids=("old-thread",),
+                receipts=({"id": "old-thread", "thread_id": "foreign"},),
+            ).as_dict(),
+        ),
+        "progress_extra": (
+            "progress",
+            {
+                **ImplementationReplyProgress(
+                    phase="create_review", pull_request_id="pr"
+                ).as_dict(),
+                "unexpected": True,
+            },
+        ),
+    }
+    if case in edits:
+        key, value = edits[case]
+        payload[key] = value
+    body = json.dumps(payload)
+    if case == "duplicate_json":
+        body = body.replace('"format": 2', '"format": 2, "format": 2')
+    with pytest.raises(ValueError):
+        _read_legacy_batch(marker + "\n<!-- " + body + " -->")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "overlap",
+        "changed_body",
+        "empty",
+        "duplicate",
+        "missing_comments",
+        "missing_body",
+        "blank_id",
+        "spaced_id",
+    ],
+)
+def test_legacy_disjointness_requires_complete_nonoverlapping_threads(case: str) -> None:
+    """Changed or incomplete live snapshots cannot hide legacy authority."""
+    threads = _threads()
+    if case in {"overlap", "changed_body"}:
+        old = deepcopy(threads[0])
+        old["id"] = "old-thread"
+        if case == "changed_body":
+            old["comments"][0]["body"] = "Changed source comment."
+            threads = [old]
+        else:
+            threads.append(old)
+    elif case == "empty":
+        threads = []
+    elif case == "duplicate":
+        threads.append(deepcopy(threads[0]))
+    elif case == "missing_comments":
+        del threads[0]["comments"]
+    elif case == "missing_body":
+        del threads[0]["comments"][0]["body"]
+    else:
+        threads[0]["id"] = " " if case == "blank_id" else " thread-1 "
+    with pytest.raises(ValueError):
+        _read_legacy_batch(_disjoint_legacy_body(), threads)
+
+
+def test_disjoint_legacy_progress_is_retained_without_mutation() -> None:
+    """Valid progress stays in its original journal while selection ignores it."""
+    marker, encoded = _disjoint_legacy_body().split("\n", 1)
+    payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
+    payload["progress"] = ImplementationReplyProgress(
+        phase="post_replies",
+        pull_request_id="pr",
+        replied_thread_ids=("old-thread",),
+        receipts=({"id": "old-thread"},),
+    ).as_dict()
+    body = marker + "\n<!-- " + json.dumps(payload) + " -->"
+    assert _read_legacy_batch(body) is None
+    assert body == marker + "\n<!-- " + json.dumps(payload) + " -->"
