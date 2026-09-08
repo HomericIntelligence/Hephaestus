@@ -47,20 +47,12 @@ def _load_pyproject(repo_root: Path) -> dict[str, Any]:
         Parsed TOML data as a nested dict.
 
     Raises:
-        SystemExit: With code 1 if the file is missing, unreadable, or tomllib is
-            unavailable.
+        SystemExit: With code 1 if the file is missing, unreadable, or invalid.
 
     """
     pyproject_path = repo_root / "pyproject.toml"
     if not pyproject_path.is_file():
         print(f"ERROR: pyproject.toml not found: {pyproject_path}", file=sys.stderr)
-        sys.exit(1)
-
-    if _tomllib is None:
-        print(
-            "ERROR: tomllib is required to parse pyproject.toml.",
-            file=sys.stderr,
-        )
         sys.exit(1)
 
     try:

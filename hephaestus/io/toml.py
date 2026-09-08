@@ -8,9 +8,8 @@ Usage::
     from hephaestus.io.toml import import_tomllib
 
     _tomllib = import_tomllib()
-    if _tomllib is not None:
-        with path.open("rb") as fh:
-            data = _tomllib.load(fh)
+    with path.open("rb") as fh:
+        data = _tomllib.load(fh)
 """
 
 from __future__ import annotations
