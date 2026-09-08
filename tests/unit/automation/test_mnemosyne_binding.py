@@ -594,3 +594,49 @@ def test_binding_rejects_symlinked_checkout(tmp_path: Path) -> None:
 
     with pytest.raises(MnemosyneBindingError, match="symlink"):
         service.bind(contract=_contract())
+
+
+@pytest.mark.parametrize("token_name", ["GH_TOKEN", "GITHUB_TOKEN"])
+def test_default_remote_git_keeps_approved_tokens_out_of_local_git(
+    tmp_path: Path, token_name: str
+) -> None:
+    """Remote authentication and Git share tokens; local Git receives none."""
+    from unittest.mock import patch
+
+    calls: list[dict[str, object]] = []
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return _completed()
+
+    with (
+        patch.dict("os.environ", {token_name: "synthetic-token"}, clear=True),
+        patch("hephaestus.automation.mnemosyne_binding.run_subprocess", side_effect=run),
+    ):
+        service = MnemosyneBindingService(remote_git_config=("-c", "credential.helper=trusted"))
+        service._remote_git(tmp_path, "fetch", "origin", "main")
+        service._git(tmp_path, "rev-parse", "HEAD")
+    assert isinstance(calls[0]["env"], dict)
+    assert calls[0]["env"].get(token_name) == "synthetic-token"
+    assert isinstance(calls[1]["env"], dict)
+    assert "GH_TOKEN" not in calls[1]["env"] and "GITHUB_TOKEN" not in calls[1]["env"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("secret"),
+        subprocess.TimeoutExpired("secret", 1),
+        UnicodeDecodeError("utf-8", b"secret", 0, 1, "remote detail"),
+    ],
+)
+def test_default_remote_boundary_redacts_launch_and_decode_failure(
+    tmp_path: Path, error: Exception
+) -> None:
+    from unittest.mock import patch
+
+    with patch("hephaestus.automation.mnemosyne_binding.run_subprocess", side_effect=error):
+        service = MnemosyneBindingService(remote_git_config=())
+        with pytest.raises(MnemosyneBindingError, match=r"^remote Git transport failed$") as caught:
+            service._remote_git(tmp_path, "clone", "origin", "candidate")
+    assert caught.value.failure_kind == "remote_git_transport"

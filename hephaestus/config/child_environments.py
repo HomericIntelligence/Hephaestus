@@ -183,6 +183,16 @@ def build_git_signing_env(*, global_config: Path | None = None) -> dict[str, str
     return env
 
 
+def build_remote_git_env() -> dict[str, str]:
+    """Add approved GitHub credentials only for remote Git operations."""
+    env = build_git_signing_env()
+    gh_env = build_gh_child_env()
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if name in gh_env:
+            env[name] = gh_env[name]
+    return env
+
+
 def build_host_verification_env(
     *,
     home: Path,
@@ -310,6 +320,7 @@ __all__ = [
     "build_nested_host_verification_env",
     "build_pi_child_env",
     "build_python_phase_env",
+    "build_remote_git_env",
     "build_sbatch_submission_env",
     "read_approved_parent_env",
     "with_correlation_id",

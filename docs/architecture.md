@@ -1450,6 +1450,13 @@ Input, artifact, and runtime checks remain mandatory before and after
 validation. The sandbox denies network access to the validator and its
 children and permits writes only in scratch space.
 
+Learning fetch, publication probes, and pushes use host-owned command-scoped
+Git authentication. The host resolves the trusted GitHub executable and checks
+login for each remote operation. Only remote Git receives the approved GitHub
+token bridges. Local Git and validators retain their existing environments.
+Repository credential helpers remain prohibited; global configuration remains
+disabled. Authentication and transport failures retain safe error messages.
+
 A live claim held by another process ejects the duplicate item. The owner keeps
 the claim, the main result, and the cleanup obligation. A terminal learning
 record stays recoverable until `finished` records a bounded cleanup result.

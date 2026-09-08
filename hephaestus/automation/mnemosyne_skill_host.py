@@ -213,10 +213,15 @@ class DefaultLearnDeliveryBackend:
         self,
         service: LearnDeliveryService | None = None,
         preparation: MnemosyneLearningPreparationService | None = None,
+        gh_extra_path_root: Path | None = None,
     ) -> None:
         """Use the concrete GitHub adapter unless a test seam supplies a service."""
-        self._service = service or LearnDeliveryService(github=GitHubLearnDeliveryAdapter())
-        self._preparation = preparation or MnemosyneLearningPreparationService()
+        self._service = service or LearnDeliveryService(
+            github=GitHubLearnDeliveryAdapter(), gh_extra_path_root=gh_extra_path_root
+        )
+        self._preparation = preparation or MnemosyneLearningPreparationService(
+            gh_extra_path_root=gh_extra_path_root
+        )
 
     def deliver_from_request(
         self,
@@ -518,7 +523,9 @@ class MnemosyneSkillHost:
             gh_extra_path_root=gh_extra_path_root
         )
         self.corpus_reader = corpus_reader or DefaultCorpusReader()
-        self.delivery_service = delivery_service or DefaultLearnDeliveryBackend()
+        self.delivery_service = delivery_service or DefaultLearnDeliveryBackend(
+            gh_extra_path_root=gh_extra_path_root
+        )
 
     def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
         """Execute ``advise`` or ``learn`` and return a typed result envelope."""
