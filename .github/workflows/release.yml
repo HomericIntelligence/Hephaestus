@@ -239,17 +239,18 @@ jobs:
         run: uv sync --all-groups --all-extras --locked
 
       - name: Run unit tests
-        run: uv run pytest tests/unit
+        run: >-
+          uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers
+          -m "not performance and not contract"
 
       - name: Run integration tests
-        # Mirror the required PR gate (_required.yml integration-tests) so a
-        # workflow_dispatch release against an arbitrary commit gets the same
-        # artifact, sdist-contents, and package-import guarantees a merged PR does.
-        # --override-ini clears the unit coverage addopts; --strict-markers is safe
+        # A release validates each normal integration test except the offline
+        # fixture lane. --override-ini clears the default precommit selection;
+        # --strict-markers is safe
         # because the integration and artifact markers are registered in pyproject.toml.
         # uv sync installed every [project.scripts] binary, so the CLI
         # entry-point checks must never skip here (#2173).
-        # The required PR build lane owns the network-free Codex release fixture.
+        # The nightly artifact lane owns the network-free Codex release fixture.
         # This release lane keeps the other package-artifact checks.
         run: >-
           uv run pytest tests/integration
@@ -257,7 +258,7 @@ jobs:
           --override-ini="addopts="
           --basetemp=build/pytest-release-integration
           -v --strict-markers
-          -m "not nightly and not codex_release_artifact"
+          -m "not performance and not contract and not codex_release_artifact"
 
   type-check:
     runs-on: ubuntu-24.04

@@ -7,12 +7,12 @@
 # Supports both Podman (rootless, no SU — preferred) and Docker.
 #
 # Usage:
-#   ./scripts/run_ci_local.sh              # Run all local CI checks
+#   ./scripts/run_ci_local.sh              # Run all local pull-request CI checks
 #   ./scripts/run_ci_local.sh lint         # pre-commit + doc-link validation
-#   ./scripts/run_ci_local.sh unit         # unit tests + structure/coverage checks
-#   ./scripts/run_ci_local.sh integration  # integration tests
-#   ./scripts/run_ci_local.sh cli          # installed-CLI entry-point tests
-#   ./scripts/run_ci_local.sh build        # artifact + package lifecycle checks
+#   ./scripts/run_ci_local.sh unit         # full unit test and coverage checks (nightly)
+#   ./scripts/run_ci_local.sh integration  # full integration tests (nightly)
+#   ./scripts/run_ci_local.sh cli          # installed-CLI tests (nightly)
+#   ./scripts/run_ci_local.sh build        # artifact and package tests (nightly)
 #   ./scripts/run_ci_local.sh audit        # pip-audit dependency scan
 #   ./scripts/run_ci_local.sh sast         # bandit static analysis
 #   ./scripts/run_ci_local.sh workflow-scan # zizmor workflow security scan
@@ -22,7 +22,7 @@
 #   ./scripts/run_ci_local.sh symlinks     # repository symlink validation
 #   ./scripts/run_ci_local.sh justfile     # justfile evaluation and recipe listing
 #   ./scripts/run_ci_local.sh shellcheck   # shell static analysis
-#   ./scripts/run_ci_local.sh shell-tests  # Bats shell test suite
+#   ./scripts/run_ci_local.sh shell-tests  # Bats shell tests (nightly)
 #   ./scripts/run_ci_local.sh secrets      # Gitleaks repository scan
 #
 # Container engine: auto-detected (podman first, docker fallback).
@@ -798,10 +798,6 @@ case "${SUBSET}" in
         ;;
     all)
         run_step "lint" run_lint
-        run_step "unit" run_unit
-        run_step "integration" run_integration
-        run_step "cli" run_cli
-        run_step "build" run_build
         run_step "audit" run_audit
         run_step "sast" run_sast
         run_step "workflow-scan" run_workflow_scan
@@ -811,7 +807,6 @@ case "${SUBSET}" in
         run_step "symlinks" run_symlinks
         run_step "justfile" run_justfile
         run_step "shellcheck" run_shellcheck
-        run_step "shell-tests" run_shell_tests
         run_step "secrets" run_secrets
         ;;
     *)

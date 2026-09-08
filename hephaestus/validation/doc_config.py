@@ -1,11 +1,11 @@
 """Enforce consistency between documentation metric values and authoritative config sources.
 
 Checks that values documented in AGENTS.md and README.md match what is configured in
-``pyproject.toml``:
+``pyproject.toml`` and the nightly test workflow:
 
 1. Coverage threshold in AGENTS.md AND docs/DEFINITION_OF_DONE.md matches ``fail_under``
    in ``[tool.coverage.report]``.
-2. ``--cov=<path>`` in README.md matches ``addopts`` in ``[tool.pytest.ini_options]``.
+2. ``--cov=<path>`` in README.md matches the nightly unit-coverage command.
 3. If ``--cov-fail-under=N`` is present in ``addopts``, it must match ``fail_under`` in
    ``[tool.coverage.report]``.  Absent is OK — ``[tool.coverage.report].fail_under`` is
    the single source of truth.
@@ -28,6 +28,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, cast
+
+import yaml
 
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.config.child_environments import build_python_phase_env
@@ -89,29 +91,44 @@ def load_coverage_threshold(repo_root: Path) -> int:
 
 
 def extract_cov_path(repo_root: Path) -> str:
-    """Read the ``--cov=<path>`` value from ``[tool.pytest.ini_options].addopts``.
+    """Read the ``--cov=<path>`` value from the nightly coverage command.
 
     Args:
-        repo_root: Repository root containing ``pyproject.toml``.
+        repo_root: Repository root containing ``.github/workflows/nightly-tests.yml``.
 
     Returns:
         Package path string (e.g. ``"hephaestus"``).
 
     Raises:
-        SystemExit: If the key is missing or no ``--cov=`` flag is found.
+        SystemExit: If the workflow cannot be read or no ``--cov=`` flag is found.
 
     """
-    data = _load_pyproject(repo_root)
-    addopts = data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("addopts", [])
-    addopts_items: list[str] = addopts.split() if isinstance(addopts, str) else list(addopts)
+    workflow_path = repo_root / ".github" / "workflows" / "nightly-tests.yml"
+    try:
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"ERROR: Could not parse {workflow_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
 
-    for item in addopts_items:
-        m = re.match(r"^--cov=(.+)$", item)
-        if m:
-            return m.group(1)
+    if isinstance(workflow, dict):
+        jobs = workflow.get("jobs")
+        if isinstance(jobs, dict):
+            unit_coverage = jobs.get("unit-coverage")
+            if isinstance(unit_coverage, dict):
+                steps = unit_coverage.get("steps")
+                if isinstance(steps, list):
+                    for step in steps:
+                        if not isinstance(step, dict):
+                            continue
+                        run = step.get("run")
+                        if not isinstance(run, str):
+                            continue
+                        match = re.search(r"(?:^|\s)--cov=([^\s]+)", run)
+                        if match:
+                            return match.group(1)
 
     print(
-        "ERROR: No --cov=<path> found in [tool.pytest.ini_options].addopts",
+        "ERROR: No --cov=<path> found in nightly unit-coverage workflow",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -354,7 +371,7 @@ def check_doc_config_consistency(
     Checks:
     1. AGENTS.md AND docs/DEFINITION_OF_DONE.md coverage threshold vs
        ``[tool.coverage.report].fail_under``.
-    2. README.md ``--cov=<path>`` vs ``[tool.pytest.ini_options].addopts``.
+    2. README.md ``--cov=<path>`` vs the nightly unit-coverage command.
     3. ``--cov-fail-under`` in addopts (if present) vs ``fail_under``.
     4. README.md hardcoded test count vs ``pytest --collect-only`` (skipped if
        *skip_test_count* is True or pytest is unavailable).
@@ -425,7 +442,9 @@ def _run_cov_path_check(repo_root: Path, verbose: bool) -> list[str]:
     expected_cov_path = extract_cov_path(repo_root)
     errors = check_readme_cov_path(repo_root, expected_cov_path)
     if not errors and verbose:
-        print(f"PASS: README.md --cov path matches pyproject.toml (--cov={expected_cov_path})")
+        print(
+            f"PASS: README.md --cov path matches nightly unit coverage (--cov={expected_cov_path})"
+        )
     return errors
 
 

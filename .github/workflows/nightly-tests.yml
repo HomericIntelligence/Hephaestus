@@ -13,15 +13,45 @@ permissions:
   contents: read
 
 jobs:
-  nightly-tests:
+  unit-coverage:
+    name: Full unit coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Setup uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Run full unit coverage
+        run: >
+          uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers
+          -m "not performance and not contract"
+          --cov=hephaestus --cov-report=term-missing --cov-report=xml
+      - name: Check per-module coverage floors
+        run: uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
+      - name: Persist coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nightly-unit-coverage
+          path: coverage.xml
+          retention-days: 14
+
+  functional-tests:
+    name: Remaining functional tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           enable-cache: true
           python-version: "3.13"
@@ -29,16 +59,116 @@ jobs:
         run: uv sync --all-groups --all-extras --locked
       - name: Install Pi CLI
         uses: ./.github/actions/setup-pi-cli
-      - name: Run nightly tests
+      - name: Run remaining functional tests
         run: >
-          uv run pytest tests/unit tests/integration
-          --require-pi-package-smoke
-          --override-ini="addopts=" -v --strict-markers -m "nightly"
+          uv run pytest tests/integration --require-pi-package-smoke
+          --override-ini="addopts=" -v --strict-markers
+          -m "not precommit and not performance and not contract and not artifact and not codex_release_artifact"
+
+  pi-conformance:
+    name: Pi conformance (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Install managed Pi runtime
+        uses: ./.github/actions/setup-pi-cli
+      - name: Run Pi conformance tests
+        run: uv run pytest tests/integration/test_pi_plugin_package_smoke.py tests/unit/agents/test_pi_plugins.py tests/unit/agents/test_pi_skill_confinement.py tests/unit/agents/test_pi_session.py tests/unit/agents/test_pi_alias_config.py tests/unit/docs/test_pi_private_provider_docs.py tests/unit/docs/test_third_party_services_doc.py tests/unit/docs/test_pi_rollout_consistency.py tests/unit/docs/test_security_policy.py tests/unit/shell/test_install_pinning.py tests/unit/ci/test_workflows.py --override-ini="addopts=" -v --strict-markers --require-pi-package-smoke
+
+  installed-cli-tests:
+    name: Installed CLI tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Build wheel
+        run: uv build --wheel
+      - name: Install wheel into fresh environment
+        run: |
+          uv venv build/cli-venv
+          WHEEL=(dist/*.whl)
+          uv pip install --python build/cli-venv/bin/python "${WHEEL[0]}[automation]" pytest pyyaml
+      - name: Run installed CLI tests
+        run: |
+          export PATH="$PWD/build/cli-venv/bin:$PATH"
+          build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py --require-cli --override-ini="addopts=" -v --strict-markers
+
+  shell-tests:
+    name: Shell tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build CI image
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Run Bats
+        run: bash scripts/run_ci_local.sh shell-tests
+
+  build:
+    name: Artifact and package tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Provision Codex Sigstore fixture
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/provision_codex_sigstore_fixture.py --root "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4"
+      - name: Validate reproducible artifacts and package lifecycle
+        run: >
+          uv run pytest tests/integration --override-ini="addopts="
+          --basetemp=build/pytest-artifacts -v --strict-markers
+          -m "artifact and not codex_release_artifact"
+      - name: Validate offline Codex artifacts
+        env:
+          HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT: ${{ github.workspace }}/build/test-fixtures/codex-sigstore/rust-v0.153.4
+        run: >
+          uv run pytest tests/integration --override-ini="addopts="
+          --basetemp=build/pytest-codex-artifacts -v --strict-markers
+          -m codex_release_artifact
 
   notify-failure:
     name: Open or update failure tracking issue
-    needs: [nightly-tests]
-    # Only scheduled runs open issues — manual dispatch runs are attended.
+    needs: [unit-coverage, functional-tests, pi-conformance, installed-cli-tests, shell-tests, build]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -56,13 +186,10 @@ jobs:
           set -euo pipefail
           title="[scheduled-ci] ${WORKFLOW_NAME} failed on ${BRANCH}"
           notice="_Automated notification from the scheduled \`${WORKFLOW_NAME}\` workflow._"
-          body="$(printf 'Scheduled lane `%s` failed on branch `%s`.\nRun: %s\n\n%s' \
-            "$WORKFLOW_NAME" "$BRANCH" "$RUN_URL" "$notice")"
-          existing="$(gh issue list --repo "${REPOSITORY}" --state open \
-            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          body="$(printf 'Scheduled lane `%s` failed on branch `%s`.\nRun: %s\n\n%s' "$WORKFLOW_NAME" "$BRANCH" "$RUN_URL" "$notice")"
+          existing="$(gh issue list --repo "${REPOSITORY}" --state open --search "${title} in:title" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "${REPOSITORY}" \
-              --body "Failed again — run: ${RUN_URL}"
+            gh issue comment "$existing" --repo "${REPOSITORY}" --body "Failed again — run: ${RUN_URL}"
           else
             gh issue create --repo "${REPOSITORY}" --title "$title" --body "$body"
           fi

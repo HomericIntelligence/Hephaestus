@@ -19,11 +19,11 @@ A piece of work is **done** when every item below is true.
 | 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
 | 8 | `uv run mypy hephaestus/ scripts/ tests/` returns `Success: no issues found in N source files` | CI job `lint` |
-| 9 | Full unit suite passes: `uv run pytest tests/unit` | CI jobs `unit-tests` and `test (ubuntu-latest, 3.13, unit)` |
-| 10 | Coverage gate satisfied: `--cov-fail-under=85` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | CI job `unit-tests` |
+| 9 | Fast test suite passes: `just test` | CI job `lint` through the pre-commit hook |
+| 10 | Coverage gate satisfied: `--cov-fail-under=85` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | Nightly CI job `unit-coverage` |
 | 11 | No new warnings introduced (pytest, deprecation, ruff) | PR reviewer |
-| 12 | Integration tests pass: `uv run pytest tests/integration` | CI job `integration-tests` |
-| 13 | Shell tests pass: `just test-shell` | CI job `shell-tests` |
+| 12 | Full integration tests pass | Nightly CI job `functional-tests` |
+| 13 | Shell tests pass: `just test-shell` | Nightly CI job `shell-tests` |
 | 14 | Schema validation passes (CLI inventory, YAML/Markdown structure) | CI job `schema-validation` |
 | 15 | The lockfile is current: `uv lock --check` | CI job `uv-lock-check` |
 | 16 | Secrets scan finds no leaks | CI jobs `security/secrets-scan`, gitleaks in `_required.yml` |
@@ -35,7 +35,7 @@ A piece of work is **done** when every item below is true.
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 | 23 | New or revised English technical prose follows the [ASD-STE100 writing standard](asd-ste100.md); principle declarations and specialized principle statements do not change only to satisfy the standard | Author and PR reviewer |
 | 24 | Each `required-checks-gate` dependency succeeds on pull-request and merge-group events; only `pr-policy` can skip on a push event | CI gate `required-checks-gate` + structural unit guard |
-| 25 | Before PR creation, pytest collects and passes each new or changed test. Pre-commit does not run pytest; required CI/CD runs the full suites. | Author and PR reviewer; full suites in CI jobs `unit-tests` and `integration-tests` |
+| 25 | Before PR creation, pytest collects and passes each new or changed test. Pre-commit and required PR checks run the shared fast selection. Nightly CI runs full coverage and the functional complement. | Author and PR reviewer; fast tests in `lint`, full suites in nightly CI |
 
 ### Conventional Commit history boundary
 
@@ -55,9 +55,8 @@ replace commit identities and invalidate existing signatures, tags, and
 downstream references. The PR closing #2157 establishes the cutover: its title
 and every later squash-merge title must satisfy the authored form above.
 
-> **Which of these actually block the merge button?** Both the classic branch
-> protection contexts (`required-checks-gate` and the two Python 3.13 matrix
-> contexts) and the direct GitHub ruleset contexts documented in
+> **Which of these actually block the merge button?** The
+> `required-checks-gate` context and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. Review output is
 > audit evidence only;
 > `state:implementation-go` is automated implementation eligibility, not the

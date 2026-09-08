@@ -84,11 +84,6 @@ SOURCE_CONTRACTS: tuple[SourceContract, ...] = (
         selector="jobs",
     ),
     SourceContract(
-        document="docs/ci/required-checks.md",
-        source=".github/workflows/test.yml",
-        selector="jobs",
-    ),
-    SourceContract(
         document="docs/specs/2026-07-16-jinja-prompt-templates-design.md",
         source="hephaestus/prompts/templates/default",
         selector="",

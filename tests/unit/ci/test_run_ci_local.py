@@ -459,15 +459,6 @@ def _assert_all_required_gates(result: subprocess.CompletedProcess[str], log: st
         "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
         "uv run pre-commit run --all-files --show-diff-on-failure",
         "uv run hephaestus-validate-links docs --repo-root .",
-        "uv run pytest tests/unit",
-        "uv run hephaestus-check-test-structure",
-        "uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml",
-        "uv run pytest tests/integration --require-cli",
-        "uv build --wheel",
-        "build/cli-venv/bin/pytest",
-        "uv run pytest tests/integration --override-ini=addopts= "
-        "--basetemp=build/pytest-artifacts -v --strict-markers "
-        "-m artifact\\ and\\ not\\ codex_release_artifact",
         "uv run pip-audit",
         "uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium",
         "uv run zizmor --no-online-audits --min-severity medium .github/workflows/",
@@ -477,10 +468,8 @@ def _assert_all_required_gates(result: subprocess.CompletedProcess[str], log: st
         "bash scripts/check-symlinks.sh",
         "just --evaluate",
         "shellcheck --severity=error",
-        "bats --recursive tests/shell",
         "detect --source=. --verbose --exit-code=1",
         "dir --verbose --exit-code=1 .",
-        "--require-cli",
         "env GITHUB_EVENT_NAME=pull_request uv run python scripts/check_license_compatibility.py",
     ):
         assert command in log
@@ -620,13 +609,13 @@ def test_build_fails_before_provisioning_when_host_zstd_is_unavailable(tmp_path:
     assert "scripts/provision_codex_sigstore_fixture.py" not in log
 
 
-def test_all_separates_general_integration_from_artifact_lane(tmp_path: Path) -> None:
-    """The serialized local gate must not execute artifact tests twice."""
+def test_all_leaves_nightly_tests_out_of_pull_request_ci(tmp_path: Path) -> None:
+    """The serialized local pull-request gate must not run nightly tests."""
     result, log = _run_runner(tmp_path, "all")
 
     assert result.returncode == 0, result.stderr
-    assert '-m "not nightly and not artifact"' in log
-    assert log.count("-m artifact") == 1
+    assert "uv run pytest tests/unit" not in log
+    assert "bats --recursive tests/shell" not in log
 
 
 @pytest.mark.usefixtures("require_git_path_format")
@@ -740,7 +729,7 @@ def test_validator_marker_like_output_is_not_runner_protocol(tmp_path: Path) -> 
     """A validator cannot create a terminal runner handoff record."""
     result, _ = _run_runner(
         tmp_path,
-        "all",
+        "unit",
         validator_marker_command="pytest tests/unit",
         machine_system="Darwin",
     )
@@ -1018,8 +1007,6 @@ def test_all_preserves_bash_array_arguments(
         assert "All locally executable CI checks passed." not in result.stdout
     else:
         _assert_all_required_gates(result, log)
-        fixture = f"{repo}/build/test-fixtures/codex-sigstore/rust-v0.153.4"
-        assert any(f"{fixture}:/codex-sigstore/rust-v0.153.4:ro" in call for call in calls)
         assert any(any(arg.endswith(":/candidate:ro") for arg in call) for call in calls)
 
 
