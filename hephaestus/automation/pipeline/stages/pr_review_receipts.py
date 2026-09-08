@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import re
-
+from ..host_verification_pyxis import HOST_KEYS, pyxis_receipt_metadata_matches
 from .pr_review_verification import _HostVerificationSpec
 
 UNSUPPORTED_HOST_VERIFICATION_ERROR = "unsupported_host_verification_boundary"
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-HOST_KEYS = ["container_runtime", "container_image", "container_image_sha256", "container_image_id", "container_image_reference", "containerfile_sha256", "container_source_revision"]  # fmt: skip  # noqa: E501
 
 
 def _host_verification_result_status(
@@ -53,27 +48,13 @@ def _host_verification_receipt_matches(
         return False
     platform = receipt.get("platform")
     if platform == "linux":
-        image = receipt.get("container_image")
-        image_digest = receipt.get("container_image_sha256")
-        image_id = receipt.get("container_image_id")
-        image_reference = receipt.get("container_image_reference")
         return bool(
             receipt.get("head_sha") == reviewed_head
             and receipt.get("argv") == list(spec.argv)
             and receipt.get("immutable_source") is True
             and receipt.get("ok") is True
             and receipt.get("status") == "passed"
-            and receipt.get("container_runtime") == "pyxis"
-            and isinstance(image, str)
-            and image.startswith("/")
-            and "://" not in image
-            and _SHA256_RE.fullmatch(str(image_digest or "")) is not None
-            and image.endswith(f"/sha256-{image_digest}.sqsh")
-            and _IMAGE_ID_RE.fullmatch(str(image_id or "")) is not None
-            and image_reference in {f"podman://{image_id}", f"dockerd://{image_id}"}
-            and _SHA256_RE.fullmatch(str(receipt.get("containerfile_sha256") or "")) is not None
-            and _COMMIT_RE.fullmatch(str(receipt.get("container_source_revision") or ""))
-            is not None
+            and pyxis_receipt_metadata_matches(receipt)
             and isinstance(receipt.get("stdout_tail"), str)
             and isinstance(receipt.get("stderr_tail"), str)
         )
