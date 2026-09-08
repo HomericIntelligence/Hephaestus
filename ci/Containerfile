@@ -25,6 +25,8 @@
 # ============================================================================
 ARG TARGETARCH
 ARG DEBIAN_SNAPSHOT=20260701T000000Z
+ARG GIT_VERSION=2.49.0
+ARG GIT_SHA256=618190cf590b7e9f6c11f91f23b1d267cd98c3ab33b850416d8758f8b5a85628
 
 # All Python stages inherit immutable Debian package indexes. The base image is
 # digest-pinned, and the dated snapshot fixes both package candidates and their
@@ -76,6 +78,9 @@ RUN pi_spec="$(node -e 'const p=require("/tmp/pi_package_catalog.json").compatib
 # ============================================================================
 FROM python-snapshot AS builder
 
+ARG GIT_VERSION
+ARG GIT_SHA256
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -88,20 +93,44 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
     PATH="/opt/hephaestus-venv/bin:$PATH"
 
-# Install build dependencies + git (required by pre-commit hooks) from the
-# immutable Debian snapshot configured by python-snapshot.
+# Install the Git build dependencies from the immutable Debian snapshot
+# configured by python-snapshot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
     curl \
     ca-certificates \
     gcc \
     g++ \
     build-essential \
+    libcurl4-openssl-dev \
+    libexpat1-dev \
+    libpcre2-dev \
+    libssl-dev \
+    xz-utils \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (pinned release — keep the version and sha256 in sync with
 # astral-sh/setup-uv in .github/workflows/*.yml when bumping).
 COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+
+# Build Git from the pinned upstream source. The runtime image copies the
+# installed files below and does not include the build toolchain.
+RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
+        --connect-timeout 30 --max-time 300 \
+        "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" \
+        -o /tmp/git.tar.xz \
+    && echo "${GIT_SHA256}  /tmp/git.tar.xz" | sha256sum --check \
+    && tar -xJf /tmp/git.tar.xz -C /tmp \
+    && make -C "/tmp/git-${GIT_VERSION}" prefix=/usr/local \
+        NO_GETTEXT=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease \
+        NO_TCLTK=YesPlease all \
+    && make -C "/tmp/git-${GIT_VERSION}" prefix=/usr/local \
+        NO_GETTEXT=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease \
+        NO_TCLTK=YesPlease install \
+    && test -x /usr/local/bin/git \
+    && test ! -L /usr/local/bin/git \
+    && /usr/local/bin/git --version | grep -Fx "git version ${GIT_VERSION}" \
+    && rm -rf "/tmp/git-${GIT_VERSION}" /tmp/git.tar.xz
 
 # Layer 1: Dependency files + the package source the hatchling build needs.
 # The package tree is copied so `uv sync` can install the project itself,
@@ -134,6 +163,7 @@ RUN uv run --no-sync pre-commit install-hooks && \
 FROM python-snapshot
 
 ARG TARGETARCH
+ARG GIT_VERSION
 ARG BATS_VERSION=1.11.1-1
 ARG SHELLCHECK_VERSION=0.10.0-1
 
@@ -153,10 +183,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # immutable snapshot as the builder stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bats="${BATS_VERSION}" \
-    git \
     curl \
     ca-certificates \
     jq \
+    libpcre2-8-0 \
     openssh-client \
     shellcheck="${SHELLCHECK_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
@@ -189,6 +219,17 @@ RUN case "$TARGETARCH" in \
 # Node 22 + npm + the Pi coding-agent CLI (same pin as setup-pi-cli), copied
 # as one consistent /usr/local tree from the node stage.
 COPY --from=node /usr/local/ /usr/local/
+
+# Copy the pinned Git installation after the Node prefix so /usr/local/bin/git
+# is the real binary selected before /usr/bin/git.
+COPY --from=builder /usr/local/bin/git /usr/local/bin/git
+COPY --from=builder /usr/local/bin/git-* /usr/local/bin/
+COPY --from=builder /usr/local/libexec/git-core/ /usr/local/libexec/git-core/
+COPY --from=builder /usr/local/share/git-core/ /usr/local/share/git-core/
+
+RUN test -x /usr/local/bin/git \
+    && test ! -L /usr/local/bin/git \
+    && /usr/local/bin/git --version | grep -Fx "git version ${GIT_VERSION}"
 
 # Copy the uv binaries and the pre-installed project virtualenv from builder.
 COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/

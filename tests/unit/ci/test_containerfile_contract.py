@@ -136,6 +136,30 @@ def test_shell_tool_versions_are_explicit_and_verified() -> None:
     assert 'grep -Fx "version: 0.10.0"' in source
 
 
+def test_git_is_built_from_a_pinned_source_and_installed_in_runtime() -> None:
+    """The runtime image must provide the requested real Git binary."""
+    source = CONTAINERFILE.read_text(encoding="utf-8")
+
+    assert "ARG GIT_VERSION=2.49.0" in source
+    assert (
+        "ARG GIT_SHA256=618190cf590b7e9f6c11f91f23b1d267cd98c3ab33b850416d8758f8b5a85628" in source
+    )
+    assert "git-${GIT_VERSION}.tar.xz" in source
+    assert "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" in source
+    assert 'echo "${GIT_SHA256}  /tmp/git.tar.xz" | sha256sum --check' in source
+    assert "tar -xJf /tmp/git.tar.xz -C /tmp" in source
+    assert 'make -C "/tmp/git-${GIT_VERSION}" prefix=/usr/local' in source
+    assert "COPY --from=builder /usr/local/bin/git /usr/local/bin/git" in source
+    assert "COPY --from=builder /usr/local/libexec/git-core/ /usr/local/libexec/git-core/" in source
+    assert "COPY --from=builder /usr/local/share/git-core/ /usr/local/share/git-core/" in source
+    assert "test ! -L /usr/local/bin/git" in source
+    assert "git version ${GIT_VERSION}" in source
+
+    runtime_stage = source.rindex("FROM python-snapshot")
+    assert "\n    libpcre2-8-0 \\\n" in source[runtime_stage:]
+    assert "\n    git \\\n" not in source[runtime_stage:]
+
+
 def test_precommit_shellcheck_uses_the_snapshot_pinned_binary() -> None:
     """Baking hook environments must not download ShellCheck from a third party."""
     source = PRE_COMMIT_CONFIG.read_text(encoding="utf-8")
