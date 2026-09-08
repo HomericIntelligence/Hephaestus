@@ -534,8 +534,81 @@ class DirtyDirectPrStateRead:
         return self.complete and not self.branch_prs and self.issue_pr_number is None
 
 
+@dataclass(frozen=True)
+class InspectAdoptedRemediationPrStateRequest:
+    """Read the current adopted PR and every unresolved thread."""
+
+    repository: str
+    issue_number: int
+    pr_number: int
+    branch: str
+    expected_head: str
+    expected_thread_snapshot_json: str
+
+    def __post_init__(self) -> None:
+        """Validate exact bounded request pins."""
+        from hephaestus.automation.remediation_recovery import RemediationReviewInput
+
+        _positive_identifier(self.issue_number, "issue_number")
+        _positive_identifier(self.pr_number, "pr_number")
+        _full_sha(self.expected_head, "expected_head")
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", self.repository) is None
+        ):
+            raise ValueError("adopted repository is invalid")
+        if (
+            not isinstance(self.branch, str)
+            or not self.branch
+            or self.branch.startswith(("-", "/"))
+            or ".." in self.branch
+            or any(ord(c) < 32 for c in self.branch)
+        ):
+            raise ValueError("adopted branch is invalid")
+        value = self.expected_thread_snapshot_json
+        if (
+            not isinstance(value, str)
+            or len(value.encode("utf-8")) > 1024 * 1024
+            or RemediationReviewInput.canonical_thread_snapshot(json.loads(value)) != value
+        ):
+            raise ValueError("adopted thread snapshot is invalid")
+
+
+@dataclass(frozen=True)
+class AdoptedRemediationPrStateRead:
+    """Retain bounded current PR facts without mutation authority."""
+
+    repository: str
+    issue_number: int
+    pr_number: int
+    branch: str
+    head: str
+    state: str
+    origin_writable: bool
+    thread_snapshot_json: str
+    complete: bool
+
+    def __post_init__(self) -> None:
+        """Validate the immutable readback envelope."""
+        InspectAdoptedRemediationPrStateRequest(
+            self.repository,
+            self.issue_number,
+            self.pr_number,
+            self.branch,
+            self.head,
+            self.thread_snapshot_json,
+        )
+        if (
+            self.state not in {"OPEN", "CLOSED", "MERGED"}
+            or type(self.origin_writable) is not bool
+            or type(self.complete) is not bool
+        ):
+            raise ValueError("adopted PR state is invalid")
+
+
 type GitHubRequest = (
-    InspectDirtyDirectPrStateRequest
+    InspectAdoptedRemediationPrStateRequest
+    | InspectDirtyDirectPrStateRequest
     | RecoverReplyJournalRequest
     | RecoverRemediationReplyJournalRequest
     | AppendReplyJournalRequest
@@ -565,6 +638,7 @@ class GitHubJob:
         if not isinstance(
             self.request,
             (
+                InspectAdoptedRemediationPrStateRequest,
                 InspectDirtyDirectPrStateRequest,
                 RecoverReplyJournalRequest,
                 RecoverRemediationReplyJournalRequest,
@@ -577,9 +651,10 @@ class GitHubJob:
             ),
         ):
             raise TypeError("request must be a supported GitHub request")
-        if isinstance(self.request, InspectDirtyDirectPrStateRequest) and (
-            self.request.repository.rsplit("/", 1)[-1].casefold() != self.repo.casefold()
-        ):
+        if isinstance(
+            self.request,
+            (InspectDirtyDirectPrStateRequest, InspectAdoptedRemediationPrStateRequest),
+        ) and (self.request.repository.rsplit("/", 1)[-1].casefold() != self.repo.casefold()):
             raise ValueError("dirty direct request repository does not match the job")
         if not isinstance(self.descr, str) or not self.descr:
             raise ValueError("descr must be a non-empty string")
@@ -798,7 +873,8 @@ class ScopeExpansionDependenciesReconciled:
 
 
 type GitHubReceipt = (
-    DirtyDirectPrStateRead
+    AdoptedRemediationPrStateRead
+    | DirtyDirectPrStateRead
     | ReplyJournalRecovered
     | RemediationReplyJournalRecovered
     | ReplyJournalAppended

@@ -85,8 +85,14 @@ class _BlockingWorkerPool(WorkerPool):
         self._release = release
         self._finished = finished
 
-    def _run(self, job: Any, claim_key: str = "", claim_stage: str = "") -> JobResult:
-        del job, claim_key, claim_stage
+    def _run(
+        self,
+        job: Any,
+        claim_key: str = "",
+        claim_stage: str = "",
+        remediation_owner_id: int | None = None,
+    ) -> JobResult:
+        del job, claim_key, claim_stage, remediation_owner_id
         assert self._release.wait(timeout=2)
         self._finished.set()
         return JobResult(ok=True)

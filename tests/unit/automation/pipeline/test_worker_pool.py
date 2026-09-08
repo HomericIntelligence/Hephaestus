@@ -16100,3 +16100,802 @@ def test_adopted_remediation_creation_consumes_worker_metadata(
     assert _git(writer.cwd, "status", "--porcelain") == ""
     assert _git(writer.cwd, "ls-files", "--stage") == original_index
     assert (writer.cwd / "tracked.txt").read_bytes() == original_content
+
+
+def test_pretest_cleanup_keeps_other_owner_and_active_entries(pool: WorkerPool) -> None:
+    """A permit release removes only its owner's completed idle result."""
+    from types import SimpleNamespace
+
+    entries = {
+        "completed": SimpleNamespace(claim_key="r#7", owner_id=11, result_sha256="a", in_use=False),
+        "other": SimpleNamespace(claim_key="r#7", owner_id=12, result_sha256="a", in_use=False),
+        "active": SimpleNamespace(claim_key="r#7", owner_id=11, result_sha256=None, in_use=False),
+        "writing": SimpleNamespace(claim_key="r#7", owner_id=11, result_sha256="a", in_use=True),
+    }
+    pool._pretest_successes.update(cast(Any, entries))
+    pool.discard_remediation_pretest_successes("r#7", owner_id=11)
+    assert set(pool._pretest_successes) == {"other", "active", "writing"}
+
+
+@pytest.mark.parametrize("case", ["success", "callback_failure", "push_failure", "legacy"])
+def test_pretest_before_publish_hook_orders_signed_local_commit(
+    pool: WorkerPool, tmp_path: Path, case: str
+) -> None:
+    """The private hook runs once after a signed child and before remote writes."""
+    root, _, parent = _worker_repository(tmp_path)
+    key = tmp_path / "pretest-key"
+    subprocess.run(
+        [_executable_path("ssh-keygen"), "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+        check=True,
+        capture_output=True,
+    )
+    signers = tmp_path / "pretest-signers"
+    signers.write_text("test@example.invalid " + key.with_suffix(".pub").read_text())
+    for name, value in (
+        ("gpg.format", "ssh"),
+        ("user.signingkey", str(key)),
+        ("gpg.ssh.allowedSignersFile", str(signers)),
+    ):
+        _git(root, "config", name, value)
+    (root / "tracked.txt").write_text("reviewed candidate\n")
+    events: list[str] = []
+    heads: list[str] = []
+    job = GitJob(
+        repo="example/project",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={"worktree_path": str(root), "issue_number": 7, "branch": "main"},
+    )
+
+    def commit(*args: Any, **kwargs: Any) -> bool:
+        _git(root, "add", "tracked.txt")
+        _git(root, "commit", "-S", "-s", "-m", "fix(test): preserve candidate")
+        _git(root, "verify-commit", "HEAD")
+        events.append("commit")
+        return True
+
+    def before_publish(head: str) -> None:
+        assert head == _git(root, "rev-parse", "HEAD")
+        assert _git(root, "rev-parse", "HEAD^") == parent
+        assert "Signed-off-by: Test User <test@example.invalid>" in _git(
+            root, "show", "-s", "--format=%B", head
+        )
+        assert _git(tmp_path / "remote.git", "rev-parse", "main") == parent
+        heads.append(head)
+        events.append("callback")
+        if case == "callback_failure":
+            raise RuntimeError("record consumption failed")
+
+    def publish(*args: Any, **kwargs: Any) -> JobResult:
+        events.append("publish")
+        if case == "push_failure":
+            return JobResult(ok=False, error="remote rejected publication")
+        _git(root, "push", "--force-with-lease=refs/heads/main:" + parent, "origin", "main")
+        return JobResult(ok=True, value={"head_sha": _git(root, "rev-parse", "HEAD")})
+
+    with (
+        patch.object(pool, "_commit_if_changes_with_controlled_signing", side_effect=commit),
+        patch.object(pool, "_publish_commit_push", side_effect=publish) as publication,
+        ExitStack() as stack,
+    ):
+        if case == "callback_failure":
+            try:
+                result = pool._git_commit_push_inner(job, stack, before_publish=before_publish)
+            except RuntimeError as exc:
+                assert str(exc) == "record consumption failed"
+            else:
+                assert not result.ok
+        else:
+            result = pool._git_commit_push_inner(
+                job, stack, before_publish=None if case == "legacy" else before_publish
+            )
+            assert result.ok is (case != "push_failure")
+    assert events == (
+        ["commit", "publish"]
+        if case == "legacy"
+        else ["commit", "callback"]
+        if case == "callback_failure"
+        else ["commit", "callback", "publish"]
+    )
+    assert len(heads) == (0 if case == "legacy" else 1)
+    assert publication.call_count == (0 if case == "callback_failure" else 1)
+    assert _git(root, "status", "--porcelain") == ""
+    assert _git(root, "rev-parse", "HEAD^") == parent
+    assert _git(tmp_path / "remote.git", "rev-parse", "main") == (
+        parent if case in {"callback_failure", "push_failure"} else _git(root, "rev-parse", "HEAD")
+    )
+
+
+@pytest.mark.parametrize(
+    "case", ["success", "push_failure", "consume_failure", "duplicate", "missing_predecessor"]
+)
+def test_pretest_publication_advances_real_receipt_before_store_and_remote(
+    pool: WorkerPool, tmp_path: Path, case: str
+) -> None:
+    """A ready record is consumed after local accounting and before publication."""
+    from hephaestus.automation.pipeline.github_jobs import AdoptedRemediationPrStateRead
+    from hephaestus.automation.pipeline.jobs import RemediationPretestInput
+    from hephaestus.automation.remediation_prepublication import (
+        RemediationPretestCandidate,
+        canonical_source_receipt_json,
+        load_pretest_candidate,
+        save_pretest_candidate,
+        source_receipt_digest,
+    )
+    from hephaestus.automation.remediation_recovery import RemediationReviewInput
+
+    root, _, parent = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(root, repository="project")
+    binding = manager.prepare(7, SourceLane.IMPLEMENTATION, parent, branch="pretest-writer")
+    writer = binding.cwd
+    _git(writer, "push", "-u", "origin", "pretest-writer")
+    source = manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+    key = tmp_path / "outer-pretest-key"
+    subprocess.run(
+        [_executable_path("ssh-keygen"), "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+        check=True,
+        capture_output=True,
+    )
+    for name, value in (("gpg.format", "ssh"), ("user.signingkey", str(key))):
+        _git(root, "config", name, value)
+    (writer / "tracked.txt").write_text("candidate before tests\n")
+    threads = RemediationReviewInput.canonical_thread_snapshot(
+        _RECOVERY_PATH_MANIFEST["remediation_thread_snapshots"]
+    )
+    inputs = RemediationPretestInput(
+        repository="example/project",
+        issue_number=7,
+        pr_number=8,
+        branch="pretest-writer",
+        expected_remote_sha=parent,
+        source_receipt_json=canonical_source_receipt_json(source),
+        source_receipt_sha256=source_receipt_digest(source),
+        thread_snapshot_json=threads,
+        batch_nonce="4" * 32,
+        allowed_paths=("tracked.txt",),
+        approved_scope_sha256="5" * 64,
+        candidate_sequence=1,
+        expected_previous_record_sha256=None,
+    )
+    if case == "missing_predecessor":
+        fix = _agent_job(
+            repo="project",
+            issue=7,
+            cwd=writer,
+            workspace=binding,
+            remediation_pretest_nonce="7" * 32,
+            remediation_pretest_input=replace(inputs, candidate_sequence=2),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER, AgentOperation.TEST_FIX, SessionLifecycle.START_NEW
+            ),
+        )
+        with patch.object(pool, "_run_agent") as provider:
+            rejected = pool._run(fix, "project#7", "implementation", remediation_owner_id=1)
+        assert not rejected.ok
+        assert rejected.error == "ValueError: remediation pretest fix predecessor is unavailable"
+        provider.assert_not_called()
+        assert not pool._pretest_successes
+        assert manager._require_receipt(7, SourceLane.IMPLEMENTATION) == source
+        assert _git(writer, "rev-parse", "HEAD") == parent
+        return
+    job = GitJob(
+        repo="project",
+        expected_repository="example/project",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={
+            "source_lane": "impl",
+            "repo_root": str(root),
+            "issue_number": 7,
+            "worktree_path": str(writer),
+            "branch": inputs.branch,
+            "remediation_pretest_input": inputs,
+        },
+    )
+    pool._github_job_runner = MagicMock()
+    pool._github_job_runner.run.return_value = AdoptedRemediationPrStateRead(
+        inputs.repository, 7, 8, inputs.branch, parent, "OPEN", True, threads, True
+    )
+    events: list[str] = []
+
+    def remote(*args: Any, **kwargs: Any) -> str:
+        return _git(tmp_path / "remote.git", "rev-parse", inputs.branch)
+
+    with patch.object(pool, "_read_remote_branch_head", side_effect=remote):
+        with manager.implementation_writer_handoff(7):
+            actual_source, snapshot, tree, diff, paths = pool._pretest_inspect(job, manager, inputs)
+        candidate = RemediationPretestCandidate(
+            phase="ready",
+            repository=inputs.repository,
+            issue_number=7,
+            pr_number=8,
+            repo_root=str(root),
+            worktree_path=str(writer),
+            branch=inputs.branch,
+            expected_remote_sha=parent,
+            source_receipt=actual_source,
+            source_receipt_sha256=inputs.source_receipt_sha256,
+            source_repository_identity=source.repository_identity,
+            source_ownership_key=source.ownership_key,
+            source_generation=source.generation,
+            candidate_tree_sha=tree,
+            add_paths=tuple(paths.add_paths),
+            update_paths=tuple(paths.update_paths),
+            diff=diff.text,
+            diff_sha256=diff.sha256,
+            content_snapshot=tuple(sorted(snapshot.snapshot.items())),
+            thread_snapshot_json=threads,
+            batch_nonce=inputs.batch_nonce,
+            candidate_sequence=1,
+            successful_job_id="prior-job",
+            successful_result_sha256="6" * 64,
+            addressed_replies=(("thread-1", "[Response] Fixed."),),
+        )
+        ready_digest = save_pretest_candidate(
+            repo_root=root, candidate=candidate, expected_digest=None
+        )
+        job.kwargs["remediation_pretest_record_sha256"] = ready_digest
+
+        def commit(*args: Any, **kwargs: Any) -> bool:
+            _git(writer, "add", "tracked.txt")
+            _git(writer, "commit", "-S", "-s", "-m", "fix(test): retain reviewed candidate")
+            events.append("commit")
+            return True
+
+        def consume(**kwargs: Any) -> str:
+            receipt = manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+            assert receipt.revision == _git(writer, "rev-parse", "HEAD")
+            assert receipt.generation == source.generation + 1
+            assert remote() == parent
+            events.append("consume")
+            if case == "consume_failure":
+                raise OSError("record replacement failed")
+            return save_pretest_candidate(**kwargs)
+
+        def publish(*args: Any, **kwargs: Any) -> JobResult:
+            consumed = load_pretest_candidate(repo_root=root, pr_number=8)
+            assert consumed is not None and consumed.phase == "consumed"
+            assert consumed.consumed_head == _git(writer, "rev-parse", "HEAD")
+            assert (
+                manager._require_receipt(7, SourceLane.IMPLEMENTATION).revision
+                == consumed.consumed_head
+            )
+            events.append("publish")
+            if case == "push_failure":
+                return JobResult(ok=False, error="remote rejected publication")
+            _git(
+                writer,
+                "push",
+                "--force-with-lease=refs/heads/" + inputs.branch + ":" + parent,
+                "origin",
+                inputs.branch,
+            )
+            return JobResult(ok=True, value={"head_sha": consumed.consumed_head})
+
+        real_inner = pool._git_commit_push_inner
+
+        def inner(*args: Any, **kwargs: Any) -> JobResult:
+            if case != "duplicate":
+                return real_inner(*args, **kwargs)
+            commit()
+            callback = kwargs["before_publish"]
+            head = _git(writer, "rev-parse", "HEAD")
+            callback(head)
+            callback(head)
+            pytest.fail("A second callback was accepted")
+
+        with (
+            patch.object(pool, "_commit_if_changes_with_controlled_signing", side_effect=commit),
+            patch.object(pool, "_publish_commit_push", side_effect=publish),
+            patch.object(pool, "_git_commit_push_inner", side_effect=inner),
+            patch(f"{_WP}.save_pretest_candidate", side_effect=consume),
+        ):
+            result = pool._git_commit_push(job)
+        assert result.ok is (case == "success"), result.error
+        assert events == (
+            ["commit", "consume", "publish"]
+            if case in {"success", "push_failure"}
+            else ["commit", "consume"]
+        )
+        head = _git(writer, "rev-parse", "HEAD")
+        final = manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+        assert final.revision == head and final.generation == source.generation + 1
+        assert _git(writer, "rev-parse", "HEAD^") == parent
+        assert _git(writer, "status", "--porcelain") == ""
+        retained = load_pretest_candidate(repo_root=root, pr_number=8)
+        assert retained is not None
+        assert retained.phase == ("ready" if case == "consume_failure" else "consumed")
+        assert remote() == (head if case == "success" else parent)
+        before_replay = (final, retained, head, remote())
+        replay = pool._git_commit_push(job)
+        assert not replay.ok
+        assert (
+            manager._require_receipt(7, SourceLane.IMPLEMENTATION),
+            load_pretest_candidate(repo_root=root, pr_number=8),
+            _git(writer, "rev-parse", "HEAD"),
+            remote(),
+        ) == before_replay
+
+
+@pytest.mark.parametrize(
+    "restart_change",
+    [
+        "none",
+        "content",
+        "invalidated",
+        "source",
+        "fix",
+        "failed",
+        "interrupted",
+        "malformed",
+        "wrong_request",
+        "write_failure",
+        "uncertain_write",
+        "shutdown",
+        "capacity",
+        "same_job",
+        "clean",
+    ],
+)
+def test_actual_pretest_completion_persists_for_fresh_worker(
+    tmp_path: Path, pool: WorkerPool, restart_change: str
+) -> None:
+    """Only the exact successful dirty candidate can resume in a new pool."""
+    from hephaestus.automation.pipeline.github_jobs import AdoptedRemediationPrStateRead
+    from hephaestus.automation.pipeline.jobs import (
+        RemediationPretestInput,
+        remediation_pretest_result_digest,
+    )
+    from hephaestus.automation.remediation_prepublication import (
+        canonical_source_receipt_json,
+        load_pretest_candidate,
+        save_pretest_candidate,
+        source_receipt_digest,
+    )
+    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+
+    root, _, head = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(root, repository="project")
+    binding = manager.prepare(7, SourceLane.IMPLEMENTATION, head, branch="pretest-writer")
+    _git(binding.cwd, "push", "-u", "origin", "pretest-writer")
+    source = manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+    threads = _RECOVERY_PATH_MANIFEST["remediation_thread_snapshots"]
+    canonical_threads = RemediationReviewInput.canonical_thread_snapshot(threads)
+    inputs = RemediationPretestInput(
+        repository="example/project",
+        issue_number=7,
+        pr_number=8,
+        branch="pretest-writer",
+        expected_remote_sha=head,
+        source_receipt_json=canonical_source_receipt_json(source),
+        source_receipt_sha256=source_receipt_digest(source),
+        thread_snapshot_json=canonical_threads,
+        batch_nonce="4" * 32,
+        allowed_paths=("tracked.txt",),
+        approved_scope_sha256="5" * 64,
+        candidate_sequence=1,
+        expected_previous_record_sha256=None,
+    )
+    nonce = "7" * 32
+    agent = _agent_job(
+        repo="project",
+        issue=7,
+        cwd=binding.cwd,
+        workspace=binding,
+        remediation_pretest_nonce=nonce,
+        remediation_pretest_input=inputs,
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER, AgentOperation.ADDRESS_REVIEW, SessionLifecycle.START_NEW
+        ),
+    )
+    value = {"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}}
+
+    with patch.object(
+        pool,
+        "_run_agent",
+        side_effect=partial(_pretest_completion_provider, pool, restart_change, value),
+    ) as invoke:
+        completed = pool._run(agent, "project#7", "implementation", remediation_owner_id=1)
+    invoke.assert_called_once()
+    assert load_pretest_candidate(repo_root=root, pr_number=8) is None
+    if restart_change in {"failed", "interrupted", "malformed", "shutdown"}:
+        assert not completed.ok or completed.interrupted
+        assert not pool._pretest_successes
+        assert manager._require_receipt(7, SourceLane.IMPLEMENTATION) == source
+        assert (binding.cwd / "tracked.txt").read_text() == "successful candidate\n"
+        return
+    assert completed.ok, completed.error
+    _check_pretest_second_reservation(pool, agent, restart_change)
+    runner = MagicMock()
+    runner.run.return_value = AdoptedRemediationPrStateRead(
+        inputs.repository, 7, 8, inputs.branch, head, "OPEN", True, canonical_threads, True
+    )
+    pool._github_job_runner = runner
+    persist = GitJob(
+        repo="project",
+        op="persist_remediation_pretest_candidate",
+        timeout_s=30,
+        expected_repository="example/project",
+        kwargs={
+            "remediation_pretest_nonce": nonce,
+            "remediation_pretest_input": inputs,
+            "remediation_pretest_result_sha256": remediation_pretest_result_digest(completed.value),
+        },
+    )
+    with patch.object(pool, "_read_remote_branch_head", return_value=head):
+        if restart_change == "wrong_request":
+            wrong = replace(
+                persist,
+                kwargs={
+                    **persist.kwargs,
+                    "remediation_pretest_input": replace(inputs, allowed_paths=("foreign.txt",)),
+                },
+            )
+            rejected = pool._run(wrong)
+            assert not rejected.ok
+            assert load_pretest_candidate(repo_root=root, pr_number=8) is None
+            assert nonce in pool._pretest_successes
+        elif restart_change in {"write_failure", "uncertain_write"}:
+            with patch(
+                f"{_WP}.save_pretest_candidate",
+                side_effect=partial(
+                    _fail_pretest_record_write, restart_change == "uncertain_write"
+                ),
+            ):
+                rejected = pool._run(persist)
+            assert not rejected.ok
+            assert nonce in pool._pretest_successes
+        stored = pool._run(persist)
+        replay = pool._run(persist)
+    assert stored.ok, stored.error
+    assert not replay.ok
+    candidate = load_pretest_candidate(repo_root=root, pr_number=8)
+    if restart_change == "clean":
+        assert candidate is None
+        assert stored.value == {
+            "outcome": "clean",
+            "sequence": 1,
+            "successful_job_id": nonce,
+            "successful_result_sha256": remediation_pretest_result_digest(value),
+            "source_receipt_sha256": inputs.source_receipt_sha256,
+            "head_sha": head,
+        }
+        assert not pool._pretest_successes
+        assert manager._require_receipt(7, SourceLane.IMPLEMENTATION) == source
+        _assert_pretest_clean_stage(stored, inputs, nonce, remediation_pretest_result_digest(value))
+        _assert_pretest_clean_no_change(pool, root, binding.cwd, inputs.branch, head)
+        return
+    assert candidate is not None and candidate.successful_job_id == nonce
+    assert candidate.addressed_replies == (("thread-1", "Fixed."),)
+    assert not pool._pretest_successes
+    if restart_change == "fix":
+        invalidate = GitJob(
+            repo="project",
+            op="invalidate_remediation_pretest_candidate",
+            timeout_s=30,
+            kwargs={
+                "repo_root": str(root),
+                "remediation_pretest_input": inputs,
+                "remediation_pretest_record_sha256": candidate.digest,
+            },
+        )
+        invalidated = pool._run(invalidate)
+        assert invalidated.ok, invalidated.error
+        fix_inputs = replace(
+            inputs,
+            candidate_sequence=2,
+            expected_previous_record_sha256=invalidated.value["record_sha256"],
+        )
+        fix = replace(
+            agent,
+            remediation_pretest_nonce="8" * 32,
+            remediation_pretest_input=fix_inputs,
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER, AgentOperation.TEST_FIX, SessionLifecycle.START_NEW
+            ),
+        )
+
+        def fix_provider(job: AgentJob) -> JobResult:
+            (job.cwd / "tracked.txt").write_text("successful test fix\n")
+            return JobResult(ok=True, value=None)
+
+        with patch.object(pool, "_run_agent", side_effect=fix_provider) as fix_invoke:
+            fixed = pool._run(fix, "project#7", "implementation", remediation_owner_id=1)
+        assert fixed.ok, fixed.error
+        fix_invoke.assert_called_once()
+        fix_persist = replace(
+            persist,
+            kwargs={
+                "remediation_pretest_nonce": fix.remediation_pretest_nonce,
+                "remediation_pretest_input": fix_inputs,
+                "remediation_pretest_result_sha256": remediation_pretest_result_digest(fixed.value),
+            },
+        )
+        with patch.object(pool, "_read_remote_branch_head", return_value=head):
+            fixed_record = pool._run(fix_persist)
+        assert fixed_record.ok, fixed_record.error
+        candidate = load_pretest_candidate(repo_root=root, pr_number=8)
+        assert candidate is not None and candidate.candidate_sequence == 2
+        assert candidate.successful_job_id == fix.remediation_pretest_nonce
+        assert candidate.successful_result_sha256 == remediation_pretest_result_digest(None)
+        assert candidate.addressed_replies == (("thread-1", "Fixed."),)
+    if restart_change == "content":
+        (binding.cwd / "tracked.txt").write_text("unproven later change\n")
+    elif restart_change == "invalidated":
+        save_pretest_candidate(
+            repo_root=root,
+            candidate=replace(candidate, phase="invalidated"),
+            expected_digest=candidate.digest,
+        )
+    elif restart_change == "source":
+        manager._write_receipt(replace(source, generation=source.generation + 1))
+    recover = GitJob(
+        repo="project",
+        op="create_worktree",
+        timeout_s=30,
+        expected_repository="example/project",
+        kwargs={
+            "repo_root": str(root),
+            "source_lane": "impl",
+            "issue_number": 7,
+            "branch_name": inputs.branch,
+            "implementation_adoption_head": head,
+            "recover_prepared_remediation": True,
+            "remediation_repository": inputs.repository,
+            "remediation_pr_number": 8,
+            "remediation_thread_snapshots": threads,
+            "remediation_pretest_allowed_paths": inputs.allowed_paths,
+            "remediation_pretest_scope_sha256": inputs.approved_scope_sha256,
+        },
+    )
+    fresh = WorkerPool(1, threading.Event(), CompletionQueue(), github_job_runner=runner)
+    try:
+        with (
+            patch.object(fresh, "_read_remote_branch_head", return_value=head),
+            patch.object(fresh, "_run_agent") as reinvoke,
+            patch.object(fresh, "_git_create_worktree_with_handoff") as recreate,
+        ):
+            recovered = fresh._run(recover)
+        assert recovered.ok is (
+            restart_change
+            in {
+                "none",
+                "fix",
+                "wrong_request",
+                "write_failure",
+                "uncertain_write",
+                "capacity",
+                "same_job",
+            }
+        ), recovered.error
+        reinvoke.assert_not_called()
+        recreate.assert_not_called()
+        if recovered.ok:
+            _assert_pretest_stage_restarts(recovered, root)
+            evidence = recovered.value["successful_remediation_pretest_recovery"]
+            assert evidence["record_sha256"] == candidate.digest
+            assert evidence["addressed_replies"] == dict(candidate.addressed_replies)
+            assert evidence["source_receipt"] == source.to_dict()
+            assert manager._require_receipt(7, SourceLane.IMPLEMENTATION) == source
+        assert _git(binding.cwd, "rev-parse", "HEAD") == head
+        assert (binding.cwd / "tracked.txt").exists()
+    finally:
+        fresh.shutdown(mark_interrupted=False)
+
+
+def _fail_pretest_record_write(write_first: bool, **kwargs: Any) -> str:
+    """Simulate a definite or uncertain store failure without changing its API."""
+    from hephaestus.automation.remediation_prepublication import save_pretest_candidate
+
+    if write_first:
+        save_pretest_candidate(**kwargs)
+    raise OSError("record write outcome unavailable")
+
+
+def _pretest_completion_provider(
+    pool: WorkerPool, case: str, value: dict[str, Any], job: AgentJob
+) -> JobResult:
+    """Return one actual result after a bounded simulated provider edit."""
+    if case != "clean":
+        (job.cwd / "tracked.txt").write_text("successful candidate\n")
+    job.prompt_kwargs["branch"] = "foreign-branch"
+    if case == "shutdown":
+        pool.shutdown(mark_interrupted=False)
+    return JobResult(
+        ok=case != "failed",
+        interrupted=case == "interrupted",
+        value={} if case == "malformed" else value,
+    )
+
+
+def _check_pretest_second_reservation(pool: WorkerPool, job: AgentJob, case: str) -> None:
+    """Keep an earlier completion when a later reservation fails."""
+    if case not in {"capacity", "same_job"}:
+        return
+    with patch.object(pool, "_run_agent") as provider:
+        result = pool._run(
+            job if case == "same_job" else replace(job, remediation_pretest_nonce="9" * 32),
+            "project#7",
+            "implementation",
+            remediation_owner_id=2,
+        )
+    assert not result.ok
+    provider.assert_not_called()
+    assert set(pool._pretest_successes) == {job.remediation_pretest_nonce}
+
+
+def _assert_pretest_clean_no_change(
+    pool: WorkerPool, root: Path, writer: Path, branch: str, head: str
+) -> None:
+    """Clean success retains the ordinary no-change commit path."""
+    job = GitJob(
+        repo="project",
+        op="commit_push",
+        timeout_s=30,
+        expected_repository="example/project",
+        kwargs={
+            "repo_root": str(root),
+            "source_lane": "impl",
+            "issue_number": 7,
+            "worktree_path": str(writer),
+            "branch": branch,
+        },
+    )
+    with (
+        patch.object(pool, "_commit_if_changes_with_controlled_signing", return_value=False),
+        patch.object(pool, "_read_remote_branch_head", return_value=head),
+        patch.object(pool, "_publish_commit_push") as publish,
+        patch.object(pool, "_git_commit_pretest_candidate") as dirty_commit,
+    ):
+        result = pool._run(job)
+    assert result.ok, result.error
+    assert result.value == {"pushed": False, "head_sha": head}
+    publish.assert_not_called()
+    dirty_commit.assert_not_called()
+    assert _git(writer, "status", "--porcelain") == ""
+
+
+def _assert_pretest_clean_stage(
+    result: JobResult, inputs: Any, nonce: str, result_digest: str
+) -> None:
+    """Use the actual clean result to request tests without dirty authority."""
+    from types import SimpleNamespace
+
+    from hephaestus.automation.pipeline.coordinator import PipelineConfig
+    from hephaestus.automation.pipeline.stages import JobRequest
+    from hephaestus.automation.pipeline.stages.base import StageContext
+    from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+    from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+    from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+    source = json.loads(inputs.source_receipt_json)
+    item = WorkItem(
+        repo="project",
+        issue=7,
+        pr=8,
+        kind=ItemKind.ISSUE,
+        stage=StageName.IMPLEMENTATION,
+        state="PRETEST_PERSIST_WAIT",
+    )
+    item.branch = inputs.branch
+    item.worktree = source["path"]
+    item.payload.update(
+        implementation_remediation=True,
+        remediation_pretest_input=inputs,
+        remediation_pretest_nonce=nonce,
+        remediation_pretest_result_sha256=result_digest,
+        remediation_output={"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}},
+    )
+    ctx = StageContext(
+        config=PipelineConfig(org="example", repos=["project"], run_pre_pr_tests=True),
+        org="example",
+        dry_run=False,
+        github=FakeStageGitHub(),
+        paths=SimpleNamespace(),
+        now_fn=lambda: 1.0,
+        budget_fn=lambda _: 1,
+    )
+    stage = ImplementationStage()
+    stage.on_job_done(item, result, ctx)
+    item.state = "TEST_WAIT"
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest) and isinstance(request.job, BuildTestJob)
+    assert not item.payload.get("remediation_pretest_ready")
+    assert "remediation_pretest_input" not in item.payload
+    assert item.payload["remediation_output"]["replies"] == {"thread-1": "Fixed."}
+
+
+def _assert_pretest_stage_restarts(recovered: JobResult, root: Path) -> None:
+    """Pass the actual fresh worker result through the stage into a test request."""
+    from types import SimpleNamespace
+
+    from hephaestus.automation.pipeline.coordinator import PipelineConfig
+    from hephaestus.automation.pipeline.stages import Continue, JobRequest
+    from hephaestus.automation.pipeline.stages.base import StageContext
+    from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+    from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+    from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+    item = WorkItem(
+        repo="project",
+        issue=7,
+        pr=8,
+        kind=ItemKind.ISSUE,
+        stage=StageName.IMPLEMENTATION,
+        state="WORKTREE_WAIT",
+    )
+    item.branch = "pretest-writer"
+    ctx = StageContext(
+        config=PipelineConfig(org="example", repos=["project"], run_pre_pr_tests=True),
+        org="example",
+        dry_run=False,
+        github=FakeStageGitHub(),
+        paths=SimpleNamespace(repo_root=root),
+        now_fn=lambda: 1.0,
+        budget_fn=lambda _: 1,
+    )
+    stage = ImplementationStage()
+    stage.on_job_done(item, recovered, ctx)
+    item.state = "DIRTY_DECISION_WAIT"
+    assert stage.step(item, ctx) == Continue(next_state="TEST_WAIT")
+    item.state = "TEST_WAIT"
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest) and isinstance(request.job, BuildTestJob)
+    assert not item.payload.get("test_receipt")
+    assert item.payload["remediation_output"]["replies"] == {"thread-1": "Fixed."}
+
+
+@pytest.mark.parametrize("issue_value", [True, 1])
+def test_pretest_job_issue_requires_an_integer(
+    tmp_path: Path, pool: WorkerPool, issue_value: int
+) -> None:
+    """A boolean cannot name an implementation item before provider execution."""
+    from hephaestus.automation.pipeline.jobs import RemediationPretestInput
+    from hephaestus.automation.remediation_prepublication import (
+        canonical_source_receipt_json,
+        source_receipt_digest,
+    )
+    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+
+    root, _, head = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(root, repository="project")
+    binding = manager.prepare(1, SourceLane.IMPLEMENTATION, head, branch="pretest-writer")
+    source = manager._require_receipt(1, SourceLane.IMPLEMENTATION)
+    inputs = RemediationPretestInput(
+        repository="example/project",
+        issue_number=1,
+        pr_number=8,
+        branch="pretest-writer",
+        expected_remote_sha=head,
+        source_receipt_json=canonical_source_receipt_json(source),
+        source_receipt_sha256=source_receipt_digest(source),
+        thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(
+            _RECOVERY_PATH_MANIFEST["remediation_thread_snapshots"]
+        ),
+        batch_nonce="4" * 32,
+        allowed_paths=("tracked.txt",),
+        approved_scope_sha256="5" * 64,
+        candidate_sequence=1,
+        expected_previous_record_sha256=None,
+    )
+    job = _agent_job(
+        repo="project",
+        issue=issue_value,
+        cwd=binding.cwd,
+        workspace=binding,
+        remediation_pretest_nonce="7" * 32,
+        remediation_pretest_input=inputs,
+        execution_request=ExecutionRequest(
+            AgentRole.IMPLEMENTER, AgentOperation.ADDRESS_REVIEW, SessionLifecycle.START_NEW
+        ),
+    )
+    with patch.object(
+        pool,
+        "_run_agent",
+        return_value=JobResult(
+            ok=True, value={"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}}
+        ),
+    ) as provider:
+        result = pool._run(job, "project#1", "implementation", remediation_owner_id=1)
+    assert result.ok is (type(issue_value) is int)
+    assert provider.call_count == int(type(issue_value) is int)

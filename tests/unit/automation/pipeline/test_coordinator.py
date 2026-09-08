@@ -4310,3 +4310,24 @@ class TestConfigWiring:
         reset_issues.discard(42)
         assert not reset_issues
         assert ctx.config.reset_plan_review_sessions == frozenset({42})
+
+
+def test_pretest_cleanup_requires_the_exact_live_permit_owner() -> None:
+    """A duplicate item cannot release another item's result authority."""
+    from hephaestus.automation.pipeline.coordinator_execution import ExecutionCoordinator
+
+    item = object()
+    duplicate = object()
+    discard = MagicMock()
+    host = SimpleNamespace(
+        _live_work_permit_ids={id(item)},
+        _learning_work_permit_ids=set(),
+        pool=SimpleNamespace(discard_remediation_pretest_successes=discard),
+        _item_key=lambda value: "r#7",
+    )
+    ExecutionCoordinator._release_work_permit(cast(Any, host), cast(Any, duplicate))
+    discard.assert_not_called()
+    ExecutionCoordinator._release_work_permit(cast(Any, host), cast(Any, item))
+    discard.assert_called_once_with("r#7", owner_id=id(item))
+    ExecutionCoordinator._release_work_permit(cast(Any, host), cast(Any, item))
+    assert discard.call_count == 1

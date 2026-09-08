@@ -57,6 +57,10 @@ class ExecutionCoordinator(_CoordinatorHost):
 
     def _release_work_permit(self, item: ct.WorkItem) -> None:
         """Release every lane permit held by an item."""
+        if id(item) in self._live_work_permit_ids:
+            discard = getattr(self.pool, "discard_remediation_pretest_successes", None)
+            if callable(discard):
+                discard(self._item_key(item), owner_id=id(item))
         self._live_work_permit_ids.discard(id(item))
         self._learning_work_permit_ids.discard(id(item))
 
@@ -128,11 +132,17 @@ class ExecutionCoordinator(_CoordinatorHost):
             handle = self.auxiliary_pool.submit(job, request.on_done_state)
             self.auxiliary_in_flight[handle] = item
         else:
+            pretest_owner = (
+                {"remediation_owner_id": id(item)}
+                if isinstance(job, AgentJob) and job.remediation_pretest_nonce is not None
+                else {}
+            )
             handle = self.pool.submit(
                 job,
                 request.on_done_state,
                 claim_key=self._item_key(item),
                 claim_stage=item.stage.value,
+                **pretest_owner,
             )
             self.in_flight[handle] = item
             self.inflight_per_repo[item.repo] += 1

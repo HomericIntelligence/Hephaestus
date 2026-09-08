@@ -3444,3 +3444,88 @@ def test_prepared_same_identity_recovery_preserves_registered_predecessor(tmp_pa
     assert _git(writer.cwd, "rev-parse", "HEAD") == head
     assert _git(writer.cwd, "symbolic-ref", "--short", "HEAD") == "adopted-writer"
     assert _git(writer.cwd, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("failure", [None, "missing", "malformed", "symlink", "foreign"])
+def test_implementation_receipt_snapshot_preserves_source(
+    tmp_path: Path, failure: str | None
+) -> None:
+    """A locked snapshot cannot reconcile or change writer state."""
+    repo, _, head = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
+    receipt = manager._require_receipt(42, SourceLane.IMPLEMENTATION)
+    path = manager._receipt_path(42, SourceLane.IMPLEMENTATION)
+    if failure == "missing":
+        path.unlink()
+    elif failure == "malformed":
+        path.write_text("{invalid")
+    elif failure == "symlink":
+        target = tmp_path / "receipt-copy.json"
+        target.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(target)
+    elif failure == "foreign":
+        manager._write_receipt(replace(receipt, ownership_key="foreign"))
+    before = path.read_bytes() if path.exists() else None
+    registration = _git(repo, "worktree", "list", "--porcelain")
+    content = (receipt.path / "tracked.txt").read_bytes()
+    with (
+        patch.object(source_worktree, "file_lock", wraps=file_lock) as lock,
+        patch.object(manager, "_reconcile_writer_transition", side_effect=AssertionError),
+        patch.object(manager, "_write_receipt", side_effect=AssertionError),
+        patch.object(manager, "prepare", side_effect=AssertionError),
+    ):
+        if failure is None:
+            observed = manager.snapshot_implementation_receipt(42)
+            assert observed == receipt
+        else:
+            with pytest.raises(SourceWorkspaceError):
+                manager.snapshot_implementation_receipt(42)
+        lock.assert_called_once_with(
+            manager._lane_lock_path(42, SourceLane.IMPLEMENTATION), require_exclusive=True
+        )
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert _git(repo, "worktree", "list", "--porcelain") == registration
+    assert (receipt.path / "tracked.txt").read_bytes() == content
+
+
+@pytest.mark.parametrize("item", [True, False, 0, -1, "42", 42.0])
+def test_implementation_receipt_snapshot_rejects_invalid_item(tmp_path: Path, item: object) -> None:
+    """Invalid identities cannot acquire a source lane lock."""
+    repo, _, _ = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    with patch.object(source_worktree, "file_lock", side_effect=AssertionError):
+        with pytest.raises(SourceWorkspaceError):
+            manager.snapshot_implementation_receipt(cast(Any, item))
+
+
+def test_implementation_receipt_snapshot_keeps_prepared_transition(tmp_path: Path) -> None:
+    """Snapshot reads preserve a prepared transition and terminal evidence."""
+    repo, _, head = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
+    with pytest.raises(source_worktree.SourceWorkspaceTerminalError):
+        with manager.implementation_writer_handoff(42) as handoff:
+            manager.authorize_adopted_implementation_writer_transition(
+                42, branch="writer", expected_head=head, handoff=handoff
+            )
+            raise source_worktree.SourceWorkspaceTerminalError("test stop before adoption")
+    journal = manager._read_writer_transition(42)
+    assert journal is not None and journal.phase == "prepared"
+    paths = (
+        manager._receipt_path(42, SourceLane.IMPLEMENTATION),
+        manager._transition_path(42),
+        manager._terminal_path(42),
+        journal.predecessor.path / "tracked.txt",
+        journal.predecessor.path / ".git",
+    )
+    before = [path.read_bytes() for path in paths]
+    registration = _git(repo, "worktree", "list", "--porcelain")
+    with (
+        patch.object(manager, "_reconcile_writer_transition", side_effect=AssertionError),
+        patch.object(manager, "_write_receipt", side_effect=AssertionError),
+    ):
+        assert manager.snapshot_implementation_receipt(42) == journal.predecessor
+    assert [path.read_bytes() for path in paths] == before
+    assert _git(repo, "worktree", "list", "--porcelain") == registration

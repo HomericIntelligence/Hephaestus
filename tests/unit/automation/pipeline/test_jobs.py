@@ -175,3 +175,47 @@ class TestDefaultFactories:
         job1 = GitJob(repo="test/repo", op="rebase", timeout_s=60)
         job2 = GitJob(repo="test/repo", op="rebase", timeout_s=60)
         assert job1.kwargs is not job2.kwargs
+
+
+def test_pretest_result_digest_binds_actual_bounded_json() -> None:
+    """Canonical results retain their values without invented reply fields."""
+    import hashlib
+
+    from hephaestus.automation.pipeline.jobs import remediation_pretest_result_digest
+
+    assert remediation_pretest_result_digest(None) == hashlib.sha256(b"null").hexdigest()
+    assert (
+        remediation_pretest_result_digest({"b": 2, "a": 1})
+        == hashlib.sha256(b'{"a":1,"b":2}').hexdigest()
+    )
+    for invalid in (object(), float("nan"), "x" * (1024 * 1024 + 1)):
+        with pytest.raises(ValueError):
+            remediation_pretest_result_digest(invalid)
+
+
+def test_recovered_ready_input_does_not_invent_a_predecessor(tmp_path: Path) -> None:
+    """Read-only ready pins can omit history that the closed record does not store."""
+    import json
+
+    from hephaestus.automation.pipeline.jobs import RemediationPretestInput
+    from tests.unit.automation.test_remediation_recovery import _pretest_payload
+
+    payload = _pretest_payload(tmp_path)
+    inputs = RemediationPretestInput(
+        repository=payload["repository"],
+        issue_number=payload["issue_number"],
+        pr_number=payload["pr_number"],
+        branch=payload["branch"],
+        expected_remote_sha=payload["expected_remote_sha"],
+        source_receipt_json=json.dumps(
+            payload["source_receipt"], sort_keys=True, separators=(",", ":")
+        ),
+        source_receipt_sha256=payload["source_receipt_sha256"],
+        thread_snapshot_json=payload["thread_snapshot_json"],
+        batch_nonce=payload["batch_nonce"],
+        allowed_paths=("a.py",),
+        approved_scope_sha256="f" * 64,
+        candidate_sequence=2,
+        expected_previous_record_sha256=None,
+    )
+    assert inputs.expected_previous_record_sha256 is None

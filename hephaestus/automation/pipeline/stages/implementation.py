@@ -70,6 +70,7 @@ import re
 import secrets
 import shlex
 import sys
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -110,9 +111,14 @@ from hephaestus.automation.prompts.implementation import (
     get_implementation_prompt,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
+from hephaestus.automation.remediation_prepublication import (
+    canonical_source_receipt_json,
+    source_receipt_digest,
+)
 from hephaestus.automation.remediation_recovery import (
     RemediationRecoveryReceipt,
     RemediationReplyResult,
+    RemediationReviewInput,
 )
 from hephaestus.automation.reply_limits import MAX_ADDRESS_REPLY_CHARS
 from hephaestus.automation.review_journal import PlanDiscoveryStatus
@@ -123,6 +129,7 @@ from hephaestus.automation.session_naming import (
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
+    SourceWorkspaceReceipt,
     SourceWorkspaceRecoveryKind,
     SourceWorkspaceTerminalReference,
 )
@@ -158,7 +165,12 @@ from ..github_jobs import (
     ReplyJournalAppended,
     bind_delivery_request,
 )
-from ..jobs import WORKTREE_MATERIALIZED_KEY, _writer_publication_matches_refresh
+from ..jobs import (
+    WORKTREE_MATERIALIZED_KEY,
+    RemediationPretestInput,
+    _writer_publication_matches_refresh,
+    remediation_pretest_result_digest,
+)
 from ..reply_handoff import (
     IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP,
     IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
@@ -334,6 +346,8 @@ REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
 ADOPTED = "ADOPTED"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
+PRETEST_PERSIST_WAIT = "PRETEST_PERSIST_WAIT"
+PRETEST_INVALIDATE_WAIT = "PRETEST_INVALIDATE_WAIT"
 TEST_WAIT = "TEST_WAIT"
 TESTFIX_WAIT = "TESTFIX_WAIT"
 COMMIT_PUSH_WAIT = "COMMIT_PUSH_WAIT"
@@ -359,6 +373,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ADOPTED: "_adopted",
     ADVISE_WAIT: "_advise_wait",
     IMPLEMENT_WAIT: "_implement_wait",
+    PRETEST_PERSIST_WAIT: "_pretest_persist_wait",
+    PRETEST_INVALIDATE_WAIT: "_pretest_invalidate_wait",
     TEST_WAIT: "_test_wait",
     TESTFIX_WAIT: "_testfix_wait",
     COMMIT_PUSH_WAIT: "_commit_push_wait",
@@ -786,6 +802,208 @@ def _add_writer_refresh(
     return None
 
 
+def _pretest_scope(item: WorkItem, ctx: StageContext) -> tuple[tuple[str, ...], str]:
+    """Read the current host-approved plan for every remediation provider."""
+    if item.issue is None:
+        raise ValueError("remediation pretest issue is unavailable")
+    plan = ctx.github.discover_plan(item.issue)
+    if plan.status is not PlanDiscoveryStatus.FOUND or plan.plan_text is None:
+        raise ValueError("remediation pretest plan is unavailable")
+    paths = parse_publication_scope_files(plan.plan_text)
+    if not paths:
+        raise ValueError("remediation pretest scope is unavailable")
+    return tuple(sorted(paths)), hashlib.sha256(plan.plan_text.encode("utf-8")).hexdigest()
+
+
+def _new_pretest_input(item: WorkItem, ctx: StageContext) -> RemediationPretestInput:
+    """Freeze exact source and review pins before the successful job exists."""
+    manager = getattr(ctx.paths, "source_workspaces", None)
+    if callable(manager):
+        manager = manager()
+        ctx.paths.source_workspaces = manager
+    if not isinstance(manager, SourceWorkspaceManager) or item.issue is None or item.pr is None:
+        raise ValueError("remediation pretest source manager is unavailable")
+    paths, scope_digest = _pretest_scope(item, ctx)
+    receipt = manager.snapshot_implementation_receipt(item.issue)
+    if (
+        str(receipt.path) != item.worktree
+        or receipt.branch != item.branch
+        or receipt.revision != item.payload.get("_impl_source_revision")
+    ):
+        raise ValueError("remediation pretest source changed")
+    return RemediationPretestInput(
+        f"{ctx.org}/{item.repo}".casefold(),
+        item.issue,
+        item.pr,
+        item.branch,
+        receipt.revision,
+        canonical_source_receipt_json(receipt),
+        source_receipt_digest(receipt),
+        RemediationReviewInput.canonical_thread_snapshot(
+            item.payload.get("remediation_thread_snapshots")
+        ),
+        uuid.uuid4().hex,
+        paths,
+        scope_digest,
+        1,
+        None,
+    )
+
+
+def _pretest_workspace(inputs: RemediationPretestInput, repo_root: Path) -> WorkspaceBinding:
+    """Carry the exact existing binding without preparing a dirty writer again."""
+    receipt = SourceWorkspaceReceipt.from_dict(json.loads(inputs.source_receipt_json))
+    return replace(
+        WorkspaceBinding.source(
+            cwd=receipt.path,
+            reusable_root=repo_root,
+            repository=receipt.repository,
+            ownership_key=receipt.ownership_key,
+            item_number=receipt.item_number,
+            lane=receipt.lane,
+            revision=receipt.revision,
+            generation=receipt.generation,
+            detached=receipt.detached,
+        ),
+        schema_version=receipt.schema_version,
+        dirty_claim=receipt.dirty_claim,
+    )
+
+
+def _record_pretest_completion(item: WorkItem, result: JobResult) -> None:
+    """Retain only the actual completion digest for the one-use worker registry."""
+    inputs = item.payload.get("remediation_pretest_input")
+    if not isinstance(inputs, RemediationPretestInput) or not result.ok or result.interrupted:
+        item.payload["remediation_pretest_error"] = True
+        return
+    try:
+        digest = remediation_pretest_result_digest(result.value)
+    except ValueError:
+        item.payload["remediation_pretest_error"] = True
+        return
+    item.payload["remediation_pretest_result_sha256"] = digest
+    item.payload["remediation_pretest_ready"] = False
+
+
+def _accept_clean_pretest_completion(item: WorkItem, result: JobResult) -> None:
+    """Validate the initial clean result without creating dirty authority."""
+    inputs = item.payload.get("remediation_pretest_input")
+    if not isinstance(inputs, RemediationPretestInput):
+        item.payload["remediation_pretest_error"] = True
+        return
+    expected = {
+        "outcome": "clean",
+        "sequence": 1,
+        "successful_job_id": item.payload.get("remediation_pretest_nonce"),
+        "successful_result_sha256": item.payload.get("remediation_pretest_result_sha256"),
+        "source_receipt_sha256": inputs.source_receipt_sha256,
+        "head_sha": inputs.expected_remote_sha,
+    }
+    if (
+        not result.ok
+        or result.interrupted
+        or item.state != PRETEST_PERSIST_WAIT
+        or inputs.candidate_sequence != 1
+        or inputs.expected_previous_record_sha256 is not None
+        or item.payload.get("remediation_pretest_record_sha256") is not None
+        or not isinstance(result.value, dict)
+        or type(result.value.get("sequence")) is not int
+        or result.value != expected
+        or not isinstance(expected["successful_job_id"], str)
+        or not isinstance(expected["successful_result_sha256"], str)
+    ):
+        item.payload["remediation_pretest_error"] = True
+        return
+    item.payload["remediation_pretest_clean_completion"] = {
+        "head_sha": inputs.expected_remote_sha,
+        "source_receipt_sha256": inputs.source_receipt_sha256,
+    }
+    for key in (
+        "remediation_pretest_input",
+        "remediation_pretest_nonce",
+        "remediation_pretest_result_sha256",
+        "remediation_pretest_record_sha256",
+        "remediation_pretest_ready",
+        "remediation_pretest_invalidated",
+    ):
+        item.payload.pop(key, None)
+
+
+def _restore_pretest_stage(item: WorkItem, value: object, *, repository: str) -> None:
+    """Validate the closed worker recovery result before restoring stage state."""
+    if not isinstance(value, dict):
+        raise ValueError("remediation pretest recovery is invalid")
+    inputs = value.get("remediation_pretest_input")
+    digest = value.get("record_sha256")
+    if (
+        not isinstance(inputs, RemediationPretestInput)
+        or inputs.issue_number != item.issue
+        or inputs.pr_number != item.pr
+        or inputs.branch != item.branch
+        or inputs.repository != repository.casefold()
+        or inputs.expected_remote_sha != item.payload.get("_impl_source_revision")
+        or value.get("worktree_path") != item.worktree
+        or type(value.get("sequence")) is not int
+        or value["sequence"] != inputs.candidate_sequence
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise ValueError("remediation pretest recovery identity changed")
+    receipt = SourceWorkspaceReceipt.from_dict(value["source_receipt"])
+    if canonical_source_receipt_json(receipt) != inputs.source_receipt_json:
+        raise ValueError("remediation pretest recovery receipt changed")
+    reply_map = value.get("addressed_replies")
+    if not isinstance(reply_map, dict):
+        raise ValueError("remediation pretest recovery replies are invalid")
+    replies = RemediationReplyResult.create(
+        review_input_sha256=digest,
+        replies=reply_map,
+        thread_snapshot_json=inputs.thread_snapshot_json,
+    )
+    item.payload.update(
+        remediation_pretest_input=inputs,
+        remediation_pretest_record_sha256=digest,
+        remediation_pretest_ready=True,
+        successful_remediation_pretest_recovered=True,
+        implementation_remediation=True,
+        remediation_thread_snapshots=json.loads(inputs.thread_snapshot_json),
+        remediation_output={
+            "addressed": list(dict(replies.replies)),
+            "replies": dict(replies.replies),
+        },
+    )
+
+
+def _pretest_commit_kwargs(item: WorkItem) -> dict[str, object] | StageOutcome:
+    """Bind the ready record and reject automatic refresh after publication failure."""
+    result: dict[str, object] = {}
+    pretest_input = item.payload.get("remediation_pretest_input")
+    if isinstance(pretest_input, RemediationPretestInput):
+        if (
+            item.payload.get("remediation_pretest_ready") is not True
+            or _COMMIT_PUSH_REFRESH in item.payload
+        ):
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "remediation_pretest_publication_unavailable"
+            )
+        result["remediation_pretest_input"] = pretest_input
+        result["remediation_pretest_record_sha256"] = item.payload.get(
+            "remediation_pretest_record_sha256"
+        )
+    return result
+
+
+def _pretest_and_retraction_kwargs(item: WorkItem) -> dict[str, object] | StageOutcome:
+    """Combine the existing retraction scope with the exact pretest publication pins."""
+    retraction = _scope_retraction_kwargs(item)
+    if isinstance(retraction, StageOutcome):
+        return retraction
+    pretest = _pretest_commit_kwargs(item)
+    if isinstance(pretest, StageOutcome):
+        return pretest
+    return {**retraction, **pretest}
+
+
 def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
     """Build one commit-and-push job from validated stage-owned data."""
     issue = _issue_number(item)
@@ -837,7 +1055,7 @@ def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
         if not is_full_commit_sha(direct_base_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
         kwargs["expected_remote_sha"] = direct_base_sha
-    retraction_scope = _scope_retraction_kwargs(item)
+    retraction_scope = _pretest_and_retraction_kwargs(item)
     if isinstance(retraction_scope, StageOutcome):
         return retraction_scope
     kwargs.update(retraction_scope)
@@ -1168,6 +1386,8 @@ class ImplementationStage(Stage):
             or (item.state == COMMIT_PUSH_WAIT and item.payload.get("tests_failed"))
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_turn_failed")
+        if item.payload.get("remediation_pretest_error"):
+            return StageOutcome(Disposition.FINISH_FAIL, "remediation_pretest_failed")
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
             handler = cast(
@@ -1283,6 +1503,14 @@ class ImplementationStage(Stage):
                 kwargs["remediation_repository"] = f"{ctx.org}/{item.repo}".casefold()
                 kwargs["remediation_pr_number"] = item.pr
                 kwargs["remediation_thread_snapshots"] = remediation_snapshots
+                try:
+                    paths, scope_digest = _pretest_scope(item, ctx)
+                except (OSError, ValueError, RuntimeError):
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL, "remediation_pretest_scope_unavailable"
+                    )
+                kwargs["remediation_pretest_allowed_paths"] = paths
+                kwargs["remediation_pretest_scope_sha256"] = scope_digest
         worktree_job = GitJob(
             repo=item.repo,
             op="create_worktree",
@@ -1549,6 +1777,8 @@ class ImplementationStage(Stage):
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
             return outcome
+        if item.payload.pop("successful_remediation_pretest_recovered", False):
+            return Continue(next_state=TEST_WAIT)
         if item.payload.pop("prepared_remediation_recovered", False):
             return Continue(next_state=TEST_WAIT)
         # Reviewers never rebase. A reviewed head that merge-wait finds behind
@@ -2062,6 +2292,16 @@ class ImplementationStage(Stage):
                     return Continue(next_state=REMEDIATION_JOURNAL_GIT_VERIFY_WAIT)
                 if not item.payload.pop("_reply_journal_recovery_complete", False):
                     return Continue(next_state=REPLY_JOURNAL_RECOVERY_WAIT)
+            item.payload.pop("remediation_pretest_clean_completion", None)
+            try:
+                pretest_input = _new_pretest_input(item, ctx)
+            except (OSError, RuntimeError, ValueError, TypeError):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "remediation_pretest_input_unavailable"
+                )
+            pretest_nonce = uuid.uuid4().hex
+            item.payload["remediation_pretest_input"] = pretest_input
+            item.payload["remediation_pretest_nonce"] = pretest_nonce
             job = AgentJob(
                 repo=item.repo,
                 issue=issue,
@@ -2097,6 +2337,8 @@ class ImplementationStage(Stage):
                     "diff_text": str(item.payload.get("pr_diff", "")),
                     "scope_retraction_paths": scope_retraction_paths or (),
                 },
+                remediation_pretest_input=pretest_input,
+                remediation_pretest_nonce=pretest_nonce,
                 parse=_parse_addressed_block,
                 **_codex_isolation_job_kwargs(ctx),
                 descr="address_review",
@@ -2214,6 +2456,101 @@ class ImplementationStage(Stage):
         )
         return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
 
+    def _pretest_persist_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Persist the actual successful completion before dispatching tests."""
+        inputs = item.payload.get("remediation_pretest_input")
+        nonce = item.payload.get("remediation_pretest_nonce")
+        digest = item.payload.get("remediation_pretest_result_sha256")
+        if (
+            not isinstance(inputs, RemediationPretestInput)
+            or not isinstance(nonce, str)
+            or re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "remediation_pretest_completion_unavailable"
+            )
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="persist_remediation_pretest_candidate",
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "remediation_pretest_input": inputs,
+                    "remediation_pretest_nonce": nonce,
+                    "remediation_pretest_result_sha256": digest,
+                },
+                descr="persist_remediation_pretest_candidate",
+            ),
+            on_done_state=TEST_WAIT,
+        )
+
+    def _pretest_invalidate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Invalidate the exact ready candidate before another test-fix job."""
+        inputs = item.payload.get("remediation_pretest_input")
+        digest = item.payload.get("remediation_pretest_record_sha256")
+        if (
+            not isinstance(inputs, RemediationPretestInput)
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "remediation_pretest_candidate_unavailable"
+            )
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="invalidate_remediation_pretest_candidate",
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "remediation_pretest_input": inputs,
+                    "remediation_pretest_record_sha256": digest,
+                },
+                descr="invalidate_remediation_pretest_candidate",
+            ),
+            on_done_state=TESTFIX_WAIT,
+        )
+
+    @staticmethod
+    def _on_pretest_store_done(item: WorkItem, result: JobResult) -> None:
+        """Accept only the exact sequence and bounded digest from the store worker."""
+        inputs = item.payload.get("remediation_pretest_input")
+        value = result.value if isinstance(result.value, dict) else {}
+        if value.get("outcome") == "clean":
+            _accept_clean_pretest_completion(item, result)
+            return
+        digest = value.get("record_sha256")
+        if (
+            not result.ok
+            or result.interrupted
+            or not isinstance(inputs, RemediationPretestInput)
+            or type(value.get("sequence")) is not int
+            or value["sequence"] != inputs.candidate_sequence
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            item.payload["remediation_pretest_error"] = True
+            return
+        if item.state == PRETEST_INVALIDATE_WAIT:
+            item.payload["remediation_pretest_input"] = replace(
+                inputs,
+                candidate_sequence=inputs.candidate_sequence + 1,
+                expected_previous_record_sha256=digest,
+            )
+            item.payload["remediation_pretest_invalidated"] = True
+            item.payload["remediation_pretest_ready"] = False
+            item.payload.pop("remediation_pretest_record_sha256", None)
+        else:
+            item.payload["remediation_pretest_record_sha256"] = digest
+            item.payload["remediation_pretest_ready"] = True
+            item.payload.pop("remediation_pretest_result_sha256", None)
+            item.payload.pop("remediation_pretest_nonce", None)
+
     def _test_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """TEST_WAIT either retries the implementer or runs the pre-PR tests."""
         issue = _issue_number(item)
@@ -2233,6 +2570,15 @@ class ImplementationStage(Stage):
             # budget); RETRY re-enters the stage for the next attempt.
             item.state = IMPLEMENT_WAIT
             return StageOutcome(Disposition.RETRY, "agent_error")
+        if (
+            item.payload.get("implementation_remediation")
+            and not item.payload.get("remediation_writer_inspection")
+            and not item.payload.get("remediation_recovery_receipt")
+            and isinstance(item.payload.get("remediation_pretest_input"), RemediationPretestInput)
+            and item.payload.get("remediation_pretest_ready") is not True
+        ):
+            item.state = PRETEST_PERSIST_WAIT
+            return self._pretest_persist_wait(item, ctx)
         is_hephaestus = (ctx.org.casefold(), item.repo.casefold()) == (
             "homericintelligence",
             "hephaestus",
@@ -2306,6 +2652,24 @@ class ImplementationStage(Stage):
                 budget,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "tests_red")
+        item.payload.pop("remediation_pretest_clean_completion", None)
+        pretest_input = item.payload.get("remediation_pretest_input")
+        pretest_kwargs: dict[str, Any] = {}
+        if isinstance(pretest_input, RemediationPretestInput):
+            if item.payload.get("remediation_pretest_ready") is True:
+                item.state = PRETEST_INVALIDATE_WAIT
+                return self._pretest_invalidate_wait(item, ctx)
+            if not item.payload.pop("remediation_pretest_invalidated", False):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "remediation_pretest_invalidation_unavailable"
+                )
+            nonce = uuid.uuid4().hex
+            item.payload["remediation_pretest_nonce"] = nonce
+            pretest_kwargs = {
+                "remediation_pretest_input": pretest_input,
+                "remediation_pretest_nonce": nonce,
+                "workspace": _pretest_workspace(pretest_input, Path(ctx.paths.repo_root)),
+            }
         logger.info("implementation:%d: requesting test-fix job", issue)
         job = AgentJob(
             repo=item.repo,
@@ -2330,6 +2694,7 @@ class ImplementationStage(Stage):
                 "test_output": item.payload.get("test_output", ""),
             },
             **_codex_isolation_job_kwargs(ctx),
+            **pretest_kwargs,
             descr="test_fix",
         )
         return JobRequest(job, on_done_state=TEST_WAIT)
@@ -2630,7 +2995,7 @@ class ImplementationStage(Stage):
             return
 
         if item.state == WORKTREE_WAIT:
-            self._on_worktree_done(item, result)
+            self._on_worktree_done(item, result, repository=f"{ctx.org}/{item.repo}")
             return
 
         if item.state == DIRTY_DECISION_WAIT:
@@ -2727,6 +3092,10 @@ class ImplementationStage(Stage):
                 item.payload["athena_advise_receipt"] = result.value.receipt
             return
 
+        if item.state in {PRETEST_PERSIST_WAIT, PRETEST_INVALIDATE_WAIT}:
+            self._on_pretest_store_done(item, result)
+            return
+
         if item.state == IMPLEMENT_WAIT:
             self._on_implement_done(item, result)
             return
@@ -2798,6 +3167,8 @@ class ImplementationStage(Stage):
 
         if item.state == TESTFIX_WAIT:
             item.attempts["test_fix"] = item.attempts.get("test_fix", 0) + 1
+            if isinstance(item.payload.get("remediation_pretest_input"), RemediationPretestInput):
+                _record_pretest_completion(item, result)
             return
 
         if item.state == REPLY_JOURNAL_RECOVERY_WAIT:
@@ -3026,6 +3397,12 @@ class ImplementationStage(Stage):
     @staticmethod
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
         """Record publication success, a no-commit result, or Git failure."""
+        if (
+            isinstance(item.payload.get("remediation_pretest_input"), RemediationPretestInput)
+            and not result.ok
+        ):
+            item.payload[_COMMIT_PUSH_TERMINAL] = "remediation_pretest_publication_failed"
+            return
         result = _consume_writer_publication(item, result)
         if _COMMIT_PUSH_TERMINAL in item.payload:
             return
@@ -3194,6 +3571,7 @@ class ImplementationStage(Stage):
                 item.payload["remediation_reply_error"] = True
             else:
                 item.payload["remediation_output"] = result.value
+                _record_pretest_completion(item, result)
         elif result.value:
             item.payload["implement_summary"] = str(result.value)
 
@@ -3258,7 +3636,7 @@ class ImplementationStage(Stage):
         item.payload["rebase_expected_remote_sha"] = expected_remote_sha
 
     @staticmethod
-    def _on_worktree_done(item: WorkItem, result: JobResult) -> None:  # noqa: C901
+    def _on_worktree_done(item: WorkItem, result: JobResult, *, repository: str) -> None:  # noqa: C901
         """Record the created worktree's path and dirty snapshot.
 
         A failed worktree job flags ``git_error`` (transient — the
@@ -3449,6 +3827,13 @@ class ImplementationStage(Stage):
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
+            recovered = value.get("successful_remediation_pretest_recovery")
+            if recovered is not None:
+                try:
+                    _restore_pretest_stage(item, recovered, repository=repository)
+                except (KeyError, TypeError, ValueError, RuntimeError):
+                    item.payload["remediation_pretest_error"] = True
+                return
             incomplete_inspection = value.get("incomplete_remediation_inspection")
             if incomplete_inspection is not None:
                 batch_nonce = value.get("remediation_batch_nonce")

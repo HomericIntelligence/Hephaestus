@@ -1296,6 +1296,29 @@ Architectural contract:
   parser treats a missing, malformed, `NOGO`, or `BLOCKED` verdict as a failed
   closed audit before any label write. The letter grade is audit metadata only.
 - The implementation agent replies to every fixed open thread but never resolves it.
+- After successful adopted-PR remediation, a host Git job stores the exact
+  dirty candidate before the first test job. The separate version-one
+  `pretest-candidate` record binds the source receipt, candidate bytes, complete
+  thread snapshot, reply map, and actual successful job result. A fresh worker
+  can restore an exact `ready` record and submit tests again. The record does
+  not prove that tests passed and does not authorize publication.
+  Before a test-fix job, the host changes the exact record to `invalidated`.
+  Only a new successful job in the same process can replace that predecessor
+  with the next `ready` sequence. A test-fix job retains the predecessor's
+  validated replies; it does not need a new reply format. After a controlled
+  signed commit, the host advances the source receipt and changes the record
+  to `consumed` before publication. An incomplete transition or failed push
+  preserves the local evidence. It does not start a new publication retry.
+  Record updates acquire the source lane lock before the record lock. They
+  compare the prior digest, archive prior bytes, and use an atomic replacement.
+  Old preparation records keep their format and route. Conflicting recovery
+  records stop recovery.
+  An initial successful reply-only job can continue without a record when
+  the same host checks prove the writer is clean and no prior record exists.
+  Its process-local clean marker permits normal tests and the existing
+  no-change reply path. It cannot restore dirty work or authorize publication.
+  The stage clears that marker before a new mutation. A later legacy test-fix
+  job does not gain durable recovery authority from the clean result.
 - A remediation provider failure stores only a redacted diagnostic of at most
   500 characters. The recovery prompt fences the retained thread snapshots,
   inspection status, diff, and diagnostic. The recovery agent uses a fresh
@@ -1776,6 +1799,15 @@ The exhaustive classification is maintained in the
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
  checks cleanliness again ([`_git_verify_pr_review_checkout`](../hephaestus/automation/pipeline/worker_pool.py)).
+ The pretest persistence job also requires a successful completion retained by
+ the same worker pool. A frozen `RemediationPretestInput` supplies source,
+ thread, scope, and batch pins before provider execution. Mutable prompt data
+ cannot supply those pins. The pool bounds retained completions by its capacity
+ and removes them on exact owner-permit release or shutdown. Fresh PR reads use
+ a closed host request while the source lane lock is held; the worker rechecks
+ local bytes after the read. A recovered ready sequence does not invent its
+ historical predecessor digest. Live test-fix jobs must provide the exact
+ invalidated predecessor before the provider can run.
 - [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one frozen
  typed request. The request can recover a normal reply journal, recover a
  remediation-only format-three journal, append a prepared journal, deliver an

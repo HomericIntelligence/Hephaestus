@@ -11,6 +11,7 @@ from hephaestus.automation.host_verification_bootstrap import (
     revoke_bootstrap_go,
 )
 from hephaestus.automation.pipeline.github_jobs import (
+    AdoptedRemediationPrStateRead,
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
     DirtyDirectPrStateRead,
@@ -18,6 +19,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     FrozenJson,
     GitHubJob,
     GitHubReceipt,
+    InspectAdoptedRemediationPrStateRequest,
     InspectDirtyDirectPrStateRequest,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
@@ -63,9 +65,9 @@ class PipelineGitHubJobRunner:
 
     def run(self, job: GitHubJob) -> GitHubReceipt:
         """Execute one request without sharing a coordinator/client instance."""
-        if isinstance(job.request, InspectDirtyDirectPrStateRequest) and (
-            job.request.repository.casefold() != f"{self.org}/{job.repo}".casefold()
-        ):
+        if isinstance(
+            job.request, (InspectDirtyDirectPrStateRequest, InspectAdoptedRemediationPrStateRequest)
+        ) and (job.request.repository.casefold() != f"{self.org}/{job.repo}".casefold()):
             raise ValueError("dirty direct request repository does not match the runner")
         github: StageGitHub = PipelineGitHub(
             self.org,
@@ -98,6 +100,8 @@ class PipelineGitHubJobRunner:
     def _run_request(self, job: GitHubJob, github: StageGitHub) -> GitHubReceipt:
         """Dispatch one closed request inside its operation deadline."""
         match job.request:
+            case InspectAdoptedRemediationPrStateRequest():
+                return _read_adopted_remediation_state(job.request, github)
             case InspectDirtyDirectPrStateRequest():
                 return _read_dirty_direct_state(job.request, github)
             case RecoverReplyJournalRequest():
@@ -1256,4 +1260,49 @@ def _read_dirty_direct_state(
         plan_journal=FrozenJson.snapshot([asdict(comment) for comment in comments]),
         issue_state=state,
         issue_labels=tuple(label["name"] for label in labels),
+    )
+
+
+def _read_adopted_remediation_state(
+    request: InspectAdoptedRemediationPrStateRequest, github: StageGitHub
+) -> AdoptedRemediationPrStateRead:
+    """Require stable open origin PR facts around the complete thread read."""
+    from hephaestus.automation.remediation_recovery import RemediationReviewInput
+
+    def pins() -> tuple[str, str, str, bool, int | None]:
+        state = github.gh_pr_state(request.pr_number)
+        if not isinstance(state, dict):
+            raise ValueError("adopted PR state is unavailable")
+        lifecycle = state.get("state")
+        head = state.get("headRefOid")
+        branch = github.get_pr_head_branch(request.pr_number)
+        writable = github.pr_head_is_writable(request.pr_number)
+        carrier = github.find_pr_for_issue(request.issue_number)
+        if type(writable) is not bool or type(carrier) is not int:
+            raise ValueError("adopted PR identity is invalid")
+        if (lifecycle, head, branch, writable, carrier) != (
+            "OPEN",
+            request.expected_head,
+            request.branch,
+            True,
+            request.pr_number,
+        ):
+            raise ValueError("adopted PR identity changed")
+        return "OPEN", request.expected_head, request.branch, True, request.pr_number
+
+    before = pins()
+    threads = github.list_unresolved_review_threads(request.pr_number)
+    canonical = RemediationReviewInput.canonical_thread_snapshot(threads)
+    if canonical != request.expected_thread_snapshot_json or pins() != before:
+        raise ValueError("adopted PR or thread snapshot changed")
+    return AdoptedRemediationPrStateRead(
+        request.repository,
+        request.issue_number,
+        request.pr_number,
+        request.branch,
+        request.expected_head,
+        "OPEN",
+        True,
+        canonical,
+        True,
     )
