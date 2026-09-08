@@ -40,6 +40,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
     SourceWorkspaceTerminalReference,
+    normalize_source_workspace_creation_failure,
 )
 
 from .base import (
@@ -241,6 +242,10 @@ class FinishedStage(Stage):
             item.worktree = str(terminal.path)
         except (RuntimeError, OSError, ValueError):
             pass
+        category = normalize_source_workspace_creation_failure(
+            item.payload.get("source_workspace_creation_failure")
+        )
+        reason = f"{reason} creation_failure={category.value}"
         item.result = ItemResult(passed=False, reason=reason, final_stage=item.stage)
 
     def _cleanup(  # noqa: C901 - cleanup validates independent durable receipts

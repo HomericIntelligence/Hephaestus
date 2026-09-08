@@ -15663,6 +15663,7 @@ def test_direct_writer_creation_failure_does_not_rollback_reservation(pool: Work
         ("missing_writer", "writer_ownership"),
         ("post_create", "post_create_preparation"),
         ("typed_inner", "writer_receipt"),
+        ("typed_transition", "writer_receipt"),
     ],
 )
 def test_writer_creation_category_crosses_worker_boundary(
@@ -15686,7 +15687,7 @@ def test_writer_creation_category_crosses_worker_boundary(
         manager.create_worktree.side_effect = subprocess.CalledProcessError(
             1, ["git", private], output=private, stderr=private
         )
-    elif boundary.endswith("transition"):
+    elif boundary in {"direct_transition", "adopted_transition"}:
         method = (
             f"authorize_{boundary.removesuffix('_transition')}_implementation_writer_transition"
         )
@@ -15709,7 +15710,12 @@ def test_writer_creation_category_crosses_worker_boundary(
         categories = getattr(source_worktree, "SourceWorkspaceCreationFailure", None)
         assert categories is not None, "the closed creation-failure enum is required"
         terminal_type = cast(Any, source_worktree.SourceWorkspaceTerminalError)
-        manager.create_worktree.side_effect = terminal_type(
+        target = (
+            source.authorize_direct_implementation_writer_transition
+            if boundary == "typed_transition"
+            else manager.create_worktree
+        )
+        target.side_effect = terminal_type(
             private,
             creation_failure=categories.WRITER_RECEIPT,
             requested_branch="7-auto",

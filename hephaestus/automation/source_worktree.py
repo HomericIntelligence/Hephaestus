@@ -128,6 +128,30 @@ class SourceWorkspaceTerminalView:
     reservation_disposition: str = "preserve"
 
 
+class SourceWorkspaceCreationFailure(StrEnum):
+    """Identify a creation-failure boundary without private exception text."""
+
+    UNKNOWN = "unknown"
+    REMOTE_REFRESH = "remote_refresh"
+    WRITER_TRANSITION = "writer_transition"
+    WORKTREE_CREATE = "worktree_create"
+    WRITER_OWNERSHIP = "writer_ownership"
+    WRITER_RECEIPT = "writer_receipt"
+    POST_CREATE_PREPARATION = "post_create_preparation"
+
+
+def normalize_source_workspace_creation_failure(value: object) -> SourceWorkspaceCreationFailure:
+    """Return a known category or the safe default."""
+    if isinstance(value, SourceWorkspaceCreationFailure):
+        return value
+    if type(value) is str:
+        try:
+            return SourceWorkspaceCreationFailure(value)
+        except ValueError:
+            pass
+    return SourceWorkspaceCreationFailure.UNKNOWN
+
+
 class SourceWorkspaceTerminalError(SourceWorkspaceError):
     """Carry a creation failure through the locked terminal capture."""
 
@@ -138,11 +162,13 @@ class SourceWorkspaceTerminalError(SourceWorkspaceError):
         requested_branch: str | None = None,
         requested_base_sha: str | None = None,
         recovery: SourceWorkspaceRecovery | None = None,
+        creation_failure: SourceWorkspaceCreationFailure = SourceWorkspaceCreationFailure.UNKNOWN,
     ) -> None:
         """Keep the request and failure without granting recovery authority."""
         super().__init__(message, recovery=recovery)
         self.requested_branch = requested_branch
         self.requested_base_sha = requested_base_sha
+        self.creation_failure = normalize_source_workspace_creation_failure(creation_failure)
         self.terminal_reference: SourceWorkspaceTerminalReference | None = None
         self.path: Path | None = None
         self.preserve = True
