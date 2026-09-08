@@ -9707,6 +9707,114 @@ class TestGitOps:
             "rebase_fallback": "verified-current-head",
             "rebase_policy": "mnemosyne-current-head-v1",
         }
+        assert run.call_args_list[-1] == call(
+            ["git", "rebase", "--abort"],
+            cwd=tmp_path,
+            check=False,
+            timeout=60,
+            env={},
+        )
+        verify.assert_called_once_with(
+            tmp_path,
+            remote="origin",
+            branch="7-auto-impl",
+            expected_repo=job.transport_repository,
+            expected_remote_sha=expected_head,
+            timeout=60,
+        )
+
+    def test_mnemosyne_writer_rebase_fallback_stops_when_abort_fails(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed abort cannot advance Mnemosyne to head verification."""
+        job = GitJob(
+            repo="Mnemosyne",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch(f"{_WP}.git_utils.run") as run,
+            patch.object(pool, "_verify_noop_writer_rebase") as verify,
+        ):
+            run.side_effect = [
+                MagicMock(returncode=0),
+                MagicMock(returncode=1),
+                MagicMock(returncode=1),
+            ]
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "cannot abort writer rebase for current-head fallback"
+        verify.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "verification_error",
+        [
+            "current writer head does not match expected remote head",
+            "remote writer head changed during rebase preparation",
+        ],
+    )
+    def test_mnemosyne_writer_rebase_fallback_stops_when_head_verification_fails(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        verification_error: str,
+    ) -> None:
+        """A failed fallback head proof cannot advance Mnemosyne."""
+        expected_head = "a" * 40
+        job = GitJob(
+            repo="Mnemosyne",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": expected_head,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch(f"{_WP}.git_utils.run") as run,
+            patch.object(
+                pool,
+                "_verify_noop_writer_rebase",
+                return_value=JobResult(ok=False, error=verification_error),
+            ) as verify,
+        ):
+            run.side_effect = [
+                MagicMock(returncode=0),
+                MagicMock(returncode=1),
+                MagicMock(returncode=0),
+            ]
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == verification_error
+        assert run.call_args_list[-1] == call(
+            ["git", "rebase", "--abort"],
+            cwd=tmp_path,
+            check=False,
+            timeout=60,
+            env={},
+        )
         verify.assert_called_once_with(
             tmp_path,
             remote="origin",
