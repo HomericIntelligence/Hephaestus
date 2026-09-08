@@ -301,10 +301,12 @@ test-only subagent for each verification task and wait for its report. Use
 `gpt-5.6-luna` with `xhigh` reasoning by default for this subagent.
 
 Verification includes unit, integration, and shell tests; lint checks;
-formatter checks; type checks; and pre-commit checks. Give the subagent the
-exact commands that are necessary. The subagent must only run verification
-commands. It must not edit repository files. Use a check-only command when a
-tool can change files.
+formatter checks; type checks; and non-mutating pre-commit checks. Give the
+subagent the exact commands that are necessary. The subagent must only run
+verification commands. It must not edit repository files. Use a check-only
+command when a tool can change files. Do not use `pre-commit run --all-files`
+for delegated verification. It can run hooks that edit files. Run the needed
+non-mutating checks instead.
 
 For a pass, the subagent report must list each command and confirm that it
 passed. For a failure, the report must include the command, its exit status,
