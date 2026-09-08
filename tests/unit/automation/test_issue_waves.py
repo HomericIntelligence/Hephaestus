@@ -35,6 +35,7 @@ from hephaestus.automation.pipeline.stages.repo import (
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.requirements_recovery import evidence_digest
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_BLOCKED
 
 BASE = "a" * 40
 HEAD = "b" * 40
@@ -377,6 +378,11 @@ def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None
     with pytest.raises(IssueWaveBlockedError, match="skip/block"):
         store.validate_prior_wave_facts(
             lease, {19: SimpleNamespace(**{**vars(facts), "labels": {"state:skip"}})}
+        )
+    with pytest.raises(IssueWaveBlockedError, match="skip/block"):
+        store.validate_prior_wave_facts(
+            lease,
+            {19: SimpleNamespace(**{**vars(facts), "labels": {STATE_IMPLEMENTATION_BLOCKED}})},
         )
 
 

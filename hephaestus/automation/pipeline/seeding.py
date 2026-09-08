@@ -11,6 +11,8 @@ Entry routing (the binding contract is the classification table in
 ``docs/architecture.md`` §7 "Seeding and restart reconstruction"):
 
 - ``state:skip`` → excluded (stage ``None``, logged)
+- ``state:implementation-blocked`` → excluded until a human resolves the
+  implementation hold
 - Closed issue + merged PR carrying an exact ``Closes #N`` line → finished
   (pass, idempotent)
 - Open PR without an exclusive issue-level ``state:plan-go`` → planning
@@ -48,6 +50,7 @@ from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
     STATE_BLOCKED,
+    STATE_IMPLEMENTATION_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -128,8 +131,9 @@ def pending_review_entry_stage(
 
 
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
-#: issue is EXCLUDED from the pipeline (state:skip) — exclusion is NOT
-#: completion, so it is deliberately distinct from ``StageName.FINISHED``.
+#: issue is EXCLUDED from the pipeline (for example, ``state:skip`` or
+#: ``state:implementation-blocked``) — exclusion is NOT completion, so it is
+#: deliberately distinct from ``StageName.FINISHED``.
 Classification = tuple[StageName | None, str]
 
 
@@ -343,6 +347,8 @@ def _issue_exclusion_reason(facts: IssueFacts) -> str | None:
         return f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
     if STATE_BLOCKED in facts.labels:
         return f"#{facts.number} tagged {STATE_BLOCKED} awaiting external intervention"
+    if STATE_IMPLEMENTATION_BLOCKED in facts.labels:
+        return f"#{facts.number} tagged {STATE_IMPLEMENTATION_BLOCKED} awaiting human direction"
     return None
 
 
@@ -381,9 +387,10 @@ def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classificat
 def classify_issue(facts: IssueFacts) -> Classification:
     """Classify an issue into a single entry stage based on GitHub state.
 
-    Exclusion (``state:skip``) is distinct from completion: excluded
-    issues return ``stage=None`` (and are logged), while genuinely finished
-    work (merged PR) returns :attr:`StageName.FINISHED`.
+    Exclusion (``state:skip`` or ``state:implementation-blocked``) is distinct
+    from completion: excluded issues return ``stage=None`` (and are logged),
+    while genuinely finished work (merged PR) returns
+    :attr:`StageName.FINISHED`.
 
     Args:
         facts: GitHub state snapshot for the issue.

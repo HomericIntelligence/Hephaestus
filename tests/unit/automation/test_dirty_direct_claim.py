@@ -116,7 +116,18 @@ def test_dirty_job_rejects_changed_inputs_before_turn(tmp_path: Path, change: st
 
 
 @pytest.mark.parametrize(
-    "failure", [None, "owner", "revision", "label", "review", "missing", "skip", "blocked"]
+    "failure",
+    [
+        None,
+        "owner",
+        "revision",
+        "label",
+        "review",
+        "missing",
+        "skip",
+        "blocked",
+        "implementation-blocked",
+    ],
 )
 def test_fresh_plan_read_requires_owned_matching_approval(failure: str | None) -> None:
     """Neither approval prose nor a stale review can authorize a dirty claim."""
@@ -156,7 +167,7 @@ def test_fresh_plan_read_requires_owned_matching_approval(failure: str | None) -
         if failure == "label"
         else (
             ("state:plan-go", f"state:{failure}")
-            if failure in {"skip", "blocked"}
+            if failure in {"skip", "blocked", "implementation-blocked"}
             else ("state:plan-go",)
         ),
     )

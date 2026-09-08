@@ -208,6 +208,7 @@ from hephaestus.automation.source_worktree import (
     _terminal_json_object,
     _terminal_read_bytes,
 )
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_BLOCKED
 from hephaestus.automation.verified_runner import (
     bind_verified_runner_git_executable,
     build_verified_runner_argv,
@@ -760,7 +761,11 @@ def _dirty_plan_from_read(receipt: DirtyDirectPrStateRead) -> DirtyDirectPlanInp
     if (
         not receipt.absent
         or receipt.issue_state != "OPEN"
-        or bool(set(receipt.issue_labels).intersection({"state:skip", "state:blocked"}))
+        or bool(
+            set(receipt.issue_labels).intersection(
+                {"state:skip", "state:blocked", STATE_IMPLEMENTATION_BLOCKED}
+            )
+        )
         or set(receipt.issue_labels).intersection(
             {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
         )

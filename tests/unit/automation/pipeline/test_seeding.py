@@ -34,6 +34,7 @@ from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
     STATE_BLOCKED,
+    STATE_IMPLEMENTATION_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -338,6 +339,14 @@ class TestClassifyIssue:
         assert stage is None
         assert "external intervention" in reason
 
+    def test_implementation_blocked_is_a_restart_latch(self) -> None:
+        """A blocked implementation is excluded without plan-state loss."""
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO, STATE_IMPLEMENTATION_BLOCKED}))
+
+        assert stage is None
+        assert STATE_IMPLEMENTATION_BLOCKED in reason
+        assert STATE_PLAN_GO not in reason
+
     def test_pr_merged_finished(self) -> None:
         """Merged PR is genuinely finished (pass, idempotent) — NOT an exclusion."""
         stage, reason = classify_issue(
@@ -508,6 +517,7 @@ _STATE_LABEL_SETS: tuple[frozenset[str], ...] = (
     frozenset({STATE_IMPLEMENTATION_GO}),
     frozenset({STATE_SKIP}),
     frozenset({STATE_SKIP, STATE_PLAN_GO}),
+    frozenset({STATE_IMPLEMENTATION_BLOCKED, STATE_PLAN_GO}),
     frozenset({STATE_NEEDS_PLAN, STATE_IMPLEMENTATION_GO}),  # contradictory
 )
 _PR_STATES: tuple[dict[str, Any], ...] = (
@@ -541,7 +551,7 @@ class TestClassificationIsStageNameSSOT:
                     for label in labels
                     if label in {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}
                 }
-                if STATE_SKIP in labels or len(known) > 1:
+                if STATE_SKIP in labels or STATE_IMPLEMENTATION_BLOCKED in labels or len(known) > 1:
                     assert stage is None
                 else:
                     assert stage is not None

@@ -1727,7 +1727,11 @@ def test_dirty_direct_pr_runner_uses_fresh_repo_bound_accessors(
             return []
 
         def gh_issue_json(self, issue_number: int) -> dict[str, object]:
-            return {"state": "OPEN", "labels": [{"name": "state:plan-go"}]}
+            return {
+                "number": issue_number,
+                "state": "OPEN",
+                "labels": [{"name": "state:plan-go"}],
+            }
 
     monkeypatch.setattr(module, "PipelineGitHub", Accessor)
     branch = "5-auto-impl-direct-" + "a" * 32
@@ -1748,6 +1752,42 @@ def test_dirty_direct_pr_runner_uses_fresh_repo_bound_accessors(
     assert len(accessors) == 2
     with pytest.raises(ValueError, match="repository"):
         GitHubJob(repo="foreign", repo_root=tmp_path, request=request, descr="Read direct PR state")
+
+
+def test_dirty_direct_pr_runner_rejects_wrong_issue_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A response for a different issue cannot supply plan authority."""
+    from hephaestus.automation import pipeline_github_jobs as module
+    from hephaestus.automation.pipeline.github_jobs import InspectDirtyDirectPrStateRequest
+
+    class WrongIssueAccessor(_DeadlineAccessor):
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def open_prs_for_branch(self, branch: str) -> list[tuple[int, str]]:
+            return []
+
+        def find_pr_for_issue(self, issue_number: int) -> int | None:
+            return None
+
+        def issue_comments(self, issue_number: int) -> list[object]:
+            return []
+
+        def gh_issue_json(self, issue_number: int) -> dict[str, object]:
+            return {
+                "number": issue_number + 1,
+                "state": "OPEN",
+                "labels": [{"name": "state:plan-go"}],
+            }
+
+    monkeypatch.setattr(module, "PipelineGitHub", WrongIssueAccessor)
+    branch = "5-auto-impl-direct-" + "a" * 32
+    request = InspectDirtyDirectPrStateRequest("org/repo", 5, branch)
+    job = GitHubJob(repo="repo", repo_root=tmp_path, request=request, descr="Read direct PR state")
+
+    with pytest.raises(RuntimeError, match="identity"):
+        module.PipelineGitHubJobRunner(org="org", dry_run=False).run(job)
 
 
 def test_dirty_direct_read_bounds_plan_journal() -> None:
