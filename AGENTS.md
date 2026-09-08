@@ -113,6 +113,14 @@ automation → library. See `docs/adr/0001-automation-library-boundary.md`.
 Significant architectural decisions are recorded as ADRs in `docs/adr/`; see
 `docs/adr/README.md` for the enumerable index.
 
+When a plan or review proposes a new ADR, refer to it as the "next available
+ADR number." Do not reserve or hardcode a new ADR number in a plan, review,
+prompt, or reusable direction. Immediately before the implementation creates
+the ADR file, read the current `docs/adr/README.md` index and allocate the next
+unused number. If concurrent work takes that number, read the index again and
+use the new next unused number. References to existing ADRs must use their
+exact assigned numbers.
+
 ### Coverage omit-list invariant
 
 Whole `hephaestus/automation/*.py` modules remain in coverage measurement.
