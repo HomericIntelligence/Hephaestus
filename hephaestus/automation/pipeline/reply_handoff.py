@@ -31,6 +31,7 @@ from hephaestus.automation.remediation_recovery import (
     decode_remediation_review_input,
     encode_remediation_review_input,
 )
+from hephaestus.automation.reply_limits import MAX_ADDRESS_REPLY_CHARS
 from hephaestus.automation.review_journal import IssueComment
 
 IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
@@ -847,6 +848,88 @@ def _progress_is_monotonic(
     )
 
 
+def _legacy_batch_is_disjoint(
+    comment: IssueComment, match: re.Match[str], threads: list[dict[str, Any]]
+) -> bool:
+    """Exclude only a valid ordinary batch with no current thread IDs."""
+    if (
+        not threads
+        or _thread_snapshot_fingerprint(threads) is None
+        or any(any(char.isspace() or ord(char) < 32 for char in thread["id"]) for thread in threads)
+    ):
+        raise ValueError("legacy reply journal current threads are incomplete")
+    _, separator, encoded = comment.body.lstrip().partition("\n")
+    if (
+        len(comment.body.encode("utf-8")) > REMEDIATION_JOURNAL_COMMENT_MAX_BYTES
+        or not separator
+        or not encoded.startswith("<!-- ")
+        or not encoded.endswith(" -->")
+    ):
+        raise ValueError("legacy reply journal schema is malformed")
+    payload = _strict_json_loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
+    required = {
+        "format",
+        "pr_number",
+        "head_sha",
+        "batch_nonce",
+        "thread_snapshot_sha256",
+        "replies",
+    }
+    if not isinstance(payload, dict) or type(payload.get("format")) is not int:
+        raise ValueError("legacy reply journal format is invalid")
+    version = payload["format"]
+    if version == 2:
+        required.add("armed")
+    if (
+        version not in {1, 2}
+        or set(payload) not in (required, required | {"progress"})
+        or (version == 2 and payload["armed"] is not True)
+        or type(payload.get("pr_number")) is not int
+        or payload["pr_number"] != int(match.group("pr"))
+        or payload.get("head_sha") != match.group("head")
+        or payload.get("batch_nonce") != match.group("batch")
+        or not isinstance(payload.get("thread_snapshot_sha256"), str)
+        or _SHA256_RE.fullmatch(payload["thread_snapshot_sha256"]) is None
+    ):
+        raise ValueError("legacy reply journal identity is invalid")
+    replies = payload["replies"]
+    if (
+        not isinstance(replies, dict)
+        or not replies
+        or any(
+            not isinstance(key, str)
+            or not key
+            or key != key.strip()
+            or any(char.isspace() or ord(char) < 32 for char in key)
+            or not isinstance(value, str)
+            or not value.strip()
+            or len(value) > MAX_ADDRESS_REPLY_CHARS
+            for key, value in replies.items()
+        )
+    ):
+        raise ValueError("legacy reply journal replies are invalid")
+    if "progress" in payload:
+        progress = ImplementationReplyProgress.from_dict(payload["progress"])
+        if (
+            progress is None
+            or not set(payload["progress"]).issubset(progress.as_dict())
+            or not _progress_is_monotonic(None, progress)
+            or not set(progress.replied_thread_ids).issubset(replies)
+            or (progress.active_thread_id is not None and progress.active_thread_id not in replies)
+            or any(
+                not isinstance(receipt[key], str)
+                or not receipt[key]
+                or any(char.isspace() or ord(char) < 32 for char in receipt[key])
+                or receipt[key] not in replies
+                for receipt in progress.receipts
+                for key in ("id", "thread_id")
+                if key in receipt
+            )
+        ):
+            raise ValueError("legacy reply journal progress is invalid")
+    return set(replies).isdisjoint(thread["id"] for thread in threads)
+
+
 def _remediation_handoff_from_comment(
     comment: IssueComment,
     *,
@@ -855,6 +938,7 @@ def _remediation_handoff_from_comment(
     pr_number: int,
     branch: str,
     current_remote_head: str,
+    threads: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Parse and validate one actor-owned format-3 journal comment."""
     marker, separator, encoded_payload = comment.body.lstrip().partition("\n")
@@ -864,6 +948,7 @@ def _remediation_handoff_from_comment(
         if legacy_match is not None and (
             int(legacy_match.group("pr")) == pr_number
             and legacy_match.group("head") == current_remote_head
+            and not _legacy_batch_is_disjoint(comment, legacy_match, threads)
         ):
             raise ValueError("legacy reply journal cannot recover remediation")
         return None
@@ -1007,6 +1092,7 @@ def journaled_implementation_remediation_reply_handoff(  # noqa: C901
             pr_number=pr_number,
             branch=branch,
             current_remote_head=current_remote_head,
+            threads=threads,
         )
         if candidate is not None:
             candidates.append(candidate)
