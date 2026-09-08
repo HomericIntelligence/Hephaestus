@@ -187,6 +187,7 @@ from hephaestus.automation.remote_git import (
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
 from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
+from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -6073,6 +6074,9 @@ class WorkerPool:
         elif job.op == "sync_checkout":
             return self._git_sync_checkout(job)
 
+        elif job.op == "prepare_intake":
+            return self._git_prepare_intake(job)
+
         elif job.op == "verify_issue_wave_ancestry":
             return self._git_verify_issue_wave_ancestry(job)
 
@@ -8311,6 +8315,44 @@ class WorkerPool:
                 expected_repo=expected_repo,
                 timeout_s=job.timeout_s,
             )
+
+    def _git_prepare_intake(self, job: GitJob) -> JobResult:
+        """Prepare an isolated intake worktree without touching the caller."""
+        expected_repo = str(job.kwargs.get("repo") or "")
+        caller_value = job.kwargs.get("caller_root")
+        caller_root = Path(str(caller_value or ""))
+        if not expected_repo or not caller_root.is_dir() or caller_root.is_symlink():
+            return JobResult(
+                ok=False,
+                error="prepare_intake requires a non-empty repo and valid caller_root",
+            )
+        if preflight_error := _checkout_preflight_error(caller_root, job.timeout_s):
+            return JobResult(ok=False, error=preflight_error)
+        gh_command = _trusted_gh_executable(self._gh_extra_path_root)
+        if gh_command is None:
+            return JobResult(
+                ok=False,
+                error=(
+                    "required GitHub executable is unavailable; pass "
+                    "--gh-extra-path-root ROOT when ROOT/bin/gh is the intended installation"
+                ),
+            )
+        remote_config = _trusted_remote_git_config(gh_command)
+        if remote_config is None:
+            return JobResult(ok=False, error="required fetch executable is unavailable")
+        try:
+            receipt = RepoIntakeManager(
+                caller_root,
+                repository=expected_repo,
+                gh_command=gh_command,
+                timeout_s=job.timeout_s,
+                git_runner=git_utils.run,
+                git_env=_controlled_git_env(),
+                remote_config=remote_config,
+            ).prepare()
+        except RepoIntakeError as exc:
+            return JobResult(ok=False, error=str(exc))
+        return JobResult(ok=True, value=receipt.to_dict())
 
     def _sync_checkout_locked(
         self,

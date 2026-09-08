@@ -753,16 +753,28 @@ exclusions, and routes each eligible issue or pull request to the stage implied
 by its durable state.
 
 Before it reads a direct `--issues` / `--prs` scope, performs a label mutation,
-or dispatches an agent, repo intake proves its reusable checkout is the
-expected repository, clean, on the remote default branch, and fast-forwarded
-to that branch's fetched head. Here, clean means that
-`git status --porcelain --untracked-files=no` reports no staged or unstaged
-tracked changes. Untracked files stay in place and do not block intake because
-issue implementation runs in isolated worktrees. Writer-worktree commit and
-cleanup checks remain strict and include untracked files. A missing checkout is
-cloned and then subjected to the same synchronization proof. Any failure is
-terminal for that scope; it never falls through to an ambient or stale
-checkout.
+or dispatches an agent, repo intake proves a clean isolated control plane at
+the fetched remote default-branch head. The caller checkout supplies only
+repository identity and the Git common directory. It can be dirty, detached,
+or on a non-default branch; its files, index, branch, and status are not
+changed. A missing repository is cloned and then subjected to the existing
+strict synchronization proof. Any failure is terminal for that scope; it
+never falls through to an ambient or stale checkout.
+
+Repo intake has three separate worktree layers:
+
+- The user checkout is the caller-selected repository identity input.
+- The per-repository intake worktree is an automation-owned detached checkout
+  outside the user checkout. Its receipt records the common directory, exact
+  fetched SHA, default branch, and ownership generation.
+- The per-item implementation and review worktrees are created from the
+  verified intake worktree. They retain their existing strict dirty-state and
+  cleanup checks.
+
+The intake worktree is created or rebound only under the shared Git metadata
+lock. A valid clean receipt is reused. A dirty, symlinked, unregistered,
+foreign, or mismatched path is preserved and fails closed. Intake never
+attaches the default branch a second time.
 
 #### Boundary diagram
 
@@ -800,8 +812,9 @@ Architectural contract:
 
 - Exclusions become durable before excluded work leaves the queue.
 - Label-vocabulary setup and source classification occur only after the
-  checkout proof succeeds. Explicit scopes use the same bounded direct cursors
-  after that gate; they do not bypass it or widen their selected stage scope.
+  isolated intake receipt and exact SHA proof succeed. Explicit scopes use the
+  same bounded direct cursors after that gate; they do not bypass it or widen
+  their selected stage scope.
 - Discovery never writes planning, review, implementation, or merge verdicts.
 - Failure of the repository item does not fabricate outcomes for its issues.
 - Runtime repository discovery does not eagerly build `products` or downstream
@@ -1885,7 +1898,9 @@ The exhaustive classification is maintained in the
  worker boundary.
 - [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op` is one operation
  in the canonical [`GIT_OPS`](../hephaestus/automation/pipeline/git_jobs.py)
- inventory. `__post_init__` validates the operation. Before a PR-review
+ inventory. `__post_init__` validates the operation. `prepare_intake` creates
+ or reuses the detached per-repository intake worktree and returns its typed
+ exact-SHA receipt. Before a PR-review
  agent job, `verify_pr_review_checkout` receives the worktree path, branch,
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
@@ -1965,8 +1980,9 @@ operation, enforcing the `StageGitHub` concurrency contract without implying
 cross-process GitHub serialization; exact live-state guards remain authoritative
 across processes.
 
-`sync_checkout` additionally takes the status-safe Git-metadata lock resolved
-by [`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).
+`prepare_intake` and `sync_checkout` additionally take the status-safe
+Git-metadata lock resolved by
+[`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).
 For linked worktrees this resolves Git's common directory, so the primary
 checkout and every linked worktree serialize synchronization and worktree
 metadata mutations without leaving an untracked sentinel in the worktree.

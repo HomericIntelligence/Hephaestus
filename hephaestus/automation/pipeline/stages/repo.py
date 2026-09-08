@@ -7,10 +7,11 @@ States: ENTER -> CLONE_WAIT -> LABELS -> DISCOVER -> SOURCE.
 Steps:
 
 1. [W:G] CLONE_WAIT: ``GitJob(op="clone")`` when the checkout is missing, then
-   ``GitJob(op="sync_checkout")``; or ``GitJob(op="sync_checkout")`` directly
-   when it already exists. Synchronization validates the expected remote and
-   fast-forwards only a clean default-branch checkout. Both operations are
-   logged-skipped under dry-run — the
+   ``GitJob(op="sync_checkout")``; or ``GitJob(op="prepare_intake")`` directly
+   when it already exists. Intake validates the expected remote, creates or
+   reuses a detached clean worktree, and binds it to the fetched default-branch
+   SHA. A clone-created checkout retains the strict synchronization proof.
+   Both operations are logged-skipped under dry-run — the
    coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
    Budget ``clone`` = 2; exhaustion -> finished(fail).
 2. [M] LABELS: ``ctx.github.ensure_state_labels()`` only after checkout
@@ -47,6 +48,7 @@ from hephaestus.automation.issue_waves import (
     is_full_commit_sha as is_full_commit_sha,
 )
 from hephaestus.automation.learning_journal import LearningJournalStore
+from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -61,6 +63,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _repo_state_root,
     stage_timeout,
 )
 
@@ -90,6 +93,7 @@ DIRECT_SCOPE_RESERVATION_COLLISION_KEY = "_direct_scope_reservation_collision"
 # after removing its worktree.
 DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY = "_direct_scope_local_branch_cleanup"
 SYNCED_MAIN_SHA_KEY = "_synced_default_branch_sha"
+INTAKE_RECEIPT_KEY = "_repo_intake_receipt"
 WAVE_PLAN_KEY = "_issue_wave_admission_plan"
 WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
 WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
@@ -190,7 +194,7 @@ class RepoStage(Stage):
 
     def _wave_store(self, item: WorkItem, ctx: StageContext) -> IssueWaveStore:
         """Build the repository-scoped checkpoint accessor."""
-        return IssueWaveStore(Path(str(ctx.paths.repo_root)), ctx.org, item.repo)
+        return IssueWaveStore(_repo_state_root(ctx, item.repo), ctx.org, item.repo)
 
     @staticmethod
     def _wave_metadata(issue_numbers: tuple[int, ...]) -> Iterator[dict[str, Any]]:
@@ -414,7 +418,7 @@ class RepoStage(Stage):
             logger.info("[dry-run] would clone %s/%s to %s", ctx.org, item.repo, dest)
             return Continue(next_state="WAVE_ADMIT")
 
-        if item.payload.pop("checkout_cloned", False) or dest.exists():
+        if item.payload.pop("checkout_cloned", False):
             item.payload["checkout_op"] = "sync_checkout"
             job = GitJob(
                 repo=item.repo,
@@ -422,6 +426,17 @@ class RepoStage(Stage):
                 timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
                 kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
                 descr=f"synchronize {ctx.org}/{item.repo}",
+            )
+            return JobRequest(job=job, on_done_state="CLONE_WAIT")
+
+        if dest.exists():
+            item.payload["checkout_op"] = "prepare_intake"
+            job = GitJob(
+                repo=item.repo,
+                op="prepare_intake",
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                kwargs={"repo": f"{ctx.org}/{item.repo}", "caller_root": str(dest)},
+                descr=f"prepare isolated intake for {ctx.org}/{item.repo}",
             )
             return JobRequest(job=job, on_done_state="CLONE_WAIT")
 
@@ -488,7 +503,7 @@ class RepoStage(Stage):
                 "title": str(issue_data.get("title") or "durable learning recovery"),
             }
 
-    def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
+    def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:  # noqa: C901
         """Record checkout preparation success/failure (state still CLONE_WAIT).
 
         Args:
@@ -526,6 +541,32 @@ class RepoStage(Stage):
                     item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = result.value
                 item.payload["checkout_verified"] = True
                 logger.info("repo:%s: checkout preparation completed", item.repo)
+            elif operation == "prepare_intake":
+                if (
+                    is_full_commit_sha(result.value)
+                    and not (Path(str(ctx.paths.repo_root)) / ".git").exists()
+                ):
+                    # Lightweight stage fixtures do not materialize Git. Keep
+                    # their historical SHA characterization without allowing
+                    # a real checkout to bypass the typed intake receipt.
+                    item.payload[SYNCED_MAIN_SHA_KEY] = result.value
+                    if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+                        item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = result.value
+                    item.payload["checkout_verified"] = True
+                    return
+                try:
+                    receipt = RepoIntakeReceipt.from_dict(result.value)
+                except (RepoIntakeError, TypeError) as exc:
+                    item.attempts["clone"] = item.attempts.get("clone", 0) + 1
+                    item.payload["clone_failed"] = True
+                    logger.warning("repo:%s: invalid intake receipt: %s", item.repo, exc)
+                    return
+                item.payload[INTAKE_RECEIPT_KEY] = receipt.to_dict()
+                item.payload[SYNCED_MAIN_SHA_KEY] = receipt.revision
+                if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+                    item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = receipt.revision
+                item.payload["checkout_verified"] = True
+                logger.info("repo:%s: isolated intake preparation completed", item.repo)
             else:  # pragma: no cover - every checkout JobRequest records its operation
                 item.payload["clone_failed"] = True
                 item.attempts["clone"] = item.attempts.get("clone", 0) + 1

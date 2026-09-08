@@ -9,7 +9,8 @@ from math import ceil
 from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_types as ct
-from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
+from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import session_selection_error, store_agent_session_result
@@ -263,6 +264,21 @@ class ExecutionCoordinator(_CoordinatorHost):
             self._complete_rate_budget(item, result)
             return
 
+        lightweight_intake_fixture = (
+            isinstance(result.value, str)
+            and not (ct._effective_repo_root(self.config, item.repo) / ".git").exists()
+        )
+        if (
+            isinstance(handle.job, GitJob)
+            and handle.job.op == "prepare_intake"
+            and result.ok
+            and not lightweight_intake_fixture
+        ):
+            adoption_error = self._adopt_repo_intake(item, result)
+            if adoption_error is not None:
+                self._finish(item, passed=False, reason=adoption_error)
+                return
+
         stage = self.stages[item.stage]
         ctx = self._ctx_for(item)
         if result.interrupted:
@@ -302,6 +318,39 @@ class ExecutionCoordinator(_CoordinatorHost):
             self._park_resumable(item)
             return
         self._run_item(item)
+
+    def _adopt_repo_intake(self, item: ct.WorkItem, result: JobResult) -> str | None:
+        """Adopt a worker-verified intake root before repository reads."""
+        try:
+            receipt = RepoIntakeReceipt.from_dict(result.value)
+        except (RepoIntakeError, TypeError) as exc:
+            return f"repository-intake receipt invalid: {exc}"
+        expected_repository = f"{self.config.org}/{item.repo}"
+        if receipt.repository.casefold() != expected_repository.casefold():
+            return "repository-intake receipt repository does not match the requested repository"
+        current_root = ct._effective_repo_root(self.config, item.repo)
+        try:
+            if receipt.path.resolve() == current_root.resolve():
+                return "repository-intake receipt points to the caller checkout"
+        except (OSError, RuntimeError):
+            return "repository-intake receipt path cannot be resolved"
+        git_entry = receipt.path / ".git"
+        if (
+            receipt.common_dir.is_symlink()
+            or not receipt.common_dir.is_dir()
+            or receipt.path.is_symlink()
+            or not receipt.path.is_dir()
+            or git_entry.is_symlink()
+            or not (git_entry.is_file() or git_entry.is_dir())
+        ):
+            return "repository-intake receipt paths are not materialized Git paths"
+        self.config.repo_roots[item.repo] = receipt.path
+        # The intake worktree can be rebound and removed when the remote
+        # default branch advances.  Keep durable journals beside its receipt,
+        # not inside that replaceable worktree or the caller checkout.
+        self.config.repo_state_roots[item.repo] = receipt.path.parent
+        self._ctx_cache.pop(item.repo, None)
+        return None
 
     def _record_completion_metrics(
         self,

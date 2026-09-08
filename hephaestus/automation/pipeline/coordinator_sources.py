@@ -4,7 +4,6 @@ import logging
 import uuid
 from collections import deque
 from contextlib import suppress
-from pathlib import Path
 
 import hephaestus.automation.issue_waves as issue_waves_mod
 import hephaestus.automation.pipeline.admission as _admission
@@ -436,7 +435,7 @@ class SourceCoordinator(_CoordinatorHost):
                 source.wave_lease,
                 facts,
                 _seeding.seed_entry_from_facts(facts),
-                repo_root=Path(str(self._ctx_for_repo(source.repo).paths.repo_root)),
+                repo_root=ct._effective_repo_state_root(self.config, source.repo),
                 org=self.config.org,
                 repo=source.repo,
             )
