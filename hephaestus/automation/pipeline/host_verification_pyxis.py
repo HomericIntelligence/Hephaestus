@@ -24,8 +24,37 @@ DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE = Path("build/host-verification/hephaestus
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+HOST_KEYS = [
+    "container_runtime",
+    "container_image",
+    "container_image_sha256",
+    "container_image_id",
+    "container_image_reference",
+    "containerfile_sha256",
+    "container_source_revision",
+]
 PYXIS_AUTHORITY_SCHEMA = "hephaestus-host-verification-pyxis-v2"
 PYXIS_WRITABLE_FILESYSTEM_MAX_BYTES = 1024 * 1024 * 1024
+
+
+def pyxis_receipt_metadata_matches(receipt: Mapping[str, object]) -> bool:
+    """Check image metadata without granting a host-verification pass."""
+    image = receipt.get("container_image")
+    image_digest = receipt.get("container_image_sha256")
+    image_id = receipt.get("container_image_id")
+    image_reference = receipt.get("container_image_reference")
+    return bool(
+        receipt.get("container_runtime") == "pyxis"
+        and isinstance(image, str)
+        and image.startswith("/")
+        and "://" not in image
+        and _SHA256_RE.fullmatch(str(image_digest or "")) is not None
+        and image.endswith(f"/sha256-{image_digest}.sqsh")
+        and _IMAGE_ID_RE.fullmatch(str(image_id or "")) is not None
+        and image_reference in {f"podman://{image_id}", f"dockerd://{image_id}"}
+        and _SHA256_RE.fullmatch(str(receipt.get("containerfile_sha256") or "")) is not None
+        and _COMMIT_RE.fullmatch(str(receipt.get("container_source_revision") or "")) is not None
+    )
 
 
 class PyxisImageValidationError(ValueError):
