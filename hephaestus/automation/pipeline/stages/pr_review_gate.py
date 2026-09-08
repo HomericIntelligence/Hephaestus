@@ -3,6 +3,7 @@
 from hephaestus.automation.review_audit import is_clean_go_review
 
 from .pr_review_bootstrap import bootstrap_go_failure
+from .pr_review_repository import _require_reviewed_unarmed_state
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
@@ -473,30 +474,8 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
 
     @staticmethod
     def _require_reviewed_unarmed(item: WorkItem, ctx: StageContext) -> StepResult | None:
-        """Verify the live unarmed PR is the exact head reviewed this round.
-
-        No pipeline stage owns auto-merge. A non-null or unreadable request is
-        consequently an external or ambiguous state, so this method is a
-        strict non-mutation boundary. A missing or changed head invalidates
-        the in-memory review proof and sends the item back through REVIEW_WAIT.
-        """
-        if item.pr is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        pr_number = item.pr
-        pr_state = ctx.github.gh_pr_state(pr_number)
-        if pr_state is None:
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-        if pr_state.get("autoMergeRequest") is not None:
-            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-        if not _is_confirmed_open_unarmed(pr_state):
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        live_head = str(pr_state.get("headRefOid") or "")
-        if not reviewed_head or not live_head or reviewed_head != live_head:
-            item.payload.pop("reviewed_pr_head_sha", None)
-            item.payload.pop("reviewed_pr_node_id", None)
-            return Continue(next_state=REVIEW_WAIT)
-        return None
+        """Verify that the reviewed PR is open, unarmed, and at the reviewed head."""
+        return _require_reviewed_unarmed_state(item, ctx, review_wait=REVIEW_WAIT)
 
     @staticmethod
     def _revalidate_go_write(item: WorkItem, ctx: StageContext) -> StepResult | None:

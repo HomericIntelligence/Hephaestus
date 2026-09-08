@@ -6,6 +6,15 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from .base import (
+    Continue,
+    Disposition,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    WorkItem,
+    _is_confirmed_open_unarmed,
+)
 from .pr_review_verification import _host_verification_specs, _HostVerificationSpec
 
 _HOST_VERIFICATION_PROFILE = "host_verification_repository_profile"
@@ -53,6 +62,28 @@ def _payload_host_verification_specs(payload: dict[str, Any]) -> tuple[_HostVeri
     return _host_verification_specs(
         payload.get("pr_diff"), profile=payload.get(_HOST_VERIFICATION_PROFILE)
     )
+
+
+def _require_reviewed_unarmed_state(
+    item: WorkItem, ctx: StageContext, *, review_wait: str
+) -> StepResult | None:
+    """Verify that the reviewed PR is open, unarmed, and at the reviewed head."""
+    if item.pr is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+    pr_state = ctx.github.gh_pr_state(item.pr)
+    if pr_state is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+    if pr_state.get("autoMergeRequest") is not None:
+        return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+    if not _is_confirmed_open_unarmed(pr_state):
+        return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+    reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+    live_head = str(pr_state.get("headRefOid") or "")
+    if not reviewed_head or not live_head or reviewed_head != live_head:
+        item.payload.pop("reviewed_pr_head_sha", None)
+        item.payload.pop("reviewed_pr_node_id", None)
+        return Continue(next_state=review_wait)
+    return None
 
 
 __all__ = [
