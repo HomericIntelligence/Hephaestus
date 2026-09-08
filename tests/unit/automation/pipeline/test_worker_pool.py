@@ -15650,6 +15650,177 @@ def test_direct_writer_creation_failure_does_not_rollback_reservation(pool: Work
 
 
 @pytest.mark.parametrize(
+    ("boundary", "expected"),
+    [
+        ("remote_refresh", "remote_refresh"),
+        ("remote_process", "remote_refresh"),
+        ("direct_transition", "writer_transition"),
+        ("adopted_transition", "writer_transition"),
+        ("create", "worktree_create"),
+        ("create_receipt", "writer_receipt"),
+        ("authority_receipt", "writer_receipt"),
+        ("claim", "writer_ownership"),
+        ("missing_writer", "writer_ownership"),
+        ("post_create", "post_create_preparation"),
+        ("typed_inner", "writer_receipt"),
+        ("typed_transition", "writer_receipt"),
+    ],
+)
+def test_writer_creation_category_crosses_worker_boundary(
+    pool: WorkerPool, tmp_path: Path, caplog: pytest.LogCaptureFixture, boundary: str, expected: str
+) -> None:
+    """The terminal result carries a safe category from the failing boundary."""
+    from hephaestus.automation.worktree_manager import RemoteGitRefreshError
+
+    private = "https://user:credential-probe@example.invalid ENV_PROBE=secret /private/probe"
+    writer = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+    writer.mkdir(parents=True)
+    evidence = writer / "evidence"
+    evidence.write_bytes(b"keep this state\n")
+    manager = MagicMock()
+    manager.create_worktree.return_value = writer
+    source = MagicMock()
+    clean = MagicMock(return_value=True)
+    if boundary == "remote_refresh":
+        manager.create_worktree.side_effect = RemoteGitRefreshError(private)
+    elif boundary == "remote_process":
+        manager.create_worktree.side_effect = subprocess.CalledProcessError(
+            1, ["git", private], output=private, stderr=private
+        )
+    elif boundary in {"direct_transition", "adopted_transition"}:
+        method = (
+            f"authorize_{boundary.removesuffix('_transition')}_implementation_writer_transition"
+        )
+        getattr(source, method).side_effect = SourceWorkspaceError(private)
+    elif boundary == "create":
+        manager.create_worktree.side_effect = RuntimeError(private)
+    elif boundary == "create_receipt":
+        manager.create_worktree.side_effect = WorktreeCreationReceiptError(private)
+    elif boundary == "authority_receipt":
+        manager.implementation_writer_authority.side_effect = WorktreeCreationReceiptError(private)
+    elif boundary == "claim":
+        source.claim_implementation_writer.side_effect = SourceWorkspaceError(private)
+    elif boundary == "missing_writer":
+        manager.create_worktree.return_value = None
+    elif boundary == "post_create":
+        clean.side_effect = RuntimeError(private)
+    else:
+        from hephaestus.automation import source_worktree
+
+        categories = getattr(source_worktree, "SourceWorkspaceCreationFailure", None)
+        assert categories is not None, "the closed creation-failure enum is required"
+        terminal_type = cast(Any, source_worktree.SourceWorkspaceTerminalError)
+        target = (
+            source.authorize_direct_implementation_writer_transition
+            if boundary == "typed_transition"
+            else manager.create_worktree
+        )
+        target.side_effect = terminal_type(
+            private,
+            creation_failure=categories.WRITER_RECEIPT,
+            requested_branch="7-auto",
+            requested_base_sha="a" * 40,
+        )
+    kwargs: dict[str, object] = {
+        "issue_number": 7,
+        "repo_root": str(tmp_path),
+        "source_lane": "impl",
+        "branch_name": "7-auto",
+        "base_sha": "a" * 40,
+    }
+    if boundary == "adopted_transition":
+        kwargs["implementation_adoption_head"] = "a" * 40
+        kwargs.update(sync_to_remote=True, pr_number=7)
+        kwargs.pop("base_sha")
+    base = None if boundary == "adopted_transition" else "a" * 40
+    job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs=kwargs)
+    with (
+        patch.object(pool, "_prepare_direct_scope_worktree", return_value=(base, "7-auto")),
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        patch(f"{_WP}.WorktreeManager", return_value=manager),
+        patch(f"{_WP}.SourceWorkspaceManager", return_value=source),
+        patch(f"{_WP}.git_utils.is_clean_working_tree", clean),
+        patch.object(pool, "_rollback_direct_scope_reservation") as rollback,
+        patch.object(pool, "_release_direct_scope_reservation") as release,
+        caplog.at_level(logging.DEBUG),
+    ):
+        result = pool._git_create_worktree(job)
+    rollback.assert_not_called()
+    release.assert_not_called()
+    assert evidence.read_bytes() == b"keep this state\n"
+    assert result.ok is False and result.error == "source_workspace_terminal"
+    assert isinstance(result.value, dict)
+    assert result.value["source_workspace_preserve"] is True
+    reservation = None if base is None else {"branch": "7-auto", "base_sha": base}
+    assert ("direct_scope_reservation" in result.value) is (base is not None)
+    assert result.value.get("direct_scope_reservation") == reservation
+    for sentinel in ("credential-probe", "ENV_PROBE", "/private/probe"):
+        assert sentinel not in json.dumps(result.value) + (result.error or "") + caplog.text
+    assert result.value.get("source_workspace_creation_failure") == expected
+
+
+@pytest.mark.parametrize("boundary", ["raise", "return", "old_caller", "invalid"])
+def test_writer_terminal_wrapper_keeps_only_a_closed_creation_category(
+    pool: WorkerPool, tmp_path: Path, boundary: str
+) -> None:
+    """Outer wrappers keep typed categories and reject arbitrary metadata."""
+    from enum import StrEnum
+
+    from hephaestus.automation import source_worktree
+
+    categories = getattr(source_worktree, "SourceWorkspaceCreationFailure", None)
+    assert categories is not None, "the closed creation-failure enum is required"
+    assert issubclass(categories, StrEnum)
+    assert {member.value for member in categories} == {
+        "unknown",
+        "remote_refresh",
+        "writer_transition",
+        "worktree_create",
+        "writer_ownership",
+        "writer_receipt",
+        "post_create_preparation",
+    }
+    terminal = source_worktree.SourceWorkspaceTerminalError("private exception probe")
+    expected = "unknown"
+    result_value: dict[str, object] = {
+        "direct_scope_reservation": {"branch": "7-auto", "base_sha": "a" * 40}
+    }
+    if boundary in {"raise", "return"}:
+        expected = "writer_receipt"
+        terminal_type = cast(Any, source_worktree.SourceWorkspaceTerminalError)
+        terminal = terminal_type(
+            "private exception probe", creation_failure=categories.WRITER_RECEIPT
+        )
+        result_value["source_workspace_creation_failure"] = expected
+    elif boundary == "invalid":
+        invalid = MagicMock()
+        invalid.configure_mock(
+            **{"__str__.side_effect": AssertionError("arbitrary conversion is forbidden")}
+        )
+        result_value["source_workspace_creation_failure"] = invalid
+    producer = MagicMock(
+        return_value=JobResult(ok=False, error="private exception probe", value=result_value)
+    )
+    if boundary in {"raise", "old_caller"}:
+        producer.side_effect = terminal
+    job = GitJob(
+        repo="test/repo",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={"issue_number": 7, "repo_root": str(tmp_path), "source_lane": "impl"},
+    )
+    with (
+        patch(f"{_WP}.SourceWorkspaceManager"),
+        patch.object(pool, "_git_create_worktree_with_handoff", producer),
+    ):
+        result = pool._git_create_worktree(job)
+    assert not result.ok and result.error == "source_workspace_terminal"
+    assert result.value["source_workspace_preserve"] is True
+    assert "private exception probe" not in json.dumps(result.value)
+    assert result.value.get("source_workspace_creation_failure") == expected
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "none",
@@ -15722,6 +15893,10 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
         terminal = json.loads(terminal_path.read_text())
         terminal["cause"] = "source_workspace_legacy_unproven"
         terminal_path.write_text(json.dumps(terminal))
+    evidence_paths = (journal_path, source_path, terminal_path)
+    evidence_before = {
+        path: path.read_bytes() if path.exists() else None for path in evidence_paths
+    }
     store = IssueWaveStore(repo, "acme", "Hephaestus")
     lease = store.seal_selection(store.plan_admission(target_sha, 1), [7])
     item = WorkItem(
@@ -15773,6 +15948,12 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
     assert journal_path.exists()
     assert ("Hephaestus", 7, str(predecessor.cwd)) in preserved
+    assert {
+        path: path.read_bytes() if path.exists() else None for path in evidence_paths
+    } == evidence_before
+    assert failure.value.get("source_workspace_creation_failure") == "worktree_create"
+    assert item.payload.get("source_workspace_creation_failure") == "worktree_create"
+    assert "creation_failure=worktree_create" in ledger[0].reason
 
 
 def test_ordinary_review_keeps_noncanonical_bootstrap_filenames(

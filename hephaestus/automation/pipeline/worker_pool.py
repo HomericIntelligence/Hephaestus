@@ -161,10 +161,12 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.source_worktree import (
+    SourceWorkspaceCreationFailure,
     SourceWorkspaceError,
     SourceWorkspaceManager,
     SourceWorkspaceRecovery,
     SourceWorkspaceTerminalError,
+    normalize_source_workspace_creation_failure,
 )
 from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
@@ -6279,18 +6281,24 @@ class WorkerPool:
                     or (result.error or "").startswith("source_workspace_ownership_unavailable:")
                 ):
                     raise SourceWorkspaceTerminalError(
-                        result.error or "writer creation failed",
+                        "writer creation failed",
                         requested_branch=reservation.get("branch")
                         if isinstance(reservation, dict)
                         else None,
                         requested_base_sha=reservation.get("base_sha")
                         if isinstance(reservation, dict)
                         else None,
+                        creation_failure=normalize_source_workspace_creation_failure(
+                            value.get("source_workspace_creation_failure")
+                        ),
                     )
                 return result
         except SourceWorkspaceTerminalError as exc:
             value = {
                 "failure_kind": "source_workspace_terminal",
+                "source_workspace_creation_failure": normalize_source_workspace_creation_failure(
+                    exc.creation_failure
+                ).value,
                 "source_workspace_preserve": True,
                 "source_workspace_terminal": exc.terminal_reference.to_dict()
                 if exc.terminal_reference is not None
@@ -6750,6 +6758,8 @@ class WorkerPool:
                         base_sha=cast(str, base_sha),
                         handoff=implementation_writer_handoff,
                     )
+            except SourceWorkspaceTerminalError:
+                raise
             except SourceWorkspaceError as exc:
                 return self._creation_receipt_failure(
                     base_dir=base_dir,
@@ -6757,6 +6767,7 @@ class WorkerPool:
                     exc=exc,
                     branch_name=branch_name,
                     base_sha=base_sha,
+                    creation_failure=SourceWorkspaceCreationFailure.WRITER_TRANSITION,
                 )
         created_or_failure = self._create_managed_worktree(
             manager=manager,
@@ -6786,6 +6797,7 @@ class WorkerPool:
                 exc=exc,
                 branch_name=branch_name,
                 base_sha=base_sha,
+                creation_failure=SourceWorkspaceCreationFailure.WRITER_RECEIPT,
             )
         result = self._finalize_created_worktree(
             created=created,
@@ -6807,9 +6819,14 @@ class WorkerPool:
         )
         if not result.ok and base_sha is not None and implementation_writer_handoff is not None:
             raise SourceWorkspaceTerminalError(
-                result.error or "writer preparation failed",
+                "writer preparation failed",
                 requested_branch=branch_name,
                 requested_base_sha=base_sha,
+                creation_failure=normalize_source_workspace_creation_failure(
+                    result.value.get("source_workspace_creation_failure")
+                    if isinstance(result.value, dict)
+                    else None
+                ),
             )
         return result
 
@@ -6828,12 +6845,15 @@ class WorkerPool:
         """Create a worktree and preserve typed writer-receipt failures."""
         try:
             return manager.create_worktree(**kwargs, timeout=timeout_s)
+        except SourceWorkspaceTerminalError:
+            raise
         except (RemoteGitRefreshError, subprocess.CalledProcessError) as exc:
             if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
                 raise SourceWorkspaceTerminalError(
                     "worktree remote refresh failed",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
+                    creation_failure=SourceWorkspaceCreationFailure.REMOTE_REFRESH,
                 ) from exc
             if bool(kwargs.get("refresh_base", False)):
                 return JobResult(
@@ -6849,6 +6869,9 @@ class WorkerPool:
                 exc=exc,
                 branch_name=branch_name,
                 base_sha=base_sha,
+                creation_failure=SourceWorkspaceCreationFailure.WRITER_RECEIPT
+                if kwargs.get("implementation_writer_handoff") is not None
+                else None,
             )
         except Exception as exc:
             if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
@@ -6856,6 +6879,7 @@ class WorkerPool:
                     "worktree creation failed",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
+                    creation_failure=SourceWorkspaceCreationFailure.WORKTREE_CREATE,
                 ) from exc
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
@@ -6876,6 +6900,7 @@ class WorkerPool:
         exc: Exception,
         branch_name: str,
         base_sha: str | None,
+        creation_failure: SourceWorkspaceCreationFailure | None = None,
     ) -> JobResult:
         """Preserve a materialized writer when its ownership proof fails."""
         error = f"source_workspace_ownership_unavailable: {exc}"
@@ -6886,6 +6911,8 @@ class WorkerPool:
             "path": str(worktree_path),
             WORKTREE_MATERIALIZED_KEY: worktree_path.exists(),
         }
+        if creation_failure is not None:
+            value["source_workspace_creation_failure"] = creation_failure.value
         recovery = getattr(exc, "recovery", None)
         if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)) and isinstance(
             recovery, (dict, SourceWorkspaceRecovery)
@@ -6993,6 +7020,9 @@ class WorkerPool:
                     exc=SourceWorkspaceError("implementation writer was not materialized"),
                     branch_name=branch_name,
                     base_sha=base_sha,
+                    creation_failure=SourceWorkspaceCreationFailure.WRITER_OWNERSHIP
+                    if implementation_writer_handoff is not None
+                    else None,
                 )
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
@@ -7013,7 +7043,10 @@ class WorkerPool:
             )
             if base_sha is not None and implementation_writer_handoff is not None:
                 raise SourceWorkspaceTerminalError(
-                    error, requested_branch=branch_name, requested_base_sha=base_sha
+                    "implementation writer path is invalid",
+                    requested_branch=branch_name,
+                    requested_base_sha=base_sha,
+                    creation_failure=SourceWorkspaceCreationFailure.WRITER_OWNERSHIP,
                 )
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(
@@ -7038,6 +7071,9 @@ class WorkerPool:
                     exc=SourceWorkspaceError("implementation writer was not materialized"),
                     branch_name=branch_name,
                     base_sha=base_sha,
+                    creation_failure=SourceWorkspaceCreationFailure.WRITER_OWNERSHIP
+                    if implementation_writer_handoff is not None
+                    else None,
                 )
             # Keep compatibility with test and alternate managers that return
             # a planned path. A materialized reusable checkout always exists
@@ -7124,12 +7160,21 @@ class WorkerPool:
                     authority=writer_authority,
                     handoff=implementation_writer_handoff,
                 )
+        except SourceWorkspaceTerminalError:
+            raise
         except Exception as exc:
             if base_sha is not None and implementation_writer_handoff is not None:
                 raise SourceWorkspaceTerminalError(
                     "worktree post-create preparation failed",
                     requested_branch=branch_name,
                     requested_base_sha=base_sha,
+                    creation_failure=(
+                        SourceWorkspaceCreationFailure.WRITER_RECEIPT
+                        if isinstance(exc, WorktreeCreationReceiptError)
+                        else SourceWorkspaceCreationFailure.WRITER_OWNERSHIP
+                        if isinstance(exc, SourceWorkspaceError)
+                        else SourceWorkspaceCreationFailure.POST_CREATE_PREPARATION
+                    ),
                 ) from exc
             if isinstance(exc, (SourceWorkspaceError, WorktreeCreationReceiptError)):
                 return self._creation_receipt_failure(
@@ -7138,6 +7183,13 @@ class WorkerPool:
                     exc=exc,
                     branch_name=branch_name,
                     base_sha=base_sha,
+                    creation_failure=(
+                        SourceWorkspaceCreationFailure.WRITER_RECEIPT
+                        if isinstance(exc, WorktreeCreationReceiptError)
+                        else SourceWorkspaceCreationFailure.WRITER_OWNERSHIP
+                    )
+                    if implementation_writer_handoff is not None
+                    else None,
                 )
             return JobResult(
                 ok=False,

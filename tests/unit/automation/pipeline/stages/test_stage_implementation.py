@@ -16,7 +16,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -6857,23 +6857,53 @@ class TestWriterPublicationRefresh:
 @pytest.mark.parametrize(
     "reference", [None, {"identity": "1-impl-terminal.json", "content_sha256": "a" * 64}]
 )
+@pytest.mark.parametrize(
+    "category",
+    [
+        "unknown",
+        "remote_refresh",
+        "writer_transition",
+        "worktree_create",
+        "writer_ownership",
+        "writer_receipt",
+        "post_create_preparation",
+        None,
+        "private category probe",
+        7,
+        "invalid_object",
+    ],
+)
 def test_terminal_writer_failure_stops_without_git_retry(
-    make_ctx: Any, make_work_item: Any, reference: object
+    make_ctx: Any, make_work_item: Any, reference: object, category: object
 ) -> None:
     """Invalid transport still preserves the writer and stops implementation."""
     stage = ImplementationStage()
     item = make_work_item(issue=1, state="WORKTREE_WAIT")
     ctx = make_ctx()
+    value: dict[str, object] = {
+        "failure_kind": "source_workspace_terminal",
+        "source_workspace_terminal": reference,
+        "path": "/missing/writer",
+    }
+    expected = (
+        category
+        if isinstance(category, str)
+        and category not in {"private category probe", "invalid_object"}
+        else "unknown"
+    )
+    if category == "invalid_object":
+        category = MagicMock()
+        category.configure_mock(
+            **{"__str__.side_effect": AssertionError("arbitrary conversion is forbidden")}
+        )
+    if category is not None:
+        value["source_workspace_creation_failure"] = category
     stage.on_job_done(
         item,
         JobResult(
             ok=False,
             error="source_workspace_terminal",
-            value={
-                "failure_kind": "source_workspace_terminal",
-                "source_workspace_terminal": reference,
-                "path": "/missing/writer",
-            },
+            value=value,
         ),
         ctx,
     )
@@ -6889,3 +6919,4 @@ def test_terminal_writer_failure_stops_without_git_retry(
     assert item.payload["source_workspace_terminal"] == reference
     assert item.worktree == "/missing/writer"
     assert not item.payload.get("git_error_retries")
+    assert item.payload.get("source_workspace_creation_failure") == expected
