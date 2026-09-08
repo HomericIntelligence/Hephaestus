@@ -3,7 +3,8 @@
 ``pr_review`` owns the loop's automated implementation-eligibility decision.
 This stage may perform one ordinary REST squash merge only after it observes
 the exact active-run reviewed head, an exclusive implementation-GO label, an
-open ``main`` PR, an explicitly absent auto-merge request, no unresolved
+open PR against the verified repository default branch, an explicitly absent
+auto-merge request, no unresolved
 review threads, and passing required status evidence for that head. It never
 enables, disables, adopts, or polls native auto-merge.
 

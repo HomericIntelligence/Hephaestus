@@ -88,7 +88,11 @@ neither writes `state:skip` during seeding.
  spending a merge attempt. The `--poll-max-wait` option controls this wait. Its
  default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof.
  Readiness is not authorization, and each request
- still has fresh open/`main`/unarmed/exclusive-GO admission.
+ still has fresh open/verified-default-branch/unarmed/exclusive-GO admission.
+ The initial default-branch and PR-base snapshot must match a final metadata
+ read immediately before the request. If repository metadata is unavailable,
+ stop queue-driven merge requests and use the normal protected manual process
+ until the accessor is repaired. Do not guess `main` or use labels as authority.
  The adapter makes one request per call and never retries. A required merge
  queue uses exact-head GraphQL admission. Otherwise, direct REST merge requires
  strict-update protection from a source that the current actor cannot bypass.
@@ -679,8 +683,9 @@ exact-head status evidence ─────► current CI merge gate
 ```
 
 `merge_wait` requires the implementation-GO label, a matching in-memory
-reviewed-head proof on an open `main`, confirmed-unarmed live PR with an
-exclusive GO label, no unresolved review threads, and complete passing required
+reviewed-head proof on an open PR against the verified repository default
+branch, with a confirmed-unarmed live PR, an exclusive GO label, no unresolved
+review threads, and complete passing required
 status evidence for that head. A missing or drifted proof,
 failed or missing required status evidence, or untrusted merge state blocks
 without a label mutation. A matching set
@@ -1433,7 +1438,7 @@ stateDiagram-v2
     Inspect --> OperatorOwned: externally armed
     Inspect --> PRReview: implementation proof missing
     Inspect --> Verify: implementation proof present
-    Verify --> Merge: matching reviewed head, main, unarmed exclusive GO
+    Verify --> Merge: matching reviewed head and verified default branch, unarmed exclusive GO
     Verify --> PRReview: missing or drifted proof
     Verify --> OperatorOwned: externally armed or ownership ambiguous
     Verify --> Failed: required status evidence missing or failed
@@ -1460,6 +1465,8 @@ stateDiagram-v2
 Architectural contract:
 
 - A current-process review proof is bound to the reviewed head commit.
+- The initial repository-default-branch and PR-base snapshot must match the
+  final read immediately before the server request.
 - Existing external merge ownership is preserved.
 - Missing or drifted proof returns approval to PR review with zero label writes.
 - A matching eligibility label, current-process proof, and passing exact-head
@@ -2212,7 +2219,8 @@ Exit-code priority is:
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
   compares the proof with the confirmed-unarmed live PR, reads complete passing
-  required status evidence for that SHA, and issues the server route that the
+  required status evidence for that SHA, verifies that the PR base equals the
+  repository default branch, and issues the server route that the
   effective policy requires. It does not arm or poll native auto-merge.
 - **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New tracker reasons are recorded in run logs; a confirmed obsolete disposition uses its distinct bounded actor-owned explanation role under ADR-0031.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).

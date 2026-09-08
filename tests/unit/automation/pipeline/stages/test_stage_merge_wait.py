@@ -56,6 +56,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         states: list[dict[str, object] | None] | None = None,
         merge_results: list[ConditionalMergeResult] | None = None,
         readiness: dict[str, object] | list[dict[str, object]] | None = None,
+        default_branch: str | None = "main",
         conversation_resolution: bool = True,
         required_checks_green: bool = True,
         merge_queue_method: str | None = None,
@@ -65,6 +66,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         super().__init__(
             pr_impl_state=labels,
             pr_state=scripted_states[0],
+            default_branch=default_branch,
             conversation_resolution=conversation_resolution,
         )
         self._states = list(scripted_states)
@@ -96,6 +98,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         self._merge_queue_method = merge_queue_method
         self._strict_update_enforced = strict_update_enforced
         self.checked_heads: list[str] = []
+        self.policy_bases: list[str] = []
         self.events: list[str] = []
 
     def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
@@ -124,9 +127,10 @@ class _ConditionalGitHub(FakeStageGitHub):
         self, pr_number: int, base_branch: str, **_kwargs: Any
     ) -> EffectiveMergePolicy:
         """Return the scripted effective policy."""
+        self.policy_bases.append(base_branch)
         return EffectiveMergePolicy(
             base_branch=base_branch,
-            default_branch="main",
+            default_branch=self._default_branch or "main",
             conversation_resolution_enforced=self._conversation_resolution,
             required_checks=(RequiredCheck("required-ci", 1),),
             bypassable_ruleset_ids=(),
@@ -147,6 +151,25 @@ class _ConditionalGitHub(FakeStageGitHub):
         self.events.append(f"checks:{head_sha}")
         self.checked_heads.append(head_sha)
         return self._required_checks_green
+
+
+class _DriftingDefaultBranchGitHub(_ConditionalGitHub):
+    """Conditional-merge fake with scripted repository metadata reads."""
+
+    def __init__(
+        self,
+        *,
+        states: list[dict[str, object] | None],
+        default_branches: list[str | None],
+    ) -> None:
+        super().__init__(states=states, default_branch=default_branches[0])
+        self._default_branches = list(default_branches)
+
+    def repository_default_branch(self) -> str | None:
+        """Return the next scripted repository default branch."""
+        if len(self._default_branches) > 1:
+            return self._default_branches.pop(0)
+        return self._default_branches[0]
 
 
 def _reviewed_item(make_work_item: Any, *, head: str = "a" * 40) -> Any:
@@ -1274,7 +1297,7 @@ def test_409_reconciliation_external_arm_blocks_without_label_mutation(
     assert github.mutation_log == []
 
 
-def test_label_loss_or_non_main_base_prevents_the_conditional_request(
+def test_label_loss_or_non_default_base_prevents_the_conditional_request(
     make_ctx: Any, make_work_item: Any
 ) -> None:
     """Final admission facts are all required immediately before the PUT."""
@@ -1286,9 +1309,94 @@ def test_label_loss_or_non_main_base_prevents_the_conditional_request(
     ) == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
     assert _complete_merge_cycle(
         MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=wrong_base)
-    ) == StageOutcome(Disposition.FINISH_FAIL, "non_main_base")
+    ) == StageOutcome(Disposition.FINISH_FAIL, "non_default_base")
     assert label_lost.merge_attempts == []
     assert wrong_base.merge_attempts == []
+
+
+def test_verified_non_main_default_branch_reaches_the_conditional_request(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A PR targeting the verified repository default branch may merge."""
+    github = _ConditionalGitHub(
+        default_branch="master",
+        states=[_open_pr(base="master"), _open_pr(base="master"), {"state": "MERGED"}],
+    )
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+
+    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert github.policy_bases == ["master", "master"]
+
+
+@pytest.mark.parametrize("base", ["main", "release"])
+def test_non_default_base_never_reaches_the_conditional_request(
+    make_ctx: Any, make_work_item: Any, base: str
+) -> None:
+    """A non-default PR base fails before any merge mutation."""
+    github = _ConditionalGitHub(
+        default_branch="master",
+        states=[_open_pr(base=base)],
+    )
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "non_default_base")
+    assert github.merge_attempts == []
+    assert github.mutation_log == []
+
+
+def test_missing_default_branch_metadata_fails_closed(make_ctx: Any, make_work_item: Any) -> None:
+    """Unavailable repository metadata prevents merge admission and mutation."""
+    github = _ConditionalGitHub(default_branch=None, states=[_open_pr(base="master")])
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "default_branch_unavailable")
+    assert github.merge_attempts == []
+    assert github.mutation_log == []
+
+
+def test_default_branch_drift_blocks_the_final_conditional_request(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A changed repository default branch invalidates the admission snapshot."""
+    github = _DriftingDefaultBranchGitHub(
+        states=[_open_pr(base="master"), _open_pr(base="release")],
+        default_branches=["master", "release"],
+    )
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_base_drift")
+    assert github.merge_attempts == []
+    assert github.mutation_log == []
+
+
+def test_pr_base_drift_blocks_the_final_conditional_request(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A changed PR base invalidates the admission before the conditional request."""
+    github = _DriftingDefaultBranchGitHub(
+        states=[_open_pr(base="master"), _open_pr(base="release")],
+        default_branches=["master", "master"],
+    )
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "non_default_base")
+    assert github.merge_attempts == []
+    assert github.mutation_log == []
 
 
 def test_contradictory_implementation_labels_prevent_the_conditional_request(

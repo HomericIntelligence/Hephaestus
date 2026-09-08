@@ -96,6 +96,7 @@ class FakeStageGitHub(FakeGitHub):
         unresolved: list[tuple[int, int]] | None = None,
         by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | _DefaultPrState | None = _DEFAULT_PR_STATE,
+        default_branch: str | None = "main",
         conversation_resolution: bool = True,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
@@ -131,6 +132,7 @@ class FakeStageGitHub(FakeGitHub):
                 distinguish blocking and advisory automation threads.
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
+            default_branch: Canned repository default branch metadata.
             conversation_resolution: Whether the admitted PR base has the
                 server-enforced required-conversation-resolution protection.
             learn_terminal: Seed answer for drive_green_learn_terminal —
@@ -174,6 +176,7 @@ class FakeStageGitHub(FakeGitHub):
             if isinstance(pr_state, _DefaultPrState)
             else pr_state
         )
+        self._default_branch = default_branch
         self.merge_attempts: list[tuple[int, str]] = []
         self._conversation_resolution = conversation_resolution
         self._pr_review_context = (
@@ -712,6 +715,10 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
 
+    def repository_default_branch(self) -> str | None:
+        """Return the canned repository default branch."""
+        return self._default_branch
+
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror the post-405 operational readiness lookup."""
         del pr_number
@@ -723,7 +730,7 @@ class FakeStageGitHub(FakeGitHub):
         """Return the canned effective merge policy."""
         return EffectiveMergePolicy(
             base_branch=base_branch,
-            default_branch="main",
+            default_branch=self._default_branch or "main",
             conversation_resolution_enforced=self._conversation_resolution,
             required_checks=(RequiredCheck("required-ci", 1),),
             bypassable_ruleset_ids=(),

@@ -503,6 +503,10 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def repository_default_branch(self) -> str | None:
+        """Read the verified default branch from repository-scoped metadata."""
+        ...
+
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Read operational normal-merge readiness without granting authorization."""
         pass
