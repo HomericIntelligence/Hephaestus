@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import tomllib  # type: ignore[no-redef, unused-ignore]
 from pathlib import Path
 
@@ -58,3 +60,30 @@ def test_low_baseline_scan_defers_exit_status_to_checker() -> None:
     assert "--exit-zero" in low_step["run"]
     assert "bandit_baseline_check.py" in low_step["run"]
     assert summary_step["env"]["BANDIT_LOW_OUTCOME"] == ("${{ steps.bandit-low.outcome }}")
+
+
+def test_low_baseline_ids_have_reviewed_pyproject_rationale_bullets() -> None:
+    """Every checked-in LOW finding ID has a rationale in the Bandit block."""
+    baseline = json.loads(
+        (REPO_ROOT / "hephaestus/ci/bandit_low_baseline.json").read_text(encoding="utf-8")
+    )
+    baseline_ids = set(baseline["counts"])
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^\[tool\.bandit\]\n(?P<body>.*?)(?=^\[|\Z)", pyproject)
+    assert match is not None
+
+    rationale_by_id: dict[str, str] = {}
+    for line in match.group("body").splitlines():
+        bullet = re.match(
+            r"^#\s+((?:B\d{3})(?:/B\d{3})*)\s+\((?P<rationale>.+)$",
+            line,
+        )
+        if bullet is None:
+            continue
+        rationale = bullet.group("rationale").strip()
+        for test_id in bullet.group(1).split("/"):
+            rationale_by_id[test_id] = rationale
+
+    assert "B110" in rationale_by_id
+    assert baseline_ids <= set(rationale_by_id)
+    assert all(rationale_by_id[test_id] for test_id in baseline_ids)
