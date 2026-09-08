@@ -83,6 +83,7 @@ def gh_issue_json(
 
     Args:
         issue_number: GitHub issue number
+        repo: Repository owner and name. If you do not supply repo, use the current checkout.
 
     Returns:
         Issue data dictionary
@@ -798,12 +799,18 @@ def _assert_body_has_closes(body: str) -> None:
         )
 
 
-def is_issue_closed(issue_number: int, cached_states: dict[int, IssueState] | None = None) -> bool:
+def is_issue_closed(
+    issue_number: int,
+    cached_states: dict[int, IssueState] | None = None,
+    *,
+    repo: tuple[str, str] | None = None,
+) -> bool:
     """Check if an issue is closed.
 
     Args:
         issue_number: GitHub issue number
         cached_states: Optional pre-fetched states cache
+        repo: Repository owner and name. If you do not supply repo, use the current checkout.
 
     Returns:
         True if issue is closed
@@ -815,7 +822,7 @@ def is_issue_closed(issue_number: int, cached_states: dict[int, IssueState] | No
         return cached_states[issue_number].is_done
 
     try:
-        issue_data = _api.gh_issue_json(issue_number)
+        issue_data = _api.gh_issue_json(issue_number, repo=repo)
         return issue_data["state"] in ("CLOSED", "MERGED")
     except Exception as e:
         _api.logger.warning("Failed to check if issue #%s is closed: %s", issue_number, e)

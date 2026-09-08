@@ -301,7 +301,7 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
         return [info.number for info in issue_infos]
 
 
-def _filter_open_issues(repo: str, issue_numbers: list[int]) -> list[int]:
+def _filter_open_issues(repo: tuple[str, str], issue_numbers: list[int]) -> list[int]:
     """Drop CLOSED issues from an explicit ``--issues`` list (#1576).
 
     An operator-pinned ``cfg.issues`` list bypasses the ``--state open`` filter
@@ -312,22 +312,23 @@ def _filter_open_issues(repo: str, issue_numbers: list[int]) -> list[int]:
     never silently drop work over a transient API blip).
 
     Args:
-        repo: Repository name (for logging).
+        repo: Repository owner and name for all issue-state reads.
         issue_numbers: The explicit issue list.
 
     Returns:
         The subset that is not closed (order preserved).
 
     """
+    slug = f"{repo[0]}/{repo[1]}"
     try:
-        cached_states = prefetch_issue_states(issue_numbers)
+        cached_states = prefetch_issue_states(issue_numbers, repo=repo)
     except Exception as exc:  # transient API failure → keep all, don't drop work
-        LOG.warning("[%s] could not prefetch issue states for closed-filter: %s", repo, exc)
+        LOG.warning("[%s] could not prefetch issue states for closed-filter: %s", slug, exc)
         return issue_numbers
     kept: list[int] = []
     for num in issue_numbers:
-        if is_issue_closed(num, cached_states):
-            LOG.info("[%s] issue #%s is closed — excluding from phase loop", repo, num)
+        if is_issue_closed(num, cached_states, repo=repo):
+            LOG.info("[%s] issue #%s is closed — excluding from phase loop", slug, num)
             continue
         kept.append(num)
     return kept

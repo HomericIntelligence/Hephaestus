@@ -4132,8 +4132,8 @@ class TestPipelineScopeWiring:
                 self.issue_json_calls.append(issue_number)
                 return super().gh_issue_json(issue_number)
 
-        def fake_filter(repo: str, issue_numbers: list[int]) -> list[int]:
-            assert repo == "repo-a"
+        def fake_filter(repo: tuple[str, str], issue_numbers: list[int]) -> list[int]:
+            assert repo == ("org", "repo-a")
             assert issue_numbers == [1, 2, 3]
             return [1, 3]
 
