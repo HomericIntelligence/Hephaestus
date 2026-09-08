@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -892,8 +892,29 @@ def test_invalid_terminal_reference_preserves_reservation_and_records_failure(
 
 
 @pytest.mark.parametrize("failure", ["none", "read", "constructor"])
+@pytest.mark.parametrize(
+    "category",
+    [
+        "unknown",
+        "remote_refresh",
+        "writer_transition",
+        "worktree_create",
+        "writer_ownership",
+        "writer_receipt",
+        "post_create_preparation",
+        None,
+        "private category probe",
+        7,
+        "invalid_object",
+    ],
+)
 def test_terminal_wave_and_ledger_use_same_validated_result(
-    tmp_path: Path, stage: FinishedStage, ledger: list[ItemResult], make_ctx: Any, failure: str
+    tmp_path: Path,
+    stage: FinishedStage,
+    ledger: list[ItemResult],
+    make_ctx: Any,
+    failure: str,
+    category: object,
 ) -> None:
     """Both stores receive the result from the manager evidence check."""
     from hephaestus.automation.source_worktree import (
@@ -910,6 +931,19 @@ def test_terminal_wave_and_ledger_use_same_validated_result(
     item.payload[DIRECT_SCOPE_RESERVATION_KEY] = reservation
     item.payload[WAVE_LEASE_PAYLOAD] = lease
     item.payload["source_workspace_preserve"] = True
+    safe = (
+        category
+        if isinstance(category, str)
+        and category not in {"private category probe", "invalid_object"}
+        else "unknown"
+    )
+    if category == "invalid_object":
+        category = MagicMock()
+        category.configure_mock(
+            **{"__str__.side_effect": AssertionError("arbitrary conversion is forbidden")}
+        )
+    if category is not None:
+        item.payload["source_workspace_creation_failure"] = category
     item.payload["source_workspace_terminal"] = {
         "identity": "42-impl-terminal.json",
         "content_sha256": "b" * 64,
@@ -924,14 +958,15 @@ def test_terminal_wave_and_ledger_use_same_validated_result(
         requested_branch="42-auto",
         requested_base_sha="a" * 40,
     )
+    private = "https://user:credential-probe@example.invalid ENV_PROBE=secret /private/probe"
     with patch.object(finished_module, "SourceWorkspaceManager") as manager:
         read = manager.return_value.read_terminal_failure
         if failure == "none":
             read.return_value = view
         elif failure == "constructor":
-            manager.side_effect = RuntimeError("cannot resolve Git metadata lock path")
+            manager.side_effect = RuntimeError(private)
         else:
-            read.side_effect = SourceWorkspaceError("changed source bytes")
+            read.side_effect = SourceWorkspaceError(private)
         stage.step(item, ctx)
     checkpoint = store.load()
     assert checkpoint is not None
@@ -945,3 +980,7 @@ def test_terminal_wave_and_ledger_use_same_validated_result(
     assert isinstance(result, Continue) and result.next_state == "DONE"
     assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
     assert "_direct_scope_reservation_release_attempted" not in item.payload
+    assert "private category probe" not in outcome.reason
+    for sentinel in ("credential-probe", "ENV_PROBE", "/private/probe"):
+        assert sentinel not in outcome.reason
+    assert f"creation_failure={safe}" in outcome.reason
