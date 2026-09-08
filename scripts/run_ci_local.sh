@@ -97,7 +97,7 @@ CONTAINER_RUNNER_FAILURE_CODE=""
 
 cleanup_candidate_snapshot() {
     if [ -z "${CANDIDATE_ROOT}" ]; then
-        return
+        return 0
     fi
     case "${CANDIDATE_ROOT}" in
         "${PROJECT_ROOT}"/build/ci-candidate.*)

@@ -1079,13 +1079,16 @@ def test_shellcheck_preserves_recursive_path_selection(tmp_path: Path, shell: st
     assert not list((repo / "build").glob("ci-shellcheck.*"))
 
 
-def test_shellcheck_collection_failure_is_not_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shell", ["/bin/bash", "/opt/homebrew/bin/bash"])
+def test_shellcheck_collection_failure_is_not_success(tmp_path: Path, shell: str) -> None:
     """A failed path producer must not validate a partial file list."""
+    if not Path(shell).is_file():
+        pytest.skip("This Bash installation is not available")
     repo = _candidate_repo(tmp_path)
     find = tmp_path / "find"
     find.write_text("#!/bin/bash\nprintf 'scripts/run_ci_local.sh\\0'\nexit 23\n")
     find.chmod(0o755)
-    result, log = _run_runner(tmp_path, "shellcheck", repo_root=repo)
+    result, log = _run_runner(tmp_path, "shellcheck", repo_root=repo, shell=shell)
     assert result.returncode != 0
     assert "shellcheck --severity=error" not in log
     assert "passed." not in result.stdout
