@@ -34,6 +34,10 @@ from hephaestus.automation.pipeline.github_jobs import (
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
 )
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    MergeWaitBaseSnapshot,
+    validate_merge_wait_base,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     journaled_implementation_remediation_reply_handoff,
@@ -982,7 +986,9 @@ class PipelineGitHubJobRunner:
                 else "host_verification_bootstrap_revocation_unverified"
             )
 
-        def admit() -> tuple[dict[str, object], str] | str:
+        def admit(  # noqa: C901
+            expected_base: MergeWaitBaseSnapshot | None = None,
+        ) -> tuple[dict[str, object], str, MergeWaitBaseSnapshot] | str:
             nonlocal terminal_merge_sha
             try:
                 state = github.gh_pr_state(request.pr_number)
@@ -1000,8 +1006,15 @@ class PipelineGitHubJobRunner:
                 return "auto_merge_already_armed"
             if state.get("state") != "OPEN" or "autoMergeRequest" not in state:
                 return "pr_state_unverified"
-            if state.get("baseRefName") != "main":
-                return "non_main_base"
+            try:
+                default_branch = github.repository_default_branch()
+            except Exception:
+                return "default_branch_unavailable"
+            base_snapshot = validate_merge_wait_base(state, default_branch)
+            if isinstance(base_snapshot, str):
+                return base_snapshot
+            if expected_base is not None and base_snapshot != expected_base:
+                return "merge_base_drift"
             try:
                 has_go, has_no_go = github.pr_has_implementation_state_label(request.pr_number)
             except Exception:
@@ -1013,7 +1026,7 @@ class PipelineGitHubJobRunner:
                 return "missing_pr_head"
             if head != request.reviewed_head_sha:
                 return "reviewed_head_drift"
-            return state, head
+            return state, head, base_snapshot
 
         def conversation_safety(policy: object) -> str | None:
             try:
@@ -1089,12 +1102,10 @@ class PipelineGitHubJobRunner:
         bootstrap_status = bootstrap_outcome()
         if bootstrap_status is not None:
             return complete(bootstrap_status)
-        state, _ = admitted
+        _, _, initial_base = admitted
         if request.queue_admitted:
             return complete("merge_queue_wait")
-        base_branch = state.get("baseRefName")
-        if not isinstance(base_branch, str) or not base_branch:
-            return complete("pr_state_unverified")
+        base_branch = initial_base.base_branch
         try:
             policy = github.effective_merge_policy(
                 request.pr_number,
@@ -1154,13 +1165,13 @@ class PipelineGitHubJobRunner:
         boundary = operation_boundary()
         if boundary is not None:
             return complete(boundary)
-        admitted = admit()
+        admitted = admit(initial_base)
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
         bootstrap_status = bootstrap_outcome()
         if bootstrap_status is not None:
             return complete(bootstrap_status)
-        final_state, _ = admitted
+        final_state, _, _ = admitted
 
         try:
             result = github.merge_pr_if_head(

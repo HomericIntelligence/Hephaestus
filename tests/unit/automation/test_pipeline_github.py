@@ -158,6 +158,9 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
                 "headRefOid": head,
             }
 
+        def repository_default_branch(self) -> str:
+            return "main"
+
         def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
             events.append("label")
             return True, False
@@ -272,6 +275,9 @@ class _RulesetBypassGitHub:
             "baseRefOid": "b" * 40,
             "headRefOid": "a" * 40,
         }
+
+    def repository_default_branch(self) -> str:
+        return "main"
 
     def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
         self.events.append("label")
@@ -563,6 +569,9 @@ def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
                 "headRefOid": head,
             }
 
+        def repository_default_branch(self) -> str:
+            return "main"
+
         def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
             events.append("label")
             return True, False
@@ -675,6 +684,9 @@ def test_merge_cycle_rechecks_final_admission_after_check_traversal(
                 "baseRefName": "main",
                 "headRefOid": "b" * 40 if self.revoked and revocation == "head-drift" else head,
             }
+
+        def repository_default_branch(self) -> str:
+            return "main"
 
         def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
             return (
@@ -4013,6 +4025,7 @@ class TestExactHeadChecks:
             "pr_has_implementation_state_label",
             lambda _pr: (True, False),
         )
+        monkeypatch.setattr(adapter, "repository_default_branch", lambda: "main")
         monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
         monkeypatch.setattr(
             adapter,
@@ -4106,6 +4119,7 @@ class TestExactHeadChecks:
             },
         )
         monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: (True, False))
+        monkeypatch.setattr(adapter, "repository_default_branch", lambda: "main")
         monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
         monkeypatch.setattr(
             adapter,
@@ -4452,6 +4466,85 @@ class TestExactHeadChecks:
         assert self._passes(adapter, head, self._policy("required-ci")) is False
         assert call_mock.call_count == 1
         assert f"Check Runs response exceeds the 2000-run safety ceiling for {head}" in caplog.text
+
+
+class TestRepositoryDefaultBranch:
+    """The repository metadata accessor is explicit and fail closed."""
+
+    def test_reads_repo_scoped_default_branch_metadata(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo-a"
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout=json.dumps({"default_branch": "master"}),
+                returncode=0,
+            )
+        )
+
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        assert adapter.repository_default_branch() == "master"
+        call_mock.assert_called_once_with(
+            ["api", "repos/org/repo-a", "--method", "GET", "--repo", "org/repo-a"],
+            timeout=120,
+        )
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"default_branch": ""},
+            {"default_branch": " master"},
+            {"default_branch": None},
+            {"default_branch": 3},
+            [],
+            "not-json",
+        ],
+    )
+    def test_rejects_missing_or_malformed_metadata(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        payload: object,
+    ) -> None:
+        adapter.repo = "repo-a"
+        stdout = payload if isinstance(payload, str) else json.dumps(payload)
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            MagicMock(return_value=SimpleNamespace(stdout=stdout, returncode=0)),
+        )
+
+        assert adapter.repository_default_branch() is None
+
+    def test_rejects_a_failed_repository_metadata_request(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo-a"
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    stdout='{"default_branch": "master"}',
+                    returncode=1,
+                )
+            ),
+        )
+
+        assert adapter.repository_default_branch() is None
+
+    def test_requires_a_repo_scope(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        call_mock = MagicMock()
+        monkeypatch.setattr(pg, "gh_call", call_mock)
+
+        adapter.repo = None
+
+        assert adapter.repository_default_branch() is None
+        call_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

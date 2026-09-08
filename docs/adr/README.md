@@ -28,7 +28,7 @@ numbered, and listed here.
 | [0013](0013-backup-and-disaster-recovery-policy.md) | Tiered backup and disaster-recovery policy | Accepted |
 | [0014](0014-conditional-normal-merge.md) | Conditional normal merge after loop-owned review | Accepted (historical; superseded by 0015) |
 | [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
-| [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted (merge-authorization boundary superseded by 0024) |
+| [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted (merge-authorization boundary superseded by 0024; branch-identity clause superseded by 0047) |
 | [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
@@ -59,3 +59,4 @@ numbered, and listed here.
 | [0044](0044-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |
 | [0045](0045-one-use-dirty-direct-writer-continuation.md) | One-use dirty direct-writer continuation | Draft |
 | [0046](0046-review-host-verification-bootstrap.md) | Target-specific source-review bootstrap | Accepted |
+| [0047](0047-verified-repository-default-branch-merge-admission.md) | Verified repository default branch for conditional merge admission | Accepted |

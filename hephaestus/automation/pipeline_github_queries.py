@@ -626,6 +626,45 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             logger.warning("PR #%s: gh_pr_state read failed: %s", pr_number, exc)
             return None
 
+    def repository_default_branch(self) -> str | None:
+        """Return the verified default branch from exact repository metadata.
+
+        The REST response must be a JSON object with a non-empty, unpadded
+        ``default_branch`` string. This method has no local-checkout or
+        ``main`` fallback.
+        """
+        if self._repo_slug is None:
+            return None
+        try:
+            owner, name = self._owner_name()
+            result = self._gh(["api", f"repos/{owner}/{name}", "--method", "GET"])
+            if getattr(result, "returncode", None) != 0:
+                return None
+            stdout = getattr(result, "stdout", None)
+            if not isinstance(stdout, str) or not stdout.strip():
+                return None
+            payload = json.loads(stdout)
+        except (
+            AttributeError,
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as exc:
+            logger.warning("repository default-branch read failed: %s", exc)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        default_branch = payload.get("default_branch")
+        if (
+            not isinstance(default_branch, str)
+            or not default_branch
+            or default_branch != default_branch.strip()
+        ):
+            return None
+        return default_branch
+
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Read operational readiness before a conditional normal merge.
 
