@@ -420,6 +420,7 @@ def test_pre_pr_tests_help_describes_the_test_gate() -> None:
 def test_repository_contention_options_have_bounded_defaults(profile: str) -> None:
     """Every queue command supplies the checkout admission timeout pair."""
     args = pipeline_cli.parse_args([], profile=profile)
+    assert args.git_lock_timeout == 7200
     assert args.repository_lock_wait_timeout == 120
     assert args.repository_contention_timeout == 600
 
@@ -428,6 +429,8 @@ def test_repository_contention_options_transport_explicit_values_to_config() -> 
     """Explicit repository wait limits reach the pipeline configuration."""
     args = pipeline_cli.parse_args(
         [
+            "--git-lock-timeout",
+            "7201",
             "--repository-lock-wait-timeout",
             "17",
             "--repository-contention-timeout",
@@ -437,13 +440,14 @@ def test_repository_contention_options_transport_explicit_values_to_config() -> 
 
     config = pipeline_cli.build_config(args, "org", ["repo-a"])
 
+    assert config.git_lock_timeout == 7201
     assert config.repository_lock_wait_timeout == 17
     assert config.repository_contention_timeout == 91
 
 
 @pytest.mark.parametrize(
     "flag",
-    ["--repository-lock-wait-timeout", "--repository-contention-timeout"],
+    ["--git-lock-timeout", "--repository-lock-wait-timeout", "--repository-contention-timeout"],
 )
 def test_repository_contention_options_require_positive_seconds(flag: str) -> None:
     """A repository wait option rejects a zero or negative value."""

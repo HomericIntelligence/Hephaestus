@@ -167,6 +167,7 @@ class TestWiring:
                 host_verification_pyxis_authority: Path | None = None,
                 host_verification_pyxis_quota_root: Path | None = None,
                 podman_machine: str | None = None,
+                git_lock_timeout: int = 7200,
             ) -> None:
                 super().__init__(size=size, shutdown=shutdown, completion_q=completion_q)
                 created["size"] = size
@@ -182,6 +183,7 @@ class TestWiring:
                 created["host_verification_pyxis_authority"] = host_verification_pyxis_authority
                 created["host_verification_pyxis_quota_root"] = host_verification_pyxis_quota_root
                 created["podman_machine"] = podman_machine
+                created["git_lock_timeout"] = git_lock_timeout
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
         monkeypatch.setattr(
@@ -196,6 +198,7 @@ class TestWiring:
             projects_dir=tmp_path,
             gh_extra_path_root=gh_root,
             rate_guard_enabled=False,
+            git_lock_timeout=7201,
         )
         coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
@@ -216,6 +219,7 @@ class TestWiring:
         assert created["host_verification_pyxis_authority"] is None
         assert created["host_verification_pyxis_quota_root"] is None
         assert created["podman_machine"] is None
+        assert created["git_lock_timeout"] == 7201
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

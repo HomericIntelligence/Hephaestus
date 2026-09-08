@@ -2334,6 +2334,25 @@ class TestGitErrorRetryCap:
         assert outcome.note == "git_error"
         assert item.attempts["implement"] == 0  # git failures never burn implement
 
+    @pytest.mark.parametrize("error", ["lock_timeout", "lock_metadata_error"])
+    def test_worktree_lock_failure_finishes_without_git_retry(
+        self,
+        error: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """An exhausted separate lock wait does not enter Git retries."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=False, error=error), ctx)
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.FINISH_FAIL, error)
+        assert "git_error_retries" not in item.payload
+
     def test_source_workspace_ownership_failure_is_terminal(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -2515,6 +2534,25 @@ class TestGitErrorRetryCap:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert outcome.note == "git_error"
+
+    @pytest.mark.parametrize("error", ["lock_timeout", "lock_metadata_error"])
+    def test_push_lock_failure_finishes_without_git_retry(
+        self,
+        error: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A push lock failure keeps its class and does not enter Git retries."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=False, error=error), ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.FINISH_FAIL, error)
+        assert "git_error_retries" not in item.payload
 
     def test_worktree_success_resets_the_counter(self, make_ctx: Any, make_work_item: Any) -> None:
         """A successful worktree job ends the consecutive-failure streak."""

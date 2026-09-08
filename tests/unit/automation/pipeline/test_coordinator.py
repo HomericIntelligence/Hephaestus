@@ -1914,7 +1914,10 @@ class TestImplementationAdmission:
         assert item.result is None
 
     def test_restarted_direct_writer_reaches_implementation_agent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        require_git_worktree_list_z: None,
     ) -> None:
         """A real direct-writer restart reaches the implementation request."""
         repo, revision = _writer_repository(tmp_path)
@@ -2026,7 +2029,10 @@ class TestImplementationAdmission:
         assert item.state == "IMPLEMENT_WAIT"
 
     def test_restarted_adopted_writer_reaches_implementation_agent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        require_git_worktree_list_z: None,
     ) -> None:
         """A real adopted-writer restart reaches the implementation request."""
         repo, revision = _writer_repository(tmp_path)
@@ -4158,10 +4164,8 @@ class TestDurableEventLog:
         assert "stdout_tail" not in complete["fields"][-1]
         assert "stderr_tail" not in complete["fields"][-1]
 
-    def test_repository_contention_event_serializes_lock_holder_diagnostics(
-        self, tmp_path: Path
-    ) -> None:
-        """A durable completion record keeps bounded lock and holder evidence."""
+    def test_lock_timeout_event_records_verified_holder(self, tmp_path: Path) -> None:
+        """A durable completion keeps the closed verified-holder fields."""
         event_log_path = tmp_path / "pipeline-events.jsonl"
         pool = FakeWorkerPool()
         pool.queue_result(
@@ -4169,23 +4173,15 @@ class TestDurableEventLog:
                 ok=False,
                 error="lock_timeout",
                 value={
+                    "failure_kind": "lock_timeout",
                     "repository": "repo-a",
-                    "operation": "clone",
-                    "lock_layer": "in_process",
-                    "lock_path": "/tmp/git-repo-a.lock",
-                    "configured_lock_wait_s": 120.0,
-                    "attempt_wait_s": 2.5,
-                    "run_identity": "run-123",
-                    "holder_metadata_status": "unverified",
-                    "holder_metadata_advisory": True,
-                    "holder_metadata": {
-                        "pid": 42,
-                        "repository": "repo-a",
-                        "operation": "commit_push",
-                        "run_identity": "holder-run",
-                        "acquired_at_unix_s": 10.0,
-                    },
-                    "ignored": "must not persist",
+                    "waiting_operation": "clone",
+                    "waiting_process_id": 43,
+                    "holder_operation": "commit_push",
+                    "holder_process_id": 42,
+                    "holder_acquired_at": "2026-09-03T12:00:00Z",
+                    "holder_source": "owner_sidecar",
+                    "wait_duration_s": 2.5004,
                 },
             )
         )
@@ -4216,26 +4212,18 @@ class TestDurableEventLog:
 
         records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
         complete = next(record for record in records if record["event"] == "complete")
-        contention = complete["fields"][-1]["lock_contention"]
+        contention = complete["fields"][-1]["lock"]
         assert contention == {
+            "failure_kind": "lock_timeout",
             "repository": "repo-a",
-            "operation": "clone",
-            "lock_layer": "in_process",
-            "lock_path": "/tmp/git-repo-a.lock",
-            "configured_lock_wait_s": 120.0,
-            "attempt_wait_s": 2.5,
-            "run_identity": "run-123",
-            "holder_metadata_status": "unverified",
-            "holder_metadata_advisory": True,
-            "holder_metadata": {
-                "pid": 42,
-                "repository": "repo-a",
-                "operation": "commit_push",
-                "run_identity": "holder-run",
-                "acquired_at_unix_s": 10.0,
-            },
+            "waiting_operation": "clone",
+            "waiting_process_id": 43,
+            "holder_operation": "commit_push",
+            "holder_process_id": 42,
+            "holder_acquired_at": "2026-09-03T12:00:00Z",
+            "holder_source": "owner_sidecar",
+            "wait_duration_s": 2.5,
         }
-        assert "ignored" not in complete["fields"][-1]
 
     def test_event_log_completion_records_worker_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

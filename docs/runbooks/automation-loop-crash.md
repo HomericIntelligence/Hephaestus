@@ -42,6 +42,31 @@ processing an issue, or a phase times out, and you need to resume safely.
    suspect, recover it with the
    [corrupted-worktree runbook](corrupted-worktree.md) before re-running.
 
+## Diagnose Git lock contention
+
+Git lock wait has a separate budget from the Git command. Use
+`--git-lock-timeout SECONDS` when a repository has long hooks. The default is
+7200 seconds. The command timeout starts only after the repository lock is
+acquired.
+
+An expired, verified wait has the durable error class `lock_timeout`. Its lock
+field identifies the waiting operation and process, the holder operation and
+process, the holder acquisition time and source, and the measured wait
+duration. `lock_metadata_error` means that the primary lock did not have valid
+active-owner data. Do not remove the primary lock or the owner sentinel while
+another loop can be active.
+
+The owner record has `.owner.json` appended to the primary lock path and mode
+`0600`. The `.owner.lock` sentinel proves that the record is active. A new
+worker replaces a stale regular record. A link, directory, malformed record,
+or repository mismatch is unsafe and stops Git before dispatch.
+
+After a crash, wait for the old process to exit. Then run the same scoped
+command again. The new worker can remove a stale regular record while it holds
+the primary lock. For `lock_metadata_error`, preserve the lock artifacts and
+inspect the process and deployment version before restart. An old executable
+still protects the primary lock, but a new executable cannot verify its holder.
+
 ## Pipeline recovery semantics
 
 For queue-pipeline recovery, distinguish interrupts from fatal coordinator

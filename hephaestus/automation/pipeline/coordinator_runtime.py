@@ -41,6 +41,7 @@ from .job_failures import (
     durable_error_class,
     is_durable_failure_kind,
     repository_contention_event_fields,
+    repository_operation_lock_event_fields,
 )
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
@@ -832,10 +833,17 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
         if diagnostics:
             fields["diagnostics"] = diagnostics
-        if result.error == "lock_timeout":
-            lock_contention = repository_contention_event_fields(value)
-            if lock_contention is not None:
-                fields["lock_contention"] = lock_contention
+        if result.error in {"lock_timeout", "lock_metadata_error"}:
+            lock_fields = repository_operation_lock_event_fields(value)
+            if lock_fields is not None:
+                fields["lock"] = lock_fields
+            elif not (
+                isinstance(value, dict)
+                and value.get("failure_kind") in {"lock_timeout", "lock_metadata_error"}
+            ):
+                lock_contention = repository_contention_event_fields(value)
+                if lock_contention is not None:
+                    fields["lock_contention"] = lock_contention
         if isinstance(value, dict) and value.get("failure_kind") == "source_workspace_ownership":
             recovery = bounded_source_workspace_recovery(value.get("source_workspace_recovery"))
             if recovery is not None:

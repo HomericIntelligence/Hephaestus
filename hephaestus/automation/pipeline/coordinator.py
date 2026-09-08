@@ -163,6 +163,7 @@ class Coordinator(
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
                 podman_machine=config.podman_machine,
+                git_lock_timeout=config.git_lock_timeout,
                 **run_identity_options,
             )
             from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool

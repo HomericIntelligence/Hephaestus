@@ -77,6 +77,7 @@ from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
 )
+from hephaestus.automation.pipeline.repository_lock import LockTimeoutError
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
@@ -92,7 +93,6 @@ from hephaestus.automation.pipeline.worker_pool import (
     _GitInspectionResourceLimitError,
     _GitLockTimeoutError,
     _hdiutil_create_argv,
-    _holder_metadata,
     _host_validation_failure_kind,
     _host_verification_command,
     _host_verification_env,
@@ -105,10 +105,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _prepare_host_output_aliases,
     _quota_backed_volume,
     _read_bounded_conflict_file,
-    _read_repo_lock_holder,
     _RebaseConflictContextError,
-    _remove_repo_lock_holder,
-    _repo_lock_holder_path,
     _repo_lock_path,
     _run_bounded_git_output,
     _run_bounded_host_command,
@@ -119,7 +116,6 @@ from hephaestus.automation.pipeline.worker_pool import (
     _validated_git_exec_path,
     _validated_signing_key,
     _verifier_owned_runtime_environment,
-    _write_repo_lock_holder,
 )
 from hephaestus.automation.prompts.pr_review import PrReviewPromptSizeError
 from hephaestus.automation.remediation_recovery import (
@@ -242,6 +238,75 @@ _EMPTY_DIFF_OUTPUT = _BoundedGitOutput(
     sha256=hashlib.sha256(b"").hexdigest(),
     byte_count=0,
 )
+
+
+def _run_controlled_long_commit_waiter(
+    completion_q: CompletionQueue,
+    shutdown_event: threading.Event,
+    tmp_path: Path,
+) -> tuple[JobResult, JobResult, list[str]]:
+    """Run one controlled long holder and one cross-pool Git waiter."""
+    lock_dir = tmp_path / "locks"
+    holder_pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=lock_dir,
+        git_lock_timeout=2,
+    )
+    waiter_pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=lock_dir,
+        git_lock_timeout=2,
+    )
+    holder_entered = threading.Event()
+    release_holder = threading.Event()
+    waiter_called = threading.Event()
+    waiter_done = threading.Event()
+    events: list[str] = []
+    results: dict[str, JobResult] = {}
+
+    def holder_dispatch(_job: GitJob) -> JobResult:
+        events.append("holder_enter")
+        holder_entered.set()
+        release_holder.wait(timeout=5)
+        events.append("holder_exit")
+        return JobResult(ok=True)
+
+    def waiter_dispatch(_job: GitJob) -> JobResult:
+        events.append("waiter_enter")
+        return JobResult(ok=True)
+
+    def run_holder() -> None:
+        results["holder"] = holder_pool._run_git(GitJob("test/repo", "commit_push", 1))
+
+    def run_waiter() -> None:
+        waiter_called.set()
+        results["waiter"] = waiter_pool._run_git(GitJob("test/repo", "create_worktree", 0))
+        waiter_done.set()
+
+    with (
+        patch.object(holder_pool, "_dispatch_locked_git", side_effect=holder_dispatch),
+        patch.object(waiter_pool, "_dispatch_locked_git", side_effect=waiter_dispatch),
+    ):
+        holder_thread = threading.Thread(target=run_holder)
+        waiter_thread = threading.Thread(target=run_waiter)
+        holder_thread.start()
+        assert holder_entered.wait(timeout=5)
+        waiter_thread.start()
+        assert waiter_called.wait(timeout=5)
+        assert not waiter_done.wait(timeout=0.1)
+        release_holder.set()
+        holder_thread.join(timeout=5)
+        waiter_thread.join(timeout=5)
+
+    holder_pool.shutdown()
+    waiter_pool.shutdown()
+    assert not holder_thread.is_alive()
+    assert not waiter_thread.is_alive()
+    return results["holder"], results["waiter"], events
 
 
 def _test_git_binding(worktree: Path) -> dict[str, str]:
@@ -18132,38 +18197,223 @@ class TestGitOps:
 class TestGitLocking:
     """Tests for per-repo serialization and cross-process file locking."""
 
-    def test_lock_holder_record_removed_before_release_for_ordinary_git_job(
-        self, pool: WorkerPool
+    def test_long_commit_push_does_not_starve_create_worktree(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
     ) -> None:
-        """An ordinary job owns its sidecar for the full advisory lock hold."""
-        events: list[str] = []
+        """A waiting worktree operation continues after the long holder."""
+        holder, waiter, events = _run_controlled_long_commit_waiter(
+            completion_q, shutdown_event, tmp_path
+        )
+
+        assert holder.ok is True
+        assert waiter.ok is True
+        assert events == ["holder_enter", "holder_exit", "waiter_enter"]
+
+    def test_waiter_survives_old_command_timeout_budget(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """Passive wait does not consume the waiter's zero command budget."""
+        _holder, waiter, _events = _run_controlled_long_commit_waiter(
+            completion_q, shutdown_event, tmp_path
+        )
+
+        assert waiter.ok is True
+
+    def test_long_commit_push_keeps_shared_metadata_serialized(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """The waiter cannot dispatch while the long holder is active."""
+        _holder, _waiter, events = _run_controlled_long_commit_waiter(
+            completion_q, shutdown_event, tmp_path
+        )
+
+        assert events.index("waiter_enter") > events.index("holder_exit")
+
+    def test_git_waiter_reports_github_holder(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A Git waiter reports an active same-process GitHub job."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Runner:
+            gh_timeout = 60
+
+            def run(
+                self,
+                _job: GitHubJob,
+                *,
+                shutdown: threading.Event | None = None,
+                deadline_s: float | None = None,
+            ) -> ReplyJournalAppended:
+                del shutdown, deadline_s
+                entered.set()
+                release.wait(timeout=5)
+                return ReplyJournalAppended(cast(AppendReplyJournalRequest, _job.request))
+
+        pool = WorkerPool(
+            size=2,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+            github_job_runner=Runner(),
+            git_lock_timeout=1,
+        )
+        marker = (
+            f"<!-- hephaestus-implementation-reply-handoff:"
+            f"pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+        )
+        github_job = GitHubJob(
+            repo="test/repo",
+            repo_root=tmp_path.resolve(),
+            request=AppendReplyJournalRequest(
+                issue_number=3,
+                marker=marker,
+                body=f'{marker}\n<!-- {{"format":1}} -->',
+            ),
+            descr="read_current_plan",
+        )
+        github_result: dict[str, JobResult] = {}
+
+        def run_github() -> None:
+            github_result["result"] = pool._run_github(github_job)
+
+        thread = threading.Thread(target=run_github)
+        thread.start()
+        assert entered.wait(timeout=5)
+        try:
+            with patch.object(pool, "_dispatch_locked_git") as dispatch:
+                result = pool._run_git(
+                    GitJob(
+                        "test/repo",
+                        "clone",
+                        10,
+                        repository_lock_wait_timeout_s=0.01,
+                        kwargs={"repo": "test/repo", "dest": str(tmp_path / "clone")},
+                    )
+                )
+        finally:
+            release.set()
+            thread.join(timeout=5)
+            pool.shutdown()
+
+        assert not thread.is_alive()
+        assert github_result["result"].ok is True
+        dispatch.assert_not_called()
+        assert result.error == "lock_timeout"
+        assert isinstance(result.value, dict)
+        assert result.value["waiting_operation"] == "clone"
+        assert result.value["holder_operation"] == "read_current_plan"
+        assert result.value["holder_process_id"] == os.getpid()
+        assert result.value["holder_source"] == "in_process"
+
+    def test_lock_wait_does_not_reduce_command_timeout(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """Passive lock wait does not reduce an ordinary Git command budget."""
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+            git_lock_timeout=30,
+        )
+        lock_budgets: list[float] = []
+        dispatched_deadlines: list[float | None] = []
 
         @contextmanager
-        def advisory(*args: object, **kwargs: object) -> Iterator[None]:
-            del args, kwargs
-            events.append("lock_enter")
-            try:
-                yield
-            finally:
-                events.append("lock_exit")
+        def wait_for_lock(
+            _repo: str,
+            *,
+            operation: str,
+            timeout_s: float,
+            include_file_lock: bool,
+        ) -> Iterator[None]:
+            assert operation == "commit_push"
+            assert include_file_lock is True
+            lock_budgets.append(timeout_s)
+            yield
 
-        def remove_holder(*_args: object) -> None:
-            events.append("holder_remove")
-
-        def dispatch(_job: GitJob) -> JobResult:
-            events.append("dispatch")
+        def dispatch(job: GitJob) -> JobResult:
+            dispatched_deadlines.append(job.deadline_s)
             return JobResult(ok=True)
 
-        with (
-            patch(f"{_WP}._interruptible_file_lock", side_effect=advisory),
-            patch(f"{_WP}._write_repo_lock_holder", return_value=MagicMock()),
-            patch(f"{_WP}._remove_repo_lock_holder", side_effect=remove_holder),
-            patch.object(pool, "_dispatch_git_op", side_effect=dispatch),
-        ):
-            result = pool._run_git(GitJob("test/repo", "commit_push", 60))
+        try:
+            with (
+                patch(f"{_WP}.time.monotonic", side_effect=[100.0, 125.0]),
+                patch.object(pool, "_repo_lock", side_effect=wait_for_lock),
+                patch.object(pool, "_dispatch_locked_git", side_effect=dispatch),
+            ):
+                result = pool._run_git(GitJob("test/repo", "commit_push", 10))
+        finally:
+            pool.shutdown()
 
-        assert result.ok
-        assert events == ["lock_enter", "dispatch", "holder_remove", "lock_exit"]
+        assert result.ok is True
+        assert lock_budgets == [30]
+        assert dispatched_deadlines == [135.0]
+
+    def test_lock_wait_does_not_erase_explicit_operation_deadline(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A fresh command budget stays inside its explicit outer deadline."""
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+            git_lock_timeout=30,
+        )
+        lock_budgets: list[float] = []
+        dispatched_deadlines: list[float | None] = []
+
+        @contextmanager
+        def wait_for_lock(
+            _repo: str,
+            *,
+            operation: str,
+            timeout_s: float,
+            include_file_lock: bool,
+        ) -> Iterator[None]:
+            assert operation == "commit_push"
+            assert include_file_lock is True
+            lock_budgets.append(timeout_s)
+            yield
+
+        def dispatch(job: GitJob) -> JobResult:
+            dispatched_deadlines.append(job.deadline_s)
+            return JobResult(ok=True)
+
+        try:
+            with (
+                patch(f"{_WP}.time.monotonic", side_effect=[100.0, 105.0]),
+                patch.object(pool, "_repo_lock", side_effect=wait_for_lock),
+                patch.object(pool, "_dispatch_locked_git", side_effect=dispatch),
+            ):
+                result = pool._run_git(GitJob("test/repo", "commit_push", 10, deadline_s=108.0))
+        finally:
+            pool.shutdown()
+
+        assert result.ok is True
+        assert lock_budgets == [8.0]
+        assert dispatched_deadlines == [108.0]
 
     def test_two_process_commit_push_holder_serializes_checkout_then_continues(
         self, tmp_path: Path
@@ -18206,8 +18456,9 @@ class TestGitLocking:
             assert contender.returncode == 0, contender.stderr
             result = json.loads(contender.stdout)
             assert result["error"] == "lock_timeout"
-            assert result["value"]["holder_metadata"]["operation"] == "commit_push"
-            assert result["value"]["holder_metadata"]["run_identity"] == "holder-run"
+            assert result["value"]["holder_operation"] == "commit_push"
+            assert result["value"]["holder_process_id"] == holder.pid
+            assert result["value"]["holder_source"] == "owner_sidecar"
             assert not contender_marker.exists()
 
             release.write_text("release", encoding="utf-8")
@@ -18435,12 +18686,18 @@ class TestGitLocking:
         pool: WorkerPool,
         tmp_path: Path,
     ) -> None:
-        """A held cross-process lock fails fast with lock_timeout."""
+        """An old primary-lock holder without metadata fails closed."""
         fcntl = pytest.importorskip("fcntl")
         lock_path = _repo_lock_path("test/repo", tmp_path / "locks")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         held_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=0, kwargs={})
+        job = GitJob(
+            repo="test/repo",
+            op="clone",
+            timeout_s=60,
+            repository_lock_wait_timeout_s=0.01,
+            kwargs={"repo": "test/repo", "dest": str(tmp_path / "clone")},
+        )
 
         try:
             fcntl.flock(held_fd, fcntl.LOCK_EX)
@@ -18452,7 +18709,7 @@ class TestGitLocking:
 
         manager.assert_not_called()
         assert result.ok is False
-        assert result.error == "lock_timeout"
+        assert result.error == "lock_metadata_error"
         with pool._repo_locks_guard:
             assert pool._repo_locks == {}
 
@@ -18475,7 +18732,10 @@ class TestGitLocking:
             return True
 
         with (
-            patch(f"{_WP}.file_lock", side_effect=LockUnavailableError("held")),
+            patch(
+                "hephaestus.automation.pipeline.repository_lock.file_lock",
+                side_effect=LockUnavailableError("held"),
+            ),
             patch.object(shutdown_event, "wait", side_effect=interrupting_wait),
             patch(f"{_WP}.WorktreeManager") as manager,
         ):
@@ -18501,127 +18761,89 @@ class TestGitLocking:
             with pytest.raises(LockUnavailableError, match="inner lock"):
                 pool._run_git(job)
 
-    def test_checkout_lock_timeout_returns_structured_unverified_holder_data(
-        self, pool: WorkerPool, tmp_path: Path
+    def test_nested_lock_timeout_has_closed_metadata_failure(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
     ) -> None:
-        """A failed advisory acquisition reports bounded diagnostic evidence."""
-        lock_path = _repo_lock_path("test/repo", tmp_path / "locks")
-        holder_path = _repo_lock_holder_path(lock_path)
-        _write_repo_lock_holder(
-            holder_path,
-            _holder_metadata(
-                repo="test/repo",
-                operation="clone",
-                run_identity="holder-run",
-            ),
-        )
-        job = GitJob(
-            repo="test/repo",
-            op="clone",
-            timeout_s=60,
-            repository_lock_wait_timeout_s=0.01,
-            kwargs={"repo": "test/repo", "dest": str(tmp_path / "clone")},
+        """An internal lock timeout does not expose its path as holder data."""
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
+        error = _GitLockTimeoutError(
+            lock_path=tmp_path / "private.lock",
+            lock_layer="internal",
         )
 
-        with patch(f"{_WP}.file_lock", side_effect=LockUnavailableError("held")):
+        with patch.object(pool, "_dispatch_locked_git", side_effect=error):
+            result = pool._run_git(job)
+
+        assert result.error == "lock_metadata_error"
+        assert isinstance(result.value, dict)
+        assert set(result.value) == {
+            "failure_kind",
+            "repository",
+            "waiting_operation",
+            "waiting_process_id",
+            "holder_operation",
+            "holder_process_id",
+            "holder_acquired_at",
+            "holder_source",
+            "wait_duration_s",
+        }
+        assert result.value["holder_source"] == "lock_metadata"
+        assert "private.lock" not in repr(result.value)
+
+    def test_nested_repository_lock_failure_uses_external_job_identity(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """An internal cache key does not enter the durable lock result."""
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
+        error = LockTimeoutError(
+            "lock_timeout",
+            {
+                "failure_kind": "lock_timeout",
+                "repository": "repository-intake:/private/common/git/dir",
+                "waiting_operation": "repository_operation",
+                "waiting_process_id": os.getpid(),
+                "holder_operation": "prepare_intake",
+                "holder_process_id": os.getpid(),
+                "holder_acquired_at": "2026-09-03T12:00:00Z",
+                "holder_source": "in_process",
+                "wait_duration_s": 1.0,
+            },
+        )
+
+        with patch.object(pool, "_dispatch_locked_git", side_effect=error):
             result = pool._run_git(job)
 
         assert result.error == "lock_timeout"
         assert isinstance(result.value, dict)
-        value = result.value
-        assert value["repository"] == "test/repo"
-        assert value["operation"] == "clone"
-        assert value["lock_layer"] == "advisory"
-        assert value["lock_path"] == str(lock_path)
-        assert value["configured_lock_wait_s"] == 0.01
-        assert cast(float, value["attempt_wait_s"]) >= 0
-        assert value["run_identity"] == "unknown"
-        assert value["holder_metadata_status"] == "unverified"
-        assert value["holder_metadata_advisory"] is True
-        holder = value["holder_metadata"]
-        assert isinstance(holder, dict)
-        assert holder["run_identity"] == "holder-run"
+        assert result.value["repository"] == "test/repo"
+        assert result.value["waiting_operation"] == "create_worktree"
+        assert "/private/common/git/dir" not in repr(result.value)
 
-    def test_shared_checkout_deadline_reaches_both_repository_lock_layers(
-        self, pool: WorkerPool, tmp_path: Path
+    def test_long_git_description_is_bounded_only_for_lock_metadata(
+        self,
+        pool: WorkerPool,
     ) -> None:
-        """The worker passes one absolute limit to both repository lock layers."""
-        deadline = time.monotonic() + 30.0
-        observed: dict[str, float] = {}
-
-        @contextmanager
-        def repo_lock(
-            repo: str, *, deadline_s: float | None = None, diagnostic_path: Path | None = None
-        ) -> Iterator[None]:
-            del repo, diagnostic_path
-            observed["in_process"] = cast(float, deadline_s)
-            yield
-
-        @contextmanager
-        def advisory_lock(
-            job: GitJob,
-            path: Path,
-            *,
-            timeout_s: float | None = None,
-            deadline_s: float | None = None,
-        ) -> Iterator[None]:
-            del job, path, timeout_s
-            observed["advisory"] = cast(float, deadline_s)
-            yield
-
+        """A long path-based description does not prevent Git dispatch."""
+        description = f"remove worktree /private/{'nested/' * 40}checkout"
         job = GitJob(
             repo="test/repo",
-            op="clone",
+            op="remove_worktree",
             timeout_s=60,
-            repository_lock_wait_timeout_s=60,
-            kwargs={"repo": "test/repo", "dest": str(tmp_path / "clone")},
+            descr=description,
+            kwargs={},
         )
-        with (
-            patch(f"{_WP}.time.monotonic", return_value=deadline - 60.0),
-            patch.object(pool, "_repo_lock", side_effect=repo_lock),
-            patch.object(pool, "_advisory_repo_lock", side_effect=advisory_lock),
-            patch.object(pool, "_dispatch_git_op", return_value=JobResult(ok=True)),
-        ):
+
+        with patch.object(
+            pool, "_dispatch_locked_git", return_value=JobResult(ok=True)
+        ) as dispatch:
             result = pool._run_git(job)
 
         assert result.ok is True
-        assert observed == {"in_process": deadline, "advisory": deadline}
-
-    def test_in_process_checkout_timeout_reports_advisory_holder(
-        self, pool: WorkerPool, tmp_path: Path
-    ) -> None:
-        """An in-process timeout reads bounded advisory holder diagnostics."""
-        pool._lock_dir = tmp_path / "locks"
-        lock_path = _repo_lock_path("test/repo", pool._lock_dir)
-        holder_path = _repo_lock_holder_path(lock_path)
-        _write_repo_lock_holder(
-            holder_path,
-            _holder_metadata(
-                repo="test/repo",
-                operation="commit_push",
-                run_identity="other-run",
-            ),
-        )
-        job = GitJob(
-            repo="test/repo",
-            op="clone",
-            timeout_s=60,
-            repository_lock_wait_timeout_s=0.01,
-            kwargs={"repo": "test/repo", "dest": str(tmp_path / "clone")},
-        )
-        timeout = _GitLockTimeoutError(lock_path=lock_path, lock_layer="in_process")
-
-        with patch.object(pool, "_repo_lock", side_effect=timeout):
-            result = pool._run_git(job)
-
-        assert result.error == "lock_timeout"
-        assert isinstance(result.value, dict)
-        assert result.value["lock_layer"] == "in_process"
-        assert result.value["holder_metadata_status"] == "unverified"
-        holder = result.value["holder_metadata"]
-        assert isinstance(holder, dict)
-        assert holder["operation"] == "commit_push"
-        assert holder["run_identity"] == "other-run"
+        dispatch.assert_called_once()
+        assert dispatch.call_args.args[0].descr == description
 
     def test_checkout_lock_admission_starts_network_budget_after_both_locks(
         self, pool: WorkerPool, tmp_path: Path
@@ -18637,13 +18859,6 @@ class TestGitLocking:
             events.append("repo_enter")
             yield
             events.append("repo_exit")
-
-        @contextmanager
-        def advisory_lock(*args: object, **kwargs: object) -> Iterator[None]:
-            del args, kwargs
-            events.append("advisory_enter")
-            yield
-            events.append("advisory_exit")
 
         @contextmanager
         def network_deadline(
@@ -18663,7 +18878,6 @@ class TestGitLocking:
         )
         with (
             patch.object(pool, "_repo_lock", side_effect=repo_lock),
-            patch.object(pool, "_advisory_repo_lock", side_effect=advisory_lock),
             patch(f"{_WP}.git_utils.operation_deadline", side_effect=network_deadline),
             patch.object(pool, "_dispatch_git_op", return_value=JobResult(ok=True)),
         ):
@@ -18672,10 +18886,8 @@ class TestGitLocking:
         assert result.ok is True
         assert events == [
             "repo_enter",
-            "advisory_enter",
             "network_enter",
             "network_exit",
-            "advisory_exit",
             "repo_exit",
         ]
 
@@ -18758,124 +18970,6 @@ class TestGitLocking:
 
         assert result.interrupted is True
         assert result.error == "interrupted"
-
-    def test_holder_sidecar_is_atomic_owner_only_and_removable(self, tmp_path: Path) -> None:
-        """Replacement keeps one complete 0600 diagnostic record."""
-        path = tmp_path / "git-test_repo.lock.holder.json"
-        first = _holder_metadata(repo="test/repo", operation="clone", run_identity="first")
-        second = _holder_metadata(
-            repo="test/repo", operation="sync_checkout", run_identity="second"
-        )
-        first_identity = _write_repo_lock_holder(path, first)
-        second_identity = _write_repo_lock_holder(path, second)
-
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        current_holder = _read_repo_lock_holder(path).get("holder_metadata")
-        assert isinstance(current_holder, dict)
-        assert current_holder["run_identity"] == "second"
-        with pytest.raises(OSError, match="changed"):
-            _remove_repo_lock_holder(path, first_identity)
-        _remove_repo_lock_holder(path, second_identity)
-        assert not path.exists()
-
-    def test_untrusted_holder_sidecars_never_assert_holder_activity(self, tmp_path: Path) -> None:
-        """Missing, malformed, stale, and symlinked sidecars stay advisory."""
-        path = tmp_path / "holder.json"
-        assert _read_repo_lock_holder(path)["holder_metadata_status"] == "unavailable"
-        path.write_text("{bad", encoding="utf-8")
-        assert _read_repo_lock_holder(path)["holder_metadata_status"] == "unverified"
-        path.unlink()
-        _write_repo_lock_holder(
-            path,
-            _holder_metadata(repo="test/repo", operation="clone", run_identity="public"),
-        )
-        path.chmod(0o644)
-        public_result = _read_repo_lock_holder(path)
-        assert public_result["holder_metadata_status"] == "unverified"
-        assert "holder_metadata" not in public_result
-        path.unlink()
-        stale = _holder_metadata(
-            repo="test/repo",
-            operation="clone",
-            run_identity="stale",
-            acquired_at_unix_s=1.0,
-        )
-        _write_repo_lock_holder(path, stale)
-        stale_result = _read_repo_lock_holder(path)
-        assert stale_result["holder_metadata_stale"] is True
-        assert "holder_metadata" not in stale_result
-        path.unlink()
-        target = tmp_path / "target"
-        target.write_text("{}", encoding="utf-8")
-        path.symlink_to(target)
-        assert _read_repo_lock_holder(path)["holder_metadata_status"] == "unverified"
-
-    def test_lock_holder_record_write_rejects_symlink_without_changing_target(
-        self, tmp_path: Path
-    ) -> None:
-        """A diagnostic write does not replace a symlink or its target."""
-        target = tmp_path / "target"
-        target.write_text("unchanged", encoding="utf-8")
-        path = tmp_path / "holder.json"
-        path.symlink_to(target)
-
-        with pytest.raises(OSError, match="regular file"):
-            _write_repo_lock_holder(
-                path,
-                _holder_metadata(
-                    repo="test/repo",
-                    operation="commit_push",
-                    run_identity="run",
-                ),
-            )
-
-        assert target.read_text(encoding="utf-8") == "unchanged"
-        assert path.is_symlink()
-
-    def test_lock_holder_record_cleanup_rejects_parent_replacement(self, tmp_path: Path) -> None:
-        """Cleanup does not unlink through a replaced parent directory."""
-        parent = tmp_path / "locks"
-        path = parent / "holder.json"
-        identity = _write_repo_lock_holder(
-            path,
-            _holder_metadata(
-                repo="test/repo",
-                operation="commit_push",
-                run_identity="run",
-            ),
-        )
-        moved = tmp_path / "old-locks"
-        parent.rename(moved)
-        parent.mkdir()
-        replacement = parent / "holder.json"
-        replacement.write_text("replacement", encoding="utf-8")
-
-        with pytest.raises(OSError, match="parent changed"):
-            _remove_repo_lock_holder(path, identity)
-
-        assert replacement.read_text(encoding="utf-8") == "replacement"
-        assert (moved / "holder.json").exists()
-
-    def test_holder_cleanup_failure_does_not_replace_success(
-        self, pool: WorkerPool, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A diagnostic cleanup error does not change the Git operation result."""
-        job = GitJob(
-            repo="test/repo",
-            op="clone",
-            timeout_s=60,
-            repository_lock_wait_timeout_s=5,
-            kwargs={"repo": "test/repo", "dest": str(tmp_path / "clone")},
-        )
-        with (
-            patch.object(pool, "_dispatch_git_op", return_value=JobResult(ok=True)),
-            patch(f"{_WP}._remove_repo_lock_holder", side_effect=OSError("cleanup")),
-            caplog.at_level(logging.WARNING, logger=_WP),
-        ):
-            result = pool._run_git(job)
-
-        assert result.ok is True
-        assert "holder sidecar cleanup failed" in caplog.text
 
 
 class TestShutdownAndCancel:
