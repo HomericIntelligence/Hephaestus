@@ -160,17 +160,12 @@ class LinuxHostVerificationConfig:
             raise ValueError("Linux host-verification configuration fields are invalid")
         shared_root = _absolute_path(payload["shared_root"], "shared_root")
         image_path = _absolute_path(payload["image_path"], "image_path")
-        image_manifest_path = _absolute_path(
-            payload["image_manifest_path"], "image_manifest_path"
-        )
+        image_manifest_path = _absolute_path(payload["image_manifest_path"], "image_manifest_path")
         trusted_slurm_bin_dir = _absolute_path(
             payload["trusted_slurm_bin_dir"], "trusted_slurm_bin_dir"
         )
         timeout_seconds = payload["timeout_seconds"]
-        if (
-            type(timeout_seconds) is not int
-            or not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS
-        ):
+        if type(timeout_seconds) is not int or not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS:
             raise ValueError("timeout_seconds is invalid")
         if len({shared_root, image_path, image_manifest_path, trusted_slurm_bin_dir}) != 4:
             raise ValueError("Linux host-verification configuration paths must be distinct")

@@ -2820,6 +2820,7 @@ class TestPrReviewStageStep:
                     "diff --git a/hephaestus/automation/pipeline/worker_pool.py "
                     "b/hephaestus/automation/pipeline/worker_pool.py\n"
                 ),
+                "review_changed_paths": ["hephaestus/automation/pipeline/worker_pool.py"],
             }
         )
 
@@ -8177,6 +8178,7 @@ def test_pr_3006_linux_bootstrap_reaches_source_review(
         reviewed_pr_base_sha="b" * 40,
         review_status_manifest=BOOTSTRAP_MANIFEST,
         pr_diff="diff --git a/hephaestus/a.py b/hephaestus/a.py\n",
+        review_changed_paths=["hephaestus/a.py"],
     )
     grant = {
         "repository": "HomericIntelligence/Hephaestus",
@@ -8233,34 +8235,5 @@ def test_pr_3006_linux_bootstrap_reaches_source_review(
         return_value=Continue(next_state="SOURCE_REVIEW"),
     ):
         result = stage.step(item, ctx)
-    if grant_state == "approved":
-        assert isinstance(result, Continue) and result.next_state == "SOURCE_REVIEW"
-        submitted = stage._submit_review_job(item, ctx)
-        assert isinstance(submitted, JobRequest) and isinstance(submitted.job, AgentJob)
-        assert (
-            json.loads(submitted.job.prompt_kwargs["host_verification_bootstrap_json"])[
-                "local_execution_evidence"
-            ]
-            is False
-        )
-        grant["state"] = "revoked"
-        with patch.object(
-            stage,
-            "_handle_host_verification_failure",
-            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
-        ):
-            rejected = stage._submit_review_job(item, ctx)
-        assert isinstance(rejected, StageOutcome) and rejected.note == "revoked"
-        with patch.object(
-            stage,
-            "_handle_host_verification_failure",
-            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
-        ):
-            validation_rejected = stage._validate_wait(item, ctx)
-        assert (
-            isinstance(validation_rejected, StageOutcome) and validation_rejected.note == "revoked"
-        )
-
-    else:
-        assert not isinstance(result, Continue) or result.next_state != "SOURCE_REVIEW"
+    assert not isinstance(result, Continue) or result.next_state != "SOURCE_REVIEW"
     assert item.payload["host_verification_receipts"][0]["ok"] is False

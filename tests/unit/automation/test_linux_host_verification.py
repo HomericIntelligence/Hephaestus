@@ -283,6 +283,7 @@ def test_prepare_run_rejects_existing_or_unsafe_shared_root(tmp_path: Path) -> N
 
     unsafe_root = tmp_path / "unsafe"
     unsafe_root.mkdir(mode=0o755)
+    unsafe_root.chmod(0o755)
     unsafe_config = LinuxHostVerificationConfig.from_mapping(
         {
             "shared_root": str(unsafe_root),
