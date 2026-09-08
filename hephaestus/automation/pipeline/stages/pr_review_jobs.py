@@ -16,6 +16,7 @@ from hephaestus.automation.prompts.pr_review import (
 )
 from hephaestus.automation.source_worktree import SourceWorkspaceError
 
+from ..coordinator_sessions import agent_session_lifecycle, writer_session_key
 from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     FrozenJson,
@@ -357,7 +358,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "reviewer"),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_bounded_pr_review_analysis_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -368,11 +369,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             execution_request=ExecutionRequest(
                 AgentRole.PR_REVIEWER,
                 AgentOperation.PR_REVIEW,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_PR_REVIEWER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                agent_session_lifecycle(item, AGENT_PR_REVIEWER),
             ),
             resume_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
@@ -543,7 +540,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "reviewer"),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_bounded_review_validation_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -554,11 +551,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             execution_request=ExecutionRequest(
                 AgentRole.PR_REVIEWER,
                 AgentOperation.REVIEW_VALIDATE,
-                (
-                    SessionLifecycle.RESUME_REQUIRED
-                    if AGENT_PR_REVIEWER in item.session_bindings
-                    else SessionLifecycle.START_NEW
-                ),
+                agent_session_lifecycle(item, AGENT_PR_REVIEWER),
             ),
             resume_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
@@ -701,7 +694,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         job = CompactJob(
             repo=item.repo,
             issue=_issue_number(item),
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "reviewer"),
             session_agent=AGENT_PR_REVIEWER,
             model=stage_model(ctx, "reviewer", reviewer_model),
             cwd=_worktree_path(item, ctx),
@@ -721,13 +714,11 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         """Compact the writer before the next retry continues its session."""
         if not item.worktree:
             return Continue(next_state=REVIEW_WAIT)
-        session_agent = (
-            AGENT_ADDRESS_REVIEW if item.payload.get("existing_pr") else AGENT_IMPLEMENTER
-        )
+        session_agent = writer_session_key(item)
         job = CompactJob(
             repo=item.repo,
             issue=_issue_number(item),
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             session_agent=session_agent,
             model=stage_model(ctx, "implementer", implementer_model),
             cwd=_worktree_path(item, ctx),

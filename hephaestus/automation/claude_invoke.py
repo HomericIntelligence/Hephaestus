@@ -16,8 +16,8 @@ What lives here:
   ``--resume`` (subsequent calls) based on whether the checkout-scoped JSONL
   transcript already exists. No recreate-on-failure cascade — a create/resume
   error propagates (#1168). On a model-specific usage cap it retries the same
-  request once on :func:`agent_config.fallback_model` and pins the fallback
-  for the rest of the process (#1793).
+  request once on an explicitly supplied fallback model and records the cap
+  for the rest of the process. Without a fallback, the failure propagates.
 """
 
 from __future__ import annotations
@@ -163,6 +163,7 @@ def invoke_claude_with_session(
     output_format: str = "text",
     input_via_stdin: bool = False,
     session_lifecycle: str | None = None,
+    require_new_session: bool = True,
     recreate_on_resume_failure: bool = True,  # accepted for back-compat; no longer used
 ) -> tuple[str, str]:
     """Invoke Claude with a deterministic per-(repo, issue, agent, model) session.
@@ -190,7 +191,7 @@ def invoke_claude_with_session(
     non-zero exit OR an exit-0 ``is_error: true`` JSON envelope (json format
     only; plain-text output is never scanned, since agent prose can
     legitimately contain the phrases) — the same request is retried once on
-    :func:`agent_config.fallback_model`, and the capped model is pinned to the
+    the explicitly supplied fallback model, and the capped model is pinned to the
     fallback for the rest of this process. The fallback runs under its own
     session lineage (the model is part of the session key), so the capped
     model's cached context is re-sent once. No retry happens when the
@@ -225,6 +226,8 @@ def invoke_claude_with_session(
         recreate_on_resume_failure: Deprecated/ignored. Retained so existing
             keyword callers keep working; the always-resume model needs no
             recreate toggle.
+        require_new_session: Reject an existing transcript for a new durable
+            cycle. Ordinary deterministic retries can reuse the transcript.
 
     Returns:
         ``(stdout, session_uuid)`` — the deterministic id derived from the
@@ -237,6 +240,8 @@ def invoke_claude_with_session(
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
+    if session_lifecycle is not None:
+        session_lifecycle = session_lifecycle.replace("_", "-")
     model = parse_model_selection(model).model
     if fallback_model_value is not None:
         fallback_model_value = parse_model_selection(fallback_model_value).model
@@ -260,11 +265,12 @@ def invoke_claude_with_session(
             output_format=output_format,
             input_via_stdin=input_via_stdin,
             session_lifecycle=session_lifecycle,
+            require_new_session=require_new_session,
         )
 
     fallback = fallback_model(fallback_model_value)
     effective = model
-    if session_lifecycle == "resume-required":
+    if not fallback or session_lifecycle in {"start-new", "resume-required"}:
         # A fallback model has a different deterministic Claude lineage.
         # Continuity is stronger than availability for an established review.
         return _attempt(model)
@@ -302,6 +308,7 @@ def _invoke_claude_once(
     output_format: str,
     input_via_stdin: bool,
     session_lifecycle: str | None,
+    require_new_session: bool = True,
 ) -> tuple[str, str]:
     """Run one ``claude`` create/resume call for the given model (no fallback).
 
@@ -324,7 +331,7 @@ def _invoke_claude_once(
     create = not transcript.is_file()
     if session_lifecycle == "resume-required" and create:
         raise AgentSessionLostError("Claude review transcript is missing")
-    if session_lifecycle == "start-new" and not create:
+    if session_lifecycle == "start-new" and require_new_session and not create:
         raise AgentSessionLostError("new Claude review cycle collided with an existing session")
     mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
     cmd: list[str] = ["claude", *mode_args]

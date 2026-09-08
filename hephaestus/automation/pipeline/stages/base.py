@@ -651,9 +651,9 @@ class StageContext:
             self.event_fn(event)
 
 
-def agent_provider(ctx: StageContext) -> str:
-    """Return the selected agent backend provider for an agent job."""
-    return ctx.config.agent or DEFAULT_AGENT
+def agent_provider(ctx: StageContext, role: str = "") -> str:
+    """Return the role tool, global tool, or default tool."""
+    return getattr(ctx.config, f"{role}_agent", "") or ctx.config.agent or DEFAULT_AGENT
 
 
 def stage_model(
@@ -664,7 +664,7 @@ def stage_model(
     provider: str | None = None,
 ) -> str:
     """Return the normalized compact selection for one pipeline phase."""
-    selected_provider = provider or agent_provider(ctx)
+    selected_provider = provider or agent_provider(ctx, phase)
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
     configured_value = phase_value or catch_all

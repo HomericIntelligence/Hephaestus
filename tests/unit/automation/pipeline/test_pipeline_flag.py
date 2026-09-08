@@ -413,9 +413,7 @@ def test_stage_model_adds_reasoning_for_supported_direct_agents(agent: str) -> N
 
     context = cast(StageContext, SimpleNamespace(config=config))
 
-    assert stage_model(context, "reviewer", lambda: "fallback") == (
-        "IFM/K2-Horizon-7B:future-effort"
-    )
+    assert stage_model(context, "reviewer", lambda: "fallback") == ("k2-horizon-7:future-effort")
 
 
 @pytest.mark.parametrize("model", ["terra:default", "gpt-5.6-terra:default"])

@@ -60,6 +60,7 @@ class AgentJob:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    session_selection_error: str | None = None
     codex_isolation_adapter: str | None = None
     codex_isolation_deployment_lock: Path | None = None
     codex_isolation_deployment_lock_sha256: str | None = None
@@ -70,10 +71,13 @@ class AgentJob:
     # Stable cycle-scoped identity.  Unlike ``session_agent`` this must not
     # be shared by separate issues or explicit planning cycles.
     session_key: str = ""
+    # Durable cycles must not adopt a transcript from a previous start.
+    require_new_session: bool = False
     # Direct-runner providers return an opaque session id.  The coordinator
     # stores it on the WorkItem and supplies it here on subsequent turns so
     # review/implementation context survives across loop iterations.
     resume_session_id: str | None = None
+    resume_selection: tuple[str, str] | None = None
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     # Examples: review_audit.parse_review_audit or a label-native plan parser.
@@ -181,6 +185,7 @@ class CompactJob:
     auth_status_timeout: int = 10
     pi_isolation_adapter: str | None = None
     pi_dir: Path | None = None
+    session_selection_error: str | None = None
     session_id: str | None = None
     # Direct-provider compaction only sends ``/compact`` and never needs write
     # access.  Keep the policy explicit so it cannot inherit user defaults.

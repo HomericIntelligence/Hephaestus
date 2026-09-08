@@ -580,9 +580,9 @@ def get_comment_difficulty_prompt(
     """Get the prompt that classifies review-comment fix difficulty (#1083).
 
     Used by :mod:`hephaestus.automation.comment_difficulty` to label each
-    unresolved comment ``simple`` / ``medium`` / ``hard`` so the per-comment fix
-    sub-agent runs at the matching model tier. The comment bodies are fenced as
-    untrusted (GitHub-sourced).
+    unresolved comment ``simple`` / ``medium`` / ``hard``. These labels describe
+    the work and do not select a model. Comment bodies are fenced as untrusted
+    GitHub input.
 
     Args:
         issue_number: Linked GitHub issue number (for log/context only).

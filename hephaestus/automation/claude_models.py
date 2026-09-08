@@ -1,14 +1,6 @@
 """Backward-compatibility shim. Canonical impl: agent_config (#1441)."""
 
 from hephaestus.automation.agent_config import (
-    CODEX_ADVISE as CODEX_ADVISE,
-    FABLE as FABLE,
-    HAIKU as HAIKU,
-    MYTHOS as MYTHOS,
-    OPUS as OPUS,
-    OPUS_48 as OPUS_48,
-    SONNET as SONNET,
-    SONNET_5 as SONNET_5,
     advise_model as advise_model,
     codex_advise_model as codex_advise_model,
     git_message_model as git_message_model,
@@ -20,14 +12,6 @@ from hephaestus.automation.agent_config import (
 )
 
 __all__ = [
-    "CODEX_ADVISE",
-    "FABLE",
-    "HAIKU",
-    "MYTHOS",
-    "OPUS",
-    "OPUS_48",
-    "SONNET",
-    "SONNET_5",
     "advise_model",
     "codex_advise_model",
     "git_message_model",

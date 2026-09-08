@@ -40,7 +40,6 @@ from ._review_utils import log_file_path
 from ._stage_context import StageMixin
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import advise_model, codex_advise_model, implementer_model
 from .git_utils import get_repo_slug
 from .learn import compact_session
 from .prompts import get_advise_prompt_builder
@@ -91,9 +90,11 @@ class ImplementPhase(StageMixin):
         """Select Mnemosyne skills and return prompt-ready context."""
 
         def _invoke(prompt: str) -> str:
-            if uses_direct_agent_runner(self.options.agent):
+            if uses_direct_agent_runner(
+                getattr(self.options, "implementer_agent", "") or self.options.agent
+            ):
                 result = run_agent_text(
-                    agent=self.options.agent,
+                    agent=(getattr(self.options, "implementer_agent", "") or self.options.agent),
                     prompt=prompt,
                     cwd=self.repo_root,
                     timeout=self.options.advise_timeout,
@@ -101,10 +102,9 @@ class ImplementPhase(StageMixin):
                         AgentRole.ADVISOR, AgentOperation.ADVISE, SessionLifecycle.ONE_SHOT
                     ),
                     model=direct_agent_model(
-                        self.options.agent,
-                        model_value=getattr(self.options, "advise_model", "")
-                        or advise_model(agent=self.options.agent),
-                        codex_default=codex_advise_model(),
+                        (getattr(self.options, "implementer_agent", "") or self.options.agent),
+                        model_value=getattr(self.options, "implementer_model", "")
+                        or getattr(self.options, "model", ""),
                     ),
                     sandbox="read-only",
                 )
@@ -115,7 +115,8 @@ class ImplementPhase(StageMixin):
                 issue=issue_number,
                 agent=AGENT_ADVISE,
                 prompt=prompt,
-                model=getattr(self.options, "advise_model", "") or advise_model(),
+                model=getattr(self.options, "implementer_model", "")
+                or getattr(self.options, "model", ""),
                 cwd=self.repo_root,
                 timeout=self.options.advise_timeout,
                 output_format="text",
@@ -127,7 +128,9 @@ class ImplementPhase(StageMixin):
             issue_title=issue_title,
             issue_body=issue_body,
             invoke=_invoke,
-            build_prompt=get_advise_prompt_builder(self.options.agent),
+            build_prompt=get_advise_prompt_builder(
+                getattr(self.options, "implementer_agent", "") or self.options.agent
+            ),
             git_timeout_s=getattr(self.options, "git_timeout", None),
             clone_timeout_s=getattr(self.options, "clone_timeout", None),
         )
@@ -156,7 +159,8 @@ class ImplementPhase(StageMixin):
             issue=issue_number,
             agent=AGENT_IMPLEMENTER,
             cwd=worktree_path,
-            model=getattr(self.options, "implementer_model", "") or implementer_model(),
+            model=getattr(self.options, "implementer_model", "")
+            or getattr(self.options, "model", ""),
         )
 
     def _run_claude_code(
@@ -164,12 +168,18 @@ class ImplementPhase(StageMixin):
     ) -> str | None:
         """Run the selected implementation agent in a worktree."""
         if self.options.dry_run:
-            logger.info("[DRY RUN] Would run %s for issue #%s", self.options.agent, issue_number)
+            logger.info(
+                "[DRY RUN] Would run %s for issue #%s",
+                (getattr(self.options, "implementer_agent", "") or self.options.agent),
+                issue_number,
+            )
             return None
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
-        if uses_direct_agent_runner(self.options.agent):
+        if uses_direct_agent_runner(
+            getattr(self.options, "implementer_agent", "") or self.options.agent
+        ):
             return self._run_direct_agent_code(issue_number, worktree_path, prompt)
 
         return cast(
@@ -192,7 +202,8 @@ class ImplementPhase(StageMixin):
                 issue=issue_number,
                 agent=AGENT_IMPLEMENTER,
                 prompt=prompt,
-                model=getattr(self.options, "implementer_model", "") or implementer_model(),
+                model=getattr(self.options, "implementer_model", "")
+                or getattr(self.options, "model", ""),
                 cwd=worktree_path,
                 timeout=self.options.agent_timeout,
                 output_format="json",
@@ -281,7 +292,7 @@ class ImplementPhase(StageMixin):
         self, issue_number: int, worktree_path: Path, prompt: str
     ) -> str | None:
         """Run a direct-runner implementation prompt in a worktree."""
-        agent = self.options.agent
+        agent = getattr(self.options, "implementer_agent", "") or self.options.agent
         log_file = log_file_path(self.state_dir, agent, issue_number)
         try:
             result = run_agent_session(
@@ -295,7 +306,7 @@ class ImplementPhase(StageMixin):
                 model=direct_agent_model(
                     agent,
                     model_value=getattr(self.options, "implementer_model", "")
-                    or implementer_model(agent=agent),
+                    or getattr(self.options, "model", ""),
                 ),
                 sandbox="workspace-write",
             )

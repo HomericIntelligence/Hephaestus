@@ -467,7 +467,11 @@ class TestPlanReviewStageStep:
         assert stage.on_enter(item, ctx) is None
         active = store.recover_active(repo=item.repo, issue=642)
         assert active is not None
-        assert active.reviewer_model == ":provider-default"
+        assert active.reviewer_model == ""
+        assert active.reviewer_config == {
+            "model_selection_format": 1,
+            "reasoning_effort": "provider-default",
+        }
 
         item.state = "REVIEW_WAIT"
         request = stage.step(item, ctx)
@@ -556,6 +560,7 @@ class TestPlanReviewStageStep:
         assert isinstance(first_job, AgentJob)
         assert first_job.execution_request is not None
         assert first_job.execution_request.lifecycle is SessionLifecycle.START_NEW
+        assert first_job.require_new_session is True
 
         stage.on_job_done(
             item,
@@ -1254,6 +1259,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=10, state="AMEND_WAIT")
+        item.session_ids["planner"] = "planner-session-id"
         item.payload["issue_title"] = "Retry failure"
         item.payload["issue_body"] = "The loop retries forever."
         item.payload["advise_findings"] = "Use the retry helper."
@@ -1265,6 +1271,7 @@ class TestPlanReviewStageStep:
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "REVIEW_WAIT"  # loop back to review
         assert result.job.descr == "amend"
+        assert result.job.resume_session_id == "planner-session-id"
         assert result.job.prompt_builder is build_amend_prompt
         # The feedback block travels via prompt_kwargs (builders run
         # in-worker; AgentJob is frozen, so no closures over payload).
@@ -2258,3 +2265,21 @@ class TestReviewFlowWithFakePool:
                 (21, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN)),
             ),
         ]
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude", "opencode"])
+def test_amendment_without_planner_session_starts_new(
+    make_ctx: Any, make_work_item: Any, provider: str
+) -> None:
+    """A seeded plan can be amended without a prior planner conversation."""
+    stage = PlanReviewStage()
+    ctx = make_ctx(config_overrides={"planner_agent": provider})
+    item = make_work_item(issue=10, state="AMEND_WAIT")
+    result = stage.step(item, ctx)
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, AgentJob)
+    assert result.job.agent == provider
+    assert result.job.resume_session_id is None
+    assert result.job.execution_request is not None
+    assert result.job.execution_request.lifecycle is SessionLifecycle.START_NEW
+    assert result.job.execution_request.operation.value == "plan"

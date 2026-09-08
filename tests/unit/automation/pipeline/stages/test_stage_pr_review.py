@@ -1774,6 +1774,8 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.resume_session_id == "review-session-id"
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle.value == "resume_required"
 
     def test_nogo_compacts_reviewer_and_writer_before_the_next_review(
         self, make_ctx: Any, make_work_item: Any
@@ -1820,6 +1822,8 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, AgentJob)
         assert result.job.session_agent == "pr-reviewer"
         assert result.job.resume_session_id == "review-session-id"
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle.value == "resume_required"
 
     def test_codex_nogo_compacts_both_resumable_sessions(
         self, make_ctx: Any, make_work_item: Any
@@ -8004,3 +8008,22 @@ class TestAgentErrorFailbackFlag:
         stage.on_enter(item, ctx)
 
         assert "review_error_retries" not in item.payload
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_existing_pr_compacts_the_stored_writer_session(
+    make_ctx: Any, make_work_item: Any, legacy: bool
+) -> None:
+    """Existing PR work uses the actual writer session for compaction."""
+    stage = PrReviewStage()
+    ctx = make_ctx(config_overrides={"agent": "codex"})
+    item = make_work_item(issue=1, pr=1001, state="COMPACT_WRITER_WAIT")
+    item.worktree = "/tmp/review-worktree"
+    item.payload["existing_pr"] = True
+    key = "address-review" if legacy else "implementer"
+    item.session_ids[key] = "writer-session"
+    result = stage.step(item, ctx)
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, CompactJob)
+    assert result.job.session_agent == key
+    assert result.job.session_id == "writer-session"

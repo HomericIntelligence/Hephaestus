@@ -218,11 +218,8 @@ def run_learn(
         issue_number: Issue number
         state_dir: Directory for state/log files
         slot_id: Worker slot ID (unused; kept for interface symmetry)
-        model: Override the model used for /learn. When ``None`` (default)
-            :func:`learn_model` default is used.
-            Pass ``implementer_model()`` so the implementer's /learn turn runs
-            on the same model tier the session was created with. Claude ignores
-            an inline effort and uses its default effort.
+        model: The implementation model for this legacy resume path. An omitted
+            value uses the tool default. Claude ignores an inline effort.
 
     Returns:
         True if learn completed successfully, False otherwise
@@ -271,12 +268,7 @@ def run_learn(
             log_file=log_file,
         )
 
-    # /learn is a SIMPLE-complexity task (summarization + file writes), so we
-    # use the configured learn model (default: Haiku) but accept operator
-    # Callers may pass ``model`` explicitly to
-    # run /learn on the same model tier as the session (e.g. implementer_model()).
-    # We can't route through `call_claude` here because we need `--resume`
-    # semantics with full Bash/Edit tools; instead we add the model flag directly.
+    # Use the caller model for this legacy resume path.
     effective_model = parse_model_selection(model if model is not None else learn_model()).model
     learn_command = [
         "claude",

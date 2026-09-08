@@ -87,18 +87,19 @@ NEWLINE_WORKTREE_PORCELAIN = "\0".join(
 )
 
 
-def test_tidy_swarm_model_matches_canonical_sonnet() -> None:
-    """Drift guard: the tidy swarm model mirrors claude_models.SONNET.
+def test_tidy_sdk_preserves_explicit_model() -> None:
+    """Forward the model name and omit the effort for Claude."""
+    factory = MagicMock()
+    tidy_module._claude_options(factory, Path("/repo"), "My-Model:max")
+    assert factory.call_args.kwargs["model"] == "My-Model"
 
-    ``hephaestus.github`` must not import ``hephaestus.automation`` (layering
-    boundary, see test_no_import_cycles), so tidy keeps a local model constant.
-    This test — which lives outside that boundary — pins the two together so a
-    canonical model bump doesn't silently leave tidy behind.
-    """
-    from hephaestus.automation.claude_models import SONNET
-    from hephaestus.github.tidy import _TIDY_SWARM_MODEL
 
-    assert _TIDY_SWARM_MODEL == SONNET
+@pytest.mark.parametrize("model", ["", ":default"])
+def test_tidy_sdk_uses_configured_default(model: str) -> None:
+    """Do not supply a model when the operator omits it."""
+    factory = MagicMock()
+    tidy_module._claude_options(factory, Path("/repo"), model)
+    assert "model" not in factory.call_args.kwargs
 
 
 # Fixture: clean gh-tidy run (no problem branches)
@@ -957,7 +958,7 @@ class TestTimeoutHandling:
             )
 
         assert run_agent.call_args.kwargs["timeout"] == 37
-        assert run_agent.call_args.kwargs["model"] == tidy_module._TIDY_SWARM_MODEL
+        assert run_agent.call_args.kwargs["model"] == ""
 
     def test_direct_rebase_agent_default_timeout(self) -> None:
         """Default rebase-agent timeout is AGENT_REBASE_TIMEOUT (2400)."""

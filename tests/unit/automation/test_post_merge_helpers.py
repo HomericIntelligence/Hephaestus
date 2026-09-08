@@ -22,7 +22,9 @@ def _raise_no_worktree(issue: int, pr: int) -> Path:
 
 def _make_processor(tmp_path: Path) -> tuple[PostMergeProcessor, dict[int, dict[str, Any]]]:
     """Return a PostMergeProcessor and the shared saved-state dict for assertions."""
-    options = MagicMock(dry_run=False, agent="claude")
+    options = MagicMock(
+        dry_run=False, agent="claude", implementer_agent="", implementer_model="", model=""
+    )
     saved: dict[int, dict[str, Any]] = {}
 
     def load(issue: int) -> dict[str, Any] | None:
@@ -43,7 +45,13 @@ def _make_processor(tmp_path: Path) -> tuple[PostMergeProcessor, dict[int, dict[
 
 def _make_codex_processor(tmp_path: Path) -> PostMergeProcessor:
     """PostMergeProcessor whose options report agent='codex'."""
-    options = MagicMock(dry_run=False, agent="codex")
+    options = MagicMock(
+        dry_run=False,
+        agent="codex",
+        implementer_agent="",
+        implementer_model="My-Model:max",
+        model="",
+    )
     saved: dict[int, dict[str, Any]] = {}
     return PostMergeProcessor(
         options_provider=lambda: options,
@@ -115,10 +123,13 @@ class TestRunDriveGreenLearnings:
             result = processor.run_drive_green_learnings(3, 4)
         assert result is True
         assert agent.call_args.kwargs["agent"] == "codex"
+        assert agent.call_args.kwargs["model"] == "My-Model:max"
         assert not inv.called
 
     def test_worktree_failure_falls_back_to_repo_root(self, tmp_path: Path) -> None:
-        options = MagicMock(dry_run=False, agent="claude")
+        options = MagicMock(
+            dry_run=False, agent="claude", implementer_agent="", implementer_model="", model=""
+        )
         proc = PostMergeProcessor(
             options_provider=lambda: options,
             repo_root_provider=lambda: tmp_path,
@@ -187,7 +198,9 @@ class TestRunDriveGreenCompact:
         assert compact.call_args.kwargs["cwd"] == tmp_path / "3-4"
 
     def test_worktree_failure_falls_back_to_repo_root(self, tmp_path: Path) -> None:
-        options = MagicMock(dry_run=False, agent="claude")
+        options = MagicMock(
+            dry_run=False, agent="claude", implementer_agent="", implementer_model="", model=""
+        )
         proc = PostMergeProcessor(
             options_provider=lambda: options,
             repo_root_provider=lambda: tmp_path,

@@ -2,14 +2,13 @@
 {{ terse_output_directive }}
 
 You are CLASSIFYING the difficulty of unresolved PR review comments on
-{{ review_context_kind }} #{{ issue_number }}, so the right model tier can be
-assigned to fix each one.
+{{ review_context_kind }} #{{ issue_number }}. Describe the work that each fix requires.
 
 You are NOT reviewing the code and NOT fixing anything. For each comment, judge
 how hard the FIX is, using these tiers:
 
 - `simple` — mechanical / local: a typo, rename, doc tweak, import, one-line
-  guard, or formatting. A junior model can do it from the comment alone.
+  guard, or formatting. The comment supplies the information needed for the change.
 - `medium` — a localized logic change, a small refactor, handling an edge case,
   or a test addition that needs reading one or two functions.
 - `hard` — cross-cutting or subtle: a design change spanning files, a tricky

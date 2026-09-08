@@ -15,7 +15,6 @@ import pytest
 
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.automation import claude_invoke
-from hephaestus.automation.agent_config import OPUS_48
 from hephaestus.automation.claude_invoke import (
     _session_expired,
     invoke_claude_with_session,
@@ -28,6 +27,8 @@ from hephaestus.automation.session_naming import (
     session_jsonl_path,
     session_uuid,
 )
+
+FALLBACK_MODEL = "claude-opus-4-8"
 
 
 def _argv(call_args_list_entry: Any) -> list[str]:
@@ -73,6 +74,35 @@ class TestCreateThenResume:
     for an unknown id — so the first call for a (repo, issue, agent, model) key
     must create the session, and later calls resume it.
     """
+
+    @pytest.mark.parametrize("agent", [AGENT_PLANNER, AGENT_PLAN_REVIEWER])
+    @pytest.mark.parametrize("require_new", [False, True])
+    def test_ordinary_retry_reuses_transcript_but_durable_start_rejects_it(
+        self, stub_run: MagicMock, fake_home: Path, agent: str, require_new: bool
+    ) -> None:
+        """Only a durable new cycle rejects an existing matching transcript."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        sid = session_uuid("repo", 1, agent, "Model", cwd=cwd)
+        _make_existing_jsonl(fake_home, cwd, sid)
+        kwargs: dict[str, Any] = {
+            "repo": "repo",
+            "issue": 1,
+            "agent": agent,
+            "prompt": "retry",
+            "model": "Model",
+            "cwd": cwd,
+            "session_lifecycle": "start_new",
+            "require_new_session": require_new,
+        }
+        if require_new:
+            with pytest.raises(AgentSessionLostError, match="collided"):
+                invoke_claude_with_session(**kwargs)
+            stub_run.assert_not_called()
+        else:
+            _, resumed_sid = invoke_claude_with_session(**kwargs)
+            assert resumed_sid == sid
+            assert "--resume" in _argv(stub_run.call_args)
 
     def test_resume_required_missing_transcript_fails_closed(
         self, stub_run: MagicMock, fake_home: Path
@@ -583,12 +613,10 @@ def _cap_envelope() -> str:
 
 
 class TestModelCapFallback:
-    """#1793: a model-specific usage cap falls back to the default model.
+    """A model usage cap retries once with an explicit fallback model.
 
-    The "reached your <model> limit … switch models with /model" 429 carries no
-    reset epoch, so the wait-until-reset handlers can't help — the correct
-    remediation is to retry once on :func:`agent_config.fallback_model` and pin
-    the fallback for the rest of the process (sticky registry).
+    Later calls can use the fallback when the caller supplies it again.
+    Durable session operations keep their original model identity.
     """
 
     @pytest.fixture(autouse=True)
@@ -625,11 +653,12 @@ class TestModelCapFallback:
         first_argv = _argv(m.call_args_list[0])
         second_argv = _argv(m.call_args_list[1])
         assert first_argv[first_argv.index("--model") + 1] == "claude-fable-5"
-        assert second_argv[second_argv.index("--model") + 1] == OPUS_48
+        assert second_argv[second_argv.index("--model") + 1] == FALLBACK_MODEL
         # Same prompt on both attempts — the request is retried, not dropped.
         assert first_argv[-1] == second_argv[-1] == "hi"
         assert any(
-            "claude-fable-5" in r.getMessage() and OPUS_48 in r.getMessage() for r in caplog.records
+            "claude-fable-5" in r.getMessage() and FALLBACK_MODEL in r.getMessage()
+            for r in caplog.records
         )
 
     def test_stdin_prompt_is_preserved_across_model_cap_fallback(self, fake_home: Path) -> None:
@@ -648,12 +677,13 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt=prompt,
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
                 input_via_stdin=True,
             )
 
         assert out == "fallback-ok"
-        assert sid == session_uuid("R", 1, AGENT_PLANNER, OPUS_48, cwd=cwd)
+        assert sid == session_uuid("R", 1, AGENT_PLANNER, FALLBACK_MODEL, cwd=cwd)
         assert [attempt.kwargs["stdin_text"] for attempt in tracked.call_args_list] == [
             prompt,
             prompt,
@@ -680,13 +710,14 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt="hi",
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
                 output_format="json",
             )
         assert out == '{"result": "ok"}'
         assert m.call_count == 2
         second_argv = _argv(m.call_args_list[1])
-        assert second_argv[second_argv.index("--model") + 1] == OPUS_48
+        assert second_argv[second_argv.index("--model") + 1] == FALLBACK_MODEL
 
     def test_registry_is_sticky_across_calls(self, fake_home: Path) -> None:
         """After a cap, later calls go straight to the fallback (1 attempt)."""
@@ -703,6 +734,7 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt="hi",
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
             )
         assert is_model_capped("claude-fable-5") is True
@@ -713,11 +745,12 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt="next",
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
             )
         assert m2.call_count == 1
         argv = _argv(m2.call_args)
-        assert argv[argv.index("--model") + 1] == OPUS_48
+        assert argv[argv.index("--model") + 1] == FALLBACK_MODEL
 
     def test_no_fallback_loop_when_model_is_already_fallback(self, fake_home: Path) -> None:
         """A cap on the fallback model itself propagates — no retry loop."""
@@ -733,11 +766,12 @@ class TestModelCapFallback:
                     issue=1,
                     agent=AGENT_PLANNER,
                     prompt="hi",
-                    model=OPUS_48,
+                    model=FALLBACK_MODEL,
+                    fallback_model_value=FALLBACK_MODEL,
                     cwd=cwd,
                 )
         assert m.call_count == 1
-        assert is_model_capped(OPUS_48) is False
+        assert is_model_capped(FALLBACK_MODEL) is False
 
     def test_fallback_also_capped_envelope_returned_verbatim(self, fake_home: Path) -> None:
         """If the fallback retry ALSO returns a cap envelope it is returned as-is.
@@ -758,12 +792,13 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt="hi",
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
                 output_format="json",
             )
         assert m.call_count == 2
         assert out == _cap_envelope()
-        assert is_model_capped(OPUS_48) is False
+        assert is_model_capped(FALLBACK_MODEL) is False
 
     def test_non_cap_failure_propagates_untouched(self, fake_home: Path) -> None:
         """A 529 overload (or any non-cap error) is NOT a fallback trigger."""
@@ -780,6 +815,7 @@ class TestModelCapFallback:
                     agent=AGENT_PLANNER,
                     prompt="hi",
                     model="claude-fable-5",
+                    fallback_model_value=FALLBACK_MODEL,
                     cwd=cwd,
                 )
         assert m.call_count == 1
@@ -799,6 +835,7 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt="hi",
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
                 output_format="json",
             )
@@ -825,6 +862,7 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt="hi",
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
             )
         assert m.call_count == 1
@@ -846,38 +884,102 @@ class TestModelCapFallback:
                 agent=AGENT_PLANNER,
                 prompt="hi",
                 model="claude-fable-5",
+                fallback_model_value=FALLBACK_MODEL,
                 cwd=cwd,
             )
-        assert sid == session_uuid("R", 1, AGENT_PLANNER, OPUS_48, cwd=cwd)
+        assert sid == session_uuid("R", 1, AGENT_PLANNER, FALLBACK_MODEL, cwd=cwd)
 
-    def test_explicit_fallback_model_selection(
-        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A resolved fallback selection redirects the capped-model retry."""
+    def test_explicit_fallback_model_selection(self, fake_home: Path) -> None:
+        """The explicit fallback string reaches the retry command unchanged."""
         cwd = fake_home / "work"
         cwd.mkdir()
-        monkeypatch.setenv("HEPH_FALLBACK_MODEL", "claude-haiku-4-5")
         ok = MagicMock(stdout="ok", stderr="", returncode=0)
-        with (
-            patch(
-                "hephaestus.automation.claude_invoke.fallback_model",
-                return_value="claude-haiku-4-5",
-            ),
-            patch(
-                "hephaestus.automation.claude_invoke._run_tracked",
-                side_effect=[_cap_error(), ok],
-            ) as m,
-        ):
+        with patch(
+            "hephaestus.automation.claude_invoke._run_tracked",
+            side_effect=[_cap_error(), ok],
+        ) as tracked:
             invoke_claude_with_session(
                 repo="R",
                 issue=1,
                 agent=AGENT_PLANNER,
                 prompt="hi",
                 model="claude-fable-5",
+                fallback_model_value="MyFallbackModel:future-effort",
                 cwd=cwd,
             )
-        second_argv = _argv(m.call_args_list[1])
-        assert second_argv[second_argv.index("--model") + 1] == "claude-haiku-4-5"
+        second_argv = _argv(tracked.call_args_list[1])
+        assert second_argv[second_argv.index("--model") + 1] == "MyFallbackModel"
+
+    def test_cap_without_explicit_fallback_propagates(self, fake_home: Path) -> None:
+        """A cap does not select a fallback model when none is supplied."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        with (
+            patch(
+                "hephaestus.automation.claude_invoke._run_tracked", side_effect=_cap_error()
+            ) as tracked,
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="MyModel",
+                cwd=cwd,
+            )
+        assert tracked.call_count == 1
+        assert not is_model_capped("MyModel")
+
+    @pytest.mark.parametrize("lifecycle", ["start-new", "resume-required"])
+    @pytest.mark.parametrize("error_envelope", [False, True])
+    def test_durable_session_does_not_change_model_on_cap(
+        self,
+        fake_home: Path,
+        lifecycle: str,
+        error_envelope: bool,
+    ) -> None:
+        """A cap preserves the durable session model and session ID."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        model = "MyModel"
+        sid = session_uuid("R", 1, AGENT_PLANNER, model, cwd=cwd)
+        if lifecycle == "resume-required":
+            _make_existing_jsonl(fake_home, cwd, sid)
+        with patch("hephaestus.automation.claude_invoke._run_tracked") as tracked:
+            if error_envelope:
+                tracked.return_value = MagicMock(stdout=_cap_envelope(), stderr="", returncode=0)
+                out, returned_sid = invoke_claude_with_session(
+                    repo="R",
+                    issue=1,
+                    agent=AGENT_PLANNER,
+                    prompt="hi",
+                    model=model,
+                    fallback_model_value=FALLBACK_MODEL,
+                    cwd=cwd,
+                    session_lifecycle=lifecycle,
+                    output_format="json",
+                )
+                assert out == _cap_envelope()
+                assert returned_sid == sid
+            else:
+                tracked.side_effect = _cap_error()
+                with pytest.raises(subprocess.CalledProcessError):
+                    invoke_claude_with_session(
+                        repo="R",
+                        issue=1,
+                        agent=AGENT_PLANNER,
+                        prompt="hi",
+                        model=model,
+                        fallback_model_value=FALLBACK_MODEL,
+                        cwd=cwd,
+                        session_lifecycle=lifecycle,
+                    )
+        assert tracked.call_count == 1
+        argv = _argv(tracked.call_args)
+        assert argv[argv.index("--model") + 1] == model
+        assert sid in argv
+        assert not is_model_capped(model)
 
 
 class TestPromptNullByteSanitization:

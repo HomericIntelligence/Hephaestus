@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
 
 from hephaestus.agents import model_selection
@@ -12,7 +10,7 @@ from hephaestus.agents import model_selection
 @pytest.mark.parametrize(
     ("reference", "expected_model", "expected_effort"),
     [
-        (" astra : max ", "gpt-6-astra", "max"),
+        (" astra : max ", "astra", "max"),
         (" private/provider:model : default ", "private/provider:model", "default"),
     ],
 )
@@ -28,47 +26,29 @@ def test_parse_model_selection_strips_each_segment(
     assert selection.reasoning_effort == expected_effort
 
 
-def test_normalize_model_reference_resolves_astra_case_insensitively() -> None:
-    """The shared registry owns the Astra alias for every provider boundary."""
-    assert model_selection.GPT_6_ASTRA == "gpt-6-astra"
-    assert (
-        model_selection.normalize_model_reference("ASTRA:max")
-        == f"{model_selection.GPT_6_ASTRA}:max"
-    )
+def test_normalize_model_reference_preserves_case() -> None:
+    """Model names retain their spelling and case."""
+    assert model_selection.normalize_model_reference(" ASTRA : max ") == "ASTRA:max"
 
 
-def test_codex_role_alias_map_is_immutable_and_complete() -> None:
-    """The shared Codex map contains the three approved role aliases."""
-    assert dict(model_selection.CODEX_ROLE_MODEL_ALIASES) == {
-        "sol": model_selection.AgentModelSelection("gpt-5.6-sol", "xhigh"),
-        "terra": model_selection.AgentModelSelection("gpt-5.6-terra", "xhigh"),
-        "luna": model_selection.AgentModelSelection("gpt-5.6-luna", "medium"),
-    }
-    with pytest.raises(TypeError):
-        aliases = cast(
-            dict[str, model_selection.AgentModelSelection], model_selection.CODEX_ROLE_MODEL_ALIASES
-        )
-        aliases["other"] = model_selection.AgentModelSelection("gpt-5.6-other", "high")
-
+def test_model_selection_is_immutable() -> None:
+    """Selection metadata cannot change after construction."""
+    selection = model_selection.AgentModelSelection("MyModel", "high")
     with pytest.raises(AttributeError):
-        object.__setattr__(
-            model_selection.CODEX_ROLE_MODEL_ALIASES["sol"], "model", "unapproved-model"
-        )
+        object.__setattr__(selection, "model", "other")
     with pytest.raises(AttributeError):
-        object.__setattr__(
-            model_selection.CODEX_ROLE_MODEL_ALIASES["terra"], "reasoning_effort", "low"
-        )
+        object.__setattr__(selection, "reasoning_effort", "low")
     with pytest.raises(AttributeError):
-        _ = model_selection.CODEX_ROLE_MODEL_ALIASES["luna"].__dict__
+        _ = selection.__dict__
 
 
 @pytest.mark.parametrize(
     ("reference", "expected"),
     [
-        ("SOL", "gpt-5.6-sol:xhigh"),
-        ("terra:high", "gpt-5.6-terra:high"),
-        ("gpt-5.6-luna", "gpt-5.6-luna:medium"),
-        ("luna:default", "gpt-5.6-luna:default"),
+        ("SOL", "SOL"),
+        ("terra:high", "terra:high"),
+        ("gpt-5.6-luna", "gpt-5.6-luna"),
+        ("luna:default", "luna:default"),
         ("gpt-6-astra:future-effort", "gpt-6-astra:future-effort"),
     ],
 )
@@ -76,15 +56,14 @@ def test_resolve_codex_model_selection_preserves_effort(
     reference: str,
     expected: str,
 ) -> None:
-    """Codex aliases use defaults only when no effort is supplied."""
+    """Codex keeps the model and only uses an explicit effort."""
     assert model_selection.resolve_codex_model_selection(reference).reference == expected
 
 
 @pytest.mark.parametrize("reference", ["unknown", "unknown:high", "terra-lite:high"])
-def test_validate_codex_model_reference_rejects_unknown_short_alias(reference: str) -> None:
-    """Unknown short aliases fail before a Codex process can start."""
-    with pytest.raises(model_selection.UnknownModelAliasError, match="Unknown Codex model alias"):
-        model_selection.validate_codex_role_model_reference(reference)
+def test_validate_codex_model_reference_accepts_arbitrary_short_names(reference: str) -> None:
+    """The provider owns model name validation."""
+    model_selection.validate_codex_role_model_reference(reference)
 
 
 @pytest.mark.parametrize(
@@ -108,7 +87,18 @@ def test_validate_claude_model_reference_accepts_configured_or_full_reference(
 
 
 @pytest.mark.parametrize("reference", ["unknown", "terra-lite:high"])
-def test_validate_claude_model_reference_rejects_unknown_alias(reference: str) -> None:
-    """Unknown Claude aliases fail before a provider process can start."""
-    with pytest.raises(model_selection.UnknownModelAliasError, match="Unknown Claude model alias"):
-        model_selection.validate_claude_model_reference(reference)
+def test_validate_claude_model_reference_accepts_arbitrary_names(reference: str) -> None:
+    """The provider owns model name validation."""
+    model_selection.validate_claude_model_reference(reference)
+
+
+@pytest.mark.parametrize("reference", ["model\x00", "model\x1b:high"])
+def test_model_reference_rejects_control_characters(reference: str) -> None:
+    """Literal model names still require safe command input."""
+    for validate in (
+        model_selection.parse_model_selection,
+        model_selection.validate_codex_role_model_reference,
+        model_selection.validate_claude_model_reference,
+    ):
+        with pytest.raises(ValueError, match="control character"):
+            validate(reference)

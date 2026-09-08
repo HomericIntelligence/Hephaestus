@@ -676,6 +676,7 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
     push.assert_not_called()
 
 
+@pytest.mark.parametrize("model", ["", "default", "resume", "gpt-6-astra:max", "MyModel", "sol"])
 @pytest.mark.parametrize("replace_staged_after_return", [False, True])
 @pytest.mark.parametrize(
     ("lifecycle", "resume_session_id"),
@@ -711,6 +712,7 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
     ),
 )
 def test_codex_implementation_builds_one_frozen_admitted_request(
+    model: str,
     pool: WorkerPool,
     tmp_path: Path,
     replace_staged_after_return: bool,
@@ -721,6 +723,8 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     allowed_tools: str | None,
     expected_sandbox: str,
     expected_tools: tuple[str, ...],
+    retry_effort: bool = False,
+    retry_failure: str | None = None,
 ) -> None:
     """The worker binds all host inputs before it invokes the admitted adapter."""
     worktree = tmp_path.resolve()
@@ -813,7 +817,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     job = _agent_job(
         agent="codex",
         cwd=tmp_path,
-        model="gpt-5.6-sol:high",
+        model=model,
         session_key="implementation:123",
         resume_session_id=resume_session_id,
         sandbox=sandbox,
@@ -824,7 +828,19 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         codex_isolation_deployment_lock_sha256="a" * 64,
     )
 
+    requests: list[Any] = []
+    worker_clock = MagicMock(wraps=time)
+
     def invoke_adapter(**_kwargs: object) -> AgentRunResult:
+        requests.append(_kwargs["request"])
+        if retry_failure == "isolation":
+            raise CodexIsolationError("codex_adapter_inventory_uncertain")
+        if retry_effort and (len(requests) == 1 or retry_failure == "repeat"):
+            if retry_failure == "deadline":
+                worker_clock.monotonic.return_value = requests[0].monotonic_deadline + 1
+            raise agent_runtime._CodexReasoningEffortRejectedError(
+                "codex_unsupported_reasoning_effort"
+            )
         if replace_staged_after_return:
             staged_path.unlink()
             staged_path.write_bytes(staged_bytes)
@@ -836,6 +852,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         )
 
     with (
+        patch(f"{_WP}.time", worker_clock),
         patch(
             "hephaestus.automation.pipeline.codex_worktree_boundary."
             "capture_codex_worktree_boundary",
@@ -854,12 +871,30 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
     ):
         result = pool._run_agent(job)
 
-    assert result.ok is not replace_staged_after_return
+    assert result.ok is (not replace_staged_after_return and retry_failure is None)
     resolve.assert_not_called()
-    boundary.verify_before_launch.assert_called_once_with()
-    boundary.verify_after_return.assert_called_once_with()
+    expected_attempts = 2 if retry_effort and retry_failure not in {"deadline", "isolation"} else 1
+    assert boundary.verify_before_launch.call_count == expected_attempts
+    assert boundary.verify_after_return.call_count == expected_attempts
+    assert len(requests) == expected_attempts
+    if expected_attempts == 2:
+        first, second = requests
+        assert first.run_nonce != second.run_nonce
+        assert first.private_profile_path != second.private_profile_path
+        assert first.command_digest != second.command_digest
+        assert first.model == second.model == model
+        assert first.session_identity_digest == second.session_identity_digest
+        assert first.monotonic_deadline == second.monotonic_deadline
+        assert first.session == second.session
+        assert any(value.startswith("model_reasoning_effort=") for value in first.command)
+        assert not any(value.startswith("model_reasoning_effort=") for value in second.command)
     adapter._close.assert_called_once_with()
     frozen = invoke.call_args.kwargs["request"]
+    assert frozen.model == model
+    if model:
+        assert frozen.command[frozen.command.index("--model") + 1] == model.split(":")[0]
+    else:
+        assert "--model" not in frozen.command
     assert frozen.command[0] == str(staged.path)
     assert frozen.command[-2:] == ("--json", "-")
     assert any(expected_sandbox in value for value in frozen.command)
@@ -881,7 +916,7 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         + json.dumps(list(expected_tools), separators=(",", ":"))
         in frozen.command
     )
-    assert ("resume" in frozen.command) is (lifecycle is SessionLifecycle.RESUME_REQUIRED)
+    assert (frozen.command[2:3] == ("resume",)) is (lifecycle is SessionLifecycle.RESUME_REQUIRED)
     if expected_sandbox == "read-only":
         assert str(worktree) in frozen.policy.read_only_mounts
         assert str(worktree) not in frozen.policy.read_write_mounts
@@ -907,6 +942,12 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         version="1.0",
         installed_tree_sha256="d" * 64,
     )
+    if retry_failure is not None:
+        assert {
+            "deadline": "codex_adapter_timeout",
+            "isolation": "codex_adapter_inventory_uncertain",
+            "repeat": "unsupported_reasoning_effort",
+        }[retry_failure] in (result.error or "")
     if replace_staged_after_return:
         assert result.error == "codex_adapter_request_mismatch"
     with pytest.raises(OSError):
@@ -15026,6 +15067,132 @@ def test_sync_checkout_uses_explicit_gh_root_for_api_when_fixed_candidates_unava
         default_branch="main",
         gh_command=expected_executable,
         timeout_s=120,
+    )
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "pi", "opencode"])
+def test_worker_rejects_session_selection_before_agent_work(
+    pool: WorkerPool,
+    completion_q: CompletionQueue,
+    agent: str,
+) -> None:
+    """An incompatible session stops before prompt or provider work."""
+    error = "session tool or model changed; start a new session"
+    prompt = MagicMock(return_value="must not run")
+    job = _agent_job(
+        agent=agent,
+        model="MixedCase/ReviewModel:max",
+        resume_session_id="existing-session",
+        session_selection_error=error,
+        prompt_builder=prompt,
+    )
+    with (
+        patch(f"{_WP}.resolve_agent") as resolve,
+        patch(f"{_WP}.validate_job_workspace") as workspace,
+        patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as claude,
+        patch(f"{_WP}.run_agent_session") as start,
+        patch(f"{_WP}.resume_agent_session") as resume,
+    ):
+        pool.submit(job, StageName.PR_REVIEW)
+        handle, result = completion_q.get(timeout=10)
+
+    assert handle.job is job
+    assert result.ok is False
+    assert result.error == error
+    assert result.session_id is None
+    prompt.assert_not_called()
+    workspace.assert_not_called()
+    resolve.assert_not_called()
+    claude.assert_not_called()
+    start.assert_not_called()
+    resume.assert_not_called()
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "pi", "opencode"])
+def test_worker_rejects_session_selection_before_compaction(
+    pool: WorkerPool,
+    completion_q: CompletionQueue,
+    agent: str,
+) -> None:
+    """Compaction cannot use a session with a different selection."""
+    error = "session tool or model changed; start a new session"
+    job = CompactJob(
+        repo="test/repo",
+        issue=123,
+        agent=agent,
+        session_agent="reviewer",
+        model="MixedCase/ReviewModel:max",
+        cwd=_TEST_AGENT_CWD,
+        timeout_s=60,
+        session_id="existing-session",
+        session_selection_error=error,
+    )
+    with (
+        patch(f"{_WP}.resolve_agent") as resolve,
+        patch(f"{_WP}.compact_agent_session") as compact,
+    ):
+        pool.submit(job, StageName.PR_REVIEW)
+        handle, result = completion_q.get(timeout=10)
+
+    assert handle.job is job
+    assert result.ok is False
+    assert result.error == error
+    resolve.assert_not_called()
+    compact.assert_not_called()
+
+
+@pytest.mark.parametrize("fallback", [None, "MyProvider/FallbackModel:future-effort"])
+def test_worker_forwards_only_the_explicit_fallback_model(
+    pool: WorkerPool,
+    completion_q: CompletionQueue,
+    fallback: str | None,
+) -> None:
+    """The worker preserves an explicit fallback and keeps omission empty."""
+    job = _agent_job(
+        agent="claude",
+        model="PrimaryModel:max",
+        fallback_model=fallback,
+    )
+    with (
+        patch(f"{_WP}.resolve_agent", return_value="claude") as resolve,
+        patch(
+            f"{_WP}.claude_invoke.invoke_claude_with_session",
+            return_value=("output", "new-session"),
+        ) as invoke,
+    ):
+        pool.submit(job, StageName.IMPLEMENTATION)
+        _, result = completion_q.get(timeout=10)
+
+    assert result.ok is True
+    resolve.assert_called_once()
+    assert resolve.call_args.args == ("claude",)
+    invoke.assert_called_once()
+    assert invoke.call_args.kwargs["model"] == "PrimaryModel:max"
+    assert invoke.call_args.kwargs["fallback_model_value"] == fallback
+
+
+@pytest.mark.parametrize("retry_failure", [None, "repeat", "deadline", "isolation"])
+@pytest.mark.parametrize("resume_session_id", [None, "provider-session-id"])
+def test_isolated_worker_retries_effort_with_fresh_request_and_one_deadline(
+    pool: WorkerPool, tmp_path: Path, resume_session_id: str | None, retry_failure: str | None
+) -> None:
+    """An admitted retry keeps the selected model and session authority."""
+    test_codex_implementation_builds_one_frozen_admitted_request(
+        model="MyModel:max",
+        pool=pool,
+        tmp_path=tmp_path,
+        replace_staged_after_return=False,
+        lifecycle=SessionLifecycle.RESUME_REQUIRED
+        if resume_session_id
+        else SessionLifecycle.START_NEW,
+        resume_session_id=resume_session_id,
+        operation=AgentOperation.IMPLEMENT,
+        sandbox="workspace-write",
+        allowed_tools=None,
+        expected_sandbox="workspace-write",
+        expected_tools=("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+        retry_effort=True,
+        retry_failure=retry_failure,
     )
 
 

@@ -1,19 +1,4 @@
-"""Classify PR review comments by difficulty and map to a model tier (#1083).
-
-The in-loop address step fixes one review comment per sub-agent. To spend the
-right amount of model capability on each, a cheap read-only classifier labels
-every unresolved comment ``simple`` / ``medium`` / ``hard``; the label then
-selects the fix sub-agent's model tier:
-
-- ``simple`` → Haiku (typo, rename, doc tweak, one-line guard)
-- ``medium`` → Sonnet (localized logic change, small refactor, edge case)
-- ``hard``   → Opus (cross-cutting design change, tricky correctness/security)
-
-The classifier is a separate sub-agent (not the reviewer and not the fixer) so
-the difficulty judgment is independent of both. Classification failures degrade
-gracefully to ``medium`` (the safe middle tier) — a misclassification must never
-block the address step.
-"""
+"""Classify review comments by difficulty without selecting a model."""
 
 from __future__ import annotations
 
@@ -39,7 +24,6 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import log_file_path, parse_json_block
 from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import HAIKU, OPUS, SONNET, advise_model
 from .git_utils import get_repo_slug
 from .prompts import get_comment_difficulty_prompt
 from .session_naming import AGENT_COMMENT_CLASSIFIER
@@ -49,24 +33,8 @@ logger = logging.getLogger(__name__)
 #: Allowed difficulty labels, in ascending order of effort.
 DIFFICULTIES = ("simple", "medium", "hard")
 
-#: Difficulty → model tier. Unknown labels fall back to the middle tier.
-_DIFFICULTY_MODEL = {
-    "simple": HAIKU,
-    "medium": SONNET,
-    "hard": OPUS,
-}
-
-#: Default applied when the classifier omits or mis-labels a thread.
+#: Default when the classifier omits a thread or returns an unknown label.
 _DEFAULT_DIFFICULTY = "medium"
-
-
-def model_for_difficulty(difficulty: str) -> str:
-    """Return the model ID for a difficulty label.
-
-    Unknown labels map to the middle (Sonnet) tier so a bad classification
-    never silently downgrades a hard fix to Haiku.
-    """
-    return _DIFFICULTY_MODEL.get(difficulty, SONNET)
 
 
 #: Max length of the (untrusted) description excerpt in a todo line.
@@ -108,6 +76,7 @@ def _run_classifier_session(
     repo_root: Path,
     state_dir: Path,
     advise_timeout: int = DEFAULT_AGENT_TIMEOUT,
+    model: str = "",
 ) -> dict[str, str]:
     """Run the read-only classifier sub-agent; return ``{thread_id: difficulty}``.
 
@@ -142,7 +111,7 @@ def _run_classifier_session(
                     AgentOperation.COMMENT_CLASSIFY,
                     SessionLifecycle.ONE_SHOT,
                 ),
-                model=direct_agent_model(agent, model_value=advise_model(agent=agent)),
+                model=direct_agent_model(agent, model_value=model),
                 sandbox="read-only",
             )
             write_secure(log_file, result.stdout or "")
@@ -153,7 +122,7 @@ def _run_classifier_session(
                 issue=issue_number,
                 agent=AGENT_COMMENT_CLASSIFIER,
                 prompt=prompt,
-                model=advise_model(),
+                model=model,
                 cwd=worktree_path,
                 timeout=advise_timeout,
                 output_format="json",
@@ -195,11 +164,12 @@ def classify_comments(
     state_dir: Path,
     dry_run: bool = False,
     advise_timeout: int = DEFAULT_AGENT_TIMEOUT,
+    model: str = "",
 ) -> dict[str, str]:
     """Classify each thread's difficulty; return ``{thread_id: difficulty}``.
 
     Every thread in *threads* is present in the result. Threads the classifier
-    omitted or mis-labeled default to ``medium`` so the caller always has a tier
+    omitted or mis-labeled default to ``medium`` so the caller always has a label
     for each. Returns ``{}`` for an empty thread list and never raises.
     """
     if not threads:
@@ -215,5 +185,6 @@ def classify_comments(
         repo_root=repo_root,
         state_dir=state_dir,
         advise_timeout=advise_timeout,
+        model=model,
     )
     return {t["id"]: classified.get(t["id"], _DEFAULT_DIFFICULTY) for t in threads}

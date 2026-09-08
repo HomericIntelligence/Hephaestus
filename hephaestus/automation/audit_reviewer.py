@@ -26,7 +26,6 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resolve_agent,
@@ -36,6 +35,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
+    add_role_agent_args,
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
@@ -259,6 +259,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dry_run_help="Skip the agent call and local audit-report writing.",
         verbose_help="DEBUG-level logging.",
     )
+    add_role_agent_args(parser)
     parser.add_argument(
         "--pr-numbers",
         nargs="+",
@@ -279,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     configure_github_throttle_from_args(args)
     configure_cli_logging(verbose=args.verbose, log_format=getattr(args, "log_format", "text"))
-    selected_agent = "codex" if args.codex else args.agent
+    selected_agent = args.reviewer_agent or ("codex" if args.codex else args.agent)
     try:
         agent = (
             selected_agent or "claude"
@@ -292,15 +293,13 @@ def main(argv: list[str] | None = None) -> int:
                 pi_dir=args.pi_dir,
                 model_references=(
                     args.reviewer_model or args.model,
-                    args.fallback_model or args.model,
+                    args.fallback_model,
                 ),
             )
         )
         resolved_model = reviewer_model(args.reviewer_model or args.model or None, agent=agent)
-        resolved_fallback_model = fallback_model(
-            args.fallback_model or args.model or None, agent=agent
-        )
-    except UnknownModelAliasError as exc:
+        resolved_fallback_model = fallback_model(args.fallback_model or None, agent=agent)
+    except ValueError as exc:
         _build_parser().error(str(exc))
 
     shutdown = threading.Event()

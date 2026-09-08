@@ -31,6 +31,23 @@ def _status(stdout: str = "") -> MagicMock:
     return MagicMock(stdout=stdout)
 
 
+@pytest.mark.parametrize("model", [None, "", "astra", "MiXeD:max", "provider/model"])
+def test_commit_callback_preserves_literal_model(model: str | None) -> None:
+    """An omitted model reaches the callback without a named default."""
+    callback = MagicMock(return_value="message")
+    result = pr_manager._invoke_git_message_agent(
+        issue_number=1,
+        prompt="Summarize the change.",
+        worktree_path=Path("/tmp/worktree"),
+        agent="codex",
+        model_override=model,
+        claude_message_agent=callback,
+    )
+    assert result == "message"
+    assert callback.call_args.args[3] == "codex"
+    assert callback.call_args.args[5] == (model or "")
+
+
 class TestReadPorcelainStatus:
     """Tests for reading stable worktree status."""
 
@@ -675,7 +692,7 @@ class TestCommitOperation:
     @pytest.mark.parametrize(
         ("model", "expected"),
         (
-            (None, pr_manager.DEFAULT_COMMIT_MESSAGE_MODEL),
+            (None, "Claude Code"),
             ("claude-explicit-5", "claude-explicit-5"),
         ),
     )

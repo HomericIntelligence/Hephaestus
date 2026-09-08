@@ -26,6 +26,9 @@ class _StageRunConfig:
     codex_isolation_deployment_lock: Path | None = None
     codex_isolation_deployment_lock_sha256: str | None = None
     model: str = ""
+    planner_agent: str = ""
+    implementer_agent: str = ""
+    reviewer_agent: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""

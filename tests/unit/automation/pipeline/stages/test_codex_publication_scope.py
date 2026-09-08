@@ -12,6 +12,7 @@ from hephaestus.automation.pipeline.jobs import GitJob
 from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import (
     _capture_codex_publication_scope,
+    _codex_isolation_job_kwargs,
     _codex_publication_kwargs,
     _remediation_prepare_request,
 )
@@ -128,3 +129,44 @@ def test_publication_scope_preserves_hidden_and_extensionless_paths(
     scope = _codex_publication_kwargs(item, ctx, "b" * 40)
     assert isinstance(scope, dict)
     assert scope["allowed_paths"] == (".github/workflows/ci.yml", "justfile")
+
+
+@pytest.mark.parametrize("global_agent", ["claude", ""])
+def test_codex_implementation_role_retains_isolation_and_publication_scope(
+    make_ctx: Callable[..., Any], make_work_item: Callable[..., Any], global_agent: str
+) -> None:
+    """The writer tool controls isolation independently of the global tool."""
+    isolation = {
+        "codex_isolation_adapter": "test-adapter",
+        "codex_isolation_deployment_lock": Path("/deployment/lock.json"),
+        "codex_isolation_deployment_lock_sha256": "a" * 64,
+    }
+    ctx = make_ctx(
+        config_overrides={"agent": global_agent, "implementer_agent": "codex", **isolation}
+    )
+    item = make_work_item()
+    plan = "## Files to Modify\n- `src/writer.py`\n"
+    assert _codex_isolation_job_kwargs(ctx) == isolation
+    with patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)):
+        assert _capture_codex_publication_scope(item, ctx) is None
+    assert _codex_publication_kwargs(item, ctx, "b" * 40) == {
+        "allowed_paths": ("src/writer.py",),
+        "scope_history_base_sha": "b" * 40,
+    }
+
+
+def test_claude_implementation_role_does_not_require_global_codex_isolation(
+    make_ctx: Callable[..., Any], make_work_item: Callable[..., Any]
+) -> None:
+    """A global Codex tool does not impose its writer contract on Claude."""
+    ctx = make_ctx(config_overrides={"agent": "codex", "implementer_agent": "claude"})
+    item = make_work_item()
+    assert _codex_isolation_job_kwargs(ctx) == {
+        "codex_isolation_adapter": None,
+        "codex_isolation_deployment_lock": None,
+        "codex_isolation_deployment_lock_sha256": None,
+    }
+    with patch.object(ctx.github, "discover_plan") as discover_plan:
+        assert _capture_codex_publication_scope(item, ctx) is None
+    discover_plan.assert_not_called()
+    assert _codex_publication_kwargs(item, ctx, None) == {}

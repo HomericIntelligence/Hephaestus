@@ -561,18 +561,15 @@ class TestParser:
 
         configure.assert_called_once_with(verbose=True, log_format="text")
 
-    def test_unknown_claude_alias_stops_before_terminal_guard(self) -> None:
-        """An invalid Claude alias produces a CLI error before audit work."""
+    def test_literal_claude_model_reaches_audit_reviewer(self) -> None:
+        """An arbitrary short model name reaches the audit reviewer unchanged."""
         with (
-            mock.patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated,
-            mock.patch("hephaestus.automation.audit_reviewer.terminal_guard") as terminal,
-            pytest.raises(SystemExit) as error,
+            mock.patch("hephaestus.automation.audit_reviewer.resolve_agent", return_value="claude"),
+            mock.patch("hephaestus.automation.audit_reviewer.AuditReviewer") as reviewer,
         ):
-            main(["--agent", "claude", "--reviewer-model", "terra-lite"])
-
-        assert error.value.code == 2
-        authenticated.assert_not_called()
-        terminal.assert_not_called()
+            reviewer.return_value.run.return_value = (0, [])
+            assert main(["--agent", "claude", "--reviewer-model", "terra-lite"]) == 0
+        assert reviewer.call_args.kwargs["model"] == "terra-lite"
 
     def test_json_flag_emits_envelope_on_exit(self) -> None:
         with mock.patch("hephaestus.automation.audit_reviewer.AuditReviewer") as mock_cls:

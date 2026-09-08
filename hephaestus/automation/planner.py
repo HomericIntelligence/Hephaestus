@@ -24,8 +24,8 @@ from __future__ import annotations
 import argparse
 import logging
 
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import resolve_agent
+from hephaestus.automation.role_selection import resolve_role_agents
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
     add_agent_timeout_arg,
@@ -215,19 +215,10 @@ def main() -> int:
     log = logging.getLogger(__name__)
     log.info("Starting issue planner (pipeline, planning scope)")
     try:
-        agent = resolve_agent(
-            args.agent,
-            disable_pi_automation=args.disable_pi_automation,
-            auth_status_timeout=args.auth_status_timeout,
-            pi_isolation_adapter=args.pi_isolation_adapter,
-            pi_dir=args.pi_dir,
-            model_references=(
-                args.planner_model or args.model,
-                args.reviewer_model or args.model,
-                args.fallback_model or args.model,
-            ),
+        agent, role_agents = resolve_role_agents(
+            args, ("planner", "reviewer"), resolver=resolve_agent
         )
-    except UnknownModelAliasError as exc:
+    except ValueError as exc:
         _build_parser().error(str(exc))
 
     org, repo = _resolve_repo()
@@ -286,13 +277,19 @@ def main() -> int:
         learning_queue_capacity=args.learning_queue_capacity,
         dry_run=args.dry_run,
         agent=agent,
+        planner_agent=role_agents["planner"],
+        reviewer_agent=role_agents["reviewer"],
         disable_pi_automation=args.disable_pi_automation,
         auth_status_timeout=args.auth_status_timeout,
         pi_dir=args.pi_dir,
         model=args.model,
-        planner_model=planner_model(args.planner_model or args.model or None, agent=agent),
-        reviewer_model=reviewer_model(args.reviewer_model or args.model or None, agent=agent),
-        fallback_model=fallback_model(args.fallback_model or args.model or None, agent=agent),
+        planner_model=planner_model(
+            args.planner_model or args.model or None, agent=role_agents["planner"]
+        ),
+        reviewer_model=reviewer_model(
+            args.reviewer_model or args.model or None, agent=role_agents["reviewer"]
+        ),
+        fallback_model=fallback_model(args.fallback_model or None, agent=role_agents["planner"]),
         planner_timeout=args.agent_timeout,
         reviewer_timeout=args.reviewer_timeout,
         no_advise=args.no_advise,

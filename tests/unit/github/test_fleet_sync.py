@@ -758,7 +758,8 @@ class TestTimeoutHandling:
         """Direct runtimes are rejected because they cannot provide zero tools."""
         assert fleet_conflicts._run_conflict_agent("codex", "prompt", Path("/repo"), 7) is None
 
-    def test_claude_conflict_agent_uses_scoped_permissions(self) -> None:
+    @pytest.mark.parametrize("model", ["", ":default", "My-Model:max", "gpt-6-astra:high", "fable"])
+    def test_claude_conflict_agent_uses_scoped_permissions(self, model: str) -> None:
         """The Claude SDK fallback receives the documented read-only tool scope."""
         captured: dict[str, Any] = {}
 
@@ -776,10 +777,15 @@ class TestTimeoutHandling:
             patch.object(fleet_conflicts, "logger") as logger,
         ):
             assert (
-                fleet_conflicts._run_conflict_agent("claude", "prompt", Path("/repo"), 7)
+                fleet_conflicts._run_conflict_agent(
+                    "claude", "prompt", Path("/repo"), 7, model=model
+                )
                 == "resolved conflict content"
             )
 
+        assert captured["options"].get("model", "") == model.split(":")[0]
+        if not model.split(":")[0]:
+            assert "model" not in captured["options"]
         assert captured["options"]["allowed_tools"] == []
         assert captured["options"]["permission_mode"] == "dontAsk"
         logger.debug.assert_called_once_with(
@@ -1953,7 +1959,7 @@ class TestProcessRepoRoutes:
     def test_process_repo_resolves_conflicted_prs(self, tmp_path: Path) -> None:
         """CONFLICTED PRs use the lazy clone and count conflict resolutions."""
         prs = [_pr(7, PRStatus.CONFLICTED)]
-        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex")
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
 
         with (
             patch.object(fleet_coordinator, "list_prs", return_value=prs),
@@ -1980,7 +1986,7 @@ class TestProcessRepoRoutes:
 
     def test_process_repo_dry_run_suppresses_github_discovery(self, tmp_path: Path) -> None:
         """Fleet dry-run does not call GitHub discovery and has no failures."""
-        args = MagicMock(dry_run=True, skip_conflict_resolution=False, agent="codex")
+        args = MagicMock(dry_run=True, skip_conflict_resolution=False, agent="codex", model="")
 
         with patch.object(fleet_coordinator, "list_prs") as list_prs:
             counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
@@ -2012,7 +2018,7 @@ class TestProcessRepoRoutes:
     def test_process_repo_skips_failing_and_unknown_without_clone(self, tmp_path: Path) -> None:
         """Non-actionable statuses are counted as skipped without checkout work."""
         prs = [_pr(1, PRStatus.FAILING), _pr(2, PRStatus.UNKNOWN)]
-        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex")
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
 
         with (
             patch.object(fleet_coordinator, "list_prs", return_value=prs),
@@ -2025,7 +2031,7 @@ class TestProcessRepoRoutes:
 
     def test_process_repo_records_list_prs_failure(self, tmp_path: Path) -> None:
         """Repository listing failures are surfaced in the failed count."""
-        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex")
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
 
         with patch.object(fleet_coordinator, "list_prs", side_effect=RuntimeError("boom")):
             counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
@@ -2036,7 +2042,7 @@ class TestProcessRepoRoutes:
     def test_process_repo_records_ready_merge_failure(self, tmp_path: Path) -> None:
         """READY PR merge failures increment failed rather than merged."""
         prs = [_pr(7, PRStatus.READY)]
-        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex")
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
 
         with (
             patch.object(fleet_coordinator, "list_prs", return_value=prs),
@@ -2053,7 +2059,7 @@ class TestProcessRepoRoutes:
     def test_process_repo_records_outdated_rebase_failure(self, tmp_path: Path) -> None:
         """OUTDATED PR rebase failures increment failed rather than rebased."""
         prs = [_pr(7, PRStatus.OUTDATED)]
-        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex")
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
 
         with (
             patch.object(fleet_coordinator, "list_prs", return_value=prs),
@@ -2074,7 +2080,7 @@ class TestProcessRepoRoutes:
     def test_process_repo_records_conflict_resolution_failure(self, tmp_path: Path) -> None:
         """CONFLICTED PR agent failures increment failed rather than conflict_resolved."""
         prs = [_pr(7, PRStatus.CONFLICTED)]
-        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex")
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
 
         with (
             patch.object(fleet_coordinator, "list_prs", return_value=prs),

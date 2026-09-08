@@ -230,26 +230,33 @@ def test_main_installs_sigtstp_handler() -> None:
     mock_tstp.assert_called_once_with()
 
 
-def test_unknown_claude_alias_stops_before_repository_resolution() -> None:
-    """An invalid Claude alias produces a CLI error before pipeline work."""
-    with (
-        patch.object(
-            sys,
-            "argv",
-            [
-                "hephaestus-drive-prs-green",
-                "--agent",
-                "claude",
-                "--reviewer-model",
-                "terra-lite",
-            ],
-        ),
-        patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated,
-        patch.object(ci_driver_mod, "_resolve_repo") as resolve_repo,
-        pytest.raises(SystemExit) as error,
-    ):
-        ci_driver_mod.main()
+@pytest.mark.parametrize("model", ["terra-lite", "astra", "gpt-6-astra:max", "MixedCase"])
+def test_literal_claude_model_reaches_pipeline_configuration(model: str) -> None:
+    """The CLI keeps a supplied model name without an alias catalog."""
+    captured = _run_main_capturing_config(
+        ["--issues", "123", "--agent", "claude", "--reviewer-model", model]
+    )
+    assert captured["rc"] == 0
+    assert captured["config"].reviewer_model == model
 
-    assert error.value.code == 2
-    authenticated.assert_not_called()
-    resolve_repo.assert_not_called()
+
+def test_ci_wrapper_forwards_codex_writer_isolation(tmp_path: Path) -> None:
+    """Review remediation receives the operator's exact Codex adapter inputs."""
+    lock = tmp_path / "deployment-lock.json"
+    config = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--implementer-agent",
+            "codex",
+            "--codex-isolation-adapter",
+            "test-adapter",
+            "--codex-isolation-deployment-lock",
+            str(lock),
+            "--codex-isolation-deployment-lock-sha256",
+            "a" * 64,
+        ]
+    )["config"]
+    assert config.codex_isolation_adapter == "test-adapter"
+    assert config.codex_isolation_deployment_lock == lock
+    assert config.codex_isolation_deployment_lock_sha256 == "a" * 64

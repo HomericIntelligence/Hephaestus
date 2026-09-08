@@ -64,7 +64,7 @@ See the [README](../README.md) for installation and development setup instructio
 - [Contract Testing](contract-testing.md) — Opt-in authenticated GitHub and agent end-to-end contract coverage
 - [Environment Variables](environment-variables.md) — Exact runtime registry,
   rationale, and deny-by-default enforcement policy
-- [IFM Model Configuration](ifm-models.md) — GPT-6 Astra, K2-Horizon aliases,
+- [Model Configuration](ifm-models.md) — Tool selection, literal model names,
   `MODEL[:EFFORT]`, and OpenCode, Pi, and inference-server setup
 - [Privacy, Retention, and Deletion Policy](../PRIVACY.md) — data inventory, retention periods, deletion procedures, and GDPR contact (issue #2175)
 - [Third-Party Services](third-party-services.md) — Vendor inventory, responsibility split, and availability expectations for GitHub, PyPI, and agent providers (issue #2177)

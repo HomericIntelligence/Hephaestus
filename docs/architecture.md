@@ -1904,12 +1904,20 @@ Provider argument construction and the bounded Codex retry are in
 [`runtime.py`](../hephaestus/agents/runtime.py). The loop option definitions
 are in [`loop_runner.py`](../hephaestus/automation/loop_runner.py).
 
-Configured model aliases for Claude and Codex are validated before work starts.
-Codex aliases also normalize to their provider model IDs. For example,
-`terra:high` becomes `gpt-5.6-terra:high`. An alias that is not configured
-fails before pipeline work. If the command specifies Claude or Codex, the
-alias fails before agent authentication. Exact provider model IDs remain
-available.
+Tool selection and model selection are independent. `--planner-agent`,
+`--implementer-agent`, and `--reviewer-agent` override `--agent` for each role.
+Each role model overrides `--model`, even when the role selects a different
+tool. Omitted models use the selected tool's configured default. Model names
+are literal strings. Hephaestus has no model catalog, alias translation, or
+model-tier assignment. `--fallback-model` is explicit and does not inherit
+`--model`. See [ADR-0044](adr/0044-independent-tool-model-selection.md).
+
+When a Codex implementation adapter is selected, its private configuration
+supplies omitted model and effort defaults. It does not import ambient Codex
+configuration. Without an adapter, the native runner uses its configured
+defaults. Supply model and effort explicitly when both paths must use the same
+selection. See [ADR-0042](adr/0042-codex-implementation-process-boundary.md) and
+[ADR-0043](adr/0043-optional-codex-adapter-until-production-ready.md).
 
 The default pipeline accepts `--loops`, `--parallel-repos`, and the staged
 `--issue-limit` selector, which advances 1 → 2 → 4 → 8 → all only after the

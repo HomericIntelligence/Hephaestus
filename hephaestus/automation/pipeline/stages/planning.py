@@ -1155,7 +1155,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "planner"),
             model=stage_model(ctx, "planner", planner_model),
             prompt_builder=build_recovery_prompt,
             cwd=workspace.cwd if workspace else ctx.paths.worktree,
@@ -1208,7 +1208,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "reviewer"),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_recovery_review_prompt,
             cwd=workspace.cwd if workspace else ctx.paths.worktree,
@@ -2189,7 +2189,7 @@ class PlanningStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=agent_provider(ctx),
+                agent=agent_provider(ctx, "planner"),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
                 cwd=workspace.cwd if workspace else ctx.paths.worktree,

@@ -16,7 +16,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.automation import pr_reviewer as pr_reviewer_mod
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.cli.utils import emit_json_status
@@ -83,23 +82,23 @@ def test_agent_timeout_threads_into_pipeline_config() -> None:
     assert captured["config"].reviewer_timeout == 11
 
 
-def test_codex_role_alias_reaches_reviewer_config() -> None:
-    """Reviewer role aliases resolve before pipeline configuration is built."""
+def test_literal_codex_model_reaches_reviewer_config() -> None:
+    """Review model names remain literal in pipeline configuration."""
     captured = _run_main_capturing_config(
         ["--issues", "123", "--agent", "codex", "--reviewer-model", "luna"],
         resolved_agent="codex",
     )
 
-    assert captured["config"].reviewer_model == "gpt-5.6-luna:medium"
+    assert captured["config"].reviewer_model == "luna"
 
 
-def test_main_rejects_unknown_codex_alias_before_repo_or_pipeline_work() -> None:
-    """Reviewer rejects an unknown alias before repository or pipeline work."""
+def test_main_reports_invalid_model_before_repo_or_pipeline_work() -> None:
+    """Reviewer reports invalid input before repository or pipeline work."""
 
-    def reject_unknown_fallback(agent: str | None, **kwargs: Any) -> str:
+    def reject_invalid_fallback(agent: str | None, **kwargs: Any) -> str:
         assert agent == "codex"
         assert kwargs["model_references"] == ("", "unknown")
-        raise UnknownModelAliasError("Unknown Codex model alias 'unknown'")
+        raise ValueError("Invalid model selection")
 
     with (
         patch(
@@ -117,7 +116,7 @@ def test_main_rejects_unknown_codex_alias_before_repo_or_pipeline_work() -> None
         patch.object(
             pr_reviewer_mod,
             "resolve_agent",
-            side_effect=reject_unknown_fallback,
+            side_effect=reject_invalid_fallback,
         ),
         patch.object(pr_reviewer_mod, "_resolve_repo") as resolve_repo,
         patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,
@@ -233,3 +232,25 @@ def test_main_installs_sigtstp_handler() -> None:
 
     assert captured["rc"] == 0
     mock_tstp.assert_called_once_with()
+
+
+def test_review_wrapper_forwards_codex_writer_isolation(tmp_path: Path) -> None:
+    """Review remediation receives the operator's exact Codex adapter inputs."""
+    lock = tmp_path / "deployment-lock.json"
+    config = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--implementer-agent",
+            "codex",
+            "--codex-isolation-adapter",
+            "test-adapter",
+            "--codex-isolation-deployment-lock",
+            str(lock),
+            "--codex-isolation-deployment-lock-sha256",
+            "a" * 64,
+        ]
+    )["config"]
+    assert config.codex_isolation_adapter == "test-adapter"
+    assert config.codex_isolation_deployment_lock == lock
+    assert config.codex_isolation_deployment_lock_sha256 == "a" * 64

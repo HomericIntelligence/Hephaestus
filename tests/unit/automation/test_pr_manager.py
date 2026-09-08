@@ -241,24 +241,22 @@ class TestCommitChanges:
 
         commit.assert_not_called()
 
-    def test_default_claude_model_is_resolved_before_neutral_delegate(self) -> None:
-        """The compatibility facade keeps the selected Claude provenance."""
+    def test_omitted_claude_model_reaches_neutral_delegate(self) -> None:
+        """The tool runtime owns the default when no model is supplied."""
         issue = MagicMock(title="Repair publication", body="Keep workers local.")
         with (
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
-            patch.object(pr_manager, "implementer_model", return_value="claude-test-model-9"),
             patch.object(commit_runtime, "commit_changes") as commit,
         ):
             pr_manager.commit_changes(3009, Path("/tmp/wt"))
 
-        assert commit.call_args.args[6] == "claude-test-model-9"
+        assert commit.call_args.args[6] is None
 
     def test_explicit_claude_model_is_preserved_before_neutral_delegate(self) -> None:
         """An explicit Claude model takes priority over the configured default."""
         issue = MagicMock(title="Repair publication", body="Keep workers local.")
         with (
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
-            patch.object(pr_manager, "implementer_model") as configured_model,
             patch.object(commit_runtime, "commit_changes") as commit,
         ):
             pr_manager.commit_changes(
@@ -267,7 +265,6 @@ class TestCommitChanges:
                 agent_model="claude-explicit-5",
             )
 
-        configured_model.assert_not_called()
         assert commit.call_args.args[6] == "claude-explicit-5"
 
 

@@ -25,7 +25,6 @@ from hephaestus.agents.runtime import (
 )
 
 from .claude_invoke import describe_claude_failure, invoke_claude_with_session
-from .claude_models import implementer_model, learn_model
 from .git_utils import get_repo_slug, issue_ref, pr_ref
 from .learn import build_learn_prompt, compact_session, mnemosyne_update_evidence
 from .session_naming import AGENT_CI_DRIVER
@@ -153,9 +152,9 @@ class PostMergeProcessor:
                     wt_err,
                 )
                 cwd = repo_root
-            if uses_direct_agent_runner(options.agent):
+            if uses_direct_agent_runner(getattr(options, "implementer_agent", "") or options.agent):
                 direct_result = run_agent_session(
-                    agent=options.agent,
+                    agent=(getattr(options, "implementer_agent", "") or options.agent),
                     prompt=prompt,
                     cwd=cwd,
                     timeout=options.learn_timeout,
@@ -163,7 +162,9 @@ class PostMergeProcessor:
                         AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW
                     ),
                     model=direct_agent_model(
-                        options.agent, model_value=learn_model(agent=options.agent)
+                        (getattr(options, "implementer_agent", "") or options.agent),
+                        model_value=getattr(options, "implementer_model", "")
+                        or getattr(options, "model", ""),
                     ),
                     sandbox="workspace-write",
                 )
@@ -171,7 +172,7 @@ class PostMergeProcessor:
                 logger.info(
                     "Issue #%s: drive-green learnings captured with %s",
                     issue_number,
-                    options.agent,
+                    (getattr(options, "implementer_agent", "") or options.agent),
                 )
                 return True
             stdout, _ = invoke_claude_with_session(
@@ -179,10 +180,8 @@ class PostMergeProcessor:
                 issue=issue_number,
                 agent=AGENT_CI_DRIVER,
                 prompt=prompt,
-                # /learn inherits the parent phase's model. drive-green resumes
-                # the implementer's session, and ``claude --resume`` is locked to
-                # the model that created it, so we must use implementer_model().
-                model=implementer_model(),
+                # Keep the implementation model when this legacy path resumes.
+                model=getattr(options, "implementer_model", "") or getattr(options, "model", ""),
                 cwd=cwd,
                 timeout=options.learn_timeout,
                 output_format="text",
@@ -222,11 +221,11 @@ class PostMergeProcessor:
         """
         options = self._options()
         repo_root = self._repo_root()
-        if uses_direct_agent_runner(options.agent):
+        if uses_direct_agent_runner(getattr(options, "implementer_agent", "") or options.agent):
             logger.info(
                 "Issue #%s: skipping /compact (%s does not use Claude compact sessions)",
                 issue_number,
-                options.agent,
+                (getattr(options, "implementer_agent", "") or options.agent),
             )
             return False
         try:
@@ -244,5 +243,5 @@ class PostMergeProcessor:
             issue=issue_number,
             agent=AGENT_CI_DRIVER,
             cwd=cwd,
-            model=implementer_model(),
+            model=getattr(options, "implementer_model", "") or getattr(options, "model", ""),
         )

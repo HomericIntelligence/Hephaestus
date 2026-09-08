@@ -32,7 +32,7 @@ from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 
 from . import commit_runtime as _commit_runtime
-from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT, HAIKU, implementer_model
+from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
 from .commit_policy import (
@@ -219,14 +219,11 @@ def _invoke_git_message_agent(
 ) -> str:
     """Run the lightweight message agent in a separate read-only session.
 
-    Pipeline callers must provide their CLI-resolved role model.  Claude and
-    Codex use the deterministic lightweight-message default when a standalone
-    caller omits one; Pi retains its provider-specific default in that case.
+    Pipeline callers supply the implementation model. If a standalone caller
+    omits the model, use the selected tool's configured default.
     """
     model = (
-        model_override
-        if model_override is not None
-        else direct_agent_model(agent, codex_default=HAIKU)
+        model_override if model_override is not None else direct_agent_model(agent, model_value="")
     )
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
@@ -594,7 +591,7 @@ def commit_changes(
         git_timeout: Optional timeout in seconds for each local git command.
         agent_model: Explicit model and reasoning effort selected by the
             command line for the message-generation session. When omitted,
-            the deterministic lightweight-message default is used.
+            the selected tool default is used.
         signing_env: Optional validated Git environment for commit signing.
         git_env: Optional isolated Git environment for status and staging.
         expected_add_paths: Bounded inspected paths to add without re-enumeration.
@@ -612,9 +609,6 @@ def commit_changes(
 
     """
     issue = fetch_issue_info(issue_number)
-    resolved_agent_model = (
-        implementer_model() if agent == "claude" and agent_model is None else agent_model
-    )
     return _commit_runtime.commit_changes(
         _commit_runtime.CommitIssueMetadata(issue_number, issue.title, _issue_body(issue)),
         worktree_path,
@@ -622,7 +616,7 @@ def commit_changes(
         git_message_timeout,
         allowed_paths,
         git_timeout,
-        resolved_agent_model,
+        agent_model,
         expected_tree_sha=expected_tree_sha,
         return_commit_sha=return_commit_sha,
         signing_env=signing_env,
@@ -659,7 +653,7 @@ def ensure_pr_created(
         slot_id: Worker slot ID for status updates
         agent: Selected implementation agent for generated PR metadata.
         agent_model: Explicit model and reasoning effort for generated PR
-            metadata. When omitted, the deterministic message default is used.
+            metadata. When omitted, the selected tool default is used.
         pi_dir: Operator-global Pi directory for generated PR metadata.
         git_message_timeout: Timeout in seconds for the lightweight PR-message
             agent. Defaults to :data:`DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT`.
@@ -784,7 +778,7 @@ def create_pr(
             is prohibited; merge-wait conditionally merges reviewed heads.
         agent: Selected implementation agent for generated PR metadata.
         agent_model: Explicit model and reasoning effort for generated PR
-            metadata. When omitted, the deterministic message default is used.
+            metadata. When omitted, the selected tool default is used.
         pi_dir: Operator-global Pi directory for generated PR metadata.
         base: Base branch used for changed-file and commit context.
         worktree_path: Optional worktree path used to invoke the lightweight

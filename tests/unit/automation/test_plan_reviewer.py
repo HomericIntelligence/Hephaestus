@@ -891,10 +891,10 @@ class TestMain:
         assert reviewer_class.call_args.args[0].reviewer_model == ""
         assert reviewer_class.call_args.args[0].fallback_model == ""
 
-    def test_unknown_claude_alias_stops_before_terminal_guard(
+    def test_literal_claude_model_reaches_reviewer_options(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An invalid Claude alias produces a CLI error before review work."""
+        """A supplied short model name reaches the reviewer unchanged."""
         from hephaestus.automation import plan_reviewer
 
         monkeypatch.setattr(
@@ -907,18 +907,14 @@ class TestMain:
                 "claude",
                 "--reviewer-model",
                 "terra-lite",
+                "--no-ui",
             ],
         )
-        with (
-            patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated,
-            patch.object(plan_reviewer, "terminal_guard") as terminal,
-            pytest.raises(SystemExit) as error,
-        ):
-            plan_reviewer.main()
-
-        assert error.value.code == 2
-        authenticated.assert_not_called()
-        terminal.assert_not_called()
+        monkeypatch.setattr(plan_reviewer, "resolve_agent", lambda *_args, **_kwargs: "claude")
+        with patch.object(plan_reviewer, "PlanReviewer") as reviewer_class:
+            reviewer_class.return_value.run.return_value = {}
+            assert plan_reviewer.main() == 0
+        assert reviewer_class.call_args.args[0].reviewer_model == "terra-lite"
 
     def test_success_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1185,3 +1181,55 @@ class TestPlanReviewerAlreadyReviewedFlag:
         # issue 4 failed → rc=1, but the work report still reflects the 2 real reviews.
         assert rc == 1
         assert report.read_text(encoding="utf-8") == "2"
+
+
+@pytest.mark.parametrize(
+    ("agent", "reviewer_agent", "global_model", "role_model", "expected_agent", "expected_model"),
+    [
+        ("codex", "claude", "MixedModel:max", "", "claude", "MixedModel:max"),
+        ("claude", "codex", "MixedModel:max", "", "codex", "MixedModel:max"),
+        ("codex", "opencode", "GlobalModel", "RoleModel:high", "opencode", "RoleModel:high"),
+        ("codex", "", "", "", "codex", ""),
+    ],
+)
+def test_sdk_reviewer_selection_reaches_execution(
+    agent: str,
+    reviewer_agent: str,
+    global_model: str,
+    role_model: str,
+    expected_agent: str,
+    expected_model: str,
+) -> None:
+    """Direct Python callers receive the same selection precedence as the CLI."""
+    from hephaestus.agents.runtime import AgentRunResult
+
+    options = PlanReviewerOptions(
+        agent=agent,
+        reviewer_agent=reviewer_agent,
+        model=global_model,
+        reviewer_model=role_model,
+    )
+    with (
+        patch(
+            "hephaestus.automation.plan_reviewer.invoke_claude_with_session",
+            return_value=("review", "session"),
+        ) as claude,
+        patch(
+            "hephaestus.automation.plan_reviewer.run_agent_text",
+            return_value=AgentRunResult(stdout="review", stderr=""),
+        ) as direct,
+    ):
+        assert PlanReviewer(options)._run_claude_analysis(123, "Title", "Body", "Plan") == "review"
+    if expected_agent == "claude":
+        direct.assert_not_called()
+        assert claude.call_args.kwargs["model"] == expected_model
+    else:
+        claude.assert_not_called()
+        assert direct.call_args.kwargs["agent"] == expected_agent
+        assert direct.call_args.kwargs["model"] == expected_model
+
+
+def test_sdk_reviewer_rejects_unknown_role_tool() -> None:
+    """An unsupported role tool cannot silently execute the global tool."""
+    with pytest.raises(ValueError, match="Unsupported agent"):
+        PlanReviewer(PlanReviewerOptions(agent="claude", reviewer_agent="unknown"))

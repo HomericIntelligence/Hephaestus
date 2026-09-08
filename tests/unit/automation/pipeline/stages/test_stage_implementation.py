@@ -2417,12 +2417,21 @@ class TestWorktreeAndAdvise:
         item.session_ids[AGENT_IMPLEMENTER] = "writer-session"
         item.session_bindings[AGENT_IMPLEMENTER] = cast(Any, object())
 
-        ctx = make_ctx(config_overrides={"projects_dir": tmp_path})
+        ctx = make_ctx(
+            config_overrides={
+                "projects_dir": tmp_path,
+                "agent": "codex",
+                "implementer_agent": "claude",
+                "model": "Shared:max",
+            }
+        )
         request = stage.step(item, ctx)
 
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, AgentJob)
         assert request.job.descr == "recover_remediation_reply"
+        assert request.job.agent == "claude"
+        assert request.job.model == "Shared:max"
         assert request.job.allowed_tools == ""
         assert request.job.sandbox == "read-only"
         assert request.job.cwd != Path(item.worktree)
@@ -4693,6 +4702,8 @@ class TestTestsAndFix:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.resume_session_id == "implement-session-id"
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.lifecycle.value == "resume_required"
 
     def test_testfix_budget_exhaustion_finishes_failed(
         self, make_ctx: Any, make_work_item: Any
@@ -5622,7 +5633,7 @@ class TestCommitPushAndPrCreate:
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
-            "agent_model": "claude-haiku-4-5",
+            "agent_model": "",
             "git_message_timeout": 1200,
         }
         assert result.on_done_state == "PR_CREATE"
@@ -5657,6 +5668,31 @@ class TestCommitPushAndPrCreate:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["pi_dir"] == "/tmp/operator-pi"
+
+    @pytest.mark.parametrize("role_model", ["", "Literal:medium"])
+    def test_commit_push_uses_implementation_tool_and_model(
+        self, make_ctx: Any, make_work_item: Any, role_model: str
+    ) -> None:
+        """Commit messages use the role tool and inherit the global model."""
+        stage = ImplementationStage()
+        ctx = make_ctx(
+            config_overrides={
+                "agent": "codex",
+                "model": "Global:max",
+                "implementer_agent": "opencode",
+                "implementer_model": role_model,
+            }
+        )
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["agent"] == "opencode"
+        assert result.job.kwargs["agent_model"] == (role_model or "Global:max")
 
     def test_commit_push_uses_configured_codex_implementer_model(
         self, make_ctx: Any, make_work_item: Any
@@ -6084,10 +6120,23 @@ class TestCommitPushAndPrCreate:
 
         assert retry_job == Continue(next_state="REMEDIATION_PREPARE_WAIT")
         item.state = retry_job.next_state
-        retry_job = stage.step(item, make_ctx())
+        retry_job = stage.step(
+            item,
+            make_ctx(
+                config_overrides={
+                    "agent": "codex",
+                    "implementer_agent": "opencode",
+                    "model": "Shared:max",
+                    "pi_dir": Path("/tmp/operator-pi"),
+                }
+            ),
+        )
         assert isinstance(retry_job, JobRequest)
         assert isinstance(retry_job.job, GitJob)
         assert retry_job.job.op == "prepare_remediation_recovery"
+        assert retry_job.job.kwargs["agent"] == "opencode"
+        assert retry_job.job.kwargs["agent_model"] == "Shared:max"
+        assert retry_job.job.kwargs["pi_dir"] == Path("/tmp/operator-pi")
         assert retry_job.job.deadline_s is not None
         first_prepare_deadline = retry_job.job.deadline_s
         assert retry_job.job.kwargs["repo_root"] == "/tmp/repo"

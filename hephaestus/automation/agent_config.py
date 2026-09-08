@@ -11,20 +11,10 @@ existing callers keep working unchanged.
 
 Model selection
 ---------------
-Each nonempty Claude base model adds ``--model <id>`` to the ``claude`` CLI
-call. Thus, the selected model does not depend on the user's CLI default. An
-empty base model omits ``--model`` and uses the Claude provider default. The
-default mapping reflects the cost/quality tradeoff for each phase:
-
-- Planning needs reasoning quality but few tokens overall → Opus
-- Implementation is a long mechanical tool-use loop → Haiku
-- Reviewers / advise / learn → Sonnet (middle ground)
-- Git/PR message writing is tiny metadata generation → Haiku
-
-Model overrides are resolved once by CLI entry points and passed explicitly.
-Unknown non-Codex overrides emit a **warning** but are still accepted so
-operators can experiment with preview models without a code change. Codex
-short aliases are validated before provider work starts.
+The caller selects a tool separately from its model string. An omitted model
+uses that tool's configured default. Explicit names pass through without
+catalog checks or alias translation. Role selections inherit the global model.
+A quota fallback requires an explicit fallback model.
 
 Reasoning effort
 ----------------
@@ -76,21 +66,11 @@ from hashlib import sha256
 from pathlib import Path
 
 from hephaestus.agents.model_selection import (
-    CODEX_ROLE_MODEL_ALIASES,
-    GPT_6_ASTRA,
-    IFM_MODELS,
-    K2_HORIZON_09B,
-    K2_HORIZON_7B,
-    K2_HORIZON_32B,
-    K2_HORIZON_37B,
-    K2_HORIZON_375B_A23B,
-    K2_HORIZON_MOVA_36B_A4B,
     AgentModelSelection,
     normalize_model_reference,
     parse_model_selection,
 )
 from hephaestus.agents.runtime import (
-    agent_uses_configured_model_default,
     normalize_provider_model_reference,
 )
 from hephaestus.constants import (
@@ -104,107 +84,25 @@ logger = logging.getLogger(__name__)
 
 # ── Model selection ──────────────────────────────────────────────────────────
 
-OPUS_47 = "claude-opus-4-7"
-SONNET_46 = "claude-sonnet-4-6"
-HAIKU_45 = "claude-haiku-4-5"
-CODEX_ADVISE = "gpt-5.4-mini"
-
-# OpenCode provider — Muse Spark 1.2 (opencode.ai/zen). It supports reasoning
-# variants through provider model options. Hephaestus passes a selected role
-# effort through ``--variant``.
-MUSE_SPARK_12 = "opencode/muse-spark-1.2-contributor-free"
-MUSE_SPARK_12_HIGH = "opencode/muse-spark-1.2-high"
-MUSE_SPARK_12_MEDIUM = "opencode/muse-spark-1.2-medium"
-MUSE_SPARK_12_LOW = "opencode/muse-spark-1.2-low"
-
-# Newer tiers that are valid model IDs but not the per-phase defaults. Listed in
-# the known set so pinning them via explicit model options doesn't emit a spurious
-# "Unknown model" warning. (Fable and Mythos sit above Opus; 4.8 is the
-# current Opus.)
-OPUS_48 = "claude-opus-4-8"
-FABLE_5 = "claude-fable-5"
-SONNET_5 = "claude-sonnet-5"
-SONNET_50 = SONNET_5
-MYTHOS = "claude-mythos-5"
-SONNET = SONNET_46
-OPUS = OPUS_48
-HAIKU = HAIKU_45
-FABLE = FABLE_5
-
-# The set of model IDs the automation suite recognizes. Overrides to values
-# outside this set are still accepted (operators may have preview access) but
-# trigger a one-time warning so misconfigured/typo'd env vars are visible.
-_KNOWN_MODELS: frozenset[str] = (
-    frozenset(
-        {
-            OPUS_47,
-            SONNET_46,
-            SONNET_5,
-            HAIKU_45,
-            OPUS_48,
-            FABLE_5,
-            MYTHOS,
-            GPT_6_ASTRA,
-            "astra",
-            *(selection.model for selection in CODEX_ROLE_MODEL_ALIASES.values()),
-            MUSE_SPARK_12,
-            MUSE_SPARK_12_HIGH,
-            MUSE_SPARK_12_MEDIUM,
-            MUSE_SPARK_12_LOW,
-        }
-    )
-    | IFM_MODELS
-)
-_MODEL_ALIASES: dict[str, str] = {
-    "fable": FABLE,
-    "mythos": MYTHOS,
-}
-
 
 def _normalize_configured_model(model: str) -> AgentModelSelection:
-    """Normalize a model selection while preserving its free-form effort."""
-    value = model.strip()
-    if not value:
-        return AgentModelSelection("")
-    selection = parse_model_selection(value)
-    normalized_model = _MODEL_ALIASES.get(selection.model.lower(), selection.model)
-    return AgentModelSelection(normalized_model, selection.reasoning_effort)
+    """Return a literal model name and optional provider effort."""
+    return parse_model_selection(model)
 
 
 def normalize_claude_model(model: str) -> str:
-    """Return the Claude model ID without an unsupported effort suffix."""
-    return _normalize_configured_model(model).model
+    """Return the literal Claude model without the effort suffix."""
+    return parse_model_selection(model).model
 
 
-def _resolve_model(value: str | None, default: str, *, agent: str = "claude") -> str:
-    """Return an explicit compact model selection or *default*.
-
-    Args:
-        value: Explicit model selection, or ``None`` to use the default.
-        default: Default model ID to use when the value is unset.
-
-    Returns:
-        The resolved compact model selection.
-
-    """
-    if value is None and agent_uses_configured_model_default(agent):
-        return ""
-    if value is None:
-        return default
-    resolved = _normalize_configured_model(normalize_provider_model_reference(agent, value))
-    selection = parse_model_selection(resolved)
-    if selection.model and selection.model not in _KNOWN_MODELS:
-        logger.warning(
-            "Unknown model %r (known: %s). Proceeding, but verify the model ID is correct.",
-            resolved,
-            ", ".join(sorted(_KNOWN_MODELS)),
-        )
-    return selection.reference
+def _resolve_model(value: str | None, *, agent: str = "claude") -> str:
+    """Use an explicit selection or the selected tool's configured default."""
+    return normalize_provider_model_reference(agent, value or "")
 
 
 def planner_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model used to generate implementation plans from issue text."""
-    return _resolve_model(value, OPUS, agent=agent)
+    return _resolve_model(value, agent=agent)
 
 
 def implementer_model(value: str | None = None, *, agent: str = "claude") -> str:
@@ -214,36 +112,36 @@ def implementer_model(value: str | None = None, *, agent: str = "claude") -> str
     (e.g. address-review, ci-driver), since ``claude --resume`` is locked
     to the model that created the session.
     """
-    return _resolve_model(value, HAIKU, agent=agent)
+    return _resolve_model(value, agent=agent)
 
 
 def reviewer_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model used by plan/PR reviewers and the review-fix loop."""
-    return _resolve_model(value, SONNET, agent=agent)
+    return _resolve_model(value, agent=agent)
 
 
 def advise_model(value: str | None = None, *, agent: str = "claude") -> str:
-    """Claude model used by the advise skill-selection step."""
-    return _resolve_model(value, HAIKU, agent=agent)
+    """Return an explicit legacy advice model or the tool default."""
+    return _resolve_model(value, agent=agent)
 
 
 def codex_advise_model() -> str:
-    """Codex model used by the advise skill-selection step."""
-    return CODEX_ADVISE
+    """Use the tool default for legacy advice callers."""
+    return ""
 
 
 def learn_model(value: str | None = None, *, agent: str = "claude") -> str:
     """Model used by /learn and follow-up issue filing."""
-    return _resolve_model(value, HAIKU, agent=agent)
+    return _resolve_model(value, agent=agent)
 
 
 def git_message_model() -> str:
-    """Return the deterministic default for standalone message generation.
+    """Use the tool default for standalone message generation.
 
     The automation loop passes its CLI-resolved implementation model directly;
     this compatibility helper deliberately has no environment override.
     """
-    return HAIKU
+    return ""
 
 
 def fallback_model(value: str | None = None, *, agent: str = "claude") -> str:
@@ -251,9 +149,9 @@ def fallback_model(value: str | None = None, *, agent: str = "claude") -> str:
 
     A "reached your <model> limit … switch models with /model" 429 carries no
     reset epoch, so waiting cannot help — the invoke chokepoint retries on
-    this model instead. Defaults to :data:`OPUS` (the current Opus).
+    this model instead, only when an explicit fallback was supplied.
     """
-    return _resolve_model(value, OPUS, agent=agent)
+    return _resolve_model(value, agent=agent)
 
 
 # ── Subprocess timeouts ──────────────────────────────────────────────────────
@@ -467,7 +365,11 @@ def _model_token(model: str | None) -> str:
     """
     if not model:
         return ""
-    return re.sub(r"[^A-Za-z0-9._-]", "-", model.strip())
+    value = model.strip()
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", value)
+    if safe == value:
+        return value
+    return f"{safe}~{sha256(value.encode()).hexdigest()}"
 
 
 def session_name(repo: str, issue: int | str, agent: str, model: str | None = None) -> str:
@@ -702,31 +604,11 @@ __all__ = [
     "AGENT_PR_REVIEWER",
     "AGENT_REVIEW_TIMEOUT",
     # Model selection
-    "CODEX_ADVISE",
     "DEFAULT_AGENT_TIMEOUT",
     "DEFAULT_CI_POLL_MAX_WAIT",
     "DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT",
     "DEFAULT_THROUGHPUT_TIMEOUT",
-    "FABLE",
-    "FABLE_5",
-    "HAIKU",
-    "HAIKU_45",
-    "IFM_MODELS",
-    "K2_HORIZON_09B",
-    "K2_HORIZON_7B",
-    "K2_HORIZON_32B",
-    "K2_HORIZON_37B",
-    "K2_HORIZON_375B_A23B",
-    "K2_HORIZON_MOVA_36B_A4B",
-    "MYTHOS",
-    "OPUS",
-    "OPUS_47",
-    "OPUS_48",
     "PLAN_STAGE_TIMEOUT",
-    "SONNET",
-    "SONNET_5",
-    "SONNET_46",
-    "SONNET_50",
     "address_review_claude_timeout",
     "advise_claude_timeout",
     "advise_model",

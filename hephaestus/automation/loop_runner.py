@@ -39,12 +39,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.utils import add_role_agent_args
+
 if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
     from hephaestus.automation.pipeline.routing import PipelineScope
 
 from hephaestus._version_lookup import get_version
-from hephaestus.agents.model_selection import UnknownModelAliasError
 from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
     resolve_agent,
@@ -280,6 +282,9 @@ class LoopConfig:
     # ``model`` is the catch-all applied to every phase when set; per-phase
     # fields below take precedence over it.
     model: str = ""
+    planner_agent: str = ""
+    implementer_agent: str = ""
+    reviewer_agent: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
@@ -351,6 +356,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         verbose_help="Enable DEBUG logging",
     )
+    add_role_agent_args(p)
     p.add_argument(
         "--loops",
         type=_parse_positive_int,
@@ -486,10 +492,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         metavar="MODEL[:EFFORT]",
         help=(
-            "MODEL[:EFFORT] applied to every phase (planner, reviewer, implementer, advise) "
-            f"for child processes. {MODEL_REFERENCE_HELP} The /learn "
-            "step inherits its parent phase's model automatically. A per-phase flag below "
-            "overrides this for that phase."
+            "MODEL[:EFFORT] for planner, reviewer, and implementer child processes. "
+            f"{MODEL_REFERENCE_HELP} A role model option overrides this selection. "
+            "Host-owned advice and learning do not use this model."
         ),
     )
     p.add_argument(
@@ -960,6 +965,9 @@ def _build_pipeline_config(
         codex_isolation_deployment_lock=cfg.codex_isolation_deployment_lock,
         codex_isolation_deployment_lock_sha256=cfg.codex_isolation_deployment_lock_sha256,
         model=cfg.model,
+        planner_agent=cfg.planner_agent,
+        implementer_agent=cfg.implementer_agent,
+        reviewer_agent=cfg.reviewer_agent,
         planner_model=cfg.planner_model,
         reviewer_model=cfg.reviewer_model,
         implementer_model=cfg.implementer_model,
@@ -1117,24 +1125,22 @@ def main(argv: list[str] | None = None) -> int:
         quiet=args.quiet,
         log_file=args.log_file,
     )
-    try:
-        agent = resolve_agent(
-            args.agent,
-            disable_pi_automation=args.disable_pi_automation,
-            auth_status_timeout=args.auth_status_timeout,
-            pi_isolation_adapter=args.pi_isolation_adapter,
-            pi_dir=args.pi_dir,
-            model_references=(
-                args.planner_model or args.model,
-                args.reviewer_model or args.model,
-                args.implementer_model or args.model,
-                args.fallback_model or args.model,
-            ),
-        )
-    except UnknownModelAliasError as exc:
-        _build_parser().error(str(exc))
-
     phases = _validate_phases(args.phases)
+    active_roles = tuple(
+        role
+        for role, enabled in (
+            ("planner", "plan" in phases),
+            ("implementer", bool({"implement", "drive-green"}.intersection(phases))),
+            ("reviewer", bool(phases)),
+        )
+        if enabled
+    )
+    try:
+        agent, role_agents = resolve_role_agents(args, active_roles, resolver=resolve_agent)
+    except ValueError as exc:
+        _build_parser().error(str(exc))
+    for role in ("planner", "implementer", "reviewer"):
+        role_agents.setdefault(role, getattr(args, f"{role}_agent") or agent)
 
     # Resolve org + repos using a 4-branch precedence ladder. Org is
     # always set explicitly here — there is no silent fallback to a
@@ -1163,6 +1169,9 @@ def main(argv: list[str] | None = None) -> int:
         parallel_repos=args.parallel_repos,
         phases=phases,
         agent=agent,
+        planner_agent=role_agents["planner"],
+        implementer_agent=role_agents["implementer"],
+        reviewer_agent=role_agents["reviewer"],
         disable_pi_automation=args.disable_pi_automation,
         auth_status_timeout=args.auth_status_timeout,
         pi_isolation_adapter=args.pi_isolation_adapter,
@@ -1184,21 +1193,21 @@ def main(argv: list[str] | None = None) -> int:
         planner_model=_resolve_model_option(
             args.planner_model,
             args.model,
-            _provider_model_default(agent, default_planner_model()),
+            _provider_model_default(role_agents["planner"], default_planner_model()),
         ),
         reviewer_model=_resolve_model_option(
             args.reviewer_model,
             args.model,
-            _provider_model_default(agent, default_reviewer_model()),
+            _provider_model_default(role_agents["reviewer"], default_reviewer_model()),
         ),
         implementer_model=_resolve_model_option(
             args.implementer_model,
             args.model,
-            _provider_model_default(agent, default_implementer_model()),
+            _provider_model_default(role_agents["implementer"], default_implementer_model()),
         ),
         fallback_model=_resolve_model_option(
             args.fallback_model,
-            args.model,
+            "",
             _provider_model_default(agent, default_fallback_model()),
         ),
         gh_extra_path_root=args.gh_extra_path_root,

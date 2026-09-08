@@ -431,7 +431,7 @@ class CodexIsolationRequestV1:
         if self.role != "implementer":
             raise ValueError("role must be implementer")
         _require_absolute_path(self.worktree_identity, "worktree_identity")
-        _require_string(self.model, "model")
+        _require_string(self.model, "model", allow_empty=True)
         _require_string(self.session, "session")
         identity = (
             self.repository,
@@ -644,12 +644,12 @@ def _validate_inventories_v1(
         _fail("codex_adapter_inventory_uncertain")
 
 
-def validate_result(  # noqa: C901 - preserve the accepted version-1 validator
+def validate_result_evidence(  # noqa: C901 - preserve the accepted version-1 validator
     request: CodexIsolationRequestV1,
     prepared: CodexIsolationPreparedV1,
     result: CodexIsolationResultV1,
 ) -> None:
-    """Validate an accepted version-1 final result."""
+    """Validate isolation evidence before the host classifies provider failure."""
     if (
         type(request) is not CodexIsolationRequestV1
         or type(prepared) is not CodexIsolationPreparedV1
@@ -703,6 +703,15 @@ def validate_result(  # noqa: C901 - preserve the accepted version-1 validator
     _validate_inventories_v1(result.inventories, request.policy.inventory_quiescence_seconds)
     if result.error_code is not None:
         _fail(result.error_code)
+
+
+def validate_result(
+    request: CodexIsolationRequestV1,
+    prepared: CodexIsolationPreparedV1,
+    result: CodexIsolationResultV1,
+) -> None:
+    """Require complete isolation evidence and a successful provider exit."""
+    validate_result_evidence(request, prepared, result)
     if result.exit_status != 0:
         _fail("codex_adapter_result_invalid")
 
@@ -993,4 +1002,5 @@ __all__ = [
     "validate_adapter",
     "validate_prepared",
     "validate_result",
+    "validate_result_evidence",
 ]

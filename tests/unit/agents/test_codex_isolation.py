@@ -167,6 +167,26 @@ def _request(tmp_path: Path, **changes: Any) -> Any:
     return iso.CodexIsolationRequestV1(**values)
 
 
+@pytest.mark.parametrize("model", ["", "default", "gpt-6-astra:max", "MyModel", "sol"])
+def test_request_preserves_literal_model_identity(tmp_path: Path, model: str) -> None:
+    """An omitted model and each literal model have distinct request identities."""
+    original = _request(tmp_path)
+    identity = (
+        original.repository,
+        original.issue,
+        original.role,
+        original.worktree_identity,
+        model,
+        original.session,
+    )
+    request = dataclasses.replace(original, model=model, session_identity_digest=_digest(identity))
+    assert request.model == model
+    assert request.session_identity_digest == _digest(identity)
+    if model == "":
+        literal_identity = (*identity[:4], "default", identity[5])
+        assert request.session_identity_digest != _digest(literal_identity)
+
+
 def test_request_binds_git_receipt_paths_and_environment(tmp_path: Path) -> None:
     """A re-digested request cannot diverge from its exact Git receipt."""
     request = _request(tmp_path)
@@ -805,3 +825,24 @@ def test_result_rejects_output_pipe_and_incomplete_inventory(tmp_path: Path) -> 
         with pytest.raises(iso.CodexIsolationError) as error:
             iso.validate_result(request, prepared, _result(request, prepared, **changes))
         assert error.value.code == code
+
+
+def test_result_evidence_accepts_provider_failure_but_keeps_isolation_checks(
+    tmp_path: Path,
+) -> None:
+    """Provider failure classification requires complete isolation evidence."""
+    iso = _module()
+    request = _request(tmp_path)
+    prepared = _prepared(request)
+    result = _result(request, prepared, exit_status=1)
+    iso.validate_result_evidence(request, prepared, result)
+    with pytest.raises(iso.CodexIsolationError, match="codex_adapter_result_invalid"):
+        iso.validate_result(request, prepared, result)
+    for changes in (
+        {"pipes_closed": False},
+        {"request_digest": "0" * 64},
+        {"inventories": ()},
+        {"error_code": "codex_adapter_inventory_uncertain"},
+    ):
+        with pytest.raises(iso.CodexIsolationError):
+            iso.validate_result_evidence(request, prepared, dataclasses.replace(result, **changes))

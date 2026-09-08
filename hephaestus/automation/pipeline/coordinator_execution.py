@@ -10,7 +10,7 @@ import hephaestus.automation.pipeline.coordinator_types as ct
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 
 from .coordinator_contract import _CoordinatorHost
-from .coordinator_sessions import store_agent_session_result
+from .coordinator_sessions import session_selection_error, store_agent_session_result
 from .jobs import CompactJob
 from .routing import AUXILIARY_PIPELINE_ORDER
 
@@ -120,6 +120,8 @@ class ExecutionCoordinator(_CoordinatorHost):
                 pi_isolation_adapter=self.config.pi_isolation_adapter,
                 pi_dir=self.config.pi_dir,
             )
+        if isinstance(job, (AgentJob, CompactJob)):
+            job = replace(job, session_selection_error=session_selection_error(item, job))
         claims = self._capture_implementation_file_claims(item)
         auxiliary = self._auxiliary_pool_separate and self._is_auxiliary_stage(item.stage)
         if auxiliary:

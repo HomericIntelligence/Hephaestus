@@ -31,6 +31,17 @@ from hephaestus.prompts import add_prompt_dir_argument
 logger = logging.getLogger(__name__)
 
 
+def _add_agent_options(parser: argparse.ArgumentParser) -> None:
+    """Add independent tool and model options for conflict planning."""
+    add_agent_argument(parser)
+    parser.add_argument(
+        "--model",
+        default="",
+        metavar="MODEL[:EFFORT]",
+        help="Model name and optional effort; omit to use the tool default",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for hephaestus-fleet-sync."""
     parser = create_parser(
@@ -78,7 +89,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="explicitly bypass matching --resign-email to the configured signing key",
     )
-    add_agent_argument(parser)
+    _add_agent_options(parser)
     add_prompt_dir_argument(parser)
     parser.add_argument(
         "--gh-timeout",

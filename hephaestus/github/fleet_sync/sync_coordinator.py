@@ -126,6 +126,7 @@ def _process_conflicted_pr(
             repo_clone(),
             dry_run=args.dry_run,
             agent=args.agent,
+            **({"model": args.model} if getattr(args, "model", "") else {}),
             symbols=symbols,
         )
     else:
@@ -135,6 +136,7 @@ def _process_conflicted_pr(
             repo_clone(),
             dry_run=args.dry_run,
             agent=args.agent,
+            **({"model": args.model} if getattr(args, "model", "") else {}),
             symbols=symbols,
             timeouts=timeouts,
             resign_email=resolved_email,

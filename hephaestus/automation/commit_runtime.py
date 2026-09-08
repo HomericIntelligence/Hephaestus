@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 _COMMIT_MANIFEST_MAX_PATHS = 512
 _COMMIT_MANIFEST_MAX_BYTES = 64 * 1024
 DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT = 1200
-DEFAULT_COMMIT_MESSAGE_MODEL = "claude-haiku-4-5"
 COMMIT_ISSUE_TITLE_MAX_BYTES = 1024
 COMMIT_ISSUE_BODY_MAX_BYTES = 256 * 1024
 _RESERVED_MESSAGE_LINE = re.compile(
@@ -213,7 +212,7 @@ def _invoke_git_message_agent(
     claude_message_agent: CommitMessageAgent | None = None,
 ) -> str:
     """Run the lightweight commit-message agent in a read-only session."""
-    model = model_override or DEFAULT_COMMIT_MESSAGE_MODEL
+    model = model_override or ""
     if claude_message_agent is None:
         raise RuntimeError("commit-message agent is unavailable")
     return claude_message_agent(
@@ -243,9 +242,9 @@ def _format_commit_message(
     """Render a commit message with host-owned policy trailers."""
     coauthor_name = _AGENT_COMMIT_NAMES.get(agent, _AGENT_COMMIT_NAMES["claude"])
     provenance = (
-        model or DEFAULT_COMMIT_MESSAGE_MODEL
+        model or _AGENT_PROVENANCE["claude"]
         if agent == "claude"
-        else _AGENT_PROVENANCE.get(agent) or model or DEFAULT_COMMIT_MESSAGE_MODEL
+        else _AGENT_PROVENANCE.get(agent, agent)
     )
     clean_body = _strip_reserved_lines(body)
     body_block = f"\n\n{clean_body}" if clean_body else ""

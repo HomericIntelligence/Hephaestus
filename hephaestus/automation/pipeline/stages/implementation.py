@@ -138,6 +138,7 @@ from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
 from ..admission import parse_publication_scope_files
+from ..coordinator_sessions import agent_session_lifecycle
 from ..diagnostics import redact_diagnostic_text
 from ..git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
@@ -209,14 +210,6 @@ from .repo import (
     is_full_commit_sha,
 )
 
-
-def _implementer_session_lifecycle(item: WorkItem) -> SessionLifecycle:
-    """Resume when either provider session store has an implementer identity."""
-    if AGENT_IMPLEMENTER in item.session_bindings or AGENT_IMPLEMENTER in item.session_ids:
-        return SessionLifecycle.RESUME_REQUIRED
-    return SessionLifecycle.START_NEW
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -230,7 +223,7 @@ class _CodexIsolationJobKwargs(TypedDict):
 
 def _codex_isolation_job_kwargs(ctx: StageContext) -> _CodexIsolationJobKwargs:
     """Return explicit Codex inputs only for the selected Codex provider."""
-    if not requires_codex_implementation_isolation(agent_provider(ctx)):
+    if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
         return {
             "codex_isolation_adapter": None,
             "codex_isolation_deployment_lock": None,
@@ -263,7 +256,7 @@ def _capture_codex_publication_scope(
     ctx: StageContext,
 ) -> StageOutcome | None:
     """Freeze one accepted plan scope before Codex implementation starts."""
-    if not requires_codex_implementation_isolation(agent_provider(ctx)):
+    if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
         return None
     if item.issue is None:
         return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_plan_unavailable")
@@ -297,7 +290,7 @@ def _codex_publication_kwargs(
     publish_base_sha: object,
 ) -> dict[str, object] | StageOutcome:
     """Return the frozen Codex publication scope or one closed failure."""
-    if not requires_codex_implementation_isolation(agent_provider(ctx)):
+    if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
         return {}
     if not is_full_commit_sha(publish_base_sha):
         return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_base_invalid")
@@ -794,7 +787,7 @@ def _add_writer_refresh(
 def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
     """Build one commit-and-push job from validated stage-owned data."""
     issue = _issue_number(item)
-    agent = agent_provider(ctx)
+    agent = agent_provider(ctx, "implementer")
     issue_metadata = _commit_issue_metadata(item)
     if issue_metadata is None:
         return StageOutcome(Disposition.FINISH_FAIL, "implementation_issue_metadata_invalid")
@@ -890,7 +883,7 @@ def _remediation_prepare_request(item: WorkItem, ctx: StageContext) -> StepResul
         "repo_root": str(ctx.paths.repo_root),
         "worktree_path": item.worktree,
         "branch": item.branch,
-        "agent": agent_provider(ctx),
+        "agent": agent_provider(ctx, "implementer"),
         "agent_model": stage_model(ctx, "implementer", implementer_model),
         "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
         "remediation_repository": f"{ctx.org}/{item.repo}".casefold(),
@@ -900,6 +893,8 @@ def _remediation_prepare_request(item: WorkItem, ctx: StageContext) -> StepResul
         "remediation_failure_diagnostic": diagnostic,
         **recovery_kwargs,
     }
+    if ctx.config.pi_dir is not None:
+        kwargs["pi_dir"] = ctx.config.pi_dir
     publication_scope = _codex_publication_kwargs(
         item, ctx, item.payload.get("_impl_source_revision")
     )
@@ -1487,7 +1482,7 @@ class ImplementationStage(Stage):
                         "status": item.payload.get("worktree_status", ""),
                         "diff": item.payload.get("worktree_diff", ""),
                         "content_snapshot": captured_content,
-                        "agent": agent_provider(ctx),
+                        "agent": agent_provider(ctx, "implementer"),
                         "agent_model": stage_model(ctx, "implementer", implementer_model),
                         "git_message_timeout": stage_timeout(
                             ctx, "git_message", git_message_agent_timeout()
@@ -1502,7 +1497,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_dirty_reused_worktree_decision_prompt,
             cwd=_worktree_path(item, ctx),
@@ -1514,7 +1509,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT_INSPECT,
-                (_implementer_session_lifecycle(item)),
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -1574,7 +1569,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_remediation_reply_recovery_prompt,
             cwd=recovery_cwd,
@@ -1830,7 +1825,7 @@ class ImplementationStage(Stage):
                 kind="advise",
                 repo=item.repo,
                 issue=issue,
-                agent=agent_provider(ctx),
+                agent=agent_provider(ctx, "implementer"),
                 model=stage_model(ctx, "advise", advise_model),
                 cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
                 timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
@@ -1940,7 +1935,7 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=issue,
-                agent=agent_provider(ctx),
+                agent=agent_provider(ctx, "implementer"),
                 model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_address_review_prompt,
                 cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -1952,7 +1947,7 @@ class ImplementationStage(Stage):
                 execution_request=ExecutionRequest(
                     AgentRole.IMPLEMENTER,
                     AgentOperation.ADDRESS_REVIEW,
-                    (_implementer_session_lifecycle(item)),
+                    agent_session_lifecycle(item, AGENT_IMPLEMENTER),
                 ),
                 resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
                 prompt_kwargs={
@@ -1993,7 +1988,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
@@ -2005,7 +2000,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (_implementer_session_lifecycle(item)),
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -2060,7 +2055,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=_worktree_path(item, ctx),
@@ -2071,7 +2066,7 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.IMPLEMENT,
-                (_implementer_session_lifecycle(item)),
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
@@ -2185,7 +2180,7 @@ class ImplementationStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx),
+            agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_test_fix_prompt,
             cwd=_worktree_path(item, ctx),

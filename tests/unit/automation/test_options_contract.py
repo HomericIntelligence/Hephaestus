@@ -170,6 +170,18 @@ def test_option_public_model_signature_and_schema_contract(
     expected_fields: frozenset[str],
 ) -> None:
     """Option models preserve public field names across Pydantic surfaces."""
+    expected_fields |= frozenset(
+        {
+            "model",
+            "planner_agent",
+            "implementer_agent",
+            "reviewer_agent",
+            "planner_model",
+            "implementer_model",
+            "reviewer_model",
+            "fallback_model",
+        }
+    )
     assert frozenset(options_cls.model_fields) == expected_fields
     assert frozenset(inspect.signature(options_cls).parameters) == expected_fields
     assert frozenset(options_cls.model_json_schema()["properties"]) == expected_fields
@@ -233,3 +245,22 @@ def test_worker_cli_help_order_is_stable(
     help_text = build_parser().format_help()
     positions = [help_text.index(flag) for flag in ordered_flags]
     assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize("options_type,required,_overrides", OPTION_CASES)
+def test_worker_options_preserve_literal_role_selections(
+    options_type: type[BaseModel], required: dict[str, Any], _overrides: dict[str, Any]
+) -> None:
+    """Legacy option objects must not discard caller-selected tools or models."""
+    selection = {
+        "model": "GlobalModel:max",
+        "planner_agent": "codex",
+        "implementer_agent": "opencode",
+        "reviewer_agent": "claude",
+        "planner_model": "gpt-6-astra:max",
+        "implementer_model": "private/Model",
+        "reviewer_model": "MyReviewModel",
+        "fallback_model": "FallbackModel",
+    }
+    values = options_type(**required, **selection).model_dump()
+    assert {key: values.get(key) for key in selection} == selection

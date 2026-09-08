@@ -338,6 +338,44 @@ def test_codex_rebase_tool_grant_is_closed(
             agent_runtime._validate_codex_session_authority(request, execution)
 
 
+@pytest.mark.parametrize("resume_session", [False, True])
+@pytest.mark.parametrize("wrong_session_argument", [False, True])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "resume",
+        "-c",
+        'hephaestus_automation.operation="implement"',
+        'hephaestus_automation.allowed_tools=["Bash","Edit","Glob","Grep","Read","Write"]',
+    ],
+)
+def test_codex_literal_resume_model_does_not_select_session_lifecycle(
+    tmp_path: Path, resume_session: bool, wrong_session_argument: bool, model: str
+) -> None:
+    """Model values cannot select a subcommand or supply the resume identity."""
+    request = _codex_implementation_request(tmp_path)
+    authority = json.loads(request.session)
+    lifecycle = SessionLifecycle.RESUME_REQUIRED if resume_session else SessionLifecycle.START_NEW
+    authority.update(
+        lifecycle=lifecycle.value, session_id="provider-session" if resume_session else None
+    )
+    request.session = json.dumps(authority)
+    prefix: tuple[str, ...] = ("codex", "exec")
+    if resume_session:
+        prefix += ("resume", "wrong-session" if wrong_session_argument else "provider-session")
+    model = "provider-session" if wrong_session_argument else model
+    request.command = (*prefix, "--model", model, *request.command[2:])
+    execution = ExecutionRequest(AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, lifecycle)
+    if resume_session and wrong_session_argument:
+        with pytest.raises(CodexIsolationError, match="codex_adapter_request_mismatch"):
+            agent_runtime._validate_codex_session_authority(request, execution)
+    else:
+        assert (
+            agent_runtime._validate_codex_session_authority(request, execution)
+            == authority["session_id"]
+        )
+
+
 def test_codex_v1_session_field_binds_exact_lifecycle_and_resume_id(tmp_path: Path) -> None:
     """The existing V1 session field binds all host operation authority."""
     request = _codex_implementation_request(tmp_path)
@@ -398,6 +436,8 @@ class _CodexImplementationAdapter:
             preparation_deadline=time.monotonic() + 60,
             guest_boot_nonce="a" * 64,
         )
+        if isinstance(invoke_result, SimpleNamespace) and not hasattr(invoke_result, "exit_status"):
+            invoke_result.exit_status = 0
         self.invoke_result = invoke_result
         self.auth_paths: list[Path] = []
 
@@ -1170,7 +1210,7 @@ def test_codex_implementation_unlinks_auth_for_every_base_exception(
     monkeypatch.setattr(agent_runtime, "_populate_codex_implementation_profile", populate)
     monkeypatch.setattr(agent_runtime, "_verify_codex_implementation_executable", lambda *_: None)
     monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_: None)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(agent_runtime, "_validate_codex_result_window", lambda *_: None)
 
     with pytest.raises(
@@ -1209,7 +1249,7 @@ def test_codex_implementation_destroys_guest_before_authentication_cleanup(
         SimpleNamespace(output='{"type":"thread.started","thread_id":"provider-3019"}\n')
     )
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
     real_remove = agent_runtime._remove_codex_authentication
 
     def remove(auth_path: Path, bridge: Any) -> None:
@@ -1245,7 +1285,7 @@ def test_codex_failed_state_contains_no_authentication_copy(
 
     monkeypatch.setattr(
         agent_runtime,
-        "validate_result",
+        "validate_result_evidence",
         reject_initial_result,
         raising=False,
     )
@@ -1323,7 +1363,7 @@ def test_codex_auth_cleanup_failure_still_scrubs_worktree_and_auth_root(
     monkeypatch.setattr(agent_runtime, "_populate_codex_implementation_profile", populate)
     monkeypatch.setattr(agent_runtime, "_verify_codex_implementation_executable", lambda *_: None)
     monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_: None)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_: None)
     monkeypatch.setattr(agent_runtime, "_validate_codex_result_window", lambda *_: None)
     monkeypatch.setattr(
         agent_runtime,
@@ -1377,7 +1417,7 @@ def test_codex_scan_limit_creates_terminal_cleanup_quarantine(
     monkeypatch.setattr(agent_runtime, "_populate_codex_implementation_profile", populate)
     monkeypatch.setattr(agent_runtime, "_verify_codex_implementation_executable", lambda *_: None)
     monkeypatch.setattr(agent_runtime, "validate_prepared", lambda *_: None)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(agent_runtime, "_validate_codex_result_window", lambda *_: None)
 
     with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
@@ -1405,7 +1445,7 @@ def test_codex_result_rejects_authentication_values(
     auth_source.chmod(0o600)
     adapter = _CodexImplementationAdapter(SimpleNamespace(output="token=test-secret"))
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
 
     with pytest.raises(CodexIsolationError, match="codex_adapter_result_invalid"):
         _run_codex_implementation_session(
@@ -1466,7 +1506,7 @@ def test_codex_implementation_returns_emitted_provider_session_id(
         SimpleNamespace(output='{"type":"thread.started","thread_id":"provider-session-3019"}\n')
     )
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
 
     result = _run_codex_implementation_session(
         adapter=cast(CodexIsolationAdapterV1, adapter),
@@ -1535,7 +1575,7 @@ def test_codex_invoke_return_after_host_deadline_fails_closed(
     adapter = LateAdapter(SimpleNamespace(output="done", session_id="provider-session-3019"))
     adapter.prepared.preparation_deadline = request.monotonic_deadline
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
 
     with pytest.raises(CodexIsolationError, match="codex_adapter_timeout"):
         _run_codex_implementation_session(
@@ -1578,7 +1618,7 @@ def test_codex_blocked_invoke_is_destroyed_by_host_deadline(
     adapter = BlockingAdapter(result)
     adapter.prepared.preparation_deadline = request.monotonic_deadline
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
 
     with pytest.raises(CodexIsolationError, match="codex_adapter_timeout"):
         _run_codex_implementation_session(
@@ -1627,7 +1667,7 @@ def test_codex_timeout_has_one_destroy_owner(
     adapter = BlockingCleanupAdapter(SimpleNamespace(output="stopped"))
     adapter.prepared.preparation_deadline = request.monotonic_deadline
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
 
     try:
         with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
@@ -1679,7 +1719,7 @@ def test_codex_dup_failure_still_unlinks_auth_before_uncertain_return(
     adapter = UncertainAdapter(SimpleNamespace(output="stopped"))
     adapter.prepared.preparation_deadline = request.monotonic_deadline
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         os,
         "dup",
@@ -1742,7 +1782,7 @@ def test_codex_helper_reaper_does_not_claim_guest_terminal_state(
     adapter = UncertainAdapter(SimpleNamespace(output="stopped"))
     adapter.prepared.preparation_deadline = request.monotonic_deadline
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
 
     def reap_helper() -> None:
         release.set()
@@ -2164,7 +2204,7 @@ def test_codex_authentication_replacement_fails_cleanup_closed(
 
     adapter = ReplacingAuthAdapter(SimpleNamespace(output="unsafe"))
     _patch_codex_profile_source(monkeypatch, request)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
 
     with pytest.raises(CodexIsolationError, match="codex_adapter_inventory_uncertain"):
         _run_codex_implementation_session(
@@ -2417,7 +2457,7 @@ def test_codex_executable_replacement_after_invoke_fails_closed(
 
     adapter = ReplacingAdapter(SimpleNamespace(output="unsafe"))
     _patch_codex_profile_source(monkeypatch, request, verify_executable=True)
-    monkeypatch.setattr(agent_runtime, "validate_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_args, **_kwargs: None)
     auth_source = tmp_path / "trusted-auth.json"
     auth_source.write_text('{"access_token":"test-secret"}\n', encoding="utf-8")
     auth_source.chmod(0o600)
@@ -3316,44 +3356,40 @@ def test_codex_approval_args_preserves_legacy_flag() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "expected_model", "expected_reasoning"),
+    "model",
     [
-        ("claude-fable-5", "gpt-5.5", "xhigh"),
-        ("claude-opus-4-7", "gpt-5.5", "xhigh"),
-        ("claude-sonnet-4-6", "gpt-5.5", "medium"),
-        ("sol", "gpt-5.6-sol", "xhigh"),
-        ("terra", "gpt-5.6-terra", "xhigh"),
-        ("luna", "gpt-5.6-luna", "medium"),
-        ("gpt-5.6-sol", "gpt-5.6-sol", "xhigh"),
-        ("gpt-5.6-terra", "gpt-5.6-terra", "xhigh"),
-        ("gpt-5.6-luna", "gpt-5.6-luna", "medium"),
-        ("astra", "gpt-6-astra", "xhigh"),
-        ("gpt-6-astra", "gpt-6-astra", "xhigh"),
+        "claude-fable-5",
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "sol",
+        "terra",
+        "luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "astra",
+        "gpt-6-astra",
+        "MyPrivateModel",
+        "vendor/Model",
     ],
 )
-def test_codex_base_cmd_maps_claude_reasoning_tiers(
-    tmp_path: Path,
-    model: str,
-    expected_model: str,
-    expected_reasoning: str,
-) -> None:
-    """Codex must receive recognized tier IDs plus matching reasoning config."""
+def test_codex_base_cmd_preserves_literal_models(tmp_path: Path, model: str) -> None:
+    """Codex receives the literal model without an implicit effort."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=model)
 
-    assert cmd[cmd.index("--model") + 1] == expected_model
-    reasoning_args = [arg for arg in cmd if arg.startswith("model_reasoning_effort=")]
-    assert reasoning_args == [f"model_reasoning_effort={json.dumps(expected_reasoning)}"]
+    assert cmd[cmd.index("--model") + 1] == model
+    assert not any(arg.startswith("model_reasoning_effort=") for arg in cmd)
 
 
-def test_codex_base_cmd_maps_haiku_to_mini_without_reasoning_override(
+def test_codex_base_cmd_keeps_claude_model_without_reasoning_override(
     tmp_path: Path,
 ) -> None:
-    """Haiku-tier Codex work should use GPT-5.4-Mini without forcing reasoning."""
+    """A Claude model name remains literal when the selected tool is Codex."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model="claude-haiku-4-5")
 
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.4-mini"
+    assert cmd[cmd.index("--model") + 1] == "claude-haiku-4-5"
     assert "model_reasoning_effort" not in cmd
 
 
@@ -3363,21 +3399,22 @@ def test_codex_base_cmd_allows_terra_default_reasoning(model: str, tmp_path: Pat
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=model)
 
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-terra"
+    assert cmd[cmd.index("--model") + 1] == model.removesuffix(":default")
     assert "model_reasoning_effort" not in cmd
 
 
-def test_codex_base_cmd_rejects_unknown_short_alias(tmp_path: Path) -> None:
-    """The Codex command builder does not pass an unknown alias to the provider."""
+def test_codex_base_cmd_accepts_arbitrary_short_names(tmp_path: Path) -> None:
+    """The provider owns model name validation."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
-        with pytest.raises(ValueError, match="Unknown Codex model alias"):
-            agent_runtime._codex_base_cmd(cwd=tmp_path, model="unknown:high")
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model="unknown:high")
+    assert cmd[cmd.index("--model") + 1] == "unknown"
+    assert 'model_reasoning_effort="high"' in cmd
 
 
 @pytest.mark.parametrize(
     ("model", "expected_model", "reasoning_effort", "expected_reasoning"),
     [
-        ("sol", "gpt-5.6-sol", "medium", "medium"),
+        ("sol", "sol", "medium", "medium"),
         ("gpt-5.6-terra", "gpt-5.6-terra", "xhigh", "xhigh"),
         ("gpt-5.6-luna", "gpt-5.6-luna", "default", ""),
         ("gpt-5.6", "gpt-5.6", "default", ""),
@@ -3392,7 +3429,7 @@ def test_codex_base_cmd_honors_explicit_reasoning_override(
     expected_reasoning: str,
     tmp_path: Path,
 ) -> None:
-    """Per-role transport settings override a tier alias's default reasoning."""
+    """An explicit effort is passed through to Codex."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=f"{model}:{reasoning_effort}")
 
@@ -3410,16 +3447,16 @@ def test_codex_base_cmd_honors_explicit_reasoning_override(
         (":default", ""),
     ],
 )
-def test_codex_base_cmd_pins_default_model_for_effort_only_selection(
+def test_codex_base_cmd_uses_tool_model_for_effort_only_selection(
     reference: str,
     expected_reasoning: str,
     tmp_path: Path,
 ) -> None:
-    """An effort-only selection keeps the pinned model for a new session."""
+    """An effort-only selection uses the configured tool model."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=reference)
 
-    assert cmd[cmd.index("--model") + 1] == agent_runtime.CODEX_DEFAULT_MODEL
+    assert "--model" not in cmd
     reasoning_args = [arg for arg in cmd if arg.startswith("model_reasoning_effort=")]
     assert bool(reasoning_args) is bool(expected_reasoning)
     if expected_reasoning:
@@ -3442,13 +3479,13 @@ def test_codex_base_cmd_keeps_native_codex_model_ids(
     assert "model_reasoning_effort" not in cmd
 
 
-def test_codex_base_cmd_defaults_new_sessions_to_gpt_55_xhigh(tmp_path: Path) -> None:
-    """A fresh Codex session should not depend on the operator's CLI default."""
+def test_codex_base_cmd_uses_tool_defaults_for_new_sessions(tmp_path: Path) -> None:
+    """A fresh Codex session uses the configured tool defaults."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path)
 
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
-    assert cmd[cmd.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+    assert "--model" not in cmd
+    assert not any(arg.startswith("model_reasoning_effort=") for arg in cmd)
 
 
 def test_claude_uses_the_model_without_an_inline_effort() -> None:
@@ -3463,8 +3500,8 @@ def test_claude_uses_the_model_without_an_inline_effort() -> None:
     ("model", "expected_model", "expected_effort"),
     [
         ("gpt-6-astra:future-effort", "gpt-6-astra", "future-effort"),
-        ("astra", "gpt-6-astra", "xhigh"),
-        ("", "gpt-5.5", "xhigh"),
+        ("astra:high", "astra", "high"),
+        ("MyPrivateModel:medium", "MyPrivateModel", "medium"),
     ],
 )
 def test_run_codex_session_retries_an_unsupported_effective_effort_with_default(
@@ -4375,11 +4412,14 @@ def test_opencode_base_cmd_passes_model_through_and_omits_empty(tmp_path: Path) 
     ]
 
 
-def test_opencode_base_cmd_translates_ifm_reasoning_to_variant(tmp_path: Path) -> None:
-    """OpenCode receives the canonical IFM model and a separate variant."""
+@pytest.mark.parametrize(
+    "model", ["k2-horizon-0.9", "gpt-6-astra", "MyPrivateModel", "vendor/Model"]
+)
+def test_opencode_base_cmd_keeps_literal_model_and_variant(tmp_path: Path, model: str) -> None:
+    """OpenCode receives the literal model and a separate variant."""
     assert agent_runtime._opencode_base_cmd(
         cwd=tmp_path,
-        model="k2-horizon-0.9:high",
+        model=f"{model}:high",
     ) == [
         "opencode",
         "run",
@@ -4388,7 +4428,7 @@ def test_opencode_base_cmd_translates_ifm_reasoning_to_variant(tmp_path: Path) -
         "--format",
         "json",
         "--model",
-        "IFM/K2-Horizon-0.9B",
+        model,
         "--variant",
         "high",
     ]
@@ -5420,17 +5460,20 @@ def test_pi_automation_command_uses_only_its_explicit_model(
     ]
 
 
-def test_pi_automation_command_translates_ifm_reasoning_to_thinking(tmp_path: Path) -> None:
-    """Pi receives the canonical IFM model and a separate thinking level."""
+@pytest.mark.parametrize(
+    "model", ["k2-horizon-0.9", "gpt-6-astra", "MyPrivateModel", "vendor/Model"]
+)
+def test_pi_automation_command_keeps_literal_model_and_thinking(tmp_path: Path, model: str) -> None:
+    """Pi receives the literal model and a separate thinking level."""
     command = agent_runtime._pi_automation_cmd(
         tmp_path / "pi",
-        model="k2-horizon-0.9:high",
+        model=f"{model}:high",
         lifecycle=SessionLifecycle.ONE_SHOT,
     )
 
     assert command[-4:] == [
         "--model",
-        "IFM/K2-Horizon-0.9B",
+        model,
         "--thinking",
         "high",
     ]
@@ -5604,7 +5647,8 @@ def test_pi_default_reasoning_replaces_an_inline_reasoning_value(tmp_path: Path)
     )
 
 
-def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", ["IFM/K2-Horizon-7B", "MyPrivateModel", "astra"])
+def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path, model: str) -> None:
     """Pi fingerprints configured thinking when the model has no inline effort."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
@@ -5616,9 +5660,7 @@ def test_pi_configured_thinking_applies_to_an_explicit_model(tmp_path: Path) -> 
     )
     settings_path.chmod(0o600)
 
-    assert agent_runtime.resolve_pi_model_reference("IFM/K2-Horizon-7B", pi_dir=pi_dir) == (
-        "IFM/K2-Horizon-7B:high"
-    )
+    assert agent_runtime.resolve_pi_model_reference(model, pi_dir=pi_dir) == f"{model}:high"
 
 
 def test_pi_default_model_rejects_a_settings_symlink(tmp_path: Path) -> None:
@@ -6095,7 +6137,7 @@ def test_direct_agent_model_preserves_empty_explicit_value_and_default() -> None
         assert agent_runtime.direct_agent_model(agent, "phase-model") == "phase-model"
         assert agent_runtime.direct_agent_model(agent, "") == ""
         assert agent_runtime.direct_agent_model(agent, None) == ""
-        expected = "" if agent in {"opencode", "pi"} else "standalone-default"
+        expected = ""
         assert (
             agent_runtime.direct_agent_model(agent, None, codex_default="standalone-default")
             == expected
@@ -6160,7 +6202,8 @@ def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Pa
     resume_pi_session.assert_not_called()
 
 
-def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", ["sonnet", "gpt-6-astra", "MyPrivateModel", "vendor/Model"])
+def test_run_claude_text_builds_stage_command(tmp_path: Path, model: str) -> None:
     """Claude stage execution should share the agents runtime boundary."""
     captured: dict[str, Any] = {}
 
@@ -6174,7 +6217,7 @@ def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
             "prompt",
             cwd=tmp_path,
             timeout=30,
-            model="sonnet:future-effort",
+            model=f"{model}:future-effort",
             sandbox="workspace-write",
         )
 
@@ -6185,7 +6228,7 @@ def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
         "--output-format",
         "text",
         "--model",
-        "sonnet",
+        model,
         "--permission-mode",
         "dontAsk",
         "--allowedTools",
@@ -6437,13 +6480,14 @@ def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: P
                 cwd=tmp_path,
                 timeout=30,
                 model="explicit/model",
+                pi_dir=tmp_path / "pi-agent",
                 execution_request=ExecutionRequest(
                     AgentRole.PR_REVIEWER,
                     AgentOperation.PR_REVIEW,
                     SessionLifecycle.ONE_SHOT,
                 ),
             )
-    preflight.assert_called_once_with(tmp_path, pi_dir=None)
+    preflight.assert_called_once_with(tmp_path, pi_dir=tmp_path / "pi-agent")
 
 
 def test_resolve_agent_explicit_rejects_uninstalled_pi() -> None:
@@ -6481,23 +6525,21 @@ def test_resolve_agent_explicit_codex_overrides_claude() -> None:
             assert agent_runtime.resolve_agent("codex") == "codex"
 
 
-@pytest.mark.parametrize("reference", ["unknown:high", "terra-lite:high"])
-def test_resolve_agent_rejects_unknown_codex_alias_before_authentication(reference: str) -> None:
-    """Codex alias validation runs before the provider authentication probe."""
-    with patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated:
-        with pytest.raises(ValueError, match="Unknown Codex model alias"):
-            agent_runtime.resolve_agent("codex", model_references=(reference,))
-
-    authenticated.assert_not_called()
-
-
-def test_resolve_agent_rejects_unknown_claude_alias_before_authentication() -> None:
-    """Claude alias validation runs before the provider authentication probe."""
-    with patch("hephaestus.agents.runtime.is_agent_authenticated") as authenticated:
-        with pytest.raises(ValueError, match="Unknown Claude model alias"):
-            agent_runtime.resolve_agent("claude", model_references=("terra-lite:high",))
-
-    authenticated.assert_not_called()
+@pytest.mark.parametrize("reference", ["unknown:high", "terra-lite:high", "gpt-6-astra:max"])
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+def test_resolve_agent_accepts_arbitrary_models_and_checks_authentication(
+    reference: str,
+    agent: str,
+) -> None:
+    """A literal model name does not bypass the tool authentication check."""
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value=f"/bin/{agent}"),
+        patch(
+            "hephaestus.agents.runtime.is_agent_authenticated", return_value=True
+        ) as authenticated,
+    ):
+        assert agent_runtime.resolve_agent(agent, model_references=(reference,)) == agent
+    authenticated.assert_called_once_with(agent, auth_status_timeout=None, pi_dir=None)
 
 
 def test_resolve_agent_explicit_rejects_uninstalled_agent() -> None:
@@ -6599,3 +6641,56 @@ def test_add_agent_argument_rejects_invalid_codex_isolation_inputs(
 
     with pytest.raises(SystemExit):
         parser.parse_args(arguments)
+
+
+@pytest.mark.parametrize("cleanup_failed", [False, True])
+@pytest.mark.parametrize("work_started", [False, True])
+def test_isolated_effort_rejection_is_reported_only_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, work_started: bool, cleanup_failed: bool
+) -> None:
+    """Only a pre-work rejection can leave a clean isolated request for retry."""
+    request = _codex_implementation_request(tmp_path)
+    request.command = (*request.command, "-c", 'model_reasoning_effort="max"')
+    auth_source = tmp_path / "auth-source.json"
+    auth_source.write_text('{"access_token":"test-secret"}')
+    auth_source.chmod(0o600)
+    rejection = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_enum_value",
+                "param": "reasoning.effort",
+            },
+        }
+    )
+    output = rejection
+    if work_started:
+        output = '{"type":"item.started","item":{"type":"command_execution"}}\n' + output
+    adapter = _CodexImplementationAdapter(SimpleNamespace(output=output, exit_status=1))
+    _patch_codex_profile_source(monkeypatch, request)
+    monkeypatch.setattr(agent_runtime, "validate_result_evidence", lambda *_: None)
+    if cleanup_failed:
+        real_remove = agent_runtime._remove_codex_authentication
+
+        def fail_after_remove(path: Path, bridge: Any) -> None:
+            real_remove(path, bridge)
+            raise CodexIsolationError("codex_adapter_result_invalid")
+
+        monkeypatch.setattr(agent_runtime, "_remove_codex_authentication", fail_after_remove)
+    expected = (
+        CodexIsolationError
+        if work_started or cleanup_failed
+        else agent_runtime._CodexReasoningEffortRejectedError
+    )
+    with pytest.raises(expected):
+        _run_codex_implementation_session(
+            adapter=cast(CodexIsolationAdapterV1, adapter), request=request, auth_source=auth_source
+        )
+    assert len(adapter.auth_paths) == 1
+    assert not adapter.auth_paths[0].exists()
+    assert not Path(request.private_profile_path).exists()
+    if not cleanup_failed:
+        assert not agent_runtime._codex_active_receipt_path(
+            Path(request.private_profile_path)
+        ).exists()

@@ -325,6 +325,7 @@ class WorkItem:
     worktree: str = ""
     branch: str = ""
     session_ids: dict[str, str] = field(default_factory=dict)
+    session_selections: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Pi bindings are deliberately separate from legacy raw session ids: they
     # bind a provider session to its worktree, role, and model fingerprint.
     session_bindings: dict[str, Any] = field(default_factory=dict)

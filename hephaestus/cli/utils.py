@@ -42,6 +42,7 @@ __all__ = [
     "add_logging_args",
     "add_pipeline_runtime_args",
     "add_poll_max_wait_arg",
+    "add_role_agent_args",
     "add_version_arg",
     "configure_cli_logging",
     "configure_github_throttle_from_args",
@@ -62,8 +63,9 @@ _POSITIVE_TIMEOUT_HELP = (
     "Omit the flag to use the configured default."
 )
 MODEL_REFERENCE_HELP = (
-    "MODEL[:EFFORT]. Codex accepts sol, terra, and luna aliases, full model IDs, and free-form "
-    "effort values. Use default to select the provider default."
+    "MODEL[:EFFORT]. Model names and effort values are literal strings. "
+    "The :default suffix selects the tool effort default. "
+    "Omit the model to use the tool configuration."
 )
 
 
@@ -691,6 +693,19 @@ def add_follow_up_timeout_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_role_agent_args(parser: argparse.ArgumentParser) -> None:
+    """Add optional tool overrides for the three pipeline roles."""
+    from hephaestus.agents.runtime import AGENT_CHOICES
+
+    for role in ("planner", "implementer", "reviewer"):
+        parser.add_argument(
+            f"--{role}-agent",
+            choices=AGENT_CHOICES,
+            default=None,
+            help=f"Tool for the {role} role. Uses --agent when omitted.",
+        )
+
+
 def add_pipeline_runtime_args(
     parser: argparse.ArgumentParser,
     *,
@@ -699,6 +714,7 @@ def add_pipeline_runtime_args(
     plugin_skills: bool = False,
 ) -> None:
     """Add shared explicit configuration for a standalone pipeline wrapper."""
+    add_role_agent_args(parser)
     for flag in ("model", f"{role}-model", "fallback-model"):
         parser.add_argument(
             f"--{flag}",
@@ -706,6 +722,12 @@ def add_pipeline_runtime_args(
             metavar="MODEL[:EFFORT]",
             help=MODEL_REFERENCE_HELP,
         )
+    for extra_role in ("planner", "implementer", "reviewer"):
+        flag = f"--{extra_role}-model"
+        if flag not in parser._option_string_actions:
+            parser.add_argument(
+                flag, default="", metavar="MODEL[:EFFORT]", help=MODEL_REFERENCE_HELP
+            )
     parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
     parser.add_argument(
         "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True

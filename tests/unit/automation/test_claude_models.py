@@ -10,32 +10,32 @@ from hephaestus.automation import agent_config as claude_models
 
 
 class TestDefaults:
-    """Default mapping reflects the cost/quality tradeoff per phase."""
+    """Omitted model settings use the selected tool default."""
 
-    def test_planner_defaults_to_opus(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_planner_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPH_PLANNER_MODEL", raising=False)
-        assert claude_models.planner_model() == claude_models.OPUS
+        assert claude_models.planner_model() == ""
 
-    def test_implementer_defaults_to_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_implementer_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPH_IMPLEMENTER_MODEL", raising=False)
-        assert claude_models.implementer_model() == claude_models.HAIKU
+        assert claude_models.implementer_model() == ""
 
-    def test_reviewer_defaults_to_sonnet(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_reviewer_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPH_REVIEWER_MODEL", raising=False)
-        assert claude_models.reviewer_model() == claude_models.SONNET
+        assert claude_models.reviewer_model() == ""
 
-    def test_codex_advise_defaults_to_gpt_mini(self) -> None:
-        assert claude_models.codex_advise_model() == "gpt-5.4-mini"
+    def test_codex_advise_uses_tool_default(self) -> None:
+        assert claude_models.codex_advise_model() == ""
 
-    def test_git_message_defaults_to_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_git_message_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The public compatibility helper ignores the retired override."""
         monkeypatch.setenv("HEPH_GIT_MESSAGE_MODEL", "terra:xhigh")
-        assert claude_models.git_message_model() == claude_models.HAIKU
+        assert claude_models.git_message_model() == ""
 
-    def test_fallback_defaults_to_current_opus(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The usage-cap fallback model is the current Opus (#1793)."""
+    def test_fallback_requires_explicit_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The fallback requires an explicit model."""
         monkeypatch.delenv("HEPH_FALLBACK_MODEL", raising=False)
-        assert claude_models.fallback_model() == claude_models.OPUS_48
+        assert claude_models.fallback_model() == ""
 
 
 class TestExplicitOverride:
@@ -55,7 +55,7 @@ class TestExplicitOverride:
     def test_fallback_override(self) -> None:
         assert claude_models.fallback_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
 
-    def test_fallback_unknown_override_warns_but_returns_value(
+    def test_fallback_unknown_override_returns_value_without_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
@@ -63,7 +63,7 @@ class TestExplicitOverride:
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
             result = claude_models.fallback_model("claude-preview-99-99")
         assert result == "claude-preview-99-99"
-        assert any("Unknown model" in r.message for r in caplog.records)
+        assert not caplog.records
 
 
 class TestModuleStable:
@@ -74,20 +74,23 @@ class TestModuleStable:
     """
 
     def test_reimport_idempotent(self) -> None:
-        expected_opus = claude_models.OPUS
-        expected_haiku = claude_models.HAIKU
-        expected_sonnet = claude_models.SONNET
-        expected_codex_advise = claude_models.CODEX_ADVISE
-
+        expected = (
+            claude_models.planner_model(),
+            claude_models.implementer_model(),
+            claude_models.reviewer_model(),
+            claude_models.codex_advise_model(),
+        )
         importlib.reload(claude_models)
-        assert expected_opus == claude_models.OPUS
-        assert expected_haiku == claude_models.HAIKU
-        assert expected_sonnet == claude_models.SONNET
-        assert expected_codex_advise == claude_models.CODEX_ADVISE
+        assert expected == (
+            claude_models.planner_model(),
+            claude_models.implementer_model(),
+            claude_models.reviewer_model(),
+            claude_models.codex_advise_model(),
+        )
 
 
 class TestExplicitValueValidation:
-    """Unknown explicit overrides warn but do not crash."""
+    """Explicit model strings pass through without catalog warnings."""
 
     def test_known_override_no_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -96,20 +99,20 @@ class TestExplicitValueValidation:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.planner_model(claude_models.HAIKU)
-        assert result == claude_models.HAIKU
+            result = claude_models.planner_model("MyPrivateModel")
+        assert result == "MyPrivateModel"
         assert not caplog.records
 
-    def test_unknown_override_warns_but_returns_value(
+    def test_unknown_override_returns_value_without_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Unknown model IDs trigger a warning but are still returned (A5-04)."""
+        """Arbitrary model names pass through without a warning."""
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
             result = claude_models.implementer_model("claude-preview-99-99")
         assert result == "claude-preview-99-99"
-        assert any("Unknown model" in r.message for r in caplog.records)
+        assert not caplog.records
 
     def test_all_phase_functions_accept_unknown_model(
         self,
@@ -124,26 +127,20 @@ class TestExplicitValueValidation:
 
 
 class TestNewerModelsRecognized:
-    """Newer models are recognized — no spurious 'Unknown model' warning.
-
-    ``claude-opus-4-8``, ``claude-fable-5``, ``claude-sonnet-5``, and
-    ``claude-mythos-5`` are valid IDs. Supported shorthand aliases are
-    normalized before validation so operators can use the same tier names in
-    env vars and one-off CLI flags.
-    """
+    """Model IDs and former aliases pass through as literal strings."""
 
     @pytest.mark.parametrize(
         ("raw_model", "expected_model"),
         [
             ("claude-opus-4-8", "claude-opus-4-8"),
             ("claude-fable-5", "claude-fable-5"),
-            ("fable", "claude-fable-5"),
+            ("fable", "fable"),
             ("claude-sonnet-5", "claude-sonnet-5"),
             ("claude-mythos-5", "claude-mythos-5"),
-            ("mythos", "claude-mythos-5"),
+            ("mythos", "mythos"),
         ],
     )
-    def test_newer_model_override_no_warning_and_normalizes_aliases(
+    def test_newer_model_override_no_warning_and_preserves_names(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -157,19 +154,13 @@ class TestNewerModelsRecognized:
         assert result == expected_model
         assert not caplog.records
 
-    def test_newer_models_in_known_set(self) -> None:
-        assert "claude-opus-4-8" in claude_models._KNOWN_MODELS
-        assert "claude-fable-5" in claude_models._KNOWN_MODELS
-        assert "claude-sonnet-5" in claude_models._KNOWN_MODELS
-        assert "claude-mythos-5" in claude_models._KNOWN_MODELS
-
     @pytest.mark.parametrize(
         ("raw_model", "expected_model"),
         [
             ("", ""),
-            (" fable ", "claude-fable-5"),
-            ("fable:future-effort", "claude-fable-5"),
-            ("MYTHOS", "claude-mythos-5"),
+            (" fable ", "fable"),
+            ("fable:future-effort", "fable"),
+            ("MYTHOS", "MYTHOS"),
             ("claude-sonnet-5", "claude-sonnet-5"),
             ("claude-sonnet-5:future-effort", "claude-sonnet-5"),
             ("claude-preview-99-99", "claude-preview-99-99"),
@@ -178,13 +169,13 @@ class TestNewerModelsRecognized:
     def test_normalize_claude_model(self, raw_model: str, expected_model: str) -> None:
         assert claude_models.normalize_claude_model(raw_model) == expected_model
 
-    def test_genuinely_unknown_model_still_warns(
+    def test_genuinely_unknown_model_does_not_warn(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Adding newer models must not suppress warnings for true typos."""
+        """Model spelling is the provider responsibility."""
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
             result = claude_models.reviewer_model("claude-fbale-5")  # typo
         assert result == "claude-fbale-5"
-        assert any("Unknown model" in r.message for r in caplog.records)
+        assert not caplog.records

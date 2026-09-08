@@ -61,7 +61,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
-from hephaestus.agents.model_selection import resolve_codex_model_selection
+from hephaestus.agents.model_selection import AgentModelSelection, resolve_codex_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -3848,6 +3848,19 @@ def _validate_staged_codex_executable(executable: StagedLinuxExecutable) -> None
             os.close(descriptor)
 
 
+def _run_isolated_codex_effort_attempts(
+    execute: Callable[[str], agent_runtime.AgentRunResult], model: str
+) -> agent_runtime.AgentRunResult:
+    """Retry one verified pre-work effort failure through the admitted boundary."""
+    selection = resolve_codex_model_selection(model)
+    try:
+        return execute(selection.reference)
+    except agent_runtime._CodexReasoningEffortRejectedError:
+        if selection.reasoning_effort in {"", "default"}:
+            raise
+    return execute(AgentModelSelection(selection.model, "default"))
+
+
 def _codex_implementation_request(
     *,
     job: AgentJob,
@@ -3857,6 +3870,8 @@ def _codex_implementation_request(
     admission: codex_adapter_admission.CodexAdapterAdmission,
     git_receipt: CodexGitReceiptV1,
     executable: StagedLinuxExecutable,
+    model_reference: str | None = None,
+    deadline_s: float | None = None,
 ) -> CodexIsolationRequestV1:
     """Build the complete frozen request for one admitted adapter."""
     lock = admission.lock
@@ -3900,7 +3915,7 @@ def _codex_implementation_request(
     command = _codex_implementation_command(
         executable=executable.path,
         worktree=worktree,
-        model=job.model,
+        model=job.model if model_reference is None else model_reference,
         session_id=session_id,
         sandbox=sandbox,
         operation=execution.operation,
@@ -3935,7 +3950,7 @@ def _codex_implementation_request(
         total_deadline=float(job.timeout_s),
     )
     worktree_identity = git_receipt.canonical_worktree
-    model = job.model or "default"
+    model = job.model
     issue = int(job.issue)
     session_identity = (
         job.repo,
@@ -3981,7 +3996,7 @@ def _codex_implementation_request(
         model=model,
         session=session,
         session_identity_digest=canonical_sha256(session_identity),
-        monotonic_deadline=time.monotonic() + job.timeout_s,
+        monotonic_deadline=(time.monotonic() + job.timeout_s if deadline_s is None else deadline_s),
     )
 
 
@@ -4452,6 +4467,9 @@ class WorkerPool:
             or job.codex_isolation_deployment_lock_sha256 is None
         ):
             raise CodexIsolationError("codex_adapter_not_selected")
+        deadline = time.monotonic() + job.timeout_s
+        if job.deadline_s is not None:
+            deadline = min(deadline, job.deadline_s)
         with _agent_workspace_lease(job) as leased:
             if leased != cwd:
                 raise CodexIsolationError("codex_adapter_request_mismatch")
@@ -4489,36 +4507,45 @@ class WorkerPool:
                         try:
                             with plugin_skills_context(job.plugin_skills_dir):
                                 prompt = job.prompt_builder(**job.prompt_kwargs)
-                            request = _codex_implementation_request(
-                                job=job,
-                                worktree=cwd,
-                                prompt=prompt,
-                                private_profile=private_profile,
-                                admission=admission,
-                                git_receipt=boundary.receipt,
-                                executable=executable,
-                            )
-                            boundary.verify_before_launch()
-                            _validate_staged_codex_executable(executable)
-                            try:
-                                execution_request = job.execution_request
-                                if execution_request is None:
-                                    raise CodexIsolationError("codex_adapter_request_mismatch")
-                                terminal_reaper = getattr(adapter, "_close", None)
-                                if not callable(terminal_reaper):
-                                    raise CodexIsolationError("codex_adapter_protocol_mismatch")
-                                return agent_runtime._run_admitted_codex_implementation_session(
-                                    adapter=adapter,
-                                    request=request,
-                                    execution_request=execution_request,
-                                    executable_descriptor=executable.descriptor,
-                                    terminal_reaper=cast(Callable[[], None], terminal_reaper),
+
+                            def execute(model_reference: str) -> agent_runtime.AgentRunResult:
+                                """Run one fresh request within the original deadline."""
+                                if time.monotonic() >= deadline:
+                                    raise CodexIsolationError("codex_adapter_timeout")
+                                request = _codex_implementation_request(
+                                    job=job,
+                                    worktree=cwd,
+                                    prompt=prompt,
+                                    private_profile=private_profile,
+                                    admission=admission,
+                                    git_receipt=boundary.receipt,
+                                    executable=executable,
+                                    model_reference=model_reference,
+                                    deadline_s=deadline,
                                 )
-                            finally:
+                                boundary.verify_before_launch()
+                                _validate_staged_codex_executable(executable)
                                 try:
-                                    _validate_staged_codex_executable(executable)
+                                    execution_request = job.execution_request
+                                    if execution_request is None:
+                                        raise CodexIsolationError("codex_adapter_request_mismatch")
+                                    terminal_reaper = getattr(adapter, "_close", None)
+                                    if not callable(terminal_reaper):
+                                        raise CodexIsolationError("codex_adapter_protocol_mismatch")
+                                    return agent_runtime._run_admitted_codex_implementation_session(
+                                        adapter=adapter,
+                                        request=request,
+                                        execution_request=execution_request,
+                                        executable_descriptor=executable.descriptor,
+                                        terminal_reaper=cast(Callable[[], None], terminal_reaper),
+                                    )
                                 finally:
-                                    boundary.verify_after_return()
+                                    try:
+                                        _validate_staged_codex_executable(executable)
+                                    finally:
+                                        boundary.verify_after_return()
+
+                            return _run_isolated_codex_effort_attempts(execute, job.model)
                         finally:
                             close_staged_linux_executable(executable)
 
@@ -4544,6 +4571,8 @@ class WorkerPool:
         escapes are converted by :meth:`_run` so the returned result preserves
         the executing worker identity.
         """
+        if job.session_selection_error:
+            return JobResult(ok=False, error=job.session_selection_error)
 
         def remaining_timeout() -> int:
             """Return the checked time for the next recovery subprocess."""
@@ -4623,6 +4652,8 @@ class WorkerPool:
                         agent=session_key,
                         prompt=prompt,
                         model=job.model,
+                        fallback_model_value=job.fallback_model,
+                        require_new_session=job.require_new_session,
                         cwd=cwd,
                         timeout=remaining_timeout(),
                         output_format=job.output_format,
@@ -4787,6 +4818,8 @@ class WorkerPool:
     @staticmethod
     def _run_compact(job: CompactJob) -> JobResult:
         """Compact an agent session without making compaction a hard gate."""
+        if job.session_selection_error:
+            return JobResult(ok=False, error=job.session_selection_error)
         compacted = compact_agent_session(
             repo=job.repo,
             issue=job.issue,

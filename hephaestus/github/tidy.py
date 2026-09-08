@@ -22,9 +22,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.runtime import (
     add_agent_argument,
-    direct_agent_model,
     reject_pi_unsupported_surface,
     resolve_agent,
     run_agent_text,
@@ -51,12 +51,6 @@ from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 
 logger = logging.getLogger(__name__)
-
-# Model the tidy conflict-resolution swarm runs on. Sourced from
-# hephaestus.constants (not hephaestus.automation) so the library layer stays
-# inside the one-way boundary while sharing a single model ID with the
-# automation taxonomy.
-_TIDY_SWARM_MODEL = "claude-sonnet-4-6"
 
 # ANSI escape sequence stripper
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -424,12 +418,13 @@ def _load_claude_swarm() -> tuple[Any, Any] | None:
     return ClaudeCodeOptions, query
 
 
-def _claude_options(options_factory: Any, repo_path: Path) -> object:
+def _claude_options(options_factory: Any, repo_path: Path, model: str = "") -> object:
     """Construct Claude SDK options without leaking SDK names into callers."""
+    base_model = parse_model_selection(model).model
     return options_factory(
         max_turns=40,
         cwd=str(repo_path),
-        model=_TIDY_SWARM_MODEL,
+        **({"model": base_model} if base_model else {}),
     )
 
 
@@ -442,6 +437,7 @@ async def _dispatch_swarm(
     dry_run: bool,
     agent: str,
     rebase_timeout: int = 2400,
+    model: str = "",
 ) -> dict[str, str]:
     """Spawn the selected coding agent per branch (capped at max_concurrent).
 
@@ -471,11 +467,12 @@ async def _dispatch_swarm(
                     branch,
                     repo_path,
                     rebase_timeout,
+                    model,
                 )
                 return
 
             results[branch] = await _run_claude_rebase_agent(
-                prompt, branch, repo_path, claude_swarm
+                prompt, branch, repo_path, claude_swarm, model
             )
 
     await asyncio.gather(*(_run_one(b) for b in branches))
@@ -488,6 +485,7 @@ def _run_direct_rebase_agent(
     branch: str,
     repo_path: Path,
     timeout: int = 2400,
+    model: str = "",
 ) -> str:
     """Run one direct rebase-fix agent and return its status marker."""
     try:
@@ -500,11 +498,7 @@ def _run_direct_rebase_agent(
             prompt=prompt,
             cwd=repo_path,
             timeout=timeout,
-            model=direct_agent_model(
-                agent,
-                _TIDY_SWARM_MODEL,
-                codex_default=_TIDY_SWARM_MODEL,
-            ),
+            model=model,
             sandbox="workspace-write",
         )
         text = result.stdout or ""
@@ -520,12 +514,13 @@ async def _run_claude_rebase_agent(
     branch: str,
     repo_path: Path,
     claude_swarm: tuple[Any, Any] | None,
+    model: str = "",
 ) -> str:
     """Run one Claude SDK rebase-fix agent and return its status marker."""
     if claude_swarm is None:
         return "failed"
     options_factory, query = claude_swarm
-    options = _claude_options(options_factory, repo_path)
+    options = _claude_options(options_factory, repo_path, model)
     status = "failed"
     try:
         async for message in query(prompt=prompt, options=options):
@@ -577,6 +572,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Max parallel swarm agents (default: 5)",
     )
     add_agent_argument(parser)
+    parser.add_argument(
+        "--model",
+        default="",
+        metavar="MODEL[:EFFORT]",
+        help="Model name and optional effort; omit to use the tool default",
+    )
     add_prompt_dir_argument(parser)
     parser.add_argument(
         "--gh-timeout",
@@ -724,6 +725,7 @@ def _dispatch_tidy_swarm(
             args.max_concurrent,
             dry_run=args.dry_run,
             agent=agent,
+            model=getattr(args, "model", ""),
             **({"rebase_timeout": args.rebase_timeout} if args.rebase_timeout != 2400 else {}),
         )
     )
