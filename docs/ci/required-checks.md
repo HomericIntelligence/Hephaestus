@@ -37,6 +37,10 @@ protection from a source that the current actor cannot bypass.
 
 ## Queue pre-PR source checks
 
+Developer pre-commit hooks do not run pytest. Before a developer creates a PR,
+the developer runs each new or changed test and verifies collection and success.
+The required CI/CD test jobs are the full-suite authority.
+
 Before publishing a Hephaestus implementation, the queue runs the fixed command
 `bash scripts/run_ci_local.sh all --rebuild`. Rebuilding the
 CI image prevents a prior checkout's dependency environment from weakening the
@@ -80,8 +84,9 @@ compares both files with the immutable implementation-source tree. It executes
 anonymous snapshots of the verified bytes. A path rename, symlink change, or
 candidate marker cannot grant native-fallback authority.
 
-This local pass cannot run checks whose inputs do not exist until GitHub creates
-the PR. `pr-policy` still validates the live PR body, title, commit subjects,
+This queue-specific pass is not a developer pre-commit hook. It cannot run
+checks whose inputs do not exist until GitHub creates the PR. `pr-policy` still
+validates the live PR body, title, commit subjects,
 and DCO trailers in Actions. The classic matrix contexts and
 `required-checks-gate` also remain authoritative merge requirements. The local
 run is early failure feedback only; it does not grant

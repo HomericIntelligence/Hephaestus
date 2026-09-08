@@ -536,9 +536,10 @@ technical prose that you create or revise.
 
 1. Follow the principles in [AGENTS.md](AGENTS.md)
 2. Write comprehensive unit tests for all new functionality
-3. Document all public functions with Google-style docstrings
-4. Use type hints for all function parameters and return values
-5. Keep functions small and focused (single responsibility principle)
+3. Run each new or changed test and verify that it passes before you create a PR
+4. Document all public functions with Google-style docstrings
+5. Use type hints for all function parameters and return values
+6. Keep functions small and focused (single responsibility principle)
 
 ## Contributing
 
@@ -558,12 +559,14 @@ the loop does not change CI/CD. Required CI/CD checks are the merge contract.
    (`git checkout -b 123-amazing-feature`).
 2. Commit your changes with both attestations (`git commit -s -S -m "feat(scope): add amazing feature"`),
    using [conventional commit](https://www.conventionalcommits.org/) messages.
-3. Push the branch (`git push -u origin 123-amazing-feature`).
-4. Open a pull request titled `type(scope): concise description` whose body
+3. Run each new or changed test. Verify that pytest collects it and reports
+   success. The full suites run in required CI/CD, not in pre-commit.
+4. Push the branch (`git push -u origin 123-amazing-feature`).
+5. Open a pull request titled `type(scope): concise description` whose body
    contains the literal line `Closes #123` (capital `C`, no colon, on its own
    line — `Fixes`/`Resolves` are **not** accepted). The title becomes the
    squash-merge subject on `main`.
-5. Do not enable auto-merge manually. The automation loop's review, label, and
+6. Do not enable auto-merge manually. The automation loop's review, label, and
    `merge_wait` preserves the head-bound approval boundary with a
    SHA-conditional normal merge and never mutates native auto-merge.
 
