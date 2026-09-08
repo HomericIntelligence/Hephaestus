@@ -1101,7 +1101,8 @@ def _engine_calls(tmp_path: Path) -> list[list[str]]:
     if not path.exists():
         return []
     values = path.read_bytes().split(b"\0")
-    assert values.pop() == b""
+    terminator = values.pop()
+    assert terminator == b""
     calls = []
     offset = 0
     while offset < len(values):
