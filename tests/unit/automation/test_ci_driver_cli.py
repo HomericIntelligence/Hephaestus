@@ -3,10 +3,35 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
 from hephaestus.automation import ci_driver
+
+
+def test_parse_args_accepts_trusted_gh_extra_path_root(tmp_path: Path) -> None:
+    """The drive-green CLI accepts a validated external GitHub CLI root."""
+    gh_root = tmp_path / "gh-root"
+    gh = gh_root / "bin" / "gh"
+    gh.parent.mkdir(parents=True)
+    gh.write_text("#!/bin/sh\n")
+    gh.chmod(0o755)
+
+    args = ci_driver._parse_args(["--gh-extra-path-root", str(gh_root)])
+
+    assert args.gh_extra_path_root == gh_root.resolve()
+
+
+def test_parse_args_rejects_invalid_gh_extra_path_root(tmp_path: Path) -> None:
+    """The drive-green CLI rejects a root without an executable bin/gh."""
+    gh_root = tmp_path / "gh-root"
+    gh_root.mkdir()
+
+    with pytest.raises(SystemExit) as error:
+        ci_driver._parse_args(["--gh-extra-path-root", str(gh_root)])
+
+    assert error.value.code == 2
 
 
 def test_parse_args_no_issues_flag_enters_discovery_mode(

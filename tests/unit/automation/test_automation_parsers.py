@@ -430,6 +430,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             ),
         ),
         _agent_spec(),
+        _gh_extra_path_root_spec(),
         _max_workers_spec(COMMON_REVIEW_MAX_WORKERS),
         _dry_run_spec(
             _dry_help("Suppress GitHub writes and git pushes (no comments, no merges, no pushes).")

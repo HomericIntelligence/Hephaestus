@@ -102,6 +102,43 @@ def test_pi_directory_threads_into_pipeline_config(tmp_path: Path) -> None:
     assert captured["config"].pi_dir == tmp_path
 
 
+def test_gh_extra_path_root_threads_into_pipeline_config(tmp_path: Path) -> None:
+    """The validated GitHub CLI root reaches the production pool configuration."""
+    gh_root = tmp_path / "gh-root"
+    gh = gh_root / "bin" / "gh"
+    gh.parent.mkdir(parents=True)
+    gh.write_text("#!/bin/sh\n")
+    gh.chmod(0o755)
+
+    config = _run_main_capturing_config(["--issues", "123", "--gh-extra-path-root", str(gh_root)])[
+        "config"
+    ]
+
+    assert config.gh_extra_path_root == gh_root.resolve()
+
+
+def test_invalid_gh_extra_path_root_stops_before_github_work(tmp_path: Path) -> None:
+    """An invalid GitHub CLI root stops before repository or pipeline access."""
+    gh_root = tmp_path / "gh-root"
+    gh_root.mkdir()
+
+    with (
+        patch.object(
+            sys,
+            "argv",
+            ["hephaestus-drive-prs-green", "--gh-extra-path-root", str(gh_root)],
+        ),
+        patch.object(ci_driver_mod, "_resolve_repo") as resolve_repo,
+        patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as run_pipeline,
+    ):
+        with pytest.raises(SystemExit) as error:
+            ci_driver_mod.main()
+
+    assert error.value.code == 2
+    resolve_repo.assert_not_called()
+    run_pipeline.assert_not_called()
+
+
 @pytest.mark.parametrize("agent", ["opencode", "pi"])
 def test_provider_owned_defaults_remain_empty(agent: str) -> None:
     """The CI wrapper must not inject Claude defaults into direct providers."""

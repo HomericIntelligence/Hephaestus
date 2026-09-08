@@ -109,6 +109,7 @@ Examples:
   %(prog)s --prs 123
         """,
         add_github_throttle=True,
+        add_gh_extra_path_root=True,
         dry_run_prefix=(
             "Suppress GitHub writes and git pushes (no comments, no merges, no pushes)."
         ),
@@ -333,6 +334,7 @@ def main() -> int:
             metadata_timeout=args.metadata_timeout,
             diff_collect_timeout=args.diff_collect_timeout,
             poll_max_wait=args.poll_max_wait,
+            gh_extra_path_root=args.gh_extra_path_root,
             json_out=args.json,
             scope=PipelineScope(_CI_DRIVER_SCOPE_STAGES),
         )
