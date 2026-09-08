@@ -11,7 +11,7 @@ import json
 import math
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
@@ -325,6 +325,8 @@ class ReconcilePrReviewRequest:
     review_diff: str
     deadline_s: float
     issue_number: int | None = None
+    host_verification_profile: str | None = None
+    host_verification_receipts: FrozenJson = field(default_factory=lambda: FrozenJson.snapshot([]))
 
     def __post_init__(self) -> None:
         """Validate the exact-head reconciliation request."""
@@ -351,6 +353,11 @@ class ReconcilePrReviewRequest:
         _deadline(self.deadline_s)
         if self.issue_number is not None:
             _positive_identifier(self.issue_number, "issue_number")
+        if self.host_verification_profile is not None and not isinstance(
+            self.host_verification_profile, str
+        ):
+            raise ValueError("host_verification_profile must be a string or None")
+        _json_root(self.host_verification_receipts, list, "host_verification_receipts")
 
 
 @dataclass(frozen=True)

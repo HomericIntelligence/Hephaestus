@@ -56,11 +56,26 @@ def _host_verification_receipt_matches(
     )
 
 
+def _unsupported_host_verification_skip_matches(
+    receipts: object,
+    specs: tuple[_HostVerificationSpec, ...],
+    reviewed_head: str,
+) -> bool:
+    """Return whether the fixed plan has an authenticated Linux bootstrap skip."""
+    return bool(
+        isinstance(receipts, list)
+        and len(receipts) == 1
+        and specs
+        and _authentic_linux_bootstrap_receipt(receipts[0], specs[0], reviewed_head)
+    )
+
+
 __all__ = [
     "UNSUPPORTED_HOST_VERIFICATION_ERROR",
     "_host_verification_failure_kind",
     "_host_verification_receipt_matches",
     "_host_verification_result_status",
+    "_unsupported_host_verification_skip_matches",
 ]
 
 
