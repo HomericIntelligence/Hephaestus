@@ -316,7 +316,8 @@ def test_default_host_constructs_and_uses_concrete_delivery_backend(
     """Default host wiring delivers through the host-owned concrete backend."""
 
     class Service:
-        def __init__(self, *, github: object) -> None:
+        def __init__(self, *, github: object, gh_extra_path_root: Path | None = None) -> None:
+            assert gh_extra_path_root is None
             assert github is not None
             self.requests: list[object] = []
 

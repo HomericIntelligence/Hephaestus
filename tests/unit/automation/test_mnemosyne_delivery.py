@@ -282,3 +282,71 @@ def test_existing_pr_binding_rejects_mismatch_before_mutation(
         service.deliver(_request(tmp_path, existing_pr_number=12))
 
     assert not any(call[0] in {"add", "commit", "push"} for call in git.calls)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_remote_seam_preserves_fetch_push_and_local_commit(tmp_path: Path, existing: bool) -> None:
+    """Only remote operations receive the explicit host transport."""
+    local = FakeGit()
+    remote = FakeGit()
+    service = LearnDeliveryService(git=local, remote_git=remote, github=FakeGitHub())
+    request = _request(tmp_path, existing_pr_number=7 if existing else None)
+    service.deliver(request)
+    assert all(call[0] not in {"push", "fetch"} for call in local.calls)
+    assert ("commit", "-S", "-s", "-m", request.commit_message) in local.calls
+    if existing:
+        assert remote.calls == [
+            ("fetch", "origin", "skill/example"),
+            (
+                "push",
+                "--force-with-lease=refs/heads/skill/example:" + HEAD,
+                "--force-if-includes",
+                "origin",
+                "HEAD:refs/heads/skill/example",
+            ),
+        ]
+    else:
+        assert remote.calls == [
+            ("push", "--force-with-lease", "--force-if-includes", "origin", "skill/example")
+        ]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_default_remote_delivery_uses_trusted_transport(tmp_path: Path, existing: bool) -> None:
+    """Default delivery retains remote authentication and local signed commits."""
+    from unittest.mock import patch
+
+    service = LearnDeliveryService(github=FakeGitHub())
+    local = FakeGit()
+    service.git = local
+    request = _request(tmp_path, existing_pr_number=7 if existing else None)
+    prefix = ("-c", "credential.helper=trusted")
+    with (
+        patch.dict("os.environ", {"GH_TOKEN": "synthetic-token"}, clear=True),
+        patch("hephaestus.automation.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
+        patch("hephaestus.automation.remote_git.trusted_gh_authenticated", return_value=True),
+        patch("hephaestus.automation.remote_git.trusted_remote_git_config", return_value=prefix),
+        patch("hephaestus.utils.helpers.run_subprocess", return_value=_completed()) as run,
+    ):
+        service.deliver(request)
+    remote_args = [tuple(call.args[0][3:]) for call in run.call_args_list]
+    assert all(call.args[0][:3] == ["git", *prefix] for call in run.call_args_list)
+    for call in run.call_args_list:
+        assert call.kwargs["env"]["GH_TOKEN"] == "synthetic-token"  # noqa: S105
+        assert call.kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    if existing:
+        assert remote_args == [
+            ("fetch", "origin", "skill/example"),
+            (
+                "push",
+                "--force-with-lease=refs/heads/skill/example:" + HEAD,
+                "--force-if-includes",
+                "origin",
+                "HEAD:refs/heads/skill/example",
+            ),
+        ]
+    else:
+        assert remote_args == [
+            ("push", "--force-with-lease", "--force-if-includes", "origin", "skill/example")
+        ]
+    assert ("commit", "-S", "-s", "-m", request.commit_message) in local.calls

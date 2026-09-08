@@ -584,3 +584,47 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
         assert "secret" not in str(error.value)
         assert verified.call_count == (2 if failure == "artifact" else 1)
     assert len(calls) == 2
+
+
+def test_default_preparation_fetch_uses_trusted_transport(tmp_path: Path) -> None:
+    """Default preparation uses remote credentials only for its bound fetch."""
+    from unittest.mock import patch
+
+    root = tmp_path / "mnemosyne"
+    root.mkdir()
+    branch = "learn/fixture"
+    head = "a" * 40
+    workspace = BoundLearningWorkspace()
+    calls: list[tuple[str, ...]] = []
+
+    def local(
+        _cwd: Path, argv: tuple[str, ...], _timeout_s: int
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess([], 0, head if argv[0] == "rev-parse" else "")
+
+    workspace._git = local
+    with (
+        patch.object(workspace, "_existing_pr", return_value=(7, head)),
+        patch("hephaestus.automation.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
+        patch("hephaestus.automation.remote_git.trusted_gh_authenticated", return_value=True),
+        patch(
+            "hephaestus.automation.remote_git.trusted_remote_git_config",
+            return_value=("-c", "credential.helper=trusted"),
+        ),
+        patch(
+            "hephaestus.utils.helpers.run_subprocess",
+            return_value=subprocess.CompletedProcess([], 0, ""),
+        ) as run,
+    ):
+        workspace.prepare(_binding(tmp_path), branch)
+    assert run.call_args.args[0] == [
+        "git",
+        "-c",
+        "credential.helper=trusted",
+        "fetch",
+        "origin",
+        branch,
+    ]
+    assert run.call_args.kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert all(call[0] != "fetch" for call in calls)

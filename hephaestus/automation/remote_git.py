@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -75,3 +76,61 @@ def trusted_remote_git_config(gh_command: str) -> tuple[str, ...] | None:
         "-c",
         "http.sslVerify=true",
     )
+
+
+def trusted_gh_authenticated(command: str, timeout_s: int) -> bool:
+    """Check the trusted executable with the approved credential bridges."""
+    from hephaestus.config.child_environments import build_gh_child_env
+    from hephaestus.utils.helpers import run_subprocess
+
+    try:
+        result = run_subprocess(
+            [command, "auth", "status", "--hostname", "github.com"],
+            env=build_gh_child_env(),
+            check=False,
+            timeout=timeout_s,
+            track_process_group=True,
+            log_on_error=False,
+        )
+    except (OSError, RuntimeError, UnicodeError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+class TrustedRemoteGit:
+    """Resolve authentication for each bounded remote Git operation."""
+
+    def __init__(self, extra_path_root: Path | None = None) -> None:
+        """Keep only the host-selected executable root."""
+        self.extra_path_root = extra_path_root
+
+    def __call__(
+        self, cwd: Path, argv: tuple[str, ...], timeout_s: int
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one remote command and discard failure diagnostics."""
+        from hephaestus.config.child_environments import build_remote_git_env
+        from hephaestus.utils.helpers import run_subprocess
+
+        command = trusted_gh_executable(self.extra_path_root)
+        if command is None or not trusted_gh_authenticated(command, timeout_s):
+            raise RuntimeError("remote Git authentication unavailable")
+        config = trusted_remote_git_config(command)
+        if config is None:
+            raise RuntimeError("remote Git authentication unavailable")
+        try:
+            result = run_subprocess(
+                ["git", *config, *argv],
+                env=build_remote_git_env(),
+                cwd=cwd,
+                check=False,
+                timeout=timeout_s,
+                track_process_group=True,
+                log_on_error=False,
+            )
+        except (OSError, RuntimeError, UnicodeError, subprocess.SubprocessError):
+            raise RuntimeError("remote Git transport failed") from None
+        if result.returncode != 0:
+            return subprocess.CompletedProcess(
+                [], result.returncode, "", "remote Git transport failed"
+            )
+        return result

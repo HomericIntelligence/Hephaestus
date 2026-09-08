@@ -16,10 +16,11 @@ from packaging.version import InvalidVersion, Version
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.automation.remote_git import (
+    trusted_gh_authenticated,
     trusted_gh_executable,
     trusted_remote_git_config,
 )
-from hephaestus.config.child_environments import build_gh_child_env, build_git_child_env
+from hephaestus.config.child_environments import build_git_child_env, build_remote_git_env
 from hephaestus.github.mnemosyne_repo import (
     UPSTREAM_OWNER,
     UPSTREAM_SLUG,
@@ -78,6 +79,26 @@ def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.Com
         timeout=timeout_s,
         track_process_group=True,
     )
+
+
+def _run_remote_git(
+    cwd: Path, argv: tuple[str, ...], timeout_s: int
+) -> subprocess.CompletedProcess[str]:
+    """Use approved credentials only for remote binding operations."""
+    try:
+        return run_subprocess(
+            ["git", *argv],
+            env=build_remote_git_env(),
+            cwd=cwd,
+            check=False,
+            timeout=timeout_s,
+            track_process_group=True,
+            log_on_error=False,
+        )
+    except (OSError, RuntimeError, UnicodeError, subprocess.SubprocessError):
+        raise MnemosyneBindingError(
+            "remote Git transport failed", failure_kind="remote_git_transport"
+        ) from None
 
 
 def _require_success(result: subprocess.CompletedProcess[str], action: str) -> str:
@@ -140,17 +161,7 @@ def _unsafe_config_key(config: str) -> str | None:
 
 def _gh_auth_status(command: str, timeout_s: int) -> bool:
     """Return true when the trusted GitHub CLI has a login for GitHub.com."""
-    try:
-        result = run_subprocess(
-            [command, "auth", "status", "--hostname", "github.com"],
-            env=build_gh_child_env(),
-            check=False,
-            timeout=timeout_s,
-            track_process_group=True,
-        )
-    except (OSError, RuntimeError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0
+    return trusted_gh_authenticated(command, timeout_s)
 
 
 class MnemosyneBindingService:
@@ -287,7 +298,8 @@ class MnemosyneBindingService:
 
     def _remote_git(self, root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
         """Run a remote Git command with command-scoped authentication."""
-        return self._git(root, *self._remote_config(), *argv)
+        runner = _run_remote_git if self.git is _run_git else self.git
+        return runner(root, (*self._remote_config(), *argv), self.timeout_s)
 
     def _clone_missing_checkout(self, root: Path, target: MnemosyneTarget) -> None:
         """Create the canonical parent and clone the already-resolved target.

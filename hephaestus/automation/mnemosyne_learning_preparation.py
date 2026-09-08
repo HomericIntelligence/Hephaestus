@@ -32,6 +32,7 @@ from hephaestus.automation.mnemosyne_validator_dependencies import (
     run_learning_subprocess,
 )
 from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
+from hephaestus.automation.remote_git import TrustedRemoteGit
 from hephaestus.automation.review_journal import (
     IssueComment,
     JournalSnapshot,
@@ -559,11 +560,16 @@ class BoundLearningWorkspace:
         self,
         *,
         git: GitRunner = _run_git,
+        remote_git: GitRunner | None = None,
+        gh_extra_path_root: Path | None = None,
         gh: Callable[..., Any] = gh_call,
         timeout_s: int = NETWORK_TIMEOUT,
     ) -> None:
         """Initialize closed Git and GitHub seams."""
         self._git = git
+        self._remote_git = remote_git or (
+            git if git is not _run_git else TrustedRemoteGit(gh_extra_path_root)
+        )
         self._gh = gh
         self._timeout_s = timeout_s
 
@@ -601,7 +607,7 @@ class BoundLearningWorkspace:
             )
         if existing_pr is not None:
             _git_success(
-                self._git(root, ("fetch", "origin", branch), self._timeout_s),
+                self._remote_git(root, ("fetch", "origin", branch), self._timeout_s),
                 "learning retry branch fetch",
             )
             remote_head = _git_success(
@@ -647,7 +653,7 @@ class BoundLearningWorkspace:
         A transport failure is ambiguous too: do not delete the only recovery
         evidence merely because the classification query itself could not run.
         """
-        result = self._git(
+        result = self._remote_git(
             root,
             ("ls-remote", "--exit-code", "origin", f"refs/heads/{branch}"),
             self._timeout_s,
@@ -805,6 +811,7 @@ class MnemosyneLearningPreparationService:
     def __init__(
         self,
         *,
+        gh_extra_path_root: Path | None = None,
         source_reader: LearningSourceReader | None = None,
         builder: MnemosyneLearningBuilder | None = None,
         workspace: LearningWorkspace | None = None,
@@ -813,7 +820,7 @@ class MnemosyneLearningPreparationService:
         """Initialize provider-neutral preparation seams."""
         self._source_reader = source_reader or GitHubLearningSourceReader()
         self._builder = builder or MnemosyneLearningBuilder()
-        self._workspace = workspace or BoundLearningWorkspace()
+        self._workspace = workspace or BoundLearningWorkspace(gh_extra_path_root=gh_extra_path_root)
         self._validator = validator or MnemosynePluginValidator()
 
     def prepare(

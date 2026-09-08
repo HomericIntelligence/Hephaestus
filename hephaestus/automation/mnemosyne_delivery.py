@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
+from hephaestus.automation.remote_git import TrustedRemoteGit
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
@@ -143,10 +144,15 @@ class LearnDeliveryService:
         *,
         git: GitRunner = _run_git,
         github: LearnGitHub,
+        remote_git: GitRunner | None = None,
+        gh_extra_path_root: Path | None = None,
         timeout_s: int = NETWORK_TIMEOUT,
     ) -> None:
         """Initialize delivery with injectable Git and GitHub adapters."""
         self.git = git
+        self.remote_git = remote_git or (
+            git if git is not _run_git else TrustedRemoteGit(gh_extra_path_root)
+        )
         self.github = github
         self.timeout_s = timeout_s
 
@@ -257,7 +263,7 @@ class LearnDeliveryService:
             raise LearnDeliveryError("existing PR lacks a valid source head SHA")
 
         _require_success(
-            self.git(
+            self.remote_git(
                 request.worktree_path,
                 ("fetch", "origin", binding.source_ref),
                 self.timeout_s,
@@ -313,7 +319,7 @@ class LearnDeliveryService:
                 "origin",
                 f"HEAD:{ref}",
             )
-        _require_success(self.git(request.worktree_path, argv, self.timeout_s), "git push")
+        _require_success(self.remote_git(request.worktree_path, argv, self.timeout_s), "git push")
 
     def _changed_paths(self, worktree_path: Path) -> tuple[str, ...]:
         output = _require_success(
