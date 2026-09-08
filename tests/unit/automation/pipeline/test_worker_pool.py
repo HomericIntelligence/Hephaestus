@@ -117,6 +117,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceManager,
     SourceWorkspaceRecovery,
     SourceWorkspaceRecoveryKind,
+    SourceWorkspaceTerminalError,
 )
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
@@ -3779,7 +3780,9 @@ class TestGitOps:
                 ],
             },
         )
-        same_manager = pool._recover_prepared_remediation_worktree(recovery, repo)
+        with patch.object(pool, "_git_create_worktree_with_handoff") as fallback:
+            same_manager = pool._git_create_worktree(recovery)
+        fallback.assert_not_called()
         restarted = WorkerPool(1, threading.Event(), CompletionQueue())
         try:
             new_manager = restarted._recover_prepared_remediation_worktree(recovery, repo)
@@ -15947,3 +15950,153 @@ def test_primary_codex_worker_keeps_typed_review_policy(pool: WorkerPool, resume
         part.startswith('default_permissions="hephaestus-review-') for part in run.call_args.args[0]
     )
     assert "--sandbox" not in run.call_args.args[0]
+
+
+@pytest.mark.parametrize(
+    ("remediation", "pending_transition", "mutation"),
+    [
+        (False, False, "none"),
+        (False, True, "none"),
+        (True, False, "none"),
+        (True, True, "none"),
+        (True, False, "recovery_identity"),
+        *[
+            (True, True, value)
+            for value in ("receipt", "path", "repository", "head", "dirty", "ambiguous")
+        ],
+    ],
+)
+def test_adopted_remediation_creation_consumes_worker_metadata(
+    pool: WorkerPool,
+    tmp_path: Path,
+    pending_transition: bool,
+    remediation: bool,
+    mutation: str,
+) -> None:
+    """Absent recovery evidence permits strict creation without worker metadata."""
+    repo, first, head = _worker_repository(tmp_path)
+    branch = "7-adopted-writer"
+    manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+    for revision in (first, head, first, head):
+        writer = manager.prepare(7, SourceLane.IMPLEMENTATION, revision, branch=branch)
+    assert writer.generation == 4
+    _git(repo, "push", "origin", f"{branch}:{branch}")
+    receipt_path = manager._receipt_path(7, SourceLane.IMPLEMENTATION)
+    original_receipt = receipt_path.read_bytes()
+    original_content = (writer.cwd / "tracked.txt").read_bytes()
+    original_index = _git(writer.cwd, "ls-files", "--stage")
+    if pending_transition:
+        with pytest.raises(SourceWorkspaceTerminalError):
+            with manager.implementation_writer_handoff(7) as handoff:
+                manager.authorize_adopted_implementation_writer_transition(
+                    7, branch=branch, expected_head=head, handoff=handoff
+                )
+                raise SourceWorkspaceTerminalError("test stop before manager creation")
+        journal = manager._read_writer_transition(7)
+        assert journal is not None
+        assert journal.phase == "prepared"
+        assert journal.predecessor.generation == 4
+        assert journal.successor.generation == 5
+        assert receipt_path.read_bytes() == original_receipt
+    if mutation in {"receipt", "path", "repository"}:
+        payload = json.loads(receipt_path.read_text())
+        field, value = {
+            "receipt": ("generation", payload["generation"] + 42),
+            "path": ("path", str(tmp_path / "foreign-writer")),
+            "repository": ("repository", "other/repository"),
+        }[mutation]
+        payload[field] = value
+        receipt_path.write_text(json.dumps(payload))
+    elif mutation == "head":
+        _git(writer.cwd, "reset", "--hard", first)
+    elif mutation == "dirty":
+        (writer.cwd / "tracked.txt").write_text("preserve changed content\n")
+    elif mutation == "ambiguous":
+        journal_path = manager._transition_path(7)
+        journal_path.write_text(journal_path.read_text().replace("{", '{"phase":"prepared",', 1))
+    preserved = {
+        "receipt": receipt_path.read_bytes(),
+        "content": (writer.cwd / "tracked.txt").read_bytes(),
+        "index": _git(writer.cwd, "ls-files", "--stage"),
+        "head": _git(writer.cwd, "rev-parse", "HEAD"),
+        "branch": _git(writer.cwd, "symbolic-ref", "--short", "HEAD"),
+    }
+    journal_before = manager._transition_path(7).read_bytes() if pending_transition else None
+    kwargs: dict[str, Any] = {
+        "issue_number": 7,
+        "branch_name": branch,
+        "repo_root": str(repo),
+        "source_lane": "impl",
+        "sync_to_remote": True,
+        "pr_number": 7,
+        "implementation_adoption_head": head,
+    }
+    if remediation:
+        kwargs.update(
+            recover_prepared_remediation=True,
+            remediation_repository="HomericIntelligence/Hephaestus",
+            remediation_pr_number=7,
+            remediation_thread_snapshots=_RECOVERY_PATH_MANIFEST["remediation_thread_snapshots"],
+        )
+    if mutation == "recovery_identity":
+        kwargs["remediation_pr_number"] = True
+    job = GitJob(
+        repo="Hephaestus",
+        expected_repository="HomericIntelligence/Hephaestus",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs=kwargs,
+    )
+    original_kwargs = dict(job.kwargs)
+    real_create = WorktreeManager.create_worktree
+    with (
+        patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", "credential.helper=")),
+        ),
+        patch.object(pool, "_sync_worktree_to_remote_branch"),
+        patch.object(
+            WorktreeManager, "create_worktree", autospec=True, side_effect=real_create
+        ) as create,
+    ):
+        result = pool._git_create_worktree(job)
+    if mutation != "none":
+        assert not result.ok
+        create.assert_not_called()
+        assert job.kwargs == original_kwargs
+        assert receipt_path.read_bytes() == preserved["receipt"]
+        assert (writer.cwd / "tracked.txt").read_bytes() == preserved["content"]
+        assert _git(writer.cwd, "ls-files", "--stage") == preserved["index"]
+        assert _git(writer.cwd, "rev-parse", "HEAD") == preserved["head"]
+        assert _git(writer.cwd, "symbolic-ref", "--short", "HEAD") == preserved["branch"]
+        if pending_transition:
+            assert manager._transition_path(7).read_bytes() == journal_before
+        else:
+            assert not manager._transition_path(7).exists()
+        return
+    assert result.ok, result.value
+    assert job.kwargs == original_kwargs
+    create.assert_called_once()
+    sent = create.call_args.kwargs
+    assert sent["source_lane"] == "impl"
+    assert sent["implementation_adoption_head"] == head
+    assert sent["branch_name"] == branch
+    assert sent["issue_number"] == 7
+    assert isinstance(sent["implementation_writer_handoff"], ImplementationWriterHandoff)
+    assert not set(sent).intersection(
+        {
+            "recover_prepared_remediation",
+            "remediation_repository",
+            "remediation_pr_number",
+            "remediation_thread_snapshots",
+        }
+    )
+    final = manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+    assert final is not None and final.generation == 5
+    assert not manager._transition_path(7).exists()
+    assert _git(writer.cwd, "rev-parse", "HEAD") == head
+    assert _git(writer.cwd, "symbolic-ref", "--short", "HEAD") == branch
+    assert _git(writer.cwd, "status", "--porcelain") == ""
+    assert _git(writer.cwd, "ls-files", "--stage") == original_index
+    assert (writer.cwd / "tracked.txt").read_bytes() == original_content
