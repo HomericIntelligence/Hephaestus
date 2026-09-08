@@ -3386,3 +3386,61 @@ def test_terminal_missing_secure_read_capability_preserves_handoff(
     assert raised.value.preserve
     assert raised.value.terminal_reference is None
     assert manager._transition_path(9).exists()
+
+
+def test_prepared_same_identity_recovery_preserves_registered_predecessor(tmp_path: Path) -> None:
+    """Recovery retains an exact predecessor, including its ignored content."""
+    repo, first, head = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    for revision in (first, head, first, head):
+        writer = manager.prepare(9, SourceLane.IMPLEMENTATION, revision, branch="adopted-writer")
+    assert writer.generation == 4
+    exclude = repo / _git(repo, "rev-parse", "--git-path", "info/exclude")
+    with exclude.open("a") as stream:
+        stream.write("\npreserved-sentinel\n")
+    sentinel = writer.cwd / "preserved-sentinel"
+    sentinel.write_bytes(b"ignored content must survive recovery\x00\n")
+    sentinel.chmod(0o640)
+    assert _git(writer.cwd, "status", "--porcelain") == ""
+    assert _git(writer.cwd, "check-ignore", "preserved-sentinel") == "preserved-sentinel"
+    with pytest.raises(source_worktree.SourceWorkspaceTerminalError):
+        with manager.implementation_writer_handoff(9) as handoff:
+            manager.authorize_adopted_implementation_writer_transition(
+                9, branch="adopted-writer", expected_head=head, handoff=handoff
+            )
+            raise source_worktree.SourceWorkspaceTerminalError("test stop before adoption")
+    journal = manager._read_writer_transition(9)
+    assert journal is not None and journal.phase == "prepared"
+    assert journal.predecessor.generation == 4
+    assert journal.successor.generation == 5
+    assert journal.predecessor.revision == journal.successor.revision == head
+    assert journal.predecessor.branch == journal.successor.branch == "adopted-writer"
+    receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+    receipt_before = receipt_path.read_bytes()
+    registration_before = _git(repo, "worktree", "list", "--porcelain")
+    paths = (writer.cwd, writer.cwd / ".git", sentinel)
+    index_before = _git(writer.cwd, "ls-files", "--stage")
+    identities = [(path.stat().st_dev, path.stat().st_ino, path.stat().st_mode) for path in paths]
+    contents = [path.read_bytes() for path in paths[1:]]
+    restarted = SourceWorkspaceManager(repo, repository="example/project")
+    with patch.object(source_worktree, "_git", wraps=_source_worktree_git) as commands:
+        with restarted.implementation_writer_handoff(9):
+            pass
+    mutations = [
+        call.args
+        for call in commands.call_args_list
+        if len(call.args) >= 3 and call.args[1:3] in (("worktree", "remove"), ("worktree", "add"))
+    ]
+    assert mutations == []
+    assert [
+        (path.stat().st_dev, path.stat().st_ino, path.stat().st_mode) for path in paths
+    ] == identities
+    assert [path.read_bytes() for path in paths[1:]] == contents
+    assert _git(writer.cwd, "ls-files", "--stage") == index_before
+    assert receipt_path.read_bytes() == receipt_before
+    assert restarted._read_receipt(9, SourceLane.IMPLEMENTATION) == journal.predecessor
+    assert not restarted._transition_path(9).exists()
+    assert _git(repo, "worktree", "list", "--porcelain") == registration_before
+    assert _git(writer.cwd, "rev-parse", "HEAD") == head
+    assert _git(writer.cwd, "symbolic-ref", "--short", "HEAD") == "adopted-writer"
+    assert _git(writer.cwd, "status", "--porcelain") == ""
