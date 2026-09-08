@@ -3069,11 +3069,11 @@ class ImplementationStage(Stage):
             item.payload["no_commits"] = True
             return
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
+        ImplementationStage._record_git_failure(item, result)
         receipt = result.value if isinstance(result.value, dict) else {}
         recovery_commit = receipt.get("recovery_commit_sha")
         if is_full_commit_sha(recovery_commit):
             item.payload["remediation_recovery_commit_sha"] = recovery_commit
-        item.payload["git_error"] = True
 
     @staticmethod
     def _post_remediation_replies_after_push(item: WorkItem, result: JobResult) -> None:
@@ -3227,9 +3227,25 @@ class ImplementationStage(Stage):
             item.payload.pop("rebase_error_policy", None)
 
     @staticmethod
+    def _record_git_failure(item: WorkItem, result: JobResult) -> None:
+        """Persist bounded, redacted diagnostics for a failed Git publication."""
+        item.payload["git_error"] = True
+        if result.error:
+            item.payload["git_error_detail"] = redact_diagnostic_text(result.error)[:500]
+        if result.stdout_tail:
+            item.payload["git_stdout_tail"] = redact_diagnostic_text(result.stdout_tail)[-4000:]
+        if result.stderr_tail:
+            item.payload["git_stderr_tail"] = redact_diagnostic_text(result.stderr_tail)[-4000:]
+        value = result.value if isinstance(result.value, dict) else {}
+        failure_kind = value.get("failure_kind")
+        if isinstance(failure_kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", failure_kind):
+            item.payload["git_error_kind"] = failure_kind
+
+    @staticmethod
     def _record_rebase_conflict(item: WorkItem, result: JobResult) -> None:
         """Retain only a complete host-produced conflict receipt on the item."""
         value = result.value if isinstance(result.value, dict) else {}
+        diagnostic = _rebase_failure_diagnostic(result)
         paths = value.get("conflict_paths")
         snapshot = value.get("conflict_snapshot")
         index_snapshot = value.get("conflict_index_snapshot")
@@ -3248,6 +3264,8 @@ class ImplementationStage(Stage):
             or not is_full_commit_sha(expected_remote_sha)
         ):
             item.payload["rebase_error"] = True
+            if diagnostic is not None:
+                item.payload["rebase_failure_diagnostic"] = diagnostic
             return
         item.payload["rebase_conflict"] = True
         item.payload["rebase_conflict_paths"] = tuple(paths)
@@ -3256,6 +3274,8 @@ class ImplementationStage(Stage):
         item.payload["rebase_paused_head_sha"] = paused_head_sha
         item.payload["rebase_base_sha"] = base_sha
         item.payload["rebase_expected_remote_sha"] = expected_remote_sha
+        if diagnostic is not None:
+            item.payload["rebase_failure_diagnostic"] = diagnostic
 
     @staticmethod
     def _on_worktree_done(item: WorkItem, result: JobResult) -> None:  # noqa: C901

@@ -1336,6 +1336,46 @@ class TestGate:
         assert all(len(value) <= 500 for value in persisted[:2])
         assert all(len(value) <= 4000 for value in persisted[2:])
 
+    def test_continued_rebase_conflict_retains_command_diagnostics(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A continued conflict retains safe output without becoming a failure."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase conflict resolution required: additional conflicts found",
+                value={
+                    "conflict_paths": ("x.py",),
+                    "conflict_snapshot": {"x.py": "after"},
+                    "conflict_index_snapshot": "1" * 64,
+                    "paused_head_sha": "c" * 40,
+                    "base_sha": "b" * 40,
+                    "expected_remote_sha": "a" * 40,
+                    "failure_kind": "continuation",
+                    "phase": "rebase_continue",
+                    "returncode": 1,
+                    "receipt_error": "",
+                },
+                stdout_tail=f"hook stdout token={github_token}",
+                stderr_tail=f"hook stderr token={github_token}",
+            ),
+            ctx,
+        )
+
+        diagnostic = item.payload.get("rebase_failure_diagnostic")
+        assert diagnostic is not None
+        assert item.payload["rebase_conflict"] is True
+        assert "rebase_error" not in item.payload
+        assert github_token not in str(diagnostic)
+        assert diagnostic["stdout_tail"] == "hook stdout token=<redacted>"
+        assert diagnostic["stderr_tail"] == "hook stderr token=<redacted>"
+
     def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1621,6 +1661,34 @@ class TestGitErrorRetryCap:
         assert item.worktree == ""
         assert item.attempts["implement"] == 0
         assert "git_error_retries" not in item.payload
+
+    def test_commit_push_failure_retains_redacted_publication_diagnostics(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed publication keeps bounded safe output on the work item."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="publish failed: unknown publication failure",
+                value={"failure_kind": "publish_unknown"},
+                stdout_tail=f"hook stdout token={github_token}",
+                stderr_tail=f"hook stderr token={github_token}",
+            ),
+            make_ctx(),
+        )
+
+        assert item.payload["git_error"] is True
+        assert item.payload.get("git_error_kind") == "publish_unknown"
+        assert item.payload.get("git_error_detail") == (
+            "publish failed: unknown publication failure"
+        )
+        assert item.payload.get("git_stdout_tail") == "hook stdout token=<redacted>"
+        assert item.payload.get("git_stderr_tail") == "hook stderr token=<redacted>"
 
     def test_external_branch_worktree_holder_fails_closed(
         self, make_ctx: Any, make_work_item: Any

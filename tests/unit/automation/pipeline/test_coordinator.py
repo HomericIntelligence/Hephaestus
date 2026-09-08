@@ -3835,7 +3835,35 @@ class TestDurableEventLog:
             "stderr_tail": "safe stderr",
         }
 
-    def test_event_log_redacts_nested_rebase_failure_diagnostics(
+    def test_job_event_retains_follow_up_rebase_conflict_diagnostic(self) -> None:
+        """A follow-up conflict keeps its continuation output in the event."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        fields = Coordinator._job_result_event_fields(
+            JobResult(
+                ok=False,
+                error="rebase conflict resolution required: additional conflicts found",
+                value={
+                    "conflict_paths": ("x.py",),
+                    "failure_kind": "continuation",
+                    "phase": "rebase_continue",
+                    "returncode": 1,
+                    "receipt_error": "",
+                },
+                stdout_tail=f"follow-up stdout token={github_token}",
+                stderr_tail=f"follow-up stderr token={github_token}",
+            )
+        )
+
+        assert fields["rebase_failure_diagnostic"] == {
+            "failure_kind": "continuation",
+            "phase": "rebase_continue",
+            "returncode": 1,
+            "receipt_error": "",
+            "stdout_tail": "follow-up stdout token=<redacted>",
+            "stderr_tail": "follow-up stderr token=<redacted>",
+        }
+
+    def test_event_log_redacts_rebase_failure_diagnostics(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Signing recovery evidence never leaks credentials into JSONL events."""

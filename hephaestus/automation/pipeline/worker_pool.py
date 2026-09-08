@@ -222,6 +222,68 @@ logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
+
+
+def _publication_diagnostic_tails(exc: BaseException) -> tuple[str, str]:
+    """Return bounded, redacted output carried by a Git publication error."""
+    return (
+        bounded_git_diagnostic(getattr(exc, "stdout_tail", ""), limit=_TAIL),
+        bounded_git_diagnostic(getattr(exc, "stderr_tail", ""), limit=_TAIL),
+    )
+
+
+def _publication_failure_result(
+    exc: git_utils.GitPushError | git_utils.DetachedHeadPushError,
+) -> JobResult:
+    """Convert a Git publication exception into a safe worker result."""
+    stdout_tail, stderr_tail = _publication_diagnostic_tails(exc)
+    if isinstance(exc, git_utils.DetachedHeadPushRemoteHeadChangedError):
+        if exc.failure_kind == "lease_drift":
+            error = "publish failed: lease drift"
+            failure_kind = "publish_lease_drift"
+        else:
+            error = "publish failed: remote head changed"
+            failure_kind = "publish_remote_head_changed"
+    elif isinstance(exc, git_utils.DetachedHeadPushRemoteHeadUnchangedError):
+        unchanged_failure = {
+            "unknown": ("publish failed: unknown publication failure", "publish_unknown"),
+            "timeout": ("publish failed: timeout", "publish_timeout"),
+            "transport": ("publish failed: transport failure", "publish_transport_failed"),
+        }.get(exc.failure_kind)
+        if unchanged_failure is not None:
+            error, failure_kind = unchanged_failure
+        else:
+            error = "publish failed: remote head unchanged"
+            failure_kind = "publish_remote_head_unchanged"
+    elif isinstance(exc, git_utils.DetachedHeadPushRemoteProbeError):
+        probe_failure = {
+            "timeout": ("publish failed: remote probe timeout", "publish_timeout"),
+            "transport": (
+                "publish failed: remote probe transport failure",
+                "publish_transport_failed",
+            ),
+        }.get(exc.failure_kind)
+        if probe_failure is not None:
+            error, failure_kind = probe_failure
+        else:
+            error = "publish failed: remote head probe failed"
+            failure_kind = "publish_remote_probe_failed"
+    else:
+        return JobResult(
+            ok=False,
+            error=str(exc),
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+        )
+    return JobResult(
+        ok=False,
+        error=error,
+        value={"failure_kind": failure_kind},
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+    )
+
+
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
 _CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
@@ -4488,48 +4550,13 @@ class WorkerPool:
                 error=BRANCH_WORKTREE_OWNED,
                 value={"branch": exc.branch, "owner_path": str(exc.owner_path)},
             )
-        except git_utils.DetachedHeadPushRemoteHeadChangedError as exc:
-            if exc.failure_kind == "lease_drift":
-                return JobResult(
-                    ok=False,
-                    error="publish failed: lease drift",
-                    value={"failure_kind": "publish_lease_drift"},
-                )
-            return JobResult(
-                ok=False,
-                error="publish failed: remote head changed",
-                value={"failure_kind": "publish_remote_head_changed"},
-            )
-        except git_utils.DetachedHeadPushRemoteHeadUnchangedError as exc:
-            unchanged_failure = {
-                "unknown": ("publish failed: unknown publication failure", "publish_unknown"),
-                "timeout": ("publish failed: timeout", "publish_timeout"),
-                "transport": ("publish failed: transport failure", "publish_transport_failed"),
-            }.get(exc.failure_kind)
-            if unchanged_failure is not None:
-                error, failure_kind = unchanged_failure
-                return JobResult(ok=False, error=error, value={"failure_kind": failure_kind})
-            return JobResult(
-                ok=False,
-                error="publish failed: remote head unchanged",
-                value={"failure_kind": "publish_remote_head_unchanged"},
-            )
-        except git_utils.DetachedHeadPushRemoteProbeError as exc:
-            probe_failure = {
-                "timeout": ("publish failed: remote probe timeout", "publish_timeout"),
-                "transport": (
-                    "publish failed: remote probe transport failure",
-                    "publish_transport_failed",
-                ),
-            }.get(exc.failure_kind)
-            if probe_failure is not None:
-                error, failure_kind = probe_failure
-                return JobResult(ok=False, error=error, value={"failure_kind": failure_kind})
-            return JobResult(
-                ok=False,
-                error="publish failed: remote head probe failed",
-                value={"failure_kind": "publish_remote_probe_failed"},
-            )
+        except (
+            git_utils.GitPushError,
+            git_utils.DetachedHeadPushRemoteHeadChangedError,
+            git_utils.DetachedHeadPushRemoteHeadUnchangedError,
+            git_utils.DetachedHeadPushRemoteProbeError,
+        ) as exc:
+            return _publication_failure_result(exc)
         except subprocess.TimeoutExpired as exc:
             return JobResult(
                 ok=False,
@@ -5601,6 +5628,8 @@ class WorkerPool:
                 timeout=timeout,
             )
         except subprocess.CalledProcessError as exc:
+            stdout_tail = bounded_git_diagnostic(exc.stdout, limit=_TAIL)
+            stderr_tail = bounded_git_diagnostic(exc.stderr, limit=_TAIL)
             next_receipt: dict[str, object] | JobResult | None = None
             if phase == "rebase_continue":
                 next_receipt = self._conflict_receipt(
@@ -5612,13 +5641,21 @@ class WorkerPool:
                 )
                 if isinstance(next_receipt, dict):
                     next_receipt["base_sha"] = base_sha
+                    next_receipt.update(
+                        failure_kind="continuation",
+                        phase=phase,
+                        returncode=exc.returncode,
+                        receipt_error="",
+                        stdout_tail=stdout_tail,
+                        stderr_tail=stderr_tail,
+                    )
                     return JobResult(
                         ok=False,
                         value=next_receipt,
                         error="rebase conflict resolution required: additional conflicts found",
+                        stdout_tail=stdout_tail,
+                        stderr_tail=stderr_tail,
                     )
-            stdout_tail = bounded_git_diagnostic(exc.stdout, limit=_TAIL)
-            stderr_tail = bounded_git_diagnostic(exc.stderr, limit=_TAIL)
             diagnostic = f"{stdout_tail}\n{stderr_tail}".lower()
             signing_failure = any(
                 marker in diagnostic
@@ -8962,10 +8999,19 @@ class WorkerPool:
                 remote_config=remote_config,
                 source_sha=source_sha,
             )
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            return self._writer_publication_failure(
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            result = self._writer_publication_failure(
                 job, worktree_path, branch, source_sha, baseline, refresh_phase=None
             )
+            if isinstance(exc, git_utils.GitPushError):
+                stdout_tail, stderr_tail = _publication_diagnostic_tails(exc)
+                return replace(
+                    result,
+                    error=str(exc),
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
+                )
+            return result
         return self._writer_publication_receipt("published", source_sha, baseline, source_sha)
 
     def _refresh_writer_publication(self, job: GitJob, worktree: Path, branch: str) -> JobResult:
