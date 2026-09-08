@@ -98,9 +98,23 @@ receives a scrubbed offline environment. Home, temporary files, and tool
 caches use the disposable scratch paths. The coverage runner preserves the
 validated `COVERAGE_FILE` path in external disposable scratch.
 
-The worker checks `srun --help` before it stages the image. The help output
-must declare `--container-unshare`. A missing option or a failed capability
-check stops validation. This check does not prove runtime isolation.
+The worker checks `srun --help` for the standard image, read-only, home-mount,
+work-directory, and mount options before it stages the image. It does not
+require `--container-unshare`. A missing option or a failed capability check
+stops validation.
+
+The verified image supplies `unshare` and `setpriv` from `util-linux`.
+After Pyxis starts the container, `unshare` creates new user, network, IPC,
+and UTS namespaces. It maps only the current host user to namespace root.
+Then `setpriv` sets `no_new_privs` and clears the bounding, inheritable,
+and ambient capability sets before it starts the candidate command.
+The candidate process has no permitted or effective capabilities after exec.
+A missing tool or a failed setup command stops execution. There is no retry
+without isolation. The host kernel must permit nested user namespaces.
+Rebuild the verified image to supply these tools.
+See the [unshare manual](https://man7.org/linux/man-pages/man1/unshare.1.html)
+and [setpriv manual](https://man7.org/linux/man-pages/man1/setpriv.1.html).
+These setup checks do not replace live acceptance evidence.
 
 Linux applies a process limit of 64 for the real user ID. This limit includes
 other processes and threads for that user on the submission and execution

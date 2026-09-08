@@ -430,7 +430,27 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
     assert command[0] == "srun"
     assert "--container-readonly" in command
     assert "--no-container-mount-home" in command
-    assert "--container-unshare=net,ipc,uts" in command
+    assert not any(value.startswith("--container-unshare") for value in command)
+    isolation_index = command.index("/usr/bin/unshare")
+    assert command[isolation_index:] == (
+        "/usr/bin/unshare",
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--ipc",
+        "--uts",
+        "--",
+        "/usr/bin/setpriv",
+        "--no-new-privs",
+        "--bounding-set=-all",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+        "--",
+        "/usr/local/bin/uv",
+        "run",
+        "pytest",
+        "tests/unit",
+    )
     assert "--export=NONE" in command
     assert "--nodes=1" in command
     assert "--ntasks=1" in command
@@ -658,24 +678,34 @@ def test_linux_pyxis_receipt_requires_exact_image_digest(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize(
-    ("help_text", "expected"),
+    "missing",
     [
-        ("      --container-unshare=NS,...\n        Unshare namespaces.\n", True),
-        ("      --container-unshare NS,...\n", True),
-        ("      --container-unshare\n", True),
-        ("      --container-unshare-extra=NS\n", False),
-        ("Description mentions --container-unshare=NS\n", False),
-        ("      --container-image=PATH\n", False),
-        ("", False),
+        None,
+        "container-image",
+        "container-readonly",
+        "no-container-mount-home",
+        "container-workdir",
+        "container-mounts",
     ],
 )
-def test_pyxis_help_requires_exact_option(help_text: str, expected: bool) -> None:
-    """Only a declared namespace option satisfies the runtime prerequisite."""
+def test_pyxis_help_accepts_standard_container_options(missing: str | None) -> None:
+    """Standard Pyxis options suffice; the image supplies namespace isolation."""
     from hephaestus.automation.pipeline.host_verification_pyxis import (
-        pyxis_help_supports_namespace_isolation,
+        pyxis_help_supports_container_execution,
     )
 
-    assert pyxis_help_supports_namespace_isolation(help_text) is expected
+    options = (
+        "container-image",
+        "container-readonly",
+        "no-container-mount-home",
+        "container-workdir",
+        "container-mounts",
+    )
+    text = "".join(f"  --{name}\n" for name in options if name != missing)
+    assert pyxis_help_supports_container_execution(text) is (missing is None)
+    if missing:
+        assert not pyxis_help_supports_container_execution(text + f"  --{missing}-extra\n")
+        assert not pyxis_help_supports_container_execution(text + f"Description: --{missing}\n")
 
 
 @pytest.mark.parametrize(

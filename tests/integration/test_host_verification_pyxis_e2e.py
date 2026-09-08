@@ -187,6 +187,7 @@ def test_linux_pyxis_host_verification_boundary(
     except (OSError, ValueError, AssertionError) as exc:
         pytest.fail(f"live Pyxis acceptance requires an allocated-node batch process: {exc}")
     hostname = socket.gethostname()
+    host_namespaces = {name: os.readlink(f"/proc/self/ns/{name}") for name in ("net", "ipc", "uts")}
     executable = shutil.which("srun", path="/usr/local/bin:/usr/bin:/bin")
     if executable is None:
         pytest.fail("trusted srun is unavailable for the placement control")
@@ -204,8 +205,16 @@ def test_linux_pyxis_host_verification_boundary(
     with _control_listener() as (port, token):
         program = f"""
 from pathlib import Path
+import os
 import socket
 import subprocess
+
+for name, host_namespace in {host_namespaces!r}.items():
+    assert os.readlink('/proc/self/ns/' + name) != host_namespace
+status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines())
+assert status['NoNewPrivs'].strip() == '1'
+for key in ('CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'):
+    assert int(status[key].strip(), 16) == 0
 
 try:
     socket.create_connection(('127.0.0.1', {port}), timeout=1)
