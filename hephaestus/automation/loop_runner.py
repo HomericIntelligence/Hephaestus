@@ -333,6 +333,8 @@ class LoopConfig:
     issue_limit: int | None = None
     event_log_retention_days: int = DEFAULT_EVENT_LOG_RETENTION_DAYS
     event_log_retention_count: int = DEFAULT_EVENT_LOG_RETENTION_COUNT
+    # Passive repository-lock waiting has a separate budget from Git commands.
+    git_lock_timeout: int = 7200
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +581,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("metadata", 10),
         ("rebase", 2400),
         ("diff-collect", 60),
+        ("git-lock", 7200),
         ("pre-pr-test", None),
     )
     for timeout_name, timeout_default in timeout_defaults:
@@ -981,6 +984,7 @@ def _build_pipeline_config(
         implementer_timeout=cfg.implementer_timeout,
         address_review_timeout=cfg.address_review_timeout,
         git_message_timeout=cfg.git_message_timeout,
+        git_lock_timeout=cfg.git_lock_timeout,
         poll_max_wait=cfg.poll_max_wait,
         clone_timeout=cfg.clone_timeout,
         network_timeout=cfg.network_timeout,
@@ -1221,6 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
         implementer_timeout=args.implementer_timeout,
         address_review_timeout=args.address_review_timeout,
         git_message_timeout=args.git_message_timeout,
+        git_lock_timeout=args.git_lock_timeout,
         poll_max_wait=args.poll_max_wait,
         clone_timeout=args.clone_timeout,
         network_timeout=args.network_timeout,

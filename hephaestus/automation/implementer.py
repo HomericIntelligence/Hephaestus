@@ -253,7 +253,15 @@ Examples:
     add_pipeline_runtime_args(
         parser,
         role="implementer",
-        timeouts=("network", "gh", "metadata", "rebase", "diff-collect", "pre-pr-test"),
+        timeouts=(
+            "network",
+            "gh",
+            "metadata",
+            "rebase",
+            "diff-collect",
+            "pre-pr-test",
+            "git-lock",
+        ),
         plugin_skills=True,
     )
     parser.add_argument("--poll-max-wait", type=positive_int, default=1200, metavar="SECONDS")
@@ -607,6 +615,7 @@ def main() -> int:
         network_timeout=args.network_timeout,
         gh_timeout=args.gh_timeout,
         metadata_timeout=args.metadata_timeout,
+        git_lock_timeout=args.git_lock_timeout,
         rebase_timeout=args.rebase_timeout,
         diff_collect_timeout=args.diff_collect_timeout,
         pre_pr_test_timeout=args.pre_pr_test_timeout,

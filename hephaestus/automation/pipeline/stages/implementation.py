@@ -531,6 +531,7 @@ _TRANSIENT_REMEDIATION_PUBLICATION_FAILURES = frozenset({"unknown", "timeout", "
 REMEDIATION_FAILURE_DIAGNOSTIC_MAX = 500
 _REMEDIATION_PUBLISH_DEADLINE = "_remediation_publish_deadline_s"
 _REMEDIATION_PREPARE_DEADLINE = "_remediation_prepare_deadline_s"
+_GIT_LOCK_FAILURES = frozenset({"lock_timeout", "lock_metadata_error"})
 
 #: A pending shared-branch holder waits for the in-flight creator's completion
 #: instead of re-entering the implementation drain in a tight loop.
@@ -1768,6 +1769,9 @@ class ImplementationStage(Stage):
             # pre-agent work and must never be interpreted as permission to
             # overwrite the other owner.
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_reservation_collision")
+        lock_failure = item.payload.pop("git_lock_failure", None)
+        if isinstance(lock_failure, str) and lock_failure in _GIT_LOCK_FAILURES:
+            return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
         if item.payload.pop("git_error", None):
             # Worktree creation failed: transient infrastructure, not an
             # implement outcome. If the retry budget remains, retry the
@@ -3406,6 +3410,12 @@ class ImplementationStage(Stage):
         result = _consume_writer_publication(item, result)
         if _COMMIT_PUSH_TERMINAL in item.payload:
             return
+        if result.error in _GIT_LOCK_FAILURES:
+            item.payload["git_lock_failure"] = result.error
+            item.payload["git_lock_diagnostic"] = (
+                dict(result.value) if isinstance(result.value, dict) else {}
+            )
+            return
         if result.ok:
             item.payload.pop("remediation_recovery_commit_sha", None)
             receipt = result.value if isinstance(result.value, dict) else {}
@@ -3650,6 +3660,13 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            if result.error in _GIT_LOCK_FAILURES:
+                item.payload["git_lock_failure"] = result.error
+                item.payload["git_lock_diagnostic"] = (
+                    dict(result.value) if isinstance(result.value, dict) else {}
+                )
+                item.worktree = ""
+                return
             result_value = result.value if isinstance(result.value, dict) else {}
             if result_value.get("failure_kind") == "source_workspace_terminal":
                 item.payload["source_workspace_preserve"] = True
@@ -4381,6 +4398,9 @@ class ImplementationStage(Stage):
         if item.payload.pop("remediation_publish_permanent", False):
             item.payload.pop("git_error", None)
             return StageOutcome(Disposition.FINISH_FAIL, "remediation_publication_failed")
+        lock_failure = item.payload.pop("git_lock_failure", None)
+        if isinstance(lock_failure, str) and lock_failure in _GIT_LOCK_FAILURES:
+            return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by

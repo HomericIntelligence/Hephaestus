@@ -87,7 +87,6 @@ from hephaestus.automation.host_verification_bootstrap import (
 )
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
-from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
@@ -129,6 +128,14 @@ from hephaestus.automation.pipeline.rebase_policy import (
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
     implementation_remediation_reply_handoff_journal_entry,
+)
+from hephaestus.automation.pipeline.repository_lock import (
+    LockInterruptedError,
+    LockMetadataError,
+    LockTimeoutError,
+    RepositoryLockError,
+    RepositoryOperationLock,
+    repo_lock_path,
 )
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
@@ -2890,53 +2897,24 @@ def _compare_and_swap_linked_branch(  # noqa: C901
             os.close(descriptor)
 
 
+_GitLockTimeoutError = LockTimeoutError
+_GitLockInterruptedError = LockInterruptedError
+
+
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
-    """Cross-process advisory lock file for *repo*.
-
-    Anchored at ``<repo_root>/<DEFAULT_STATE_DIR>/locks`` (the shared
-    automation state dir) rather than the bare CWD, so every process that
-    operates on this checkout resolves the SAME sentinel file regardless of
-    which subdirectory it was launched from. ``file_lock`` creates the parent
-    directory on first acquisition.
-
-    Args:
-        repo: Repository slug (``owner/name``); slashes are flattened.
-        lock_dir: Override directory for the sentinel files (tests inject a
-            temp dir here).
-
-    Returns:
-        Path of the sentinel lock file for *repo*.
-
-    """
-    if lock_dir is None:
-        lock_dir = get_repo_root() / DEFAULT_STATE_DIR / "locks"
-    return lock_dir / f"git-{repo.replace('/', '_')}.lock"
+    """Return the shared repository lock path."""
+    return repo_lock_path(repo, lock_dir)
 
 
-@dataclass
-class _RepoLockEntry:
-    """In-process git lock plus active/waiting user count."""
-
-    lock: threading.Lock
-    users: int = 0
-
-
-class _GitLockTimeoutError(TimeoutError):
-    """Raised when a Git job cannot acquire its cross-process repo lock in time."""
-
-
-class _GitLockInterruptedError(RuntimeError):
-    """Raised when shutdown interrupts a Git job while it waits for the repo lock."""
-
-
-def _git_lock_failure_result(exc: _GitLockTimeoutError | _GitLockInterruptedError) -> JobResult:
+def _git_lock_failure_result(exc: RepositoryLockError) -> JobResult:
     """Map a typed Git-lock failure to the corresponding bounded job result."""
-    if isinstance(exc, _GitLockTimeoutError):
-        return JobResult(ok=False, error="lock_timeout")
+    if isinstance(exc, (LockTimeoutError, LockMetadataError)):
+        return JobResult(ok=False, error=exc.failure_kind, value=exc.details)
     return JobResult(
         ok=False,
         interrupted=True,
         error="interrupted_waiting_for_git_lock",
+        value=exc.details,
     )
 
 
@@ -2964,7 +2942,10 @@ def _interruptible_file_lock(
 
     while True:
         if shutdown.is_set():
-            raise _GitLockInterruptedError
+            raise _GitLockInterruptedError(
+                "interrupted_waiting_for_git_lock",
+                {"failure_kind": "interrupted"},
+            )
 
         with ExitStack() as stack:
             try:
@@ -2972,15 +2953,21 @@ def _interruptible_file_lock(
             except LockUnavailableError as exc:
                 now = time.monotonic()
                 if now >= deadline:
-                    raise _GitLockTimeoutError from exc
+                    raise _GitLockTimeoutError("lock_timeout", {}) from exc
 
                 wait_s = min(_GIT_LOCK_WAIT_POLL_S, deadline - now)
                 if shutdown.wait(timeout=wait_s):
-                    raise _GitLockInterruptedError from exc
+                    raise _GitLockInterruptedError(
+                        "interrupted_waiting_for_git_lock",
+                        {"failure_kind": "interrupted"},
+                    ) from exc
                 continue
 
             if shutdown.is_set():
-                raise _GitLockInterruptedError
+                raise _GitLockInterruptedError(
+                    "interrupted_waiting_for_git_lock",
+                    {"failure_kind": "interrupted"},
+                )
             yield
             return
 
@@ -3506,6 +3493,7 @@ class WorkerPool:
         athena_skill_executor: AthenaSkillExecutor | None = None,
         rebase_policy_selector: RebasePolicySelector | None = None,
         evidence_receipt_dir: Path | None = None,
+        git_lock_timeout: int = 7200,
     ) -> None:
         """Initialize the pool.
 
@@ -3527,6 +3515,7 @@ class WorkerPool:
                 repository-agnostic.
             evidence_receipt_dir: Optional private directory for bounded typed
                 agent and Athena result receipts.
+            git_lock_timeout: Maximum seconds to wait for repository Git locks.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -3537,9 +3526,12 @@ class WorkerPool:
         self._completion_q = completion_q
         self._completion_wakeup: threading.Event | None = None
         self._completion_saturation: threading.Event | None = None
-        self._repo_locks: dict[str, _RepoLockEntry] = {}
+        self._repo_locks: dict[str, RepositoryOperationLock] = {}
         self._repo_locks_guard = threading.Lock()
         self._lock_dir = lock_dir
+        if git_lock_timeout < 0:
+            raise ValueError("git_lock_timeout must not be negative")
+        self._git_lock_timeout = git_lock_timeout
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
         self._athena_skill_executor = athena_skill_executor
@@ -3551,33 +3543,45 @@ class WorkerPool:
         self._pretest_closed = False
 
     @contextmanager
-    def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
-        """Serialize in-process worker operations for one repository."""
+    def _repo_lock(
+        self,
+        repo: str,
+        *,
+        deadline_s: float | None = None,
+        operation: str = "",
+        timeout_s: float | None = None,
+        include_file_lock: bool = False,
+    ) -> Iterator[None]:
+        """Acquire the requested repository lock layers."""
         with self._repo_locks_guard:
             entry = self._repo_locks.get(repo)
             if entry is None:
-                entry = _RepoLockEntry(threading.Lock())
+                entry = RepositoryOperationLock(
+                    repo,
+                    lock_dir=self._lock_dir,
+                    shutdown=self._shutdown,
+                    on_idle=self._evict_repo_lock,
+                )
                 self._repo_locks[repo] = entry
-            entry.users += 1
-
-        acquired = False
-        try:
-            if deadline_s is None:
-                entry.lock.acquire()
-                acquired = True
-            else:
-                remaining_s = deadline_s - time.monotonic()
-                if remaining_s <= 0 or not entry.lock.acquire(timeout=remaining_s):
-                    raise _GitLockTimeoutError
-                acquired = True
+        if deadline_s is not None:
+            remaining_s = max(deadline_s - time.monotonic(), 0.0)
+            timeout_s = remaining_s if timeout_s is None else min(timeout_s, remaining_s)
+        if not include_file_lock and timeout_s is None:
+            with entry.acquire_in_process(operation=operation):
+                yield
+            return
+        with entry.acquire(
+            operation=operation or "repository_operation",
+            timeout_s=(0.0 if timeout_s is None else timeout_s),
+            include_file_lock=include_file_lock,
+        ):
             yield
-        finally:
-            if acquired:
-                entry.lock.release()
-            with self._repo_locks_guard:
-                entry.users -= 1
-                if entry.users == 0 and self._repo_locks.get(repo) is entry:
-                    self._repo_locks.pop(repo, None)
+
+    def _evict_repo_lock(self, entry: RepositoryOperationLock) -> None:
+        """Remove an idle repository lock from the worker pool cache."""
+        with self._repo_locks_guard:
+            if entry.users == 0 and self._repo_locks.get(entry.repository) is entry:
+                self._repo_locks.pop(entry.repository, None)
 
     def set_completion_notifiers(
         self,
@@ -4344,7 +4348,11 @@ class WorkerPool:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
         try:
             deadline_s = getattr(job.request, "deadline_s", None)
-            with self._repo_lock(job.repo, deadline_s=deadline_s):
+            with self._repo_lock(
+                job.repo,
+                deadline_s=deadline_s,
+                operation=job.descr or type(job.request).__name__,
+            ):
                 receipt = self._github_job_runner.run(job)
         except Exception as exc:
             failure = _classify_github_failure(exc, now_epoch=time.time())
@@ -4911,34 +4919,25 @@ class WorkerPool:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
 
     def _run_git(self, job: GitJob) -> JobResult:
-        """Run a git job (serialized per-repo, in-process AND cross-process).
+        """Run one Git job under the complete repository lock contract.
 
-        Lock layering (documented invariant): the in-process
-        ``threading.Lock`` is OUTER and the cross-process
-        :func:`~hephaestus.utils.file_lock.file_lock` is INNER. The thread
-        lock elects a single thread per process first, so at most one thread
-        per process ever opens/holds the flock descriptor — sidestepping
-        flock's confusing same-process semantics (multiple fds on one file
-        within one process can still exclude each other) and keeping the
-        blocking flock wait to one thread. Both locks are held for the entire
-        operation because worktrees share ``.git``.
+        Git hooks remain inside the critical section because linked worktrees
+        share ``.git``. The lock wait uses ``git_lock_timeout``; Git helpers
+        continue to use ``job.timeout_s`` after the lock is acquired.
         """
-        lock_path = _repo_lock_path(job.repo, self._lock_dir)
         try:
             with (
                 git_utils.operation_deadline(job.deadline_s),
-                self._repo_lock(job.repo, deadline_s=job.deadline_s),
-                _interruptible_file_lock(
-                    lock_path,
-                    shutdown=self._shutdown,
-                    timeout_s=cast(
-                        float,
-                        git_utils.remaining_operation_timeout(job.timeout_s),
-                    ),
+                self._repo_lock(
+                    job.repo,
+                    deadline_s=job.deadline_s,
+                    operation=job.descr or job.op,
+                    timeout_s=self._git_lock_timeout,
+                    include_file_lock=True,
                 ),
             ):
                 return self._dispatch_git_op(job)
-        except (_GitLockTimeoutError, _GitLockInterruptedError) as exc:
+        except RepositoryLockError as exc:
             return _git_lock_failure_result(exc)
         except (_RebaseSigningEnvironmentError, _RemoteGitAuthenticationError) as exc:
             return _git_environment_failure_result(exc)

@@ -317,6 +317,9 @@ class PipelineConfig:
     explicit_pr_review: bool = False
     # This selector is not grant authority. Keep new fields at the end.
     host_verification_bootstrap_comment_id: int | None = None
+    # Passive repository-lock waiting has its own budget.  It does not reduce
+    # the timeout used by the Git subprocess after acquisition.
+    git_lock_timeout: int = 7200
 
     @property
     def enable_advise(self) -> bool:

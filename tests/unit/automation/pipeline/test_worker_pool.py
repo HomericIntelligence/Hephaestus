@@ -14679,6 +14679,27 @@ class TestGitLocking:
         """An explicit lock_dir overrides the state-dir anchor (test seam)."""
         assert _repo_lock_path("a/b", tmp_path) == tmp_path / "git-a_b.lock"
 
+    def test_git_lock_wait_uses_separate_budget(self, pool: WorkerPool) -> None:
+        """Lock waiting uses the configured budget, not the Git command timeout."""
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=1, kwargs={})
+        observed: list[float] = []
+        original_lock = pool._repo_lock
+
+        def fake_lock(repo: str, **kwargs: object) -> Iterator[None]:
+            observed.append(cast(float, kwargs["timeout_s"]))
+            return original_lock(repo, **kwargs)
+
+        instance = MagicMock()
+        instance.create_worktree.return_value = None
+        with (
+            patch.object(pool, "_repo_lock", side_effect=fake_lock),
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+        ):
+            result = pool._run_git(job)
+
+        assert result.ok is True
+        assert observed == [7200]
+
     def test_git_job_takes_cross_process_file_lock(
         self,
         pool: WorkerPool,
@@ -14701,12 +14722,13 @@ class TestGitLocking:
         pool: WorkerPool,
         tmp_path: Path,
     ) -> None:
-        """A held cross-process lock fails fast with lock_timeout."""
+        """An unverifiable cross-process holder fails closed."""
         fcntl = pytest.importorskip("fcntl")
         lock_path = _repo_lock_path("test/repo", tmp_path / "locks")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         held_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         job = GitJob(repo="test/repo", op="create_worktree", timeout_s=0, kwargs={})
+        pool._git_lock_timeout = 0
 
         try:
             fcntl.flock(held_fd, fcntl.LOCK_EX)
@@ -14718,7 +14740,7 @@ class TestGitLocking:
 
         manager.assert_not_called()
         assert result.ok is False
-        assert result.error == "lock_timeout"
+        assert result.error == "lock_metadata_error"
         with pool._repo_locks_guard:
             assert pool._repo_locks == {}
 
@@ -14735,7 +14757,10 @@ class TestGitLocking:
             return True
 
         with (
-            patch(f"{_WP}.file_lock", side_effect=LockUnavailableError("held")),
+            patch(
+                "hephaestus.automation.pipeline.repository_lock.file_lock",
+                side_effect=LockUnavailableError("held"),
+            ),
             patch.object(shutdown_event, "wait", side_effect=interrupting_wait),
             patch(f"{_WP}.WorktreeManager") as manager,
         ):

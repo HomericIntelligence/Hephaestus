@@ -1863,22 +1863,48 @@ and selects exit code 130.
 ### Per-repo lock layering
 
 [`_run_git`](../hephaestus/automation/pipeline/worker_pool.py) wraps every git
-operation in two locks. `_run_github` uses the same outer repository lock but
-does not take the Git metadata file lock:
+operation in three locks. `_run_github` uses the same in-process repository
+lock but does not take the Git metadata locks:
 
-1. **Outer**: in-process `threading.Lock` per repo ([`_repo_lock`](../hephaestus/automation/pipeline/worker_pool.py))
- — single-thread per process serializes at most one thread per
- repo, sidestepping `flock`'s same-process ambiguity.
-2. **Inner**: cross-process
- [`file_lock`](../hephaestus/utils/file_lock.py) at
- `<repo_root>/<DEFAULT_STATE_DIR>/locks/git-<repo>.lock`
- ([`_repo_lock_path`](../hephaestus/automation/pipeline/worker_pool.py))
- with a bounded wait using interruptible polling.
-Both git locks are held for the entire git operation because worktrees share
-`.git`. A GitHub job holds only the outer lock for its entire fresh-client
-operation, enforcing the `StageGitHub` concurrency contract without implying
-cross-process GitHub serialization; exact live-state guards remain authoritative
-across processes.
+1. **In-process**: `threading.Lock` per repo
+([`_repo_lock`](../hephaestus/automation/pipeline/worker_pool.py)) — one
+thread per process enters the repository operation at a time. This avoids
+`flock` same-process ambiguity.
+2. **Primary**: cross-process
+[`file_lock`](../hephaestus/utils/file_lock.py) at
+`<repo_root>/<DEFAULT_STATE_DIR>/locks/git-<repo>.lock`
+([`repo_lock_path`](../hephaestus/automation/pipeline/repository_lock.py)).
+3. **Owner sentinel**: cross-process `file_lock` at the primary path with
+`.owner.lock` appended. Its sidecar is `.owner.json`.
+
+Git operations hold all three locks for the complete operation because linked
+worktrees share `.git`. `--git-lock-timeout` controls only passive lock wait;
+the Git job timeout controls the subprocess after acquisition. All three
+acquisition steps use one monotonic deadline and interruptible polling.
+
+The owner sidecar uses mode `0600` and contains only the version, repository,
+operation, process ID, acquisition token, and UTC acquisition time. A waiter
+reports `lock_timeout` only when it verifies an active owner sidecar. Missing,
+malformed, unsafe, or mismatched metadata produces `lock_metadata_error` and
+prevents dispatch. A timeout event contains the waiting operation and process,
+the holder operation and process, the holder acquisition time and source, and
+the measured wait duration. It does not contain lock paths, tokens, or raw
+sidecar data.
+
+Release removes a matching sidecar, releases the owner sentinel, releases the
+primary lock, then clears and releases the in-process lock. A release cleanup
+failure is logged; it does not replace a completed Git result. A later holder
+validates and replaces a stale regular sidecar before publication.
+
+An old worker that does not publish an owner sidecar still obeys the primary
+lock. A new waiter fails closed with `lock_metadata_error` when it cannot verify
+that old holder. This mixed-version behavior preserves shared Git metadata
+safety during rollback.
+
+A GitHub job holds only the in-process lock for its complete fresh-client
+operation. This enforces the `StageGitHub` concurrency contract without
+implying cross-process GitHub serialization; exact live-state guards remain
+authoritative across processes.
 
 `sync_checkout` additionally takes the status-safe Git-metadata lock resolved
 by [`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).

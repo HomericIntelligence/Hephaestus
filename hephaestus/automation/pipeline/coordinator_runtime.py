@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import heapq
 import logging
+import math
 import signal
 from contextlib import suppress
 from pathlib import Path
@@ -42,6 +43,20 @@ _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
 _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
 _ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
+_LOCK_FAILURE_KINDS = frozenset({"lock_timeout", "lock_metadata_error"})
+_LOCK_EVENT_FIELDS = frozenset(
+    {
+        "failure_kind",
+        "repository",
+        "waiting_operation",
+        "waiting_process_id",
+        "holder_operation",
+        "holder_process_id",
+        "holder_acquired_at",
+        "holder_source",
+        "wait_duration_s",
+    }
+)
 
 
 class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
@@ -795,6 +810,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 fields["source_workspace_recovery"] = recovery
         if (
             isinstance(value, dict)
+            and isinstance(value.get("failure_kind"), str)
+            and value.get("failure_kind") in _LOCK_FAILURE_KINDS
+        ):
+            lock_fields = CoordinatorRuntime._job_result_lock_fields(value)
+            if lock_fields is not None:
+                fields["lock"] = lock_fields
+        if (
+            isinstance(value, dict)
             and value.get("failure_kind") in {"signing", "continuation"}
             and value.get("phase") in {"stage_conflicts", "validate_index", "rebase_continue"}
         ):
@@ -811,6 +834,54 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         return fields
 
     @staticmethod
+    def _job_result_lock_fields(value: dict[str, object]) -> dict[str, object] | None:
+        """Return only valid, bounded repository-lock event fields."""
+        if not _LOCK_EVENT_FIELDS.issubset(value):
+            return None
+        failure_kind = value.get("failure_kind")
+        repository = value.get("repository")
+        waiting_operation = value.get("waiting_operation")
+        waiting_process_id = value.get("waiting_process_id")
+        holder_operation = value.get("holder_operation")
+        holder_process_id = value.get("holder_process_id")
+        holder_acquired_at = value.get("holder_acquired_at")
+        holder_source = value.get("holder_source")
+        wait_duration_s = value.get("wait_duration_s")
+        if (
+            not isinstance(failure_kind, str)
+            or failure_kind not in _LOCK_FAILURE_KINDS
+            or not isinstance(repository, str)
+            or not repository
+            or not isinstance(waiting_operation, str)
+            or not waiting_operation
+            or isinstance(waiting_process_id, bool)
+            or not isinstance(waiting_process_id, int)
+            or waiting_process_id <= 0
+            or not (holder_operation is None or isinstance(holder_operation, str))
+            or isinstance(holder_process_id, bool)
+            or not (holder_process_id is None or isinstance(holder_process_id, int))
+            or (isinstance(holder_process_id, int) and holder_process_id <= 0)
+            or not (holder_acquired_at is None or isinstance(holder_acquired_at, str))
+            or not (holder_source is None or isinstance(holder_source, str))
+            or isinstance(wait_duration_s, bool)
+            or not isinstance(wait_duration_s, (int, float))
+            or wait_duration_s < 0
+            or not math.isfinite(float(wait_duration_s))
+        ):
+            return None
+        return {
+            "failure_kind": failure_kind,
+            "repository": repository,
+            "waiting_operation": waiting_operation,
+            "waiting_process_id": waiting_process_id,
+            "holder_operation": holder_operation,
+            "holder_process_id": holder_process_id,
+            "holder_acquired_at": holder_acquired_at,
+            "holder_source": holder_source,
+            "wait_duration_s": round(float(wait_duration_s), 3),
+        }
+
+    @staticmethod
     def _job_result_error_class(result: JobResult) -> str | None:
         """Classify job failures without persisting raw error text."""
         if result.error is None:
@@ -821,8 +892,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return "worker_crash"
         if error_class := durable_error_class(result.error):
             return error_class
+        if result.error in _LOCK_FAILURE_KINDS:
+            return result.error
         value = result.value if isinstance(result.value, dict) else {}
         failure_kind = value.get("failure_kind")
+        if isinstance(failure_kind, str) and failure_kind in _LOCK_FAILURE_KINDS:
+            return failure_kind
         if is_durable_failure_kind(failure_kind):
             return failure_kind
         if result.error == "timeout":
