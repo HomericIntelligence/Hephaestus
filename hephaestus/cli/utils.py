@@ -743,6 +743,7 @@ def add_pipeline_runtime_args(
         "metadata": 10,
         "rebase": 2400,
         "diff-collect": 60,
+        "git-lock": 7200,
         # Keep this unset by default so the implementation stage can select
         # its repository-specific fallback.
         "pre-pr-test": None,

@@ -161,7 +161,11 @@ Examples:
         help=MODEL_REFERENCE_HELP,
     )
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
-    add_pipeline_runtime_args(parser, role="planner", timeouts=("gh", "metadata"))
+    add_pipeline_runtime_args(
+        parser,
+        role="planner",
+        timeouts=("gh", "metadata", "git-lock"),
+    )
     return parser
 
 
@@ -299,6 +303,7 @@ def main() -> int:
         rate_guard_threshold=args.rate_guard_threshold,
         gh_timeout=args.gh_timeout,
         metadata_timeout=args.metadata_timeout,
+        git_lock_timeout=args.git_lock_timeout,
         json_out=args.json,
         scope=PipelineScope(_PLANNER_SCOPE_STAGES),
         # --force re-plans issues already at-or-past state:plan-go (seeding

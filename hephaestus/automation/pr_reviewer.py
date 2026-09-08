@@ -103,7 +103,7 @@ Examples:
     add_pipeline_runtime_args(
         parser,
         role="reviewer",
-        timeouts=("network", "gh", "metadata", "diff-collect"),
+        timeouts=("network", "gh", "metadata", "diff-collect", "git-lock"),
         plugin_skills=True,
     )
     return parser
@@ -202,6 +202,7 @@ def main() -> int:
             network_timeout=args.network_timeout,
             gh_timeout=args.gh_timeout,
             metadata_timeout=args.metadata_timeout,
+            git_lock_timeout=args.git_lock_timeout,
             diff_collect_timeout=args.diff_collect_timeout,
             json_out=args.json,
             scope=PipelineScope(_PR_REVIEWER_SCOPE_STAGES),

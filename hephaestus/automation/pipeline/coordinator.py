@@ -183,6 +183,7 @@ class Coordinator(
                 # selects a policy for each repository job.
                 rebase_policy_selector=partial(select_rebase_policy, config.org),
                 evidence_receipt_dir=config.evidence_receipt_dir,
+                git_lock_timeout=config.git_lock_timeout,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected
