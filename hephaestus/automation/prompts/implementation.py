@@ -1,7 +1,8 @@
 """Implementation-phase prompts.
 
 Contains the canonical implementation prompt, the iteration-aware impl-loop
-structural-audit prompt, and the resume-after-feedback prompt.
+structural-audit prompt, the resume-after-feedback prompt, and the narrow
+rebase-conflict resolution prompt.
 """
 
 from hephaestus.prompts import PromptCatalog
@@ -59,6 +60,39 @@ def get_implementation_prompt(
         worktree_path=safe_worktree_path,
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
+    )
+
+
+def get_rebase_conflict_prompt(
+    *,
+    conflict_paths: tuple[str, ...],
+    conflict_hunks: dict[str, str] | None = None,
+    diagnosis: str = "",
+) -> str:
+    """Build the narrow prompt for one host-owned rebase conflict turn.
+
+    Args:
+        conflict_paths: Host-validated paths that the agent may edit.
+        conflict_hunks: Bounded current hunk text keyed by path.
+        diagnosis: Bounded host diagnosis from a prior agent turn, if any.
+
+    Returns:
+        A standalone edit-only prompt with bounded, fenced conflict context.
+
+    """
+    fenced = fence_content()
+    paths_text = "\n".join(conflict_paths) or "_(none)_"
+    hunk_parts = [
+        f"Path: {path}\n{(conflict_hunks or {}).get(path, '_(context unavailable)_')}"
+        for path in conflict_paths
+    ]
+    hunks_text = "\n\n".join(hunk_parts) or "_(none)_"
+    return PromptCatalog.current().render(
+        "implementation/rebase_conflict_resolution.j2",
+        conflict_paths_block=fenced.fence("CONFLICT_PATHS", paths_text),
+        conflict_hunks_block=fenced.fence("CONFLICT_HUNKS", hunks_text),
+        diagnosis_block=(fenced.fence("HOST_DIAGNOSIS", diagnosis) if diagnosis else ""),
+        untrusted_notice=fenced.untrusted_notice,
     )
 
 

@@ -36,6 +36,7 @@ class AgentOperation(StrEnum):
     IMPLEMENT_INSPECT = "implement_inspect"
     REMEDIATION_REPLY = "remediation_reply"
     IMPLEMENT = "implement"
+    REBASE_CONFLICT = "rebase_conflict"
     TEST_FIX = "test_fix"
     ADDRESS_REVIEW = "address_review"
     GIT_MESSAGE = "git_message"
@@ -102,6 +103,7 @@ class ExecutionPolicy:
 
 _READ: Final = frozenset({"read", "grep", "find", "ls"})
 _READ_SHELL: Final = _READ | {"bash"}
+_EDIT: Final = _READ | {"write", "edit"}
 _WRITE: Final = _READ_SHELL | {"write", "edit"}
 _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
     (AgentRole.PLANNER, AgentOperation.PLAN): ExecutionPolicy(
@@ -170,6 +172,16 @@ _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
         frozenset({SessionLifecycle.START_NEW, SessionLifecycle.RESUME_REQUIRED}),
         FilesystemMode.WORKTREE_RW,
         _WRITE,
+        frozenset(),
+        False,
+        NetworkMode.PROVIDER_RELAY,
+    ),
+    (AgentRole.IMPLEMENTER, AgentOperation.REBASE_CONFLICT): ExecutionPolicy(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.REBASE_CONFLICT,
+        frozenset({SessionLifecycle.START_NEW, SessionLifecycle.RESUME_REQUIRED}),
+        FilesystemMode.WORKTREE_RW,
+        _EDIT,
         frozenset(),
         False,
         NetworkMode.PROVIDER_RELAY,

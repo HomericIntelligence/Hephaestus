@@ -22,13 +22,12 @@ from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, Route
 
+from . import diagnostics as _d
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .diagnostics import (
     bounded_source_workspace_recovery,
-    redact_bounded_diagnostic_tails,
-    redact_diagnostic_text,
 )
 from .job_failures import durable_error_class, is_durable_failure_kind
 
@@ -745,7 +744,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if result.worker_id:
             fields["worker_id"] = result.worker_id
         value = result.value
-        diagnostics = redact_bounded_diagnostic_tails(
+        diagnostics = _d.redact_bounded_diagnostic_tails(
             result.stdout_tail, result.stderr_tail, limit=4000
         )
         if diagnostics:
@@ -763,13 +762,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 "failure_kind": value["failure_kind"],
                 "phase": value["phase"],
                 "returncode": value.get("returncode"),
-                "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[
+                "receipt_error": _d.redact_diagnostic_text(str(value.get("receipt_error") or ""))[
                     -500:
                 ],
                 "stdout_tail": diagnostics.get("stdout_tail", ""),
                 "stderr_tail": diagnostics.get("stderr_tail", ""),
             }
-        return fields
+        return fields | _d.rebase_conflict_event_fields(value, result.error)
 
     @staticmethod
     def _job_result_error_class(result: JobResult) -> str | None:

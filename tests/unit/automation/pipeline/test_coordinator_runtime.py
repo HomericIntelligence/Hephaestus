@@ -192,3 +192,24 @@ def test_source_workspace_recovery_is_durable_and_redacted() -> None:
     assert recovery["item_number"] == 2969
     assert token not in recovery["manual_action"]
     assert recovery["manual_action"] == "Use token=<redacted> only after preserving the checkout."
+
+
+def test_rebase_conflict_event_keeps_bounded_classification_and_summary() -> None:
+    """Conflict validation events retain only bounded, redacted agent detail."""
+    secret = "sk" + "_live_12345678901234567890"
+    result = JobResult(
+        ok=False,
+        error="rebase conflict resolution required: agent made no file changes",
+        value={
+            "conflict_resolution": "no_edit",
+            "agent_summary": f"No changes; token={secret}",
+        },
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result)
+
+    assert fields["rebase_conflict_resolution"] == "no_edit"
+    summary = fields["rebase_conflict_agent_summary"]
+    assert secret not in summary
+    assert "redacted" in summary
+    assert len(summary) <= 500

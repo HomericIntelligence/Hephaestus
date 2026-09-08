@@ -407,6 +407,101 @@ def _executable_path(name: str, *, path: str | None = None) -> str:
     return str(Path(executable).resolve())
 
 
+def _prepare_one_file_rebase_conflict(
+    tmp_path: Path,
+) -> tuple[Path, dict[str, str], str, str, str]:
+    """Create one signed-policy rebase with a textual conflict in one file."""
+    origin = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    signing_key = tmp_path / "signing-key"
+
+    def run_git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    subprocess.run(
+        ["git", "init", "--bare", "--quiet", str(origin)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "init", "--initial-branch", "main", str(checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            _executable_path("ssh-keygen"),
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-f",
+            str(signing_key),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for key, value in (
+        ("user.name", "Test User"),
+        ("user.email", "test@example.invalid"),
+        ("gpg.format", "ssh"),
+        ("user.signingkey", str(signing_key)),
+        ("commit.gpgsign", "false"),
+    ):
+        run_git("config", key, value)
+    run_git("remote", "add", "origin", str(origin))
+
+    source = checkout / "tests" / "test_gateway_lifecycle.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "wait_for(lambda: active_path.read_text().strip() == str(second))\n",
+        encoding="utf-8",
+    )
+    run_git("add", str(source.relative_to(checkout)))
+    run_git("commit", "-m", "test: add gateway lifecycle check")
+    run_git("push", "-u", "origin", "main")
+
+    run_git("switch", "-c", "7-auto-impl")
+    topic_content = (
+        "wait_for(lambda: active_path.is_file() and "
+        "active_path.read_text().strip() == str(second))\n"
+    )
+    source.write_text(topic_content, encoding="utf-8")
+    run_git("commit", "-am", "test(gateway): wait for active release publication")
+    run_git("push", "-u", "origin", "7-auto-impl")
+    expected_remote_sha = run_git("rev-parse", "HEAD")
+
+    run_git("switch", "main")
+    source.write_text(
+        "wait_for(lambda: active_path.exists() and "
+        "active_path.read_text().strip() == str(second))\n",
+        encoding="utf-8",
+    )
+    run_git("commit", "-am", "test: guard gateway path")
+    run_git("push", "origin", "main")
+    base_sha = run_git("rev-parse", "HEAD")
+    run_git("switch", "7-auto-impl")
+
+    signing = {
+        "user.name": "Test User",
+        "user.email": "test@example.invalid",
+        "gpg.format": "ssh",
+        "user.signingkey": str(signing_key),
+    }
+    return checkout, signing, expected_remote_sha, base_sha, topic_content
+
+
 def test_trusted_gh_executable_accepts_explicit_extra_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11562,6 +11657,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
             patch(f"{_WP}.git_utils.run") as run,
         ):
             result = pool._git_continue_rebase(job, record_source=Mock())
@@ -11569,6 +11665,138 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "rebase conflict resolution required: agent made no file changes"
         run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("content", "classification", "expected_ok", "error"),
+        [
+            (
+                "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n",
+                "residual_markers",
+                False,
+                "rebase conflict resolution required: conflict markers remain",
+            ),
+            (
+                "resolved\n",
+                "resolved_content",
+                True,
+                None,
+            ),
+        ],
+    )
+    def test_validate_rebase_conflict_classifies_file_content(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        content: str,
+        classification: str,
+        expected_ok: bool,
+        error: str | None,
+    ) -> None:
+        """The host classifies edited content before any continuation call."""
+        (tmp_path / "x.py").write_text(content, encoding="utf-8")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "before"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+        current_receipt = {
+            **receipt,
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_hunks": {"x.py": "bounded hunk"},
+        }
+        validation_job = GitJob(
+            repo=job.repo,
+            op="validate_rebase_conflict",
+            timeout_s=job.timeout_s,
+            kwargs=job.kwargs,
+        )
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
+        ):
+            result = pool._git_validate_rebase_conflict(validation_job)
+
+        assert result.ok is expected_ok
+        assert isinstance(result.value, dict)
+        assert result.value["conflict_resolution"] == classification
+        assert result.error == error
+
+    def test_validate_rebase_conflict_rejects_out_of_scope_paths(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A changed conflict set is an out-of-scope agent result."""
+        job = self._continue_rebase_job(tmp_path)
+        current_receipt = {
+            "conflict_paths": ("x.py", "outside.py"),
+            "conflict_snapshot": {"x.py": "after", "outside.py": "new"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+        validation_job = GitJob(
+            repo=job.repo,
+            op="validate_rebase_conflict",
+            timeout_s=job.timeout_s,
+            kwargs=job.kwargs,
+        )
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+        ):
+            result = pool._git_validate_rebase_conflict(validation_job)
+
+        assert result.ok is False
+        assert isinstance(result.value, dict)
+        assert result.value["conflict_resolution"] == "out_of_scope_edit"
+        assert result.error == "conflict index was mutated outside host ownership"
+
+    def test_rebase_semantic_validation_rejects_duplicate_adr_numbers(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A resolved README conflict cannot publish duplicate ADR identities."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
+        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        (adr_dir / "README.md").write_text(
+            "- [Durable plan review conversations](0027-durable-plan-review-conversations.md)\n"
+            "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
+        )
+
+        result = pool._validate_rebased_tree(tmp_path)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "semantic_validation"},
+            error=(
+                "rebase semantic validation failed: duplicate ADR number 0027 "
+                "(0027-durable-plan-review-conversations.md, "
+                "0027-host-owned-learning-preparation.md)"
+            ),
+        )
+
+    def test_rebase_semantic_validation_rejects_malformed_adr_record(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ADR that bypasses the duplicate check still cannot be published."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0001-first-decision.md").write_text(
+            "# ADR-0001: First decision\n- Status: Accepted\n"
+        )
+        (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
+
+        result = pool._validate_rebased_tree(tmp_path)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "semantic_validation"},
+            error=(
+                "rebase semantic validation failed: malformed ADR record 0001-first-decision.md"
+            ),
+        )
 
     def test_continue_rebase_selected_policy_semantic_failure_does_not_publish(
         self, pool: WorkerPool, tmp_path: Path
@@ -11794,6 +12022,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
         ):
             result = pool._git_continue_rebase(job, record_source=Mock())
 
@@ -12161,6 +12390,129 @@ class TestGitOps:
             env={"GIT_TERMINAL_PROMPT": "0"},
             remote_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
             revalidate_remote=ANY,
+        )
+
+    @pytest.mark.usefixtures("require_git_path_format")
+    def test_one_file_textual_conflict_is_validated_then_host_continued(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A semantic one-file edit is staged and continued only by the host."""
+        checkout, signing, expected_remote_sha, base_sha, topic_content = (
+            _prepare_one_file_rebase_conflict(tmp_path)
+        )
+        relative_path = "tests/test_gateway_lifecycle.py"
+        source = checkout / relative_path
+        rebase_job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": checkout,
+                "base_branch": "main",
+                "remote": "origin",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": expected_remote_sha,
+            },
+        )
+
+        with (
+            patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(os.environ.copy(), ()),
+            ),
+        ):
+            paused = pool._git_rebase(rebase_job)
+
+            assert paused.ok is False
+            assert paused.error == "mechanical rebase hit conflicts; resolution required"
+            assert isinstance(paused.value, dict)
+            assert paused.value["conflict_paths"] == (relative_path,)
+            conflict_hunks = paused.value.get("conflict_hunks")
+            assert isinstance(conflict_hunks, dict)
+            conflict_hunk = conflict_hunks.get(relative_path)
+            assert isinstance(conflict_hunk, str)
+            assert "<<<<<<<" in conflict_hunk
+            assert "active_path.is_file()" in conflict_hunk
+            assert "active_path.exists()" in conflict_hunk
+
+            continuation_kwargs = {
+                key: value for key, value in paused.value.items() if key != "rebased"
+            }
+            continuation_kwargs.update(
+                {"cwd": checkout, "remote": "origin", "branch": "7-auto-impl"}
+            )
+            validation_job = GitJob(
+                repo="test/repo",
+                op="validate_rebase_conflict",
+                timeout_s=60,
+                kwargs=continuation_kwargs,
+            )
+            source.write_text(topic_content, encoding="utf-8")
+            status_before_validation = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            validated = pool._git_validate_rebase_conflict(validation_job)
+            status_after_validation = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+            assert validated.ok is True
+            assert isinstance(validated.value, dict)
+            assert validated.value["conflict_resolution"] == "resolved_content"
+            assert status_after_validation == status_before_validation
+
+            continued = pool._git_continue_rebase(
+                GitJob(
+                    repo="test/repo",
+                    op="continue_rebase",
+                    timeout_s=60,
+                    kwargs=continuation_kwargs,
+                )
+            )
+
+        assert continued.ok is True
+        assert isinstance(continued.value, dict)
+        assert source.read_text(encoding="utf-8") == topic_content
+        assert (
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            == ""
+        )
+        published_sha = str(continued.value["head_sha"])
+        assert (
+            subprocess.run(
+                ["git", "ls-remote", "origin", "refs/heads/7-auto-impl"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.split()[0]
+            == published_sha
+        )
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base_sha, published_sha],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
     @pytest.mark.usefixtures("require_git_path_format")

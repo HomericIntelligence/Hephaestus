@@ -92,6 +92,7 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillResult,
     athena_workspace_lease,
 )
+from hephaestus.automation.pipeline.diagnostics import redact_diagnostic_text
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
@@ -259,6 +260,10 @@ logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
+_CONFLICT_HUNK_MAX = 4000
+_CONFLICT_RESOLUTION_OUTCOMES = frozenset(
+    {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
+)
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
 _CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
@@ -3310,6 +3315,14 @@ def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
         fields["committed_patch_sha256"] = _evidence_patch_digest(
             Path(worktree), f"{head_sha}^", head_sha
         )
+    classification = result.value.get("conflict_resolution")
+    if job.op == "validate_rebase_conflict" and classification in _CONFLICT_RESOLUTION_OUTCOMES:
+        fields["rebase_conflict_resolution"] = classification
+        if result.error:
+            fields["rebase_conflict_diagnostic"] = redact_diagnostic_text(result.error)[:500]
+        summary = result.value.get("agent_summary")
+        if isinstance(summary, str) and summary:
+            fields["rebase_conflict_agent_summary"] = redact_diagnostic_text(summary)[:500]
     return fields
 
 
@@ -3408,6 +3421,7 @@ _CODEX_NON_APPLICABLE_TOOLS = {
 _CODEX_OPERATION_TOOLS = {
     AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
     AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.REBASE_CONFLICT: ("Edit", "Glob", "Grep", "Read", "Write"),
     AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
     AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
 }
@@ -3437,10 +3451,8 @@ def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], b
     non_applicable = _CODEX_NON_APPLICABLE_TOOLS.get(execution.operation, frozenset())
     allowed_tools = tuple(sorted(declared_tools - non_applicable))
     capabilities = {_CODEX_TOOL_CAPABILITIES.get(value, "") for value in allowed_tools}
-    rebase_tools = ("Edit", "Glob", "Grep", "Read", "Write")
-    rebase_grant = execution.operation is AgentOperation.IMPLEMENT and allowed_tools == rebase_tools
     if (
-        (allowed_tools != expected_tools and not rebase_grant)
+        allowed_tools != expected_tools
         or "" in capabilities
         or not capabilities <= operation_policy.builtins
     ):
@@ -5492,6 +5504,7 @@ class WorkerPool:
                     "inspect_implementation_worktree",
                     "recover_dirty_worktree",
                     "rebase",
+                    "validate_rebase_conflict",
                     "continue_rebase",
                 }:
                     return self._run_source_git_operation(job)
@@ -5624,7 +5637,9 @@ class WorkerPool:
                 path=binding.cwd,
                 expected_binding=binding,
                 paused_head_sha=(
-                    job.kwargs.get("paused_head_sha") if job.op == "continue_rebase" else None
+                    job.kwargs.get("paused_head_sha")
+                    if job.op in {"validate_rebase_conflict", "continue_rebase"}
+                    else None
                 ),
                 deadline=deadline,
             ) as record:
@@ -5691,6 +5706,8 @@ class WorkerPool:
         try:
             if job.op == "rebase":
                 return self._git_rebase(job, record_source=record_source)
+            if job.op == "validate_rebase_conflict":
+                return self._git_validate_rebase_conflict(job)
             if job.op == "continue_rebase":
                 return self._git_continue_rebase(job, record_source=record_source)
             return self._dispatch_git_op(job)
@@ -5771,6 +5788,9 @@ class WorkerPool:
 
         elif job.op == "verify_rebase_review":
             return self._git_verify_rebase_review(job)
+
+        elif job.op == "validate_rebase_conflict":
+            return self._git_validate_rebase_conflict(job)
 
         elif job.op == "commit_push" or job.op == "prepare_remediation_recovery":
             return self._git_commit_push(job)
@@ -7071,6 +7091,7 @@ class WorkerPool:
             content_snapshot = _dirty_worktree_content_snapshot(
                 cwd, timeout=timeout, shutdown=self._shutdown
             )
+            hunks = {path: self._conflict_path_hunk(cwd, path) for path in paths}
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             return JobResult(ok=False, error=f"cannot capture paused rebase: {exc}")
         return {
@@ -7078,6 +7099,7 @@ class WorkerPool:
             "conflict_paths": paths,
             "conflict_snapshot": snapshot,
             "content_snapshot": content_snapshot,
+            "conflict_hunks": hunks,
             "conflict_index_snapshot": index_snapshot,
             "paused_head_sha": paused_head_sha,
             "base_sha": base_sha,
@@ -7091,6 +7113,40 @@ class WorkerPool:
         if not target.exists():
             return "<absent>"
         return hashlib.sha256(target.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _conflict_path_hunk(cwd: Path, path: str) -> str:
+        """Return bounded conflict hunks with small surrounding context."""
+        target = cwd / path
+        try:
+            lines = target.read_bytes().decode(errors="replace").splitlines(keepends=True)
+        except OSError:
+            return "_(conflict context unavailable)_"
+        marker_lines = [
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(("<<<<<<<", "=======", ">>>>>>>"))
+        ]
+        if not marker_lines:
+            return "_(conflict markers no longer present)_"
+
+        chunks: list[str] = []
+        index = 0
+        while index < len(marker_lines):
+            start_marker = marker_lines[index]
+            end_marker = start_marker
+            while index < len(marker_lines):
+                end_marker = marker_lines[index]
+                index += 1
+                if lines[end_marker].startswith(">>>>>>>"):
+                    break
+            start = max(0, start_marker - 2)
+            end = min(len(lines), end_marker + 3)
+            chunks.append("".join(lines[start:end]))
+        context = "\n...\n".join(chunks)
+        if len(context) <= _CONFLICT_HUNK_MAX:
+            return context
+        return f"{context[:_CONFLICT_HUNK_MAX]}\n...[truncated]"
 
     @staticmethod
     def _annotate_rebase_policy_failure(
@@ -7375,6 +7431,55 @@ class WorkerPool:
         )
         return self._retain_rebase_review(job, completed, record)
 
+    def _git_validate_rebase_conflict(self, job: GitJob) -> JobResult:
+        """Classify agent edits without changing Git state."""
+        parsed = self._parse_rebase_continuation(job)
+        if isinstance(parsed, JobResult):
+            return parsed
+        (
+            cwd,
+            branch,
+            remote,
+            base_sha,
+            expected_remote_sha,
+            paths,
+            snapshot,
+            index_snapshot,
+            paused_head_sha,
+        ) = parsed
+        remote_head = self._read_remote_branch_head(
+            cwd,
+            remote=remote,
+            branch=branch,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        if isinstance(remote_head, JobResult):
+            return remote_head
+        if remote_head != expected_remote_sha:
+            return JobResult(
+                ok=False, error="remote writer head changed during conflict resolution"
+            )
+        classification = self._classify_rebase_conflict_edits(
+            cwd,
+            remote=remote,
+            paths=paths,
+            snapshot=snapshot,
+            index_snapshot=index_snapshot,
+            paused_head_sha=paused_head_sha,
+            base_sha=base_sha,
+            expected_remote_sha=expected_remote_sha,
+            timeout=job.timeout_s,
+        )
+        if not isinstance(classification.value, dict):
+            return classification
+        raw_summary = job.kwargs.get("agent_summary")
+        if not isinstance(raw_summary, str) or not raw_summary:
+            return classification
+        value = dict(classification.value)
+        value["agent_summary"] = redact_diagnostic_text(raw_summary)[:500]
+        return replace(classification, value=value)
+
     @staticmethod
     def _parse_rebase_continuation(
         job: GitJob,
@@ -7419,7 +7524,7 @@ class WorkerPool:
             paused_head_sha,
         )
 
-    def _validate_rebase_conflict_edits(
+    def _classify_rebase_conflict_edits(
         self,
         cwd: Path,
         *,
@@ -7431,8 +7536,8 @@ class WorkerPool:
         base_sha: str,
         expected_remote_sha: str,
         timeout: int,
-    ) -> JobResult | None:
-        """Reject out-of-band index edits, no-op agents, and residual markers."""
+    ) -> JobResult:
+        """Classify the workspace after an edit-only conflict turn."""
         current_receipt = self._conflict_receipt(
             cwd,
             remote=remote,
@@ -7450,15 +7555,38 @@ class WorkerPool:
             else ()
         )
         if set(current_paths) != set(paths):
-            return JobResult(ok=False, error="conflict index was mutated outside host ownership")
+            current_receipt["conflict_resolution"] = "out_of_scope_edit"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="conflict index was mutated outside host ownership",
+            )
         if current_receipt.get("conflict_index_snapshot") != index_snapshot:
-            return JobResult(ok=False, error="conflict index was mutated outside host ownership")
+            current_receipt["conflict_resolution"] = "out_of_scope_edit"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="conflict index was mutated outside host ownership",
+            )
         if current_receipt.get("paused_head_sha") != paused_head_sha:
             return JobResult(ok=False, error="paused rebase head changed outside host ownership")
+        scope_error = self._rebase_conflict_edit_scope_error(
+            cwd,
+            conflict_paths=paths,
+            timeout=timeout,
+        )
+        if scope_error is not None:
+            current_receipt["conflict_resolution"] = "out_of_scope_edit"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error=scope_error.error,
+            )
         current_snapshot = current_receipt.get("conflict_snapshot")
         if not isinstance(current_snapshot, dict) or all(
             current_snapshot.get(path) == snapshot.get(path) for path in paths
         ):
+            current_receipt["conflict_resolution"] = "no_edit"
             return JobResult(
                 ok=False,
                 value=current_receipt,
@@ -7468,19 +7596,41 @@ class WorkerPool:
         if any(
             (cwd / path).is_file() and marker.search((cwd / path).read_bytes()) for path in paths
         ):
+            current_receipt["conflict_resolution"] = "residual_markers"
             return JobResult(
                 ok=False,
                 value=current_receipt,
                 error="rebase conflict resolution required: conflict markers remain",
             )
-        scope_error = self._rebase_conflict_edit_scope_error(
+        current_receipt["conflict_resolution"] = "resolved_content"
+        return JobResult(ok=True, value=current_receipt)
+
+    def _validate_rebase_conflict_edits(
+        self,
+        cwd: Path,
+        *,
+        remote: str,
+        paths: tuple[str, ...],
+        snapshot: dict[str, object],
+        index_snapshot: str,
+        paused_head_sha: str,
+        base_sha: str,
+        expected_remote_sha: str,
+        timeout: int,
+    ) -> JobResult | None:
+        """Reject out-of-band index edits, no-op agents, and residual markers."""
+        classification = self._classify_rebase_conflict_edits(
             cwd,
-            conflict_paths=paths,
+            remote=remote,
+            paths=paths,
+            snapshot=snapshot,
+            index_snapshot=index_snapshot,
+            paused_head_sha=paused_head_sha,
+            base_sha=base_sha,
+            expected_remote_sha=expected_remote_sha,
             timeout=timeout,
         )
-        if scope_error is not None:
-            return scope_error
-        return None
+        return None if classification.ok else classification
 
     @staticmethod
     def _rebase_conflict_edit_scope_error(

@@ -44,6 +44,7 @@ from .implementation import (
     get_impl_loop_review_prompt,
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
+    get_rebase_conflict_prompt,
 )
 from .planning import (
     get_plan_loop_review_prompt,
@@ -80,6 +81,7 @@ __all__ = [
     "get_plan_review_prompt",
     "get_pr_description",
     "get_pr_review_analysis_prompt",
+    "get_rebase_conflict_prompt",
     "get_remediation_reply_recovery_prompt",
     "get_review_validation_prompt",
     "get_terse_output_directive",

@@ -91,6 +91,26 @@ def test_pr_review_one_shot_uses_the_read_only_review_policy() -> None:
     assert policy.network is NetworkMode.CONSTRAINED_WEB_RELAY
 
 
+def test_rebase_conflict_policy_is_edit_only() -> None:
+    """Conflict turns can edit the worktree but cannot use a shell or delegation."""
+    operation = getattr(AgentOperation, "REBASE_CONFLICT", None)
+    assert operation is not None
+    for lifecycle in (SessionLifecycle.START_NEW, SessionLifecycle.RESUME_REQUIRED):
+        policy = resolve_policy(
+            ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                operation,
+                lifecycle,
+            )
+        )
+
+        assert policy.filesystem is FilesystemMode.WORKTREE_RW
+        assert policy.builtins == frozenset({"read", "grep", "find", "ls", "write", "edit"})
+        assert policy.skills == frozenset()
+        assert policy.subagent is False
+        assert policy.network is NetworkMode.PROVIDER_RELAY
+
+
 def test_unknown_lifecycle_fails_closed() -> None:
     """A permitted role/operation cannot be started with an invented lifecycle."""
     with pytest.raises(ExecutionPolicyError, match="not permitted"):
