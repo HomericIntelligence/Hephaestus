@@ -28,6 +28,10 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
 )
 from hephaestus.automation.pipeline.routing import ROUTES, PipelineScope, StageName
+from hephaestus.automation.podman_machine_supervisor import (
+    PodmanMachineError,
+    prepare_podman_machine,
+)
 from hephaestus.automation.role_selection import resolve_role_agents
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
@@ -400,6 +404,11 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
     )
     parser.allow_abbrev = False
     parser.set_defaults(profile=profile, stages=stages, force=False)
+    parser.set_defaults(
+        podman_machine=None,
+        podman_start_timeout=120,
+        podman_health_timeout=60,
+    )
     add_role_agent_args(parser)
     add_host_verification_pyxis_image_arg(parser)
     if profile == "full":
@@ -407,6 +416,28 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
             "--stages",
             type=_parse_stages,
             help="Comma-separated main stage names in queue order: " + ",".join(MAIN_STAGES),
+        )
+        parser.add_argument(
+            "--podman-machine",
+            metavar="NAME",
+            help=(
+                "Start and verify one AppleHV Podman machine in this host process before "
+                "pipeline dispatch. The loop never stops, removes, or recreates the machine."
+            ),
+        )
+        parser.add_argument(
+            "--podman-start-timeout",
+            type=_parse_positive_int,
+            default=120,
+            metavar="SECONDS",
+            help="Maximum Podman machine start time (default: 120).",
+        )
+        parser.add_argument(
+            "--podman-health-timeout",
+            type=_parse_positive_int,
+            default=60,
+            metavar="SECONDS",
+            help="Maximum named-connection health-check time (default: 60).",
         )
     if profile in {"full", "planning"}:
         parser.add_argument("--force", action="store_true", help="Plan the selected issues again.")
@@ -695,6 +726,15 @@ def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
 
     identity = runtime_identity()
     LOG.info("Runtime identity: %s", identity, extra={"runtime_identity": identity})
+    if args.podman_machine:
+        try:
+            prepare_podman_machine(
+                args.podman_machine,
+                start_timeout_s=args.podman_start_timeout,
+                health_timeout_s=args.podman_health_timeout,
+            )
+        except PodmanMachineError as exc:
+            return _error_exit(args, str(exc), "Podman machine preflight failed.")
     selected = set(args.stages)
     if (
         not args.dry_run

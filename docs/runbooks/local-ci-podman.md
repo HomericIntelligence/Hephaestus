@@ -9,9 +9,20 @@ Keep the native fallback active until all container health checks pass. Do not
 change `scripts/run_ci_local.sh` to manage Podman machines. Machine deletion is
 an operator action and is outside the CI runner authority.
 
-Use a persistent host terminal for all machine commands. Keep the terminal open
-until the machine and container checks are complete. This keeps the AppleHV
-helper process lifetime separate from a short-lived automation command.
+Start the automation loop with its host-owned Podman supervisor:
+
+```bash
+hephaestus-automation-loop --podman-machine hephaestus-ci <other-options>
+```
+
+The foreground automation-loop process owns the AppleHV helper lifetime. Before
+pipeline dispatch, the supervisor inspects only the selected machine. It starts
+the machine if it is stopped and runs a bounded health check against its named
+connection. It requires the AppleHV provider, a running state, and a nonempty
+`LastUp` value.
+If a check fails, it records the `machine-start.lock` owner and the last 200
+serial-log lines. It then stops pipeline dispatch. It does not stop, remove, or
+recreate a machine.
 
 ## Inspect the host state
 
@@ -75,6 +86,10 @@ podman machine inspect hephaestus-ci
 podman system connection list
 podman info
 ```
+
+In the `podman machine inspect` output, verify that `ConfigDir.Path` ends in
+`/applehv`. Also verify that `LastUp` is not empty or the zero timestamp. These
+checks prove that the replacement uses AppleHV and completed at least one boot.
 
 Stop if `podman info` cannot connect to the server. Keep the native fallback
 active. Capture the serial log and the owner of `machine-start.lock`, if one
