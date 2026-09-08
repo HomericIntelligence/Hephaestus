@@ -843,6 +843,83 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
     auxiliary.shutdown(mark_interrupted=False)
 
 
+@pytest.mark.parametrize("exception_type", [SystemExit, KeyboardInterrupt, GeneratorExit])
+def test_process_control_learning_completion_releases_coordinator_accounting(
+    tmp_path: Path,
+    exception_type: type[BaseException],
+) -> None:
+    """A host process-control failure releases capacity and lets the coordinator stop."""
+
+    class RaisingHost:
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            del request
+            raise exception_type("controlled failure")
+
+    shutdown = threading.Event()
+    completions: queue.Queue = queue.Queue(maxsize=1)
+    auxiliary = AuxiliaryWorkerPool(
+        size=1,
+        shutdown=shutdown,
+        completion_q=completions,
+        athena_skill_executor=RaisingHost(),
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            learning_workers=1,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=auxiliary,
+        install_signals=False,
+    )
+
+    class RecordingLearningStage:
+        def on_job_done(self, item: WorkItem, result: JobResult, ctx: object) -> None:
+            del item, result, ctx
+
+    coordinator.stages[StageName.LEARNING] = RecordingLearningStage()  # type: ignore[assignment]
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING)
+    primary = ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+    item.compact_for_post_processing(primary)
+    request = AthenaSkillJob(
+        request=AthenaSkillRequest(
+            kind="learn",
+            repo="repo",
+            issue=1,
+            agent="codex",
+            model="default",
+            cwd=tmp_path,
+            timeout_s=60,
+        )
+    )
+
+    handle = auxiliary.submit(request, "RESULT")
+    coordinator.auxiliary_in_flight[handle] = item
+    done, result = coordinator.auxiliary_completion_q.get(timeout=2)
+    coordinator.shutdown.set()
+    coordinator._handle_completion(done, result, auxiliary=True)
+
+    assert not result.ok
+    assert result.error == f"worker_crash: {exception_type.__name__}: controlled failure"
+    assert not coordinator.auxiliary_in_flight
+    assert coordinator._auxiliary_job_count == 1
+    assert coordinator._auxiliary_job_failure_count == 1
+    assert item.post_processing is not None
+    assert item.post_processing.result == primary
+    assert coordinator._all_idle()
+
+    coordinator.shutdown.clear()
+    next_handle = auxiliary.submit(request, "RESULT")
+    next_done, next_result = coordinator.auxiliary_completion_q.get(timeout=2)
+    assert next_done is next_handle
+    assert not next_result.ok
+    auxiliary.shutdown(mark_interrupted=False)
+
+
 @pytest.mark.skipif(not subprocess_registry.supported(), reason="requires POSIX process groups")
 def test_forced_auxiliary_shutdown_stops_active_host_process() -> None:
     """Forced shutdown ends active host work and releases its worker thread."""

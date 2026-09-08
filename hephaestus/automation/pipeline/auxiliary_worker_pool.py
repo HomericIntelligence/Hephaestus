@@ -87,6 +87,8 @@ class AuxiliaryWorkerPool:
                 if self._cleanup_runner is None:
                     raise RuntimeError("cleanup job submitted without a cleanup runner")
                 result = self._cleanup_runner(job)
+        except (SystemExit, KeyboardInterrupt, GeneratorExit) as exc:
+            result = JobResult(ok=False, error=f"worker_crash: {type(exc).__name__}: {exc}")
         except Exception as exc:
             result = JobResult(ok=False, error=f"{type(exc).__name__}: {exc}")
         if self._shutdown.is_set():
@@ -106,6 +108,8 @@ class AuxiliaryWorkerPool:
                 interrupted=True,
                 error="interrupted_before_start",
             )
+        except (SystemExit, KeyboardInterrupt, GeneratorExit) as exc:
+            result = JobResult(ok=False, error=f"worker_crash: {type(exc).__name__}: {exc}")
         except Exception as exc:
             result = JobResult(ok=False, error=f"worker_crash: {type(exc).__name__}: {exc}")
         with self._futures_guard:

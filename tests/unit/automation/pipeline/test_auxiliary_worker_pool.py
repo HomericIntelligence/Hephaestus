@@ -8,7 +8,7 @@ import importlib.util
 import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,9 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillRequest,
     AthenaSkillResult,
 )
+from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
+from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.job_results import JobHandle, JobResult
 from hephaestus.automation.pipeline.jobs import AgentJob
 
 
@@ -26,6 +29,160 @@ class _Host:
         return AthenaSkillResult(
             kind=str(request.kind), receipt={"worker": threading.current_thread().name}
         )
+
+
+def _learning_job(tmp_path: Path) -> AthenaSkillJob:
+    """Return one valid host-learning job for worker tests."""
+    return AthenaSkillJob(
+        request=AthenaSkillRequest(
+            kind="learn",
+            repo="Hephaestus",
+            issue=3051,
+            agent="codex",
+            model="",
+            cwd=tmp_path,
+            timeout_s=10,
+        )
+    )
+
+
+@pytest.mark.parametrize("exception_type", [SystemExit, KeyboardInterrupt, GeneratorExit])
+@pytest.mark.parametrize("job_kind", ["learning", "cleanup"])
+def test_process_control_failure_on_worker_thread_publishes_once(
+    tmp_path: Path,
+    exception_type: type[BaseException],
+    job_kind: str,
+) -> None:
+    """A process-control failure on a worker thread releases its completion."""
+    started = threading.Event()
+    release = threading.Event()
+    completions: queue.Queue[tuple[JobHandle, JobResult]] = queue.Queue(maxsize=1)
+    wakeup = threading.Event()
+    saturation = threading.Event()
+
+    class RaisingHost:
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            del request
+            started.set()
+            assert release.wait(timeout=2)
+            raise exception_type("controlled failure")
+
+    def raising_cleanup(job: GitJob) -> JobResult:
+        del job
+        started.set()
+        assert release.wait(timeout=2)
+        raise exception_type("controlled failure")
+
+    pool = AuxiliaryWorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completions,
+        athena_skill_executor=RaisingHost(),
+        cleanup_runner=raising_cleanup,
+    )
+    pool.set_completion_notifiers(wakeup=wakeup, saturation=saturation)
+    job = (
+        _learning_job(tmp_path)
+        if job_kind == "learning"
+        else GitJob(repo="Hephaestus", op="remove_worktree", timeout_s=10)
+    )
+
+    handle = pool.submit(job, "DONE")
+    assert started.wait(timeout=1)
+    release.set()
+    done, result = completions.get(timeout=2)
+
+    assert done is handle
+    assert not result.ok
+    assert result.error == f"worker_crash: {exception_type.__name__}: controlled failure"
+    assert result.worker_id.startswith("hephaestus-learning-worker-")
+    assert result.duration_s >= 0
+    assert wakeup.is_set()
+    assert not saturation.is_set()
+    assert completions.empty()
+    assert not pool._futures
+    pool.shutdown(mark_interrupted=False)
+
+
+class _CompletedFutureExecutor:
+    """Return an exceptional future before callback registration."""
+
+    def __init__(self, exception: BaseException) -> None:
+        self.future: Future[JobResult] = Future()
+        self.future.set_exception(exception)
+
+    def submit(self, function: object, job: object) -> Future[JobResult]:
+        del function, job
+        return self.future
+
+    def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+        del wait, cancel_futures
+
+
+@pytest.mark.parametrize("exception_type", [SystemExit, KeyboardInterrupt, GeneratorExit])
+def test_immediate_callback_process_control_failure_publishes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exception_type: type[BaseException],
+) -> None:
+    """An already-complete future releases its handle and sends one wakeup."""
+    executor = _CompletedFutureExecutor(exception_type("controlled failure"))
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.auxiliary_worker_pool.ThreadPoolExecutor",
+        lambda **_kwargs: executor,
+    )
+    completions: queue.Queue = queue.Queue(maxsize=1)
+    wakeup = threading.Event()
+    saturation = threading.Event()
+    pool = AuxiliaryWorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completions,
+        athena_skill_executor=_Host(),
+    )
+    pool.set_completion_notifiers(wakeup=wakeup, saturation=saturation)
+
+    handle = pool.submit(_learning_job(tmp_path), "DONE")
+    done, result = completions.get_nowait()
+
+    assert done is handle
+    assert not result.ok
+    assert result.error == f"worker_crash: {exception_type.__name__}: controlled failure"
+    assert wakeup.is_set()
+    assert not saturation.is_set()
+    assert not pool._futures
+    pool.shutdown(mark_interrupted=False)
+
+
+def test_process_control_failure_with_full_completion_queue_signals_fault(
+    tmp_path: Path,
+) -> None:
+    """A full completion queue releases the future and signals saturation."""
+    completions: queue.Queue = queue.Queue(maxsize=1)
+    completions.put_nowait((object(), JobResult(ok=True)))
+    wakeup = threading.Event()
+    saturation = threading.Event()
+    pool = AuxiliaryWorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completions,
+        athena_skill_executor=_Host(),
+    )
+    pool.set_completion_notifiers(wakeup=wakeup, saturation=saturation)
+    future: Future[JobResult] = Future()
+    future.set_exception(SystemExit("controlled failure"))
+    pool._futures.add(future)
+    job_handle = JobHandle(job=_learning_job(tmp_path), on_done_state="DONE")
+
+    started = time.monotonic()
+    pool._publish(job_handle, future)
+
+    assert time.monotonic() - started < 1
+    assert not pool._futures
+    assert saturation.is_set()
+    assert wakeup.is_set()
+    assert completions.qsize() == 1
+    pool.shutdown(mark_interrupted=False)
 
 
 def test_learning_workers_are_distinct_and_reject_generic_agents(tmp_path: Path) -> None:
