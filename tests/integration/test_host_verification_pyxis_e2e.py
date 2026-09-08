@@ -65,20 +65,33 @@ def test_linux_pyxis_host_verification_boundary(
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
-    program = (
-        "from pathlib import Path; import socket, subprocess; "
-        f"\ntry: socket.create_connection(('127.0.0.1', {port}), timeout=1); "
-        "raise SystemExit('network access was not denied')\nexcept OSError: pass; "
-        "assert Path('.git').is_file(); "
-        "assert Path('build').is_symlink(); "
-        "assert Path('pi-smoke-logs').is_dir(); "
-        "try: Path('tracked.txt').write_text('changed')\nexcept OSError: pass\n"
-        "else: raise SystemExit('source was writable')\n"
-        "assert subprocess.run(('git', 'config', '--local', 'pyxis.probe', '1')).returncode != 0; "
-        "Path('build/probe.txt').write_text('scratch'); "
-        "Path('coverage.xml').write_text('coverage'); "
-        "Path('pi-smoke-logs/probe.txt').write_text('logs')"
-    )
+    program = f"""
+from pathlib import Path
+import socket
+import subprocess
+
+try:
+    socket.create_connection(('127.0.0.1', {port}), timeout=1)
+except OSError:
+    pass
+else:
+    raise SystemExit('network access was not denied')
+
+assert Path('.git').is_file()
+assert Path('build').is_symlink()
+assert Path('pi-smoke-logs').is_dir()
+try:
+    Path('tracked.txt').write_text('changed')
+except OSError:
+    pass
+else:
+    raise SystemExit('source was writable')
+
+assert subprocess.run(('git', 'config', '--local', 'pyxis.probe', '1')).returncode != 0
+Path('build/probe.txt').write_text('scratch')
+Path('coverage.xml').write_text('coverage')
+Path('pi-smoke-logs/probe.txt').write_text('logs')
+"""
     pool = WorkerPool(
         size=1,
         shutdown=threading.Event(),

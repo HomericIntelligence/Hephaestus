@@ -166,6 +166,14 @@ def build_pyxis_environment(*, source: Path, scratch: Path) -> dict[str, str]:
     return environment
 
 
+def pyxis_help_supports_namespace_isolation(help_text: str) -> bool:
+    """Check for the required option in successful runtime help output.
+
+    This prerequisite does not prove that runtime isolation works.
+    """
+    return re.search(r"(?m)^[ \t]*--container-unshare(?=[= \t\r\n]|$)", help_text) is not None
+
+
 def build_pyxis_srun_command(
     *,
     image: PyxisImageMetadata,

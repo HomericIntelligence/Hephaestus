@@ -2448,6 +2448,7 @@ class TestWorkerPoolSubmitComplete:
 
         archive = MagicMock(return_value=(b"", ""))
         with (
+            patch(f"{_WP}._pyxis_runtime_available", return_value=True),
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}._trusted_executable", return_value=sys.executable),
             patch(
@@ -2505,6 +2506,7 @@ class TestWorkerPoolSubmitComplete:
         with (
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._pyxis_runtime_available", return_value=True),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
             patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata) as stage_image,
@@ -2625,6 +2627,7 @@ class TestWorkerPoolSubmitComplete:
         with (
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._pyxis_runtime_available", return_value=True),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=quota_root),
             patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
@@ -16356,3 +16359,108 @@ def test_adopted_remediation_creation_consumes_worker_metadata(
     assert _git(writer.cwd, "status", "--porcelain") == ""
     assert _git(writer.cwd, "ls-files", "--stage") == original_index
     assert (writer.cwd / "tracked.txt").read_bytes() == original_content
+
+
+def test_pyxis_capability_failure_prevents_image_staging(pool: WorkerPool, tmp_path: Path) -> None:
+    """An unavailable runtime cannot start image staging or reviewed code."""
+    job = BuildTestJob(
+        repo="test/repo",
+        cwd=tmp_path,
+        argv=("uv", "run", "pytest"),
+        timeout_s=60,
+        expected_head_sha="a" * 40,
+        immutable_source=True,
+    )
+    with (
+        patch(f"{_WP}._pyxis_runtime_available", return_value=False),
+        patch(f"{_WP}._validate_pyxis_image") as image,
+        patch(f"{_WP}._stage_verified_pyxis_image") as stage,
+        patch(f"{_WP}._run_bounded_host_command") as run,
+    ):
+        result = pool._run_linux_immutable_build_test(job)
+    assert result.error == "host_verification_pyxis_runtime_unavailable"
+    assert result.value == {
+        "head_sha": "a" * 40,
+        "immutable_source": False,
+        "failure_kind": "runner",
+        "platform": "linux",
+        "status": "failed",
+    }
+    image.assert_not_called()
+    stage.assert_not_called()
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "supported",
+        "missing",
+        "command",
+        "timeout",
+        "interrupted",
+        "oversize",
+        "unreadable",
+        "encoding",
+    ],
+)
+def test_pyxis_runtime_preflight_uses_bounded_scrubbed_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """The metadata check accepts only bounded successful option evidence."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PRIVATE_SENTINEL", "do-not-forward")
+    shutdown = threading.Event()
+
+    def run(command: tuple[str, ...], **kwargs: Any) -> JobResult:
+        assert command == ("limited", "/usr/bin/srun", "--help")
+        assert kwargs["timeout_s"] == 30
+        assert kwargs["shutdown"] is shutdown
+        assert "PRIVATE_SENTINEL" not in kwargs["environment"]
+        assert kwargs["source"] != tmp_path
+        output = kwargs["scratch"] / "outputs"
+        output.mkdir()
+        text = (
+            "  --container-unshare=NS,...\n"
+            if case == "supported"
+            else "  --container-image=PATH\n"
+        )
+        if case == "oversize":
+            text = "  --container-unshare=NS,...\n" + "x" * 65536
+        if case == "unreadable":
+            raise OSError("output unavailable")
+        if case == "encoding":
+            (output / "stdout.log").write_bytes(b"\xff")
+        else:
+            (output / "stdout.log").write_text(text)
+        return JobResult(ok=case not in {"command", "timeout", "interrupted"}, error=case)
+
+    with (
+        patch(f"{_WP}._trusted_executable", return_value="/usr/bin/srun"),
+        patch(
+            f"{_WP}._linux_resource_limited_command",
+            side_effect=lambda command, **kw: ("limited", *command),
+        ),
+        patch(f"{_WP}._run_bounded_host_command", side_effect=run),
+    ):
+        assert worker_pool_module._pyxis_runtime_available(shutdown=shutdown) is (
+            case == "supported"
+        )
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_pyxis_runtime_preflight_stops_without_executable_or_on_shutdown(cancelled: bool) -> None:
+    """Missing launch capability and cancellation both prevent the command."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+    shutdown = threading.Event()
+    if cancelled:
+        shutdown.set()
+    with (
+        patch(f"{_WP}._trusted_executable", return_value="/usr/bin/srun" if cancelled else None),
+        patch(f"{_WP}._run_bounded_host_command") as run,
+    ):
+        assert not worker_pool_module._pyxis_runtime_available(shutdown=shutdown)
+    run.assert_not_called()

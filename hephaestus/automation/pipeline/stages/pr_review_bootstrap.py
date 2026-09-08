@@ -14,7 +14,7 @@ from hephaestus.automation.host_verification_bootstrap import (
 )
 
 from ..diagnostics import redact_diagnostic_text
-from .pr_review_receipts import _authentic_linux_bootstrap_receipt
+from .pr_review_receipts import HOST_KEYS, _authentic_linux_bootstrap_receipt
 from .pr_review_threads import (
     Disposition,
     JobResult,
@@ -179,6 +179,7 @@ def store_host_verification_result(item: WorkItem, result: JobResult) -> None:
             "status": status,
             "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
             "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
+            **{key: value for key in HOST_KEYS if isinstance(value := result_value.get(key), str)},
         }
     )
     if is_bootstrap_skip(result, result_value, reviewed_head):
