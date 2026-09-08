@@ -6653,6 +6653,10 @@ class WorkerPool:
     ) -> JobResult:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
+        kwargs.pop("recover_prepared_remediation", None)
+        kwargs.pop("remediation_repository", None)
+        kwargs.pop("remediation_pr_number", None)
+        kwargs.pop("remediation_thread_snapshots", None)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
