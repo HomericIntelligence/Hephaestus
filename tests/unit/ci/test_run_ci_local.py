@@ -450,6 +450,98 @@ def test_all_preserves_failure_from_multi_command_check(
     assert "detect --source=. --verbose --exit-code=1" in log
 
 
+@pytest.mark.usefixtures("require_git_path_format")
+@pytest.mark.parametrize("git_failing_command", ["read-tree HEAD", "checkout-index --all"])
+@pytest.mark.parametrize(
+    ("subset", "blocked_commands"),
+    [
+        (
+            "lint",
+            (
+                "uv run pre-commit run --all-files --show-diff-on-failure",
+                "uv run hephaestus-validate-links docs --repo-root .",
+            ),
+        ),
+        (
+            "secrets",
+            (
+                "detect --source=. --verbose --exit-code=1",
+                "dir --verbose --exit-code=1 .",
+            ),
+        ),
+    ],
+)
+def test_prebuilt_snapshot_failure_stops_stage(
+    tmp_path: Path,
+    git_failing_command: str,
+    subset: str,
+    blocked_commands: tuple[str, str],
+) -> None:
+    """A failed candidate snapshot must stop its stage before validation."""
+    result, log = _run_runner(
+        tmp_path,
+        subset,
+        git_failing_command=git_failing_command,
+    )
+
+    assert result.returncode == 1
+    assert f"Failed: {subset}" in result.stderr
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+    assert "build --" not in log
+    for command in blocked_commands:
+        assert command not in log
+
+
+@pytest.mark.usefixtures("require_git_path_format")
+def test_all_aggregates_prebuilt_snapshot_failures(tmp_path: Path) -> None:
+    """Snapshot failures must not stop collection of other stage failures."""
+    result, log = _run_runner(
+        tmp_path,
+        "all",
+        failing_command="hephaestus.scripts_lib.check_version_single_source",
+        git_failing_command="read-tree HEAD",
+    )
+
+    assert result.returncode == 1
+    assert "Failed: lint version secrets" in result.stderr
+    assert "uv run pip-audit" in log
+    assert "detect --source=. --verbose --exit-code=1" not in log
+
+
+@pytest.mark.usefixtures("require_git_path_format")
+@pytest.mark.parametrize(
+    ("subset", "expected_commands"),
+    [
+        (
+            "lint",
+            (
+                "uv run pre-commit run --all-files --show-diff-on-failure",
+                "uv run hephaestus-validate-links docs --repo-root .",
+            ),
+        ),
+        (
+            "secrets",
+            (
+                "detect --source=. --verbose --exit-code=1",
+                "dir --verbose --exit-code=1 .",
+            ),
+        ),
+    ],
+)
+def test_prebuilt_snapshot_success_runs_validators(
+    tmp_path: Path,
+    subset: str,
+    expected_commands: tuple[str, str],
+) -> None:
+    """A complete candidate snapshot must run all validators for its stage."""
+    result, log = _run_runner(tmp_path, subset)
+
+    assert result.returncode == 0, result.stderr
+    assert "build --" not in log
+    for command in expected_commands:
+        assert command in log
+
+
 def _assert_all_required_gates(result: subprocess.CompletedProcess[str], log: str) -> None:
     """Require every local gate and the final success summary."""
     assert result.returncode == 0, result.stderr
