@@ -1679,6 +1679,7 @@ def _codex_base_cmd(
     sandbox: str | None = "workspace-write",
     approval: str = "never",
     resume_id: str | None = None,
+    execution_request: ExecutionRequest | None = None,
 ) -> list[str]:
     """Build a Codex exec or exec-resume command."""
     cmd = (
@@ -1695,7 +1696,32 @@ def _codex_base_cmd(
         ]
     )
     cmd.extend(_codex_model_args(model, use_default=resume_id is None))
-    if resume_id is not None:
+    primary_review = (
+        execution_request is not None
+        and execution_request.role is AgentRole.PR_REVIEWER
+        and execution_request.operation is AgentOperation.PR_REVIEW
+        and sandbox == "read-only"
+        and approval == "never"
+    )
+    if primary_review:
+        # Use a fresh namespace to avoid merging a fixed ambient profile.
+        profile_name = "hephaestus-review-" + secrets.token_hex(16)
+        cmd.extend(
+            [
+                "--strict-config",
+                "-c",
+                f'permissions.{profile_name}={{extends=":read-only",network={{enabled=true}}}}',
+                "-c",
+                f"default_permissions={json.dumps(profile_name)}",
+                "-c",
+                'approval_policy="never"',
+            ]
+        )
+        if resume_id is None:
+            if cwd is None:
+                raise ValueError("cwd is required for new Codex exec sessions")
+            cmd.extend(["--cd", str(cwd)])
+    elif resume_id is not None:
         # ``codex exec resume`` does not accept the new-session --sandbox or
         # --ask-for-approval flags.  Its generic config overrides are the
         # enforceable equivalent, and must not inherit a permissive user
@@ -2085,6 +2111,7 @@ def run_codex_session(
     model: str = "",
     sandbox: str = "workspace-write",
     approval: str = "never",
+    execution_request: ExecutionRequest | None = None,
     process_tracker: ProcessTracker | None = None,
     _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
@@ -2096,6 +2123,7 @@ def run_codex_session(
         model=model,
         sandbox=sandbox,
         approval=approval,
+        execution_request=execution_request,
         process_tracker=process_tracker,
         final_message_grace_seconds=_final_message_grace_seconds,
     )
@@ -4631,6 +4659,7 @@ def resume_codex_session(
     model: str = "",
     sandbox: str = "workspace-write",
     approval: str = "never",
+    execution_request: ExecutionRequest | None = None,
     process_tracker: ProcessTracker | None = None,
     _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
@@ -4642,6 +4671,7 @@ def resume_codex_session(
         model=model,
         sandbox=sandbox,
         approval=approval,
+        execution_request=execution_request,
         resume_id=session_id,
         process_tracker=process_tracker,
         final_message_grace_seconds=_final_message_grace_seconds,
@@ -4656,6 +4686,7 @@ def _run_codex_session_with_effort_fallback(
     model: str,
     sandbox: str,
     approval: str,
+    execution_request: ExecutionRequest | None = None,
     resume_id: str | None = None,
     process_tracker: ProcessTracker | None = None,
     final_message_grace_seconds: float | None = None,
@@ -4672,6 +4703,7 @@ def _run_codex_session_with_effort_fallback(
             model=selected_model,
             sandbox=sandbox,
             approval=approval,
+            execution_request=execution_request,
             resume_id=resume_id,
         )
         remaining = deadline - time.monotonic()
@@ -5744,6 +5776,7 @@ def run_agent_session(
             model=model,
             sandbox=sandbox,
             approval=approval,
+            execution_request=execution_request,
             process_tracker=process_tracker,
         )
     if is_opencode(agent):
@@ -5843,6 +5876,7 @@ def resume_agent_session(
             model=model,
             sandbox=sandbox,
             approval=approval,
+            execution_request=execution_request,
             process_tracker=process_tracker,
         )
     if is_opencode(agent):

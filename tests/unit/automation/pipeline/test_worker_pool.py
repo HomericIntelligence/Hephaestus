@@ -15919,3 +15919,31 @@ def _assert_dirty_test_replay(enabled: bool, pool: WorkerPool, job: AgentJob, in
     replay = pool._run_agent(job)
     assert not replay.ok
     invoke.assert_called_once()
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_primary_codex_worker_keeps_typed_review_policy(pool: WorkerPool, resume: bool) -> None:
+    """Worker dispatch retains primary authority through the real runtime builder."""
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+    )
+    job = _agent_job(
+        agent="codex",
+        sandbox="read-only",
+        execution_request=request,
+        resume_session_id="primary-session" if resume else None,
+    )
+    with (
+        patch(f"{_WP}.resolve_agent", return_value="codex"),
+        patch.object(
+            agent_runtime,
+            "_run_codex_command",
+            return_value=AgentRunResult("audit", "", "primary-session"),
+        ) as run,
+    ):
+        result = pool._run_agent(job)
+    assert result.ok
+    assert any(
+        part.startswith('default_permissions="hephaestus-review-') for part in run.call_args.args[0]
+    )
+    assert "--sandbox" not in run.call_args.args[0]

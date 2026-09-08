@@ -1741,6 +1741,9 @@ class TestPrReviewStageStep:
         assert result.job.descr == "review"
         assert result.job.sandbox == "read-only"
         assert result.job.allowed_tools == "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
+        assert result.job.execution_request is not None
+        assert result.job.execution_request.role.value == "pr_reviewer"
+        assert result.job.execution_request.operation.value == "pr_review"
         assert result.job.parse is not None
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
