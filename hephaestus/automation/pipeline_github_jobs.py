@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Literal, assert_never, cast
 
 from hephaestus.automation.host_verification_bootstrap import (
@@ -13,10 +13,12 @@ from hephaestus.automation.host_verification_bootstrap import (
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
+    DirtyDirectPrStateRead,
     EnsureScopeExpansionChildrenRequest,
     FrozenJson,
     GitHubJob,
     GitHubReceipt,
+    InspectDirtyDirectPrStateRequest,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
@@ -43,6 +45,14 @@ from hephaestus.automation.remediation_prepublication import (
 )
 
 
+def _request_threads(value: FrozenJson, label: str) -> list[Any]:
+    """Decode the validated immutable thread list at the worker boundary."""
+    threads = value.thaw()
+    if not isinstance(threads, list):
+        raise ValueError(f"{label} threads must be a list")
+    return threads
+
+
 @dataclass(frozen=True)
 class PipelineGitHubJobRunner:
     """Dispatch closed requests through a fresh repository-scoped accessor."""
@@ -53,6 +63,10 @@ class PipelineGitHubJobRunner:
 
     def run(self, job: GitHubJob) -> GitHubReceipt:
         """Execute one request without sharing a coordinator/client instance."""
+        if isinstance(job.request, InspectDirtyDirectPrStateRequest) and (
+            job.request.repository.casefold() != f"{self.org}/{job.repo}".casefold()
+        ):
+            raise ValueError("dirty direct request repository does not match the runner")
         github: StageGitHub = PipelineGitHub(
             self.org,
             repo=job.repo,
@@ -84,10 +98,10 @@ class PipelineGitHubJobRunner:
     def _run_request(self, job: GitHubJob, github: StageGitHub) -> GitHubReceipt:
         """Dispatch one closed request inside its operation deadline."""
         match job.request:
+            case InspectDirtyDirectPrStateRequest():
+                return _read_dirty_direct_state(job.request, github)
             case RecoverReplyJournalRequest():
-                threads = job.request.threads.thaw()
-                if not isinstance(threads, list):  # constructor guard; keeps narrowing explicit
-                    raise ValueError("recovery threads must be a list")
+                threads = _request_threads(job.request.threads, "recovery")
                 handoff = journaled_implementation_reply_handoff(
                     github.issue_comments(job.request.issue_number),
                     pr_number=job.request.pr_number,
@@ -98,9 +112,7 @@ class PipelineGitHubJobRunner:
                     handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
                 )
             case RecoverRemediationReplyJournalRequest():
-                threads = job.request.threads.thaw()
-                if not isinstance(threads, list):
-                    raise ValueError("remediation recovery threads must be a list")
+                threads = _request_threads(job.request.threads, "remediation recovery")
                 handoff = journaled_implementation_remediation_reply_handoff(
                     github.issue_comments(job.request.pr_number),
                     repository=job.request.repository,
@@ -1217,3 +1229,31 @@ class PipelineGitHubJobRunner:
                 fingerprint=fingerprint,
             )
         return complete(f"merge_http_{result.status}", attempted=True)
+
+
+def _read_dirty_direct_state(
+    request: InspectDirtyDirectPrStateRequest, github: StageGitHub
+) -> DirtyDirectPrStateRead:
+    """Read complete PR and actor-owned plan evidence through one fresh accessor."""
+    branches = github.open_prs_for_branch(request.branch)
+    issue_pr = github.find_pr_for_issue(request.issue_number)
+    comments = github.issue_comments(request.issue_number)
+    issue = github.gh_issue_json(request.issue_number)
+    labels = issue.get("labels")
+    if not isinstance(labels, list) or not all(
+        isinstance(label, dict) and isinstance(label.get("name"), str) for label in labels
+    ):
+        raise RuntimeError("dirty direct issue label evidence is incomplete")
+    state = issue.get("state")
+    if not isinstance(state, str):
+        raise RuntimeError("dirty direct issue state evidence is incomplete")
+    return DirtyDirectPrStateRead(
+        repository=request.repository,
+        issue_number=request.issue_number,
+        branch=request.branch,
+        branch_prs=tuple(branches),
+        issue_pr_number=issue_pr,
+        plan_journal=FrozenJson.snapshot([asdict(comment) for comment in comments]),
+        issue_state=state,
+        issue_labels=tuple(label["name"] for label in labels),
+    )

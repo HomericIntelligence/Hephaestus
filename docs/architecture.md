@@ -1030,7 +1030,17 @@ stateDiagram-v2
     Admission --> Skipped: issue excluded
     Admission --> PlanReview: approval missing or revoked
     Admission --> InspectPR: eligible
-    InspectPR --> Prepare: no open PR
+    InspectPR --> DirectProbe: no open PR
+    DirectProbe --> Prepare: no dirty direct writer
+    DirectProbe --> DirtyClaim: owned dirty direct writer
+    DirtyClaim --> DirtyTurn: exact approved inputs and consumed claim
+    DirtyClaim --> Failed: claim unavailable; preserve writer
+    DirtyTurn --> DirtyPublish: one turn and tests succeed
+    DirtyTurn --> Failed: turn or tests fail; preserve writer
+    DirtyPublish --> DirtyPR: signed commit and exact lease push succeed
+    DirtyPublish --> Failed: publication fails; preserve writer
+    DirtyPR --> ReviewReady: strict create and exact head confirmed
+    DirtyPR --> Failed: create is uncertain; preserve writer
     InspectPR --> Adopt: open PR exists
     InspectPR --> Complete: already merged
     InspectPR --> Failed: closed without merge
@@ -1061,6 +1071,23 @@ stateDiagram-v2
 
 Architectural contract:
 
+- Before it creates a direct reservation, `WORKTREE_WAIT` submits an ownership
+  probe. `DIRTY_DIRECT_CLAIM_WAIT` admits only an owned dirty direct writer
+  without an open PR. It retains the original branch and reservation base.
+  The closed GitHub read supplies complete PR absence and current actor-owned
+  plan and review evidence. Skip and blocked labels stop this route.
+- The dirty direct route has one nonretryable provider turn. The host binds
+  the frozen plan, review, exact allowed paths, and content snapshot to a
+  version 2 claim. It consumes the claim under the source lane lock before
+  provider entry. Tests can run after that turn, but failure cannot request
+  another implementation or test-fix turn.
+- Dirty direct publication holds the repository, Git, and source lane locks
+  in that order. It checks current plan and PR evidence before staging and
+  push. It publishes only an exact scoped signed DCO commit with the original
+  remote SHA as its lease. `PR_CREATE` uses strict creation and cannot adopt
+  a concurrent PR. Only confirmed creation with exact head readback clears
+  preservation. Failures retain the receipt, reservation, and deterministic
+  path for terminal reporting. See [ADR-0045](adr/0045-one-use-dirty-direct-writer-continuation.md).
 - One issue maps to one active implementation pull request.
 - The queue observes but never mutates auto-merge while review is pending.
 - Implementation never writes `state:implementation-go`.
@@ -1694,6 +1721,20 @@ worker proves the physical checkout again under the Git metadata lock. The
 replacement keeps the old local branch reference. A dirty, drifted, foreign,
 missing, or unproven predecessor remains unchanged and returns a typed
 recovery record with the exact manual action.
+The version 2 dirty direct claim is the narrow exception to dirty-lane
+rejection. The host independently validates frozen `AgentJob` plan and review
+inputs, issue, and repository before it consumes the exact armed receipt.
+`SourceWorkspaceManager.acquire` then checks generation, physical identity,
+and the shared bounded content snapshot under the lane lock. It writes and
+reads back the consumed receipt before it issues an active process-local
+permit. The lease covers provider execution and adapter cleanup. Serialized
+claims, changed inputs, expired permits, and replay cannot authorize a turn.
+Version 1 jobs keep their existing validation contract. The source manager
+has no GitHub dependency. Native Codex retains workspace and approved-plan
+scope checks. An explicitly selected adapter must satisfy its admission
+contract and cannot fall back to native execution.
+See [ADR-0045](adr/0045-one-use-dirty-direct-writer-continuation.md).
+
 The exhaustive classification is maintained in the
 [source-agent workspace inventory](source-agent-workspace-inventory.md).
 

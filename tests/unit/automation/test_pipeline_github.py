@@ -8582,3 +8582,113 @@ def test_review_terminal_read_uses_node_identity(
     assert len(calls) == 1
     assert "id=PR_exact" in calls[0]
     assert any("node(id:$id)" in arg for arg in calls[0])
+
+
+def test_dirty_direct_strict_create_rejects_existing_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A strict continuation cannot adopt an existing branch PR."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    monkeypatch.setattr(adapter, "_open_prs_for_branch", lambda branch: [(77, "main")])
+    monkeypatch.setattr(adapter, "find_pr_for_issue", lambda issue: None)
+    with pytest.raises(RuntimeError, match="absence"):
+        adapter.create_pr(
+            5, "5-auto-impl-direct-" + "a" * 32, "title", "Closes #5", strict_absence=True
+        )
+
+
+@pytest.mark.parametrize("existing", ["branch-other-base", "issue"])
+def test_dirty_direct_strict_create_rejects_all_open_pr_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: str
+) -> None:
+    """Strict creation rejects both branch and issue-linked PR reuse."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_open_prs_for_branch",
+        lambda branch: [(77, "release")] if existing == "branch-other-base" else [],
+    )
+    monkeypatch.setattr(
+        adapter, "find_pr_for_issue", lambda issue: 78 if existing == "issue" else None
+    )
+    create = MagicMock()
+    monkeypatch.setattr(adapter, "_gh", create)
+    with pytest.raises(RuntimeError, match="absence violated"):
+        adapter.create_pr(
+            5, "5-auto-impl-direct-" + "a" * 32, "title", "Closes #5", strict_absence=True
+        )
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize("race", ["branch", "issue", "none", "incomplete"])
+def test_dirty_direct_ambiguous_create_reads_once_without_adoption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, race: str
+) -> None:
+    """An ambiguous create gets one complete read and never adopts a PR."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    reads: list[str] = []
+
+    def branches(branch: str) -> list[tuple[int, str]]:
+        reads.append("branch")
+        if reads.count("branch") == 2:
+            if race == "incomplete":
+                raise RuntimeError("incomplete read")
+            if race == "branch":
+                return [(77, "main")]
+        return []
+
+    def issue(number: int) -> int | None:
+        reads.append("issue")
+        return 78 if reads.count("issue") == 2 and race == "issue" else None
+
+    monkeypatch.setattr(adapter, "_open_prs_for_branch", branches)
+    monkeypatch.setattr(adapter, "find_pr_for_issue", issue)
+    monkeypatch.setattr(github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None)
+    create = MagicMock(side_effect=RuntimeError("ambiguous transport"))
+    monkeypatch.setattr(adapter, "_gh", create)
+    with pytest.raises(RuntimeError, match="strict PR"):
+        adapter.create_pr(
+            5, "5-auto-impl-direct-" + "a" * 32, "title", "Closes #5", strict_absence=True
+        )
+    assert create.call_count == 1
+    assert reads.count("branch") == 2
+    assert reads.count("issue") == (1 if race == "incomplete" else 2)
+
+
+def test_dirty_direct_complete_branch_cap_blocks_strict_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capped branch result cannot prove absence or permit creation."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    create = MagicMock(
+        return_value=SimpleNamespace(
+            stdout=json.dumps(
+                [{"number": i + 1, "state": "CLOSED", "baseRefName": "main"} for i in range(1000)]
+            )
+        )
+    )
+    monkeypatch.setattr(adapter, "_gh", create)
+    with pytest.raises(RuntimeError, match="absence read failed"):
+        adapter.create_pr(
+            5, "5-auto-impl-direct-" + "a" * 32, "title", "Closes #5", strict_absence=True
+        )
+    assert create.call_count == 1
+    assert create.call_args.args[0][:2] == ["pr", "list"]
+
+
+def test_dirty_direct_strict_create_submits_only_one_new_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Complete absence permits one normal signed-branch PR creation."""
+    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    monkeypatch.setattr(adapter, "_open_prs_for_branch", lambda branch: [])
+    monkeypatch.setattr(adapter, "find_pr_for_issue", lambda issue: None)
+    signed = MagicMock()
+    monkeypatch.setattr(github_api_mod, "_assert_branch_commits_signed", signed)
+    create = MagicMock(return_value=SimpleNamespace(stdout="https://github.com/org/repo-a/pull/79"))
+    monkeypatch.setattr(adapter, "_gh", create)
+    branch = "5-auto-impl-direct-" + "a" * 32
+    assert adapter.create_pr(5, branch, "title", "Closes #5", strict_absence=True) == 79
+    signed.assert_called_once_with(branch, base="main")
+    assert create.call_count == 1
+    assert create.call_args.args[0][:2] == ["pr", "create"]

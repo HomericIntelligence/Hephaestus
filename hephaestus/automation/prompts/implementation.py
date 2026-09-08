@@ -179,3 +179,19 @@ def get_impl_resume_feedback_prompt(
             )
         ),
     )
+
+
+def get_dirty_direct_continuation_prompt(
+    *, plan: str, review: str, status: str, diff: str, allowed_paths: tuple[str, ...]
+) -> str:
+    """Describe the one permitted edit-and-test turn for a dirty direct writer."""
+    fenced = fence_content()
+    return PromptCatalog.current().render(
+        "implementation/dirty_direct_continuation.j2",
+        plan_block=fenced.fence("APPROVED_PLAN", plan),
+        review_block=fenced.fence("PLAN_REVIEW", review),
+        status_block=fenced.fence("INITIAL_STATUS", status),
+        diff_block=fenced.fence("INITIAL_DIFF", diff),
+        paths_block=fenced.fence("ALLOWED_PATHS", "\n".join(allowed_paths)),
+        untrusted_notice=fenced.untrusted_notice,
+    )

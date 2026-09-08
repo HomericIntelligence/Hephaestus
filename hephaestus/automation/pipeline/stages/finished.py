@@ -247,6 +247,12 @@ class FinishedStage(Stage):
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult:
         """Clean or preserve the writer worktree."""
+        if item.payload.get("dirty_direct_preserve"):
+            if item.worktree:
+                entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+                if entry not in self._preserved:
+                    self._preserved.append(entry)
+            return Continue(next_state="DONE")
         recovery_worktrees = self._record_recovery_worktrees(item, ctx)
         if item.worktree and not self._learning_is_terminal(item, ctx):
             return self._preserve_pending_learning_worktree(item)

@@ -40,6 +40,7 @@ _AGENT_DIRECTION_TEMPLATES = frozenset(
         "fleet_sync/conflict_resolution.j2",
         "follow_up/follow_up.j2",
         "implementation/dirty_worktree.j2",
+        "implementation/dirty_direct_continuation.j2",
         "implementation/implementation.j2",
         "implementation/loop_review.j2",
         "implementation/resume_feedback.j2",

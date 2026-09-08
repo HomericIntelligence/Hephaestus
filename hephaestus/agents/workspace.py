@@ -8,10 +8,14 @@ starts.
 
 from __future__ import annotations
 
+import re
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Self
 
 from hephaestus.config.child_environments import build_git_child_env
@@ -56,6 +60,93 @@ _FIELDS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class DirtyPlanIdentity:
+    """Identify independently validated plan and review content."""
+
+    revision: int
+    plan_fingerprint: str
+    review_fingerprint: str
+    allowed_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DirtyDirectClaim:
+    """Bind one dirty writer turn to its plan, content, and reservation."""
+
+    branch: str
+    reservation_base_sha: str
+    plan_revision: int
+    plan_fingerprint: str
+    review_fingerprint: str
+    allowed_paths: tuple[str, ...]
+    index_sha256: str
+    worktree_sha256: str
+    untracked_sha256: str
+    nonce: str
+    state: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Return claim data without an execution permit."""
+        payload = asdict(self)
+        payload["allowed_paths"] = list(self.allowed_paths)
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: object) -> Self:
+        """Parse the exact version 2 claim schema."""
+        if not isinstance(payload, dict) or set(payload) != {field.name for field in fields(cls)}:
+            raise WorkspaceBindingError("dirty claim schema mismatch")
+        paths = payload["allowed_paths"]
+        if not isinstance(paths, list) or not paths or any(not isinstance(p, str) for p in paths):
+            raise WorkspaceBindingError("dirty claim scope is invalid")
+        if any(
+            not path
+            or "\\" in path
+            or "\0" in path
+            or PurePosixPath(path).is_absolute()
+            or PureWindowsPath(path).drive
+            or PurePosixPath(path).as_posix() != path
+            or any(part in {"", ".", "..", ".git"} for part in path.split("/"))
+            for path in paths
+        ) or len(set(paths)) != len(paths):
+            raise WorkspaceBindingError("dirty claim scope is invalid")
+        if type(payload["plan_revision"]) is not int or payload["plan_revision"] < 1:
+            raise WorkspaceBindingError("dirty claim plan revision is invalid")
+        for name in (
+            "plan_fingerprint",
+            "review_fingerprint",
+            "index_sha256",
+            "worktree_sha256",
+            "untracked_sha256",
+        ):
+            if (
+                not isinstance(payload[name], str)
+                or re.fullmatch(r"[0-9a-f]{64}", payload[name]) is None
+            ):
+                raise WorkspaceBindingError("dirty claim digest is invalid")
+        if (
+            not isinstance(payload["reservation_base_sha"], str)
+            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", payload["reservation_base_sha"])
+            is None
+            or not isinstance(payload["nonce"], str)
+            or re.fullmatch(r"[0-9a-f]{32}", payload["nonce"]) is None
+            or not isinstance(payload["branch"], str)
+            or re.fullmatch(r"[1-9][0-9]*-auto-impl-direct-[0-9a-f]{32}", payload["branch"]) is None
+            or payload["state"] not in ("armed", "consumed")
+        ):
+            raise WorkspaceBindingError("dirty claim identity is invalid")
+        return cls(**{**payload, "allowed_paths": tuple(paths)})
+
+    def content_snapshot(self) -> dict[str, str]:
+        """Return the three exact content digests."""
+        return {
+            "index_sha256": self.index_sha256,
+            "worktree_sha256": self.worktree_sha256,
+            "untracked_sha256": self.untracked_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceBinding:
     """Immutable execution-directory binding validated at invocation time."""
 
@@ -70,6 +161,7 @@ class WorkspaceBinding:
     generation: int = 0
     detached: bool = False
     schema_version: int = 1
+    dirty_claim: DirtyDirectClaim | None = None
 
     @classmethod
     def source(
@@ -111,7 +203,7 @@ class WorkspaceBinding:
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable JSON-compatible representation."""
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "kind": self.kind.value,
             "cwd": str(self.cwd),
@@ -124,12 +216,16 @@ class WorkspaceBinding:
             "generation": self.generation,
             "detached": self.detached,
         }
+        if self.schema_version == 2:
+            payload["dirty_claim"] = self.dirty_claim.to_dict() if self.dirty_claim else None
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> Self:
         """Parse a strict workspace binding representation."""
-        unknown = set(payload) - _FIELDS
-        missing = _FIELDS - set(payload)
+        expected = _FIELDS | {"dirty_claim"} if payload.get("schema_version") == 2 else _FIELDS
+        unknown = set(payload) - expected
+        missing = expected - set(payload)
         if unknown:
             raise WorkspaceBindingError(f"workspace binding has unknown fields: {sorted(unknown)}")
         if missing:
@@ -151,6 +247,11 @@ class WorkspaceBinding:
                 revision=_optional_str(payload["revision"]),
                 generation=int(payload["generation"]),
                 detached=bool(payload["detached"]),
+                dirty_claim=(
+                    DirtyDirectClaim.from_dict(payload["dirty_claim"])
+                    if payload["schema_version"] == 2
+                    else None
+                ),
             )
         except (TypeError, ValueError) as exc:
             raise WorkspaceBindingError(f"invalid workspace binding: {exc}") from exc
@@ -175,8 +276,22 @@ def _optional_int(value: object) -> int | None:
 
 
 def _validate_shape(binding: WorkspaceBinding) -> None:
-    if binding.schema_version != 1:
+    if binding.schema_version not in (1, 2):
         raise WorkspaceBindingError("unsupported workspace binding schema")
+    if binding.schema_version == 1 and binding.dirty_claim is not None:
+        raise WorkspaceBindingError("version 1 binding cannot carry a dirty claim")
+    if binding.schema_version == 2:
+        claim = binding.dirty_claim
+        if (
+            claim is None
+            or binding.kind is not WorkspaceKind.SOURCE
+            or binding.lane is not SourceLane.IMPLEMENTATION
+            or binding.detached
+            or not claim.branch.startswith(f"{binding.item_number}-auto-impl-direct-")
+            or (claim.state == "armed" and claim.reservation_base_sha != binding.revision)
+        ):
+            raise WorkspaceBindingError("dirty claim does not match the workspace")
+        DirtyDirectClaim.from_dict(claim.to_dict())
     if binding.generation < 0:
         raise WorkspaceBindingError("workspace generation must be non-negative")
     if binding.kind is WorkspaceKind.SOURCE and any(
@@ -204,13 +319,47 @@ def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedP
     )
 
 
-def validate_workspace_binding(binding: WorkspaceBinding, *, allowed_tools: str = "") -> Path:
+@dataclass(slots=True)
+class _DirtyPermitRecord:
+    """Revoke a permit in every copied context when its lease ends."""
+
+    permit: object
+    binding: WorkspaceBinding
+    active: bool = True
+
+
+_DIRTY_PERMITS: ContextVar[tuple[_DirtyPermitRecord, ...]] = ContextVar(
+    "dirty_workspace_permits", default=()
+)
+
+
+@contextmanager
+def _dirty_workspace_permit(binding: WorkspaceBinding) -> Iterator[object]:
+    """Hold a process-local permit after the source manager consumes a claim."""
+    permit = object()
+    record = _DirtyPermitRecord(permit, binding)
+    token = _DIRTY_PERMITS.set((*_DIRTY_PERMITS.get(), record))
+    try:
+        yield permit
+    finally:
+        record.active = False
+        _DIRTY_PERMITS.reset(token)
+
+
+def validate_workspace_binding(
+    binding: WorkspaceBinding, *, allowed_tools: str = "", dirty_permit: object | None = None
+) -> Path:
     """Validate a binding immediately before an agent invocation.
 
     Returns the canonical directory on success. No source-capable invocation
     may proceed from a session-only directory or the reusable checkout.
     """
     _validate_shape(binding)
+    if binding.schema_version == 2 and not any(
+        record.active and record.permit is dirty_permit and record.binding is binding
+        for record in _DIRTY_PERMITS.get()
+    ):
+        raise WorkspaceBindingError("dirty workspace requires an active exact permit")
     lexical = binding.cwd.absolute()
     try:
         canonical = binding.cwd.resolve(strict=True)
@@ -244,9 +393,18 @@ def validate_workspace_binding(binding: WorkspaceBinding, *, allowed_tools: str 
     if head != revision:
         raise WorkspaceBindingError(f"workspace revision changed: expected {revision}, got {head}")
     status = _run_git(canonical, "status", "--porcelain", "--untracked-files=all").stdout
-    if status:
+    if status and binding.schema_version != 2:
         raise WorkspaceBindingError("source workspace is dirty")
+    _validate_workspace_branch(binding, canonical)
+    return canonical
+
+
+def _validate_workspace_branch(binding: WorkspaceBinding, canonical: Path) -> None:
+    """Check attached branch identity before a source invocation."""
     symbolic = _run_git(canonical, "symbolic-ref", "-q", "HEAD", check=False)
+    if binding.dirty_claim is not None and symbolic.stdout.strip() != (
+        f"refs/heads/{binding.dirty_claim.branch}"
+    ):
+        raise WorkspaceBindingError("dirty workspace branch changed")
     if binding.detached != (symbolic.returncode != 0):
         raise WorkspaceBindingError("workspace detached/branch state changed")
-    return canonical

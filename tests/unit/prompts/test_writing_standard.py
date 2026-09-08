@@ -62,6 +62,7 @@ COMPLETE_AGENT_PROMPTS = (
     "fleet_sync/conflict_resolution.j2",
     "follow_up/follow_up.j2",
     "implementation/dirty_worktree.j2",
+    "implementation/dirty_direct_continuation.j2",
     "implementation/implementation.j2",
     "implementation/loop_review.j2",
     "implementation/resume_feedback.j2",
@@ -155,6 +156,17 @@ DIRECT_PROMPTS: tuple[tuple[str, dict[str, Any]], ...] = (
         {
             "untrusted_notice": "Untrusted data follows.",
             "branch_block": "branch",
+            "status_block": "status",
+            "diff_block": "diff",
+        },
+    ),
+    (
+        "implementation/dirty_direct_continuation.j2",
+        {
+            "untrusted_notice": "Untrusted data follows.",
+            "plan_block": "plan",
+            "review_block": "review",
+            "paths_block": "paths",
             "status_block": "status",
             "diff_block": "diff",
         },

@@ -54,6 +54,11 @@ EXPECTED_SCOPES = {
     ("stages/implementation.py", "_implement_wait", "build_implementation_prompt"): WRITE,
     (
         "stages/implementation.py",
+        "_dirty_direct_implement",
+        "get_dirty_direct_continuation_prompt",
+    ): WRITE,
+    (
+        "stages/implementation.py",
         "_rebase_conflict_wait",
         "build_implementation_prompt",
     ): EDIT_ONLY,
