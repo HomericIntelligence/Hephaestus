@@ -201,6 +201,16 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
         "severity": normalized_severity,
         "body": body.strip(),
     }
+    finding_id = comment.get("finding_id")
+    if finding_id is not None:
+        if not isinstance(finding_id, str) or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None:
+            return None
+        finding["finding_id"] = finding_id
+    evidence = comment.get("evidence")
+    if evidence is not None:
+        if not isinstance(evidence, str) or not evidence.strip():
+            return None
+        finding["evidence"] = evidence.strip()
     if paths:
         finding["scope_retraction_paths"] = paths
     return finding

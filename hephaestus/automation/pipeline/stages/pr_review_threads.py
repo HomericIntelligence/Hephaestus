@@ -190,6 +190,7 @@ REVIEW_CHECKOUT_RETRY_CAP = 2
 
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
+_ANCHOR_CORRECTION_RETRY = "review_anchor_correction_retry"
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
@@ -592,6 +593,7 @@ __all__ = [
     "UNSUPPORTED_HOST_VERIFICATION_ERROR",
     "VALIDATE_WAIT",
     "VALID_SEVERITIES",
+    "_ANCHOR_CORRECTION_RETRY",
     "_COMMENT_VALIDATION_ONLY",
     "_HOST_VERIFICATION_PENDING",
     "_JSON_RESPONSE_BLOCK_RE",

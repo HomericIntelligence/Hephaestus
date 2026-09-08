@@ -1,6 +1,8 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
+import json
 from pathlib import Path
+from typing import cast
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -52,6 +54,191 @@ def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:
         _issue_number(item),
     )
     return StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff")
+
+
+def _finding_content_key(value: object) -> str | None:
+    """Return a stable key for finding text and evidence without its anchor."""
+    if not isinstance(value, dict):
+        return None
+    finding_id = value.get("finding_id")
+    if isinstance(finding_id, str) and re.fullmatch(r"[0-9a-f]{64}", finding_id):
+        return f"id:{finding_id}"
+    content = {
+        key: candidate for key, candidate in value.items() if key not in {"path", "line", "side"}
+    }
+    try:
+        return json.dumps(content, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _correction_content_key(value: object) -> str | None:
+    """Return the content key for one serialized anchor correction."""
+    if not isinstance(value, dict):
+        return None
+    finding_id = value.get("finding_id")
+    if isinstance(finding_id, str) and re.fullmatch(r"[0-9a-f]{64}", finding_id):
+        return f"id:{finding_id}"
+    return _finding_content_key(value.get("finding"))
+
+
+def _pending_correction_records(
+    previous: list[object],
+    published_content_keys: set[str],
+    current: tuple[list[dict[str, object]], list[dict[str, object]]],
+) -> list[dict[str, object]]:
+    """Retain unresolved corrections across reviewer correction attempts."""
+    pending: list[dict[str, object]] = []
+    pending_keys: set[str | None] = set()
+    for value in previous:
+        if not isinstance(value, dict):
+            continue
+        content_key = _correction_content_key(value)
+        if content_key not in published_content_keys and content_key not in pending_keys:
+            pending.append(dict(value))
+            pending_keys.add(content_key)
+    for collection in current:
+        for correction in collection:
+            content_key = _correction_content_key(correction)
+            if content_key not in pending_keys:
+                pending.append(dict(correction))
+                pending_keys.add(content_key)
+    return pending
+
+
+def _review_receipt_lists(
+    receipt: PrReviewReconciled,
+) -> tuple[list[dict[str, object]], ...] | None:
+    """Thaw and validate the lists carried by one review receipt."""
+    values = (
+        receipt.posted_receipts.thaw(),
+        receipt.unresolved_threads.thaw(),
+        receipt.remediation_threads.thaw(),
+        receipt.anchor_corrections.thaw(),
+        receipt.unpublishable_findings.thaw(),
+    )
+    if not all(isinstance(value, list) for value in values):
+        return None
+    lists = tuple(cast(list[object], value) for value in values)
+    if not all(isinstance(entry, dict) for value in lists for entry in value):
+        return None
+    return tuple(cast(list[dict[str, object]], value) for value in lists)
+
+
+def _correction_failure_result(item: WorkItem, receipt: PrReviewReconciled) -> StepResult | None:
+    """Keep correction data when another publication proof fails."""
+    corrections = receipt.anchor_corrections.thaw()
+    unpublishable = receipt.unpublishable_findings.thaw()
+    if (
+        not isinstance(corrections, list)
+        or not isinstance(unpublishable, list)
+        or not all(isinstance(value, dict) for value in corrections)
+        or not all(isinstance(value, dict) for value in unpublishable)
+        or (not corrections and not unpublishable)
+    ):
+        return None
+    previous = item.payload.get("review_anchor_corrections", [])
+    previous_records = previous if isinstance(previous, list) else []
+    pending = _pending_correction_records(
+        previous_records,
+        set(),
+        (corrections, unpublishable),
+    )
+    item.payload["review_anchor_corrections"] = pending
+    item.payload[_ANCHOR_CORRECTION_RETRY] = True
+    item.payload["review_publication_summary"] = {
+        "published": [],
+        "corrected": [],
+        "could_not_publish": pending,
+    }
+    return Continue(next_state=REVIEW_WAIT)
+
+
+def _apply_review_receipt(
+    item: WorkItem,
+    receipt: PrReviewReconciled,
+    *,
+    remediation_handoff: Callable[[], StepResult],
+) -> StepResult:
+    """Apply a successful review publication receipt to one work item."""
+    lists = _review_receipt_lists(receipt)
+    if lists is None:
+        item.payload["review_audit_failure"] = True
+        return Continue(next_state=EVAL)
+    posted, unresolved, remediation, corrections, unpublishable = lists
+    raw_findings = receipt.request.findings.thaw()
+    if not isinstance(raw_findings, list) or not all(
+        isinstance(value, dict) for value in raw_findings
+    ):
+        item.payload["review_audit_failure"] = True
+        return Continue(next_state=EVAL)
+    previous_corrections = item.payload.get("review_anchor_corrections", [])
+    had_previous_corrections = isinstance(previous_corrections, list) and any(
+        isinstance(value, dict) for value in previous_corrections
+    )
+    posted_keys = {key for value in posted if (key := _finding_key(value)) is not None}
+    published_findings = [
+        dict(value) for value in raw_findings if _finding_key(value) in posted_keys
+    ]
+    if not isinstance(previous_corrections, list):
+        previous_corrections = []
+    published_content_keys = {
+        content_key
+        for finding in published_findings
+        if (content_key := _finding_content_key(finding)) is not None
+    }
+    corrected = [
+        {
+            "finding": dict(finding),
+            "previous_correction": dict(previous_correction),
+        }
+        for previous_correction in previous_corrections
+        if isinstance(previous_correction, dict)
+        and _correction_content_key(previous_correction) in published_content_keys
+        for finding in published_findings
+        if _finding_content_key(finding) == _correction_content_key(previous_correction)
+    ]
+    pending_corrections = _pending_correction_records(
+        previous_corrections,
+        published_content_keys,
+        (corrections, unpublishable),
+    )
+    pending_unpublishable = [dict(correction) for correction in pending_corrections]
+    item.payload["review_threads"] = [dict(value) for value in published_findings]
+    item.payload["posted_thread_ids"] = [str(value["id"]) for value in posted if "id" in value]
+    item.payload["unresolved_threads"] = [dict(value) for value in unresolved]
+    item.payload["remediation_threads"] = [dict(value) for value in remediation]
+    item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]
+    item.payload["unresolved_threads_before_address"] = len(remediation)
+    item.payload["review_publication_summary"] = {
+        "published": published_findings,
+        "corrected": corrected,
+        "could_not_publish": pending_unpublishable,
+    }
+    if pending_corrections:
+        item.payload["review_anchor_corrections"] = pending_corrections
+    else:
+        item.payload.pop("review_anchor_corrections", None)
+    if item.payload.pop(_COMMENT_VALIDATION_ONLY, None):
+        # Thread validation can resolve comments but cannot manufacture
+        # the reviewer-owned decision required to authorize GO.
+        item.payload.pop("review_audit", None)
+        return Continue(next_state=REVIEW_WAIT)
+    if pending_corrections and not remediation:
+        # A correction is reviewer work. Keep it out of implementation
+        # remediation and ask the reviewer to choose a valid anchor on
+        # the current immutable diff.
+        item.payload[_ANCHOR_CORRECTION_RETRY] = True
+        return Continue(next_state=REVIEW_WAIT)
+    if remediation:
+        item.payload.pop(_ANCHOR_CORRECTION_RETRY, None)
+    elif had_previous_corrections and not corrected:
+        # The reviewer had a correction task, but did not publish a current
+        # inline finding. Let the gate complete this correction cycle without
+        # charging the implementation-review budget.
+        item.payload[_ANCHOR_CORRECTION_RETRY] = True
+        return Continue(next_state=REVIEW_WAIT)
+    return remediation_handoff() if remediation else Continue(next_state=EVAL)
 
 
 class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
@@ -396,6 +583,14 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
+                ),
+                "host_verification_bootstrap_json": item.payload.get(
+                    "host_verification_bootstrap_json", ""
+                ),
+                "anchor_corrections_json": json.dumps(
+                    item.payload.get("review_anchor_corrections", []),
+                    ensure_ascii=False,
+                    sort_keys=True,
                 ),
                 "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
@@ -1004,47 +1199,19 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.payload.pop("validation_pr_metadata_fingerprint", None)
             return Continue(next_state=REVIEW_WAIT)
         if receipt.action == "audit_failure":
+            correction_result = _correction_failure_result(item, receipt)
+            if correction_result is not None:
+                return correction_result
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-
-        posted = receipt.posted_receipts.thaw()
-        unresolved = receipt.unresolved_threads.thaw()
-        remediation = receipt.remediation_threads.thaw()
-        if (
-            not isinstance(posted, list)
-            or not isinstance(unresolved, list)
-            or not isinstance(remediation, list)
-        ):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        raw_findings = receipt.request.findings.thaw()
-        if not isinstance(raw_findings, list) or not all(
-            isinstance(value, dict) for value in raw_findings
-        ):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        posted_keys = {
-            key for value in posted if isinstance(value, dict) and (key := _finding_key(value))
-        }
-        item.payload["review_threads"] = [
-            dict(value) for value in raw_findings if _finding_key(value) in posted_keys
-        ]
-        item.payload["posted_thread_ids"] = [
-            str(value["id"]) for value in posted if isinstance(value, dict) and "id" in value
-        ]
-        item.payload["unresolved_threads"] = [dict(value) for value in unresolved]
-        item.payload["remediation_threads"] = [dict(value) for value in remediation]
-        item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]
-        item.payload["unresolved_threads_before_address"] = len(remediation)
-        if item.payload.pop(_COMMENT_VALIDATION_ONLY, None):
-            # Thread validation can resolve comments but cannot manufacture
-            # the reviewer-owned decision required to authorize GO.
-            item.payload.pop("review_audit", None)
-            return Continue(next_state=REVIEW_WAIT)
         audit = item.payload.get("review_audit")
         if isinstance(audit, ReviewAudit) and audit.scope_expansions:
             return Continue(next_state=EVAL)
-        return self._handoff_implementation(item, ctx) if remediation else Continue(next_state=EVAL)
+        return _apply_review_receipt(
+            item,
+            receipt,
+            remediation_handoff=lambda: self._handoff_implementation(item, ctx),
+        )
 
     def _post(  # noqa: C901
         self, item: WorkItem, ctx: StageContext

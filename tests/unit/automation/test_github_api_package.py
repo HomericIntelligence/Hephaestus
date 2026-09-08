@@ -14,7 +14,14 @@ def test_public_reexports_match_canonical_submodules() -> None:
     """The package shim must re-export the canonical submodule functions."""
     expected = {
         "checks": ["gh_pr_checks", "_map_pr_check"],
-        "diff": ["_filter_comments_to_diff", "_valid_review_positions"],
+        "diff": [
+            "_filter_comments_to_diff",
+            "_valid_review_positions",
+            "_validate_comments_to_diff",
+            "ReviewAnchorCorrection",
+            "ReviewAnchorCorrectionReason",
+            "ReviewCommentValidation",
+        ],
         "issue_states": ["prefetch_issue_states", "_fetch_batch_states"],
         "issues": ["gh_issue_json", "gh_issue_create", "fetch_issue_info"],
         "labels": ["gh_list_labels", "gh_create_label", "_ensure_labels_exist"],

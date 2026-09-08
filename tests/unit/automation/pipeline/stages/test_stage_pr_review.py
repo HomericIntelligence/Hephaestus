@@ -22,6 +22,7 @@ import hephaestus.automation.pipeline.stages.pr_review_jobs as pr_review_jobs
 from hephaestus.agents import runtime as agent_runtime
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import parse_addressed_replies
+from hephaestus.automation.github_api import ReviewAnchorCorrection
 from hephaestus.automation.pipeline.github_jobs import (
     EnsureScopeExpansionChildrenRequest,
     FrozenJson,
@@ -81,6 +82,7 @@ from hephaestus.automation.pipeline.stages.pr_review_verification import (
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.pipeline_github_reviews import ReviewPublicationResult
 from hephaestus.automation.prompts.pr_review import MAX_PR_REVIEW_RENDERED_CHARS
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.review_journal import IssueComment
@@ -6983,6 +6985,241 @@ class TestAuditPublication:
 
         assert result == Continue(next_state="EVAL")
         assert github.received_diff == item.payload["pr_diff"]
+
+    def test_invalid_anchor_returns_to_review_without_consuming_a_round(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Anchor correction keeps evidence and does not advance review rounds."""
+
+        class CorrectionPublishingGitHub(FakeStageGitHub):
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                *,
+                expected_head_sha: str,
+                review_diff: str | None = None,
+            ) -> ReviewPublicationResult:
+                del pr_number, expected_head_sha, review_diff
+                valid = dict(threads[0])
+                invalid = dict(threads[1])
+                correction = ReviewAnchorCorrection(
+                    finding=invalid,
+                    path=str(invalid["path"]),
+                    line=invalid["line"],
+                    side=str(invalid["side"]),
+                    reason="anchor_not_in_reviewed_diff",
+                )
+                return ReviewPublicationResult(
+                    [
+                        {
+                            "id": "valid-thread",
+                            "path": valid["path"],
+                            "line": valid["line"],
+                            "side": valid["side"],
+                            "body": valid["body"],
+                        }
+                    ],
+                    validated_findings=[valid],
+                    corrections=[correction],
+                    unpublishable=[correction],
+                )
+
+        valid = {
+            "path": "a.py",
+            "line": 1,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "valid finding",
+        }
+        invalid = {
+            "path": "a.py",
+            "line": 99,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "credible finding with an invalid anchor",
+            "evidence": "descriptor state is lost in the spawned worker",
+        }
+        stage = PrReviewStage()
+        item = make_work_item(issue=50, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": "reviewed diff",
+                "review_threads": [valid, invalid],
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    summary="Needs review",
+                    findings=(valid, invalid),
+                    raw_feedback="review feedback",
+                    valid=True,
+                ),
+            }
+        )
+
+        result = _complete_github_job(stage, item, make_ctx(github=CorrectionPublishingGitHub()))
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert item.attempts.get("pr_review_iter", 0) == 0
+        assert item.payload["review_anchor_corrections"][0]["finding"]["evidence"] == (
+            "descriptor state is lost in the spawned worker"
+        )
+        summary = item.payload["review_publication_summary"]
+        assert summary["published"] == [valid]
+        assert summary["corrected"] == []
+        assert summary["could_not_publish"][0]["path"] == "a.py"
+
+    def test_anchor_correction_retry_does_not_advance_review_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The gate does not count a reviewer-only anchor correction."""
+        item = make_work_item(issue=50, pr=1001, state="EVAL")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_audit": _valid_audit(),
+                "review_anchor_correction_retry": True,
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=FakeStageGitHub()))
+
+        assert isinstance(result, StageOutcome)
+        assert item.attempts.get("pr_review_iter", 0) == 0
+
+    def test_same_content_at_different_anchors_keeps_two_corrections(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The correction handoff preserves each original finding identity."""
+
+        class TwoCorrectionGitHub(FakeStageGitHub):
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                *,
+                expected_head_sha: str,
+                review_diff: str | None = None,
+            ) -> ReviewPublicationResult:
+                del pr_number, expected_head_sha, review_diff
+                corrections = [
+                    ReviewAnchorCorrection(
+                        finding=dict(finding),
+                        path=str(finding["path"]),
+                        line=cast(int, finding["line"]),
+                        side=str(finding["side"]),
+                        reason="anchor_not_in_reviewed_diff",
+                    )
+                    for finding in threads
+                ]
+                return ReviewPublicationResult(
+                    [], corrections=corrections, unpublishable=corrections
+                )
+
+        shared = {
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "worker state is not retained",
+            "evidence": "the child rebuilds state without the descriptor",
+        }
+        findings = [
+            {**shared, "path": "old.py", "line": 99},
+            {**shared, "path": "other.py", "line": 99},
+        ]
+        item = make_work_item(issue=50, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": "reviewed diff",
+                "review_threads": findings,
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    summary="Needs review",
+                    findings=tuple(findings),
+                    raw_feedback="review feedback",
+                    valid=True,
+                ),
+            }
+        )
+
+        result = _complete_github_job(PrReviewStage(), item, make_ctx(github=TwoCorrectionGitHub()))
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        corrections = item.payload["review_anchor_corrections"]
+        assert len(corrections) == 2
+        assert corrections[0]["finding_id"] != corrections[1]["finding_id"]
+
+    def test_reanchored_finding_is_marked_corrected(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later valid anchor changes the summary from pending to corrected."""
+
+        class ReanchoredPublishingGitHub(FakeStageGitHub):
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                *,
+                expected_head_sha: str,
+                review_diff: str | None = None,
+            ) -> ReviewPublicationResult:
+                del pr_number, expected_head_sha, review_diff
+                finding = dict(threads[0])
+                return ReviewPublicationResult(
+                    [
+                        {
+                            "id": "reanchored-thread",
+                            "path": finding["path"],
+                            "line": finding["line"],
+                            "side": finding["side"],
+                            "body": finding["body"],
+                        }
+                    ],
+                    validated_findings=[finding],
+                )
+
+        original = {
+            "path": "old.py",
+            "line": 99,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "worker state is not retained",
+            "evidence": "the child rebuilds state without the descriptor",
+        }
+        correction = {
+            "finding": original,
+            "path": "old.py",
+            "line": 99,
+            "side": "RIGHT",
+            "reason": "anchor_not_in_reviewed_diff",
+        }
+        reanchored = {**original, "path": "new.py", "line": 7}
+        item = make_work_item(issue=50, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": "reviewed diff",
+                "review_anchor_corrections": [correction],
+                "review_threads": [reanchored],
+                "review_audit": ReviewAudit(
+                    grade="F",
+                    summary="Needs review",
+                    findings=(reanchored,),
+                    raw_feedback="review feedback",
+                    valid=True,
+                ),
+            }
+        )
+
+        result = _complete_github_job(
+            PrReviewStage(), item, make_ctx(github=ReanchoredPublishingGitHub())
+        )
+
+        assert result == Continue(next_state="EVAL")
+        assert "review_anchor_corrections" not in item.payload
+        assert item.payload["review_publication_summary"]["corrected"] == [
+            {"finding": reanchored, "previous_correction": correction}
+        ]
 
 
 class TestProgressCounts:

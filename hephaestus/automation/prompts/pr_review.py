@@ -271,6 +271,8 @@ def get_pr_review_analysis_prompt(
     pr_description: str = "",
     advise_findings: str = "",
     host_verifications_json: str = "",
+    host_verification_bootstrap_json: str = "",
+    anchor_corrections_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
     reviewer_provider: str = "",
@@ -293,6 +295,10 @@ def get_pr_review_analysis_prompt(
             reviewer continuity with the advise-first implementation turn.
         host_verifications_json: Host-captured output from every fixed,
             repository-owned validation command bound to the reviewed head.
+        host_verification_bootstrap_json: Host-owned bootstrap data that
+            identifies the exact verification boundary.
+        anchor_corrections_json: Host feedback for findings that were not
+            publishable on the previous review pass.
         include_nitpicks: When False (default), the reviewer is told to OMIT
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
@@ -316,6 +322,8 @@ def get_pr_review_analysis_prompt(
         pr_description=pr_description,
         advise_findings=advise_findings,
         host_verifications_json=host_verifications_json,
+        host_verification_bootstrap_json=host_verification_bootstrap_json,
+        anchor_corrections_json=anchor_corrections_json,
         include_nitpicks=include_nitpicks,
         review_context_kind=review_context_kind,
         reviewer_provider=reviewer_provider,
@@ -332,6 +340,8 @@ def _render_pr_review_analysis_prompt(
     pr_description: str,
     advise_findings: str,
     host_verifications_json: str,
+    host_verification_bootstrap_json: str,
+    anchor_corrections_json: str,
     include_nitpicks: bool,
     review_context_kind: str,
     reviewer_provider: str,
@@ -362,6 +372,14 @@ def _render_pr_review_analysis_prompt(
             "HOST_VERIFICATIONS",
             host_verifications_json or "[]",
         ),
+        host_verification_bootstrap_block=fenced.fence(
+            "HOST_VERIFICATION_BOOTSTRAP", host_verification_bootstrap_json or "{}"
+        ),
+        anchor_corrections_json=anchor_corrections_json or "[]",
+        anchor_corrections_block=fenced.fence(
+            "ANCHOR_CORRECTIONS",
+            anchor_corrections_json or "[]",
+        ),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
         review_rubric=get_pr_review_rubric().strip(),
@@ -389,6 +407,8 @@ def build_bounded_pr_review_analysis_prompt(
     pr_description: str = "",
     advise_findings: str = "",
     host_verifications_json: str = "",
+    host_verification_bootstrap_json: str = "",
+    anchor_corrections_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
     reviewer_provider: str = "",
@@ -412,6 +432,8 @@ def build_bounded_pr_review_analysis_prompt(
             pr_description=description,
             advise_findings=advise,
             host_verifications_json=receipts,
+            host_verification_bootstrap_json=host_verification_bootstrap_json,
+            anchor_corrections_json=anchor_corrections_json,
             include_nitpicks=include_nitpicks,
             review_context_kind=review_context_kind,
             reviewer_provider=reviewer_provider,
