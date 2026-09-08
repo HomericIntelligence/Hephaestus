@@ -220,12 +220,19 @@ def build_pyxis_environment(*, source: Path, scratch: Path) -> dict[str, str]:
     return environment
 
 
-def pyxis_help_supports_namespace_isolation(help_text: str) -> bool:
-    """Check for the required option in successful runtime help output.
-
-    This prerequisite does not prove that runtime isolation works.
-    """
-    return re.search(r"(?m)^[ \t]*--container-unshare(?=[= \t\r\n]|$)", help_text) is not None
+def pyxis_help_supports_container_execution(help_text: str) -> bool:
+    """Check standard Pyxis options; the image must enforce isolation at launch."""
+    required = (
+        "container-image",
+        "container-readonly",
+        "no-container-mount-home",
+        "container-workdir",
+        "container-mounts",
+    )
+    return all(
+        re.search(rf"(?m)^[ \t]*--{name}(?=[= \t\r\n]|$)", help_text) is not None
+        for name in required
+    )
 
 
 def build_pyxis_srun_command(
@@ -283,13 +290,27 @@ def build_pyxis_srun_command(
         "--container-image=" + str(image.path),
         "--container-readonly",
         "--no-container-mount-home",
-        "--container-unshare=net,ipc,uts",
         "--container-workdir=" + str(source_path),
         "--container-mounts=" + mounts,
         "--export=NONE",
         "/usr/bin/env",
         "-i",
         *environment_items,
+        # The verified image supplies these tools. Drop namespace capabilities
+        # before candidate code starts; a setup failure cannot run the command.
+        "/usr/bin/unshare",
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--ipc",
+        "--uts",
+        "--",
+        "/usr/bin/setpriv",
+        "--no-new-privs",
+        "--bounding-set=-all",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+        "--",
         *container_argv,
     )
 

@@ -111,7 +111,7 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     PyxisExecutionPlacement,
     build_pyxis_environment as _build_pyxis_environment,
     build_pyxis_srun_command as _build_pyxis_srun_command,
-    pyxis_help_supports_namespace_isolation as _pyxis_help_supports_namespace_isolation,
+    pyxis_help_supports_container_execution as _pyxis_help_supports_container_execution,
     stage_verified_pyxis_image as _stage_verified_pyxis_image,
     validate_pyxis_image as _validate_pyxis_image,
     validate_pyxis_quota_root as _validate_pyxis_quota_root,
@@ -1747,7 +1747,7 @@ def _pyxis_runtime_available(*, shutdown: threading.Event) -> bool:
                 help_bytes = output.read(65_537)
             if len(help_bytes) > 65_536:
                 return False
-            return _pyxis_help_supports_namespace_isolation(help_bytes.decode("utf-8"))
+            return _pyxis_help_supports_container_execution(help_bytes.decode("utf-8"))
     except (OSError, ValueError):
         return False
 

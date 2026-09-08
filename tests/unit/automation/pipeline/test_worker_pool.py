@@ -16431,12 +16431,13 @@ def test_pyxis_runtime_preflight_uses_bounded_scrubbed_runner(
         output = kwargs["scratch"] / "outputs"
         output.mkdir()
         text = (
-            "  --container-unshare=NS,...\n"
+            "  --container-image=PATH\n  --container-readonly\n"
+            "  --no-container-mount-home\n  --container-workdir=PATH\n  --container-mounts=MOUNTS\n"
             if case == "supported"
             else "  --container-image=PATH\n"
         )
         if case == "oversize":
-            text = "  --container-unshare=NS,...\n" + "x" * 65536
+            text = "x" * 65537
         if case == "unreadable":
             raise OSError("output unavailable")
         if case == "encoding":
