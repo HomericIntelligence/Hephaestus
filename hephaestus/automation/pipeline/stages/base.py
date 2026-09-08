@@ -856,28 +856,6 @@ def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> Stag
     return StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
 
 
-def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJob:
-    """Build the mechanical rebase-onto-base GitJob (shared base-ref capture).
-
-    ``merge_wait`` uses this shared worker operation when a dirty-worktree
-    resolution needs to rebase the item's worktree onto the captured
-    ``item.payload["base_branch"]`` (defaulting to ``main``) via the same
-    worker ``op="rebase"`` (``git_utils.rebase_worktree_onto``) — single home
-    so all remaining consumers use one mechanic (#1861).
-    """
-    return GitJob(
-        repo=item.repo,
-        op="rebase",
-        timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
-        expected_repository=f"{ctx.org}/{item.repo}",
-        kwargs={
-            "cwd": _worktree_path(item, ctx),
-            "base_branch": str(item.payload.get("base_branch") or "main"),
-        },
-        descr=descr,
-    )
-
-
 def _reviewed_terminal_pr_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
     """Finish only from a terminal record for the exact dispatched review."""
     node_id = item.payload.get("reviewed_pr_node_id")

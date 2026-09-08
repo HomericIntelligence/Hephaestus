@@ -1642,6 +1642,21 @@ class TestImplementationAdmission:
             "branch": branch,
             "base_sha": base_revision,
         }
+        rebase_handle, _rebase_result = coordinator.completion_q.get_nowait()
+        assert isinstance(rebase_handle.job, GitJob)
+        assert rebase_handle.job.op == "rebase"
+        coordinator._handle_completion(
+            rebase_handle,
+            JobResult(
+                ok=True,
+                value={
+                    "head_sha": item.payload["_impl_source_revision"],
+                    "implementation_started": True,
+                    "direct_scope_reservation": item.payload.get(DIRECT_SCOPE_RESERVATION_KEY),
+                },
+            ),
+        )
+
         advice_handle, advice_result = coordinator.completion_q.get_nowait()
         assert coordinator.in_flight[advice_handle] is item
         assert isinstance(advice_handle.job, AthenaSkillJob)
@@ -1745,6 +1760,21 @@ class TestImplementationAdmission:
 
         coordinator._handle_completion(worktree_handle, restarted_result)
 
+        rebase_handle, _rebase_result = coordinator.completion_q.get_nowait()
+        assert isinstance(rebase_handle.job, GitJob)
+        assert rebase_handle.job.op == "rebase"
+        coordinator._handle_completion(
+            rebase_handle,
+            JobResult(
+                ok=True,
+                value={
+                    "head_sha": item.payload["_impl_source_revision"],
+                    "implementation_started": True,
+                    "direct_scope_reservation": item.payload.get(DIRECT_SCOPE_RESERVATION_KEY),
+                },
+            ),
+        )
+
         advice_handle, advice_result = coordinator.completion_q.get_nowait()
         assert isinstance(advice_handle.job, AthenaSkillJob)
         coordinator._handle_completion(advice_handle, advice_result)
@@ -1827,6 +1857,21 @@ class TestImplementationAdmission:
         coordinator.inflight_per_repo[item.repo] = 1
 
         coordinator._handle_completion(worktree_handle, restarted_result)
+
+        rebase_handle, _rebase_result = coordinator.completion_q.get_nowait()
+        assert isinstance(rebase_handle.job, GitJob)
+        assert rebase_handle.job.op == "rebase"
+        coordinator._handle_completion(
+            rebase_handle,
+            JobResult(
+                ok=True,
+                value={
+                    "head_sha": item.payload["_impl_source_revision"],
+                    "implementation_started": True,
+                    "direct_scope_reservation": item.payload.get(DIRECT_SCOPE_RESERVATION_KEY),
+                },
+            ),
+        )
 
         advice_handle, advice_result = coordinator.completion_q.get_nowait()
         assert isinstance(advice_handle.job, AthenaSkillJob)
@@ -4312,22 +4357,147 @@ class TestConfigWiring:
         assert ctx.config.reset_plan_review_sessions == frozenset({42})
 
 
-def test_pretest_cleanup_requires_the_exact_live_permit_owner() -> None:
-    """A duplicate item cannot release another item's result authority."""
-    from hephaestus.automation.pipeline.coordinator_execution import ExecutionCoordinator
+@pytest.mark.parametrize("stage", [StageName.PLANNING, StageName.PR_REVIEW, StageName.MERGE_WAIT])
+def test_manual_rebase_routes_selected_item_then_retains_normal_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: StageName
+) -> None:
+    """A manual rebase runs before the selected item's normal stage."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+    coordinator.config = replace(coordinator.config, rebase=True)
+    entry = SeedEntry("issue", 8, stage, "selected", pr_number=18)
+    item = coordinator._prepare_direct_item(entry, "repo-a", "")
+    assert item.stage is StageName.IMPLEMENTATION
+    assert item.payload["manual_rebase_required"] is True
+    assert item.payload["manual_rebase_resume_stage"] == stage.value
+    assert coordinator._push_item(item, item.stage, enter=True)
+    linked = SeedEntry("pr", 18, StageName.PR_REVIEW, "selected", issue_number=8)
+    repeated = coordinator._prepare_direct_item(linked, "repo-a", "")
+    assert repeated.stage is StageName.PR_REVIEW
+    assert not repeated.payload.get("manual_rebase_required")
 
-    item = object()
-    duplicate = object()
-    discard = MagicMock()
-    host = SimpleNamespace(
-        _live_work_permit_ids={id(item)},
-        _learning_work_permit_ids=set(),
-        pool=SimpleNamespace(discard_remediation_pretest_successes=discard),
-        _item_key=lambda value: "r#7",
+
+def test_manual_rebase_does_not_override_terminal_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed or skipped item retains its terminal result."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+    coordinator.config = replace(coordinator.config, rebase=True)
+    item = coordinator._prepare_direct_item(
+        SeedEntry("issue", 8, StageName.FINISHED, "closed"), "repo-a", ""
     )
-    ExecutionCoordinator._release_work_permit(cast(Any, host), cast(Any, duplicate))
-    discard.assert_not_called()
-    ExecutionCoordinator._release_work_permit(cast(Any, host), cast(Any, item))
-    discard.assert_called_once_with("r#7", owner_id=id(item))
-    ExecutionCoordinator._release_work_permit(cast(Any, host), cast(Any, item))
-    assert discard.call_count == 1
+    assert item.stage is StageName.FINISHED
+    assert not item.payload.get("manual_rebase_required")
+
+
+def test_manual_rebase_request_survives_full_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full queue must not consume a manual rebase request."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+    coordinator.config = replace(coordinator.config, rebase=True)
+    entry = SeedEntry("issue", 8, StageName.PLANNING, "selected")
+    item = coordinator._prepare_direct_item(entry, "repo-a", "")
+    with patch.object(coordinator.queues[item.stage], "offer", return_value=False):
+        assert not coordinator._push_item(item, item.stage, enter=True, defer_if_full=True)
+    retry = coordinator._prepare_direct_item(entry, "repo-a", "")
+    assert retry.stage is StageName.IMPLEMENTATION
+    assert retry.payload["manual_rebase_required"] is True
+    assert coordinator._push_item(retry, retry.stage, enter=True)
+    later = coordinator._prepare_direct_item(entry, "repo-a", "")
+    assert later.stage is StageName.PLANNING
+    assert not later.payload.get("manual_rebase_required")
+
+
+@pytest.mark.parametrize("rebase", [False, True])
+def test_update_plan_runs_once_and_follows_manual_rebase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rebase: bool
+) -> None:
+    """Update a selected plan once, after an optional manual rebase."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, issues=[8])
+    coordinator.config = replace(coordinator.config, rebase=rebase, update_plan=True)
+    stage, reason, _ = coordinator._scope_seed_decision(
+        8, StageName.IMPLEMENTATION, "plan approved", None
+    )
+    assert stage is StageName.PLANNING
+    entry = SeedEntry("issue", 8, stage, reason)
+    item = coordinator._prepare_direct_item(entry, "repo-a", "")
+    assert item.payload["update_plan_required"] is True
+    if rebase:
+        assert item.stage is StageName.IMPLEMENTATION
+        assert item.payload["manual_rebase_resume_stage"] == StageName.PLANNING.value
+    else:
+        assert item.stage is StageName.PLANNING
+    assert coordinator._push_item(item, item.stage, enter=True)
+    repeated_stage, _, _ = coordinator._scope_seed_decision(
+        8, StageName.IMPLEMENTATION, "plan approved", None
+    )
+    assert repeated_stage is StageName.IMPLEMENTATION
+    repeated = coordinator._prepare_direct_item(
+        SeedEntry("issue", 8, repeated_stage, "plan approved"), "repo-a", ""
+    )
+    assert not repeated.payload.get("update_plan_required")
+
+
+@pytest.mark.parametrize("stage", [None, StageName.FINISHED, StageName.LEARNING])
+def test_update_plan_preserves_excluded_and_terminal_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: StageName | None
+) -> None:
+    """A plan update does not reopen excluded or complete work."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, issues=[8])
+    coordinator.config = replace(coordinator.config, update_plan=True)
+    selected, _, _ = coordinator._scope_seed_decision(8, stage, "closed", None)
+    assert selected is stage
+
+
+def test_update_plan_does_not_change_unselected_pr_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A selected PR does not expand the plan-update issue selection."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, issues=[8])
+    coordinator.config = replace(coordinator.config, update_plan=True, prs=[19])
+    selected, _, _ = coordinator._scope_seed_decision(9, StageName.PR_REVIEW, "PR selected", None)
+    assert selected is StageName.PR_REVIEW
+    item = coordinator._prepare_direct_item(
+        SeedEntry("pr", 19, selected, "PR selected", issue_number=9), "repo-a", ""
+    )
+    assert not item.payload.get("update_plan_required")
+
+
+def test_update_plan_request_survives_full_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full queue retains the requested plan update."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, issues=[8])
+    coordinator.config = replace(coordinator.config, update_plan=True)
+    item = coordinator._prepare_direct_item(
+        SeedEntry("issue", 8, StageName.PLANNING, "selected"), "repo-a", ""
+    )
+    with patch.object(coordinator.queues[item.stage], "offer", return_value=False):
+        assert not coordinator._push_item(item, item.stage, enter=True, defer_if_full=True)
+    selected, _, _ = coordinator._scope_seed_decision(
+        8, StageName.IMPLEMENTATION, "plan approved", frozenset({StageName.PLANNING})
+    )
+    assert selected is StageName.PLANNING
+
+
+def test_update_plan_same_issue_number_in_two_repositories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each selected repository has its own plan-update request."""
+    coordinator, _, _ = make_coordinator(
+        tmp_path, monkeypatch, repos=["repo-a", "repo-b"], issues=[8]
+    )
+    coordinator.config = replace(coordinator.config, update_plan=True)
+    entry = SeedEntry("issue", 8, StageName.PLANNING, "selected")
+    first = coordinator._prepare_direct_item(entry, "repo-a", "")
+    assert coordinator._push_item(first, first.stage, enter=True)
+    second = coordinator._prepare_direct_item(entry, "repo-b", "")
+    assert second.payload.get("update_plan_required") is True
+    first_stage, _, _ = coordinator._scope_seed_decision(
+        8, StageName.IMPLEMENTATION, "plan approved", None, repo="repo-a"
+    )
+    second_stage, _, _ = coordinator._scope_seed_decision(
+        8, StageName.IMPLEMENTATION, "plan approved", None, repo="repo-b"
+    )
+    assert first_stage is StageName.IMPLEMENTATION
+    assert second_stage is StageName.PLANNING

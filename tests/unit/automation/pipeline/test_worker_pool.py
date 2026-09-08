@@ -16542,6 +16542,56 @@ def test_adopted_remediation_creation_consumes_worker_metadata(
     assert (writer.cwd / "tracked.txt").read_bytes() == original_content
 
 
+def test_fresh_direct_reservation_allows_exactly_one_initial_rebase(
+    pool: WorkerPool,
+    tmp_path: Path,
+) -> None:
+    """A fresh direct reservation permits one implementation-start rebase."""
+    repo, _, base = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+    manager.prepare(7, SourceLane.IMPLEMENTATION, base)
+    branch = "7-auto-impl-direct-" + "e" * 32
+    create = GitJob(
+        repo="Hephaestus",
+        expected_repository="HomericIntelligence/Hephaestus",
+        op="create_worktree",
+        timeout_s=60,
+        kwargs={
+            "repo_root": str(repo),
+            "issue_number": 7,
+            "branch_name": branch,
+            "source_lane": "impl",
+            "base_sha": base,
+            "direct_worktree_nonce": "e" * 32,
+            "record_initial_creation": True,
+        },
+    )
+    with patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())):
+        created = pool._git_create_worktree(create)
+    assert created.ok, created.error
+    rebase = GitJob(
+        repo=create.repo,
+        expected_repository=create.expected_repository,
+        op="rebase",
+        timeout_s=60,
+        kwargs={
+            "cwd": created.value["path"],
+            "repo_root": str(repo),
+            "issue_number": 7,
+            "branch": branch,
+            "expected_head_sha": base,
+            "rebase_reason": "implementation_start",
+        },
+    )
+    with patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())):
+        first = pool._git_rebase(rebase)
+    assert first.ok, first.error
+    with patch.object(pool, "_git_fetch_main") as fetch:
+        second = pool._git_rebase(rebase)
+    assert second.ok, second.error
+    fetch.assert_not_called()
+
+
 def test_pretest_cleanup_keeps_other_owner_and_active_entries(pool: WorkerPool) -> None:
     """A permit release removes only its owner's completed idle result."""
     from types import SimpleNamespace

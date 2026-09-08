@@ -107,6 +107,8 @@ from hephaestus.automation.pipeline.github_jobs import (
     GitHubJobRunner,
     InspectAdoptedRemediationPrStateRequest,
     InspectDirtyDirectPrStateRequest,
+    InspectRebaseConflictRequest,
+    RebaseConflictInspected,
 )
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
@@ -192,6 +194,8 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceReceipt,
     SourceWorkspaceRecovery,
     SourceWorkspaceTerminalError,
+    _terminal_json_object,
+    _terminal_read_bytes,
 )
 from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
@@ -5328,6 +5332,9 @@ class WorkerPool:
 
             return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
 
+        elif job.op == "fetch_main":
+            return self._git_fetch_main(job)
+
         elif job.op == "rebase":
             return self._git_rebase(job)
 
@@ -5618,105 +5625,506 @@ class WorkerPool:
             value={"main_sha": main_sha, "ancestors": tuple(ancestor_values)},
         )
 
-    def _git_rebase(self, job: GitJob) -> JobResult:  # noqa: C901
-        """Rebase an implementation writer and optionally lease-publish its head."""
-        kwargs = dict(job.kwargs)
-        if "publish_detached_head" in kwargs:
-            return JobResult(
-                ok=False,
-                error="detached reviewer rebase publication is unsupported",
-            )
-        publish_rebased_head = bool(kwargs.pop("publish_rebased_head", False))
-        abort_on_conflict = bool(kwargs.pop("abort_on_conflict", False))
-        required_ancestor_shas = kwargs.pop("required_ancestor_shas", ())
-        sync_to_expected_remote_head = bool(kwargs.pop("sync_to_expected_remote_head", False))
-        branch = str(kwargs.pop("branch", "") or "")
-        expected_remote_sha = kwargs.pop("expected_remote_sha", None)
-        pr_number = kwargs.pop("pr_number", None)
-        cwd = Path(str(kwargs.get("cwd") or ""))
-
-        revalidate_remote = self._authenticated_remote_revalidator(
+    def _git_fetch_main(self, job: GitJob) -> JobResult:
+        """Fetch origin/main and return its exact commit."""
+        cwd = Path(str(job.kwargs.get("cwd") or ""))
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
             cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
-        remote_env, remote_config = revalidate_remote()
-        if not isinstance(required_ancestor_shas, (list, tuple)) or not all(
-            _is_full_commit_sha(value) for value in required_ancestor_shas
-        ):
-            return JobResult(ok=False, error="required rebase ancestors are invalid")
+        git_utils.run(
+            ["git", *remote_config, "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+            cwd=cwd,
+            timeout=job.timeout_s,
+            env=remote_env,
+        )
+        head = git_utils.run(
+            ["git", "rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+            cwd=cwd,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if not _is_full_commit_sha(head):
+            return JobResult(ok=False, error="fetched main head is invalid")
+        return JobResult(ok=True, value={"head_sha": head})
 
-        def verify_required_ancestors() -> JobResult | None:
-            for ancestor_sha in required_ancestor_shas:
-                ancestry = git_utils.run(
-                    ["git", "merge-base", "--is-ancestor", ancestor_sha, "HEAD"],
+    def _initial_start_identity(self, job: GitJob) -> tuple[Path, dict[str, object]]:
+        """Bind a first-start record to host Git state and one issue branch."""
+        issue = job.kwargs.get("issue_number")
+        branch = job.kwargs.get("branch")
+        raw_root = job.kwargs.get("repo_root")
+        if type(issue) is not int or issue < 1 or not isinstance(branch, str) or not branch:
+            raise SourceWorkspaceError("initial implementation identity is invalid")
+        if not isinstance(raw_root, (str, Path)):
+            raise SourceWorkspaceError("initial implementation repository root is missing")
+        root = Path(raw_root).resolve(strict=True)
+        manager = SourceWorkspaceManager(root, repository=job.transport_repository)
+        cwd = Path(str(job.kwargs.get("cwd") or "")).resolve(strict=True)
+        if (
+            WorktreeManager.git_metadata_lock_path(cwd).parent.resolve(strict=True)
+            != manager.common_dir
+        ):
+            raise SourceWorkspaceError("initial implementation Git identity does not match")
+        directory = manager.state_dir
+        if directory.is_symlink() or directory.resolve() != directory:
+            raise SourceWorkspaceError("initial implementation state directory is invalid")
+        directory.mkdir(parents=True, exist_ok=True)
+        identity: dict[str, object] = {
+            "format": 1,
+            "repository": job.transport_repository,
+            "repository_identity": manager.repository_identity,
+            "issue_number": issue,
+            "branch": branch,
+        }
+        return directory / f"{issue}-implementation-start.json", identity
+
+    @staticmethod
+    def _initial_record_matches(
+        path: Path, identity: dict[str, object]
+    ) -> dict[str, object] | None:
+        """Read one complete host record without following links."""
+        if not path.exists() and not path.is_symlink():
+            return None
+        stored = _terminal_json_object(_terminal_read_bytes(path))
+        if (
+            set(stored) != {*identity, "head_sha"}
+            or any(stored.get(key) != value for key, value in identity.items())
+            or not _is_full_commit_sha(stored.get("head_sha"))
+        ):
+            raise SourceWorkspaceError("initial implementation record does not match")
+        return stored
+
+    def _completed_initial_start(self, job: GitJob) -> bool:
+        """Read completed start evidence for a dirty continuation."""
+        path, identity = self._initial_start_identity(job)
+        return self._initial_record_matches(path, identity) is not None
+
+    @staticmethod
+    def _initial_reservation_base(job: GitJob, identity: dict[str, object]) -> str | None:
+        """Validate the host's original empty-branch reservation."""
+        reservation = job.kwargs.get("direct_scope_reservation")
+        if reservation is None:
+            return None
+        if (
+            job.kwargs.get("rebase_reason") != "implementation_start"
+            or job.kwargs.get("publish_rebased_head")
+            or not isinstance(reservation, dict)
+            or set(reservation) != {"branch", "base_sha"}
+            or reservation.get("branch") != identity["branch"]
+            or not _is_full_commit_sha(reservation.get("base_sha"))
+        ):
+            raise SourceWorkspaceError("initial reservation is invalid")
+        return str(reservation["base_sha"])
+
+    def _publish_initial_reservation(
+        self,
+        job: GitJob,
+        result: JobResult,
+        path: Path,
+        identity: dict[str, object],
+    ) -> JobResult:
+        """Move only the exact reserved remote head to the prepared local head."""
+        original = self._initial_reservation_base(job, identity)
+        if original is None or not result.ok or not isinstance(result.value, dict):
+            return result
+        target = result.value.get("head_sha")
+        if not _is_full_commit_sha(target):
+            raise SourceWorkspaceError("initial reservation target is invalid")
+        transition_path = path.with_suffix(".reservation.json")
+        transition_identity = {**identity, "reservation_base_sha": original}
+        previous = self._initial_record_matches(transition_path, transition_identity)
+        if previous is not None and previous["head_sha"] != target:
+            raise SourceWorkspaceError("initial reservation transition changed")
+        write_secure(
+            transition_path,
+            json.dumps({**transition_identity, "head_sha": target}, sort_keys=True) + "\n",
+        )
+        descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        cwd = Path(str(job.kwargs["cwd"]))
+        branch = str(identity["branch"])
+        manager = SourceWorkspaceManager(Path(str(job.kwargs["repo_root"])), repository=job.repo)
+        owner = manager._require_receipt(int(job.kwargs["issue_number"]), SourceLane.IMPLEMENTATION)
+        manager._reject_foreign_owner(
+            owner, int(job.kwargs["issue_number"]), SourceLane.IMPLEMENTATION
+        )
+        if (
+            owner.revision != target
+            or owner.branch != branch
+            or owner.path != cwd
+            or not manager._physical_matches_receipt(owner)
+        ):
+            return JobResult(
+                ok=False,
+                value={
+                    "initial_reservation_pending": True,
+                    "head_sha": target,
+                    "source_receipt_refresh_required": True,
+                },
+                error="preserve the prepared reservation; source ownership needs recovery",
+            )
+        published = False
+        try:
+            remote = self._read_remote_branch_head(
+                cwd,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            if remote != target:
+                if remote != original:
+                    raise SourceWorkspaceError("initial reservation remote head changed")
+                revalidate = self._authenticated_remote_revalidator(
                     cwd=cwd,
-                    check=False,
+                    expected_repo=job.transport_repository,
                     timeout=job.timeout_s,
                 )
-                if ancestry.returncode != 0:
+                remote_env, remote_config = revalidate()
+                git_utils.push_head_to_branch(
+                    branch,
+                    original,
+                    cwd,
+                    source_sha=target,
+                    timeout=job.timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                    revalidate_remote=revalidate,
+                )
+                published = True
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return JobResult(
+                ok=False,
+                value={
+                    "initial_reservation_pending": True,
+                    "head_sha": target,
+                    **(
+                        {"source_receipt_refresh_required": True}
+                        if job.op == "continue_rebase"
+                        else {}
+                    ),
+                },
+                error="initial reservation publication failed; preserve the prepared head",
+            )
+        return replace(
+            result,
+            value={
+                **result.value,
+                "published": published,
+                "direct_scope_reservation": {"branch": branch, "base_sha": target},
+            },
+        )
+
+    def _run_initial_rebase(
+        self,
+        job: GitJob,
+        path: Path,
+        identity: dict[str, object],
+    ) -> JobResult:
+        """Keep source ownership current before publication can fail."""
+        reservation = self._initial_reservation_base(job, identity)
+        if reservation is None:
+            return self._record_initial_start(job, self._git_rebase_once(job), path, identity)
+        if reservation != job.kwargs.get("expected_head_sha"):
+            return JobResult(ok=False, error="initial reservation source head changed")
+        manager = SourceWorkspaceManager(Path(str(job.kwargs["repo_root"])), repository=job.repo)
+        with manager.implementation_local_commit(
+            int(job.kwargs["issue_number"]),
+            branch=str(identity["branch"]),
+            path=Path(str(job.kwargs["cwd"])),
+        ) as advance:
+            result = self._git_rebase_once(job)
+            if result.ok and isinstance(result.value, dict):
+                advance(str(result.value["head_sha"]))
+                return self._record_initial_start(job, result, path, identity)
+            return result
+
+    def _record_initial_start(
+        self,
+        job: GitJob,
+        result: JobResult,
+        path: Path,
+        identity: dict[str, object],
+    ) -> JobResult:
+        """Save the successful start before an implementation agent can run."""
+        if not result.ok or not isinstance(result.value, dict):
+            return result
+        head = result.value.get("head_sha")
+        if not _is_full_commit_sha(head):
+            return JobResult(ok=False, error="initial implementation result head is invalid")
+        result = self._publish_initial_reservation(job, result, path, identity)
+        if not result.ok:
+            return result
+        write_secure(path, json.dumps({**identity, "head_sha": head}, sort_keys=True) + "\n")
+        descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return replace(result, value={**result.value, "implementation_started": True})
+
+    def _completed_initial_rebase_result(
+        self,
+        job: GitJob,
+        identity: dict[str, object],
+        completed: dict[str, object],
+        reservation: str | None,
+    ) -> JobResult:
+        """Return the verified initial preparation record."""
+        cwd = Path(str(job.kwargs.get("cwd") or ""))
+        expected = job.kwargs.get("expected_head_sha")
+        if (
+            not _is_full_commit_sha(expected)
+            or self._read_publish_head(cwd, timeout=job.timeout_s) != expected
+        ):
+            return JobResult(ok=False, error="writer head changed before implementation")
+        if reservation is not None:
+            remote = self._read_remote_branch_head(
+                cwd,
+                remote="origin",
+                branch=str(identity["branch"]),
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            if remote != completed["head_sha"]:
+                return JobResult(
+                    ok=False,
+                    value={"initial_reservation_changed": True},
+                    error="completed initial reservation remote head changed",
+                )
+        return JobResult(
+            ok=True,
+            value={
+                "rebased": False,
+                "published": False,
+                "head_sha": expected,
+                "implementation_started": True,
+                **(
+                    {
+                        "direct_scope_reservation": {
+                            "branch": identity["branch"],
+                            "base_sha": completed["head_sha"],
+                        }
+                    }
+                    if reservation is not None
+                    else {}
+                ),
+            },
+        )
+
+    def _git_rebase(self, job: GitJob) -> JobResult:
+        """Prevent a repeated initial rebase across process restarts."""
+        if job.kwargs.get("rebase_reason") == "manual" and not job.kwargs.get(
+            "publish_rebased_head"
+        ):
+            try:
+                path, identity = self._initial_start_identity(job)
+                with file_lock(path.with_suffix(".lock"), require_exclusive=True):
+                    return self._record_initial_start(
+                        job, self._git_rebase_once(job), path, identity
+                    )
+            except (OSError, ValueError, SourceWorkspaceError) as error:
+                return JobResult(ok=False, error=f"manual implementation state failed: {error}")
+        if job.kwargs.get("rebase_reason") != "implementation_start":
+            return self._git_rebase_once(job)
+        try:
+            path, identity = self._initial_start_identity(job)
+            with file_lock(path.with_suffix(".lock"), require_exclusive=True):
+                cwd = Path(str(job.kwargs.get("cwd") or ""))
+                expected = job.kwargs.get("expected_head_sha")
+                branch = git_utils.run(
+                    ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                    cwd=cwd,
+                    timeout=job.timeout_s,
+                ).stdout.strip()
+                if branch != identity["branch"]:
+                    return JobResult(ok=False, error="initial implementation branch changed")
+                reservation = self._initial_reservation_base(job, identity)
+                completed = self._initial_record_matches(path, identity)
+                transition = (
+                    self._initial_record_matches(
+                        path.with_suffix(".reservation.json"),
+                        {**identity, "reservation_base_sha": reservation},
+                    )
+                    if reservation is not None and completed is None
+                    else None
+                )
+                if completed is not None:
+                    return self._completed_initial_rebase_result(
+                        job, identity, completed, reservation
+                    )
+                if transition is not None:
+                    if (
+                        transition["head_sha"] != expected
+                        or self._read_publish_head(cwd, timeout=job.timeout_s) != expected
+                        or not git_utils.is_clean_working_tree(cwd, timeout=job.timeout_s)
+                    ):
+                        return JobResult(
+                            ok=False, error="initial reservation recovery head changed"
+                        )
+                    return self._record_initial_start(
+                        job,
+                        JobResult(
+                            ok=True,
+                            value={
+                                "rebased": False,
+                                "published": False,
+                                "head_sha": expected,
+                            },
+                        ),
+                        path,
+                        identity,
+                    )
+                pending = self._initial_record_matches(path.with_suffix(".pending.json"), identity)
+                if pending is None or pending["head_sha"] != expected:
                     return JobResult(
                         ok=False,
-                        error=f"required dependency {ancestor_sha} is not in the source head",
+                        value={"initial_implementation_ambiguous": True},
+                        error="initial implementation history is unknown; use --rebase to continue",
                     )
-            return None
+                return self._run_initial_rebase(job, path, identity)
+        except (OSError, ValueError, SourceWorkspaceError) as error:
+            return JobResult(ok=False, error=f"initial implementation state failed: {error}")
 
-        if publish_rebased_head:
-            if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
-                return JobResult(ok=False, error="writer rebase publish arguments invalid")
-            remote = str(kwargs.get("remote", "origin"))
-            base_branch = str(kwargs.get("base_branch", "main"))
-            base_ref = f"{remote}/{base_branch}"
+    def _revalidate_review_conflict(
+        self,
+        job: GitJob,
+        *,
+        head_sha: str,
+        base_sha: str,
+    ) -> JobResult | None:
+        """Require fresh GO and conflict evidence after the base fetch."""
+        runner = self._github_job_runner
+        root = job.kwargs.get("repo_root")
+        pr = job.kwargs.get("pr_number")
+        if runner is None or not isinstance(root, (str, Path)) or type(pr) is not int:
+            return JobResult(ok=False, error="rebase live admission is unavailable")
+        try:
+            request = InspectRebaseConflictRequest(job.transport_repository, pr, head_sha, base_sha)
+            receipt = runner.run(
+                GitHubJob(
+                    repo=job.repo,
+                    repo_root=Path(root).resolve(strict=True),
+                    request=request,
+                    descr="inspect_rebase_conflict",
+                )
+            )
+        except Exception:
+            return JobResult(ok=False, error="rebase live admission is unavailable")
+        if not isinstance(receipt, RebaseConflictInspected) or receipt.request != request:
+            return JobResult(ok=False, error="rebase live admission receipt is invalid")
+        if not receipt.admitted:
+            return JobResult(
+                ok=False, value={"rebase_admission_changed": True}, error=receipt.reason
+            )
+        return None
+
+    def _git_rebase_once(self, job: GitJob) -> JobResult:  # noqa: C901
+        """Rebase an admitted writer onto the exact fetched main commit."""
+        kwargs = dict(job.kwargs)
+        reason = kwargs.pop("rebase_reason", None)
+        if reason not in {"implementation_start", "review_conflict", "manual"}:
+            return JobResult(ok=False, error="rebase reason is not allowed")
+        if "publish_detached_head" in kwargs:
+            return JobResult(ok=False, error="detached reviewer rebase publication is unsupported")
+        if (
+            kwargs.get("remote", "origin") != "origin"
+            or kwargs.get("base_branch", "main") != "main"
+        ):
+            return JobResult(ok=False, error="rebase base must be origin/main")
+        if kwargs.pop("abort_on_conflict", False) or kwargs.pop("required_ancestor_shas", ()):
+            return JobResult(ok=False, error="legacy rebase options are not allowed")
+        publish = bool(kwargs.pop("publish_rebased_head", False))
+        resolve_conflicts = bool(kwargs.pop("resolve_conflicts", False))
+        expected_base = kwargs.pop("expected_base_sha", None)
+        sync = bool(kwargs.pop("sync_to_expected_remote_head", False))
+        branch = str(kwargs.pop("branch", "") or "")
+        expected_remote_sha = kwargs.pop("expected_remote_sha", None)
+        expected_head_sha = kwargs.pop("expected_head_sha", None)
+        expected = expected_remote_sha if publish else expected_head_sha
+        pr_number = kwargs.pop("pr_number", None)
+        cwd = Path(str(kwargs.get("cwd") or ""))
+        if not cwd.is_dir() or not _is_full_commit_sha(expected) or (publish and not branch):
+            return JobResult(ok=False, error="writer rebase arguments invalid")
+        if expected_base is not None and not _is_full_commit_sha(expected_base):
+            return JobResult(ok=False, error="rebase base head is invalid")
+        if resolve_conflicts and reason == "manual" and expected_base is None:
+            return JobResult(ok=False, error="manual conflict restart needs an exact base")
+        if publish:
             synced = self._sync_writer_to_expected_remote_head(
                 cwd,
-                enabled=sync_to_expected_remote_head,
+                enabled=sync,
                 branch=branch,
-                remote=remote,
+                remote="origin",
                 expected_repo=job.transport_repository,
                 pr_number=pr_number,
-                expected_remote_sha=expected_remote_sha,
+                expected_remote_sha=expected,
                 timeout=job.timeout_s,
             )
             if synced is not None:
                 return synced
-            git_utils.run(
-                ["git", *remote_config, "fetch", remote, base_branch],
-                cwd=cwd,
-                timeout=job.timeout_s,
-                env=remote_env,
-            )
-            ancestry = git_utils.run(
-                ["git", "merge-base", "--is-ancestor", base_ref, "HEAD"],
-                cwd=cwd,
-                check=False,
-                timeout=job.timeout_s,
-            )
-            if ancestry.returncode == 0:
-                if required_error := verify_required_ancestors():
-                    return required_error
+        if self._read_publish_head(cwd, timeout=job.timeout_s) != expected:
+            return JobResult(ok=False, error="writer head changed before rebase")
+        if not git_utils.is_clean_working_tree(cwd, timeout=job.timeout_s):
+            return JobResult(ok=False, error="writer worktree is not clean before rebase")
+        fetched = self._git_fetch_main(job)
+        if not fetched.ok or not isinstance(fetched.value, dict):
+            return fetched
+        base_sha = str(fetched.value["head_sha"])
+        if expected_base is not None and base_sha != expected_base:
+            return JobResult(ok=False, error="main changed before conflict restart")
+        if self._read_publish_head(cwd, timeout=job.timeout_s) != expected:
+            return JobResult(ok=False, error="writer head changed before rebase")
+        ancestry = git_utils.run(
+            ["git", "merge-base", "--is-ancestor", base_sha, "HEAD"],
+            cwd=cwd,
+            check=False,
+            timeout=job.timeout_s,
+        )
+        if ancestry.returncode == 0:
+            if publish:
                 return self._verify_noop_writer_rebase(
                     cwd,
-                    remote=remote,
+                    remote="origin",
                     branch=branch,
                     expected_repo=job.transport_repository,
-                    expected_remote_sha=expected_remote_sha,
+                    expected_remote_sha=expected,
                     timeout=job.timeout_s,
                 )
-            if ancestry.returncode != 1:
-                return JobResult(ok=False, error="cannot determine writer base ancestry")
+            return JobResult(
+                ok=True, value={"rebased": False, "published": False, "head_sha": expected}
+            )
+        if ancestry.returncode != 1:
+            return JobResult(ok=False, error="cannot determine writer base ancestry")
+        if reason == "review_conflict":
+            admission = self._revalidate_review_conflict(job, head_sha=expected, base_sha=base_sha)
+            if admission is not None:
+                return admission
+            if self._read_publish_head(cwd, timeout=job.timeout_s) != expected:
+                return JobResult(ok=False, error="writer head changed before rebase")
         signing_env = _required_git_signing_env(cwd, timeout=job.timeout_s)
         result = git_utils.rebase_worktree_onto(
-            **kwargs,
-            preserve_conflicts=publish_rebased_head and not abort_on_conflict,
+            cwd=cwd,
+            base_branch="main",
+            remote="origin",
+            base_sha=base_sha,
+            preserve_conflicts=reason != "manual" or resolve_conflicts,
             timeout=job.timeout_s,
             env=signing_env,
-            fetch_env=remote_env,
-            fetch_config=remote_config,
         )
         if not result:
-            if not publish_rebased_head or abort_on_conflict:
+            if reason == "manual" and not resolve_conflicts:
+                if self._read_publish_head(cwd, timeout=job.timeout_s) != expected:
+                    return JobResult(ok=False, error="manual rebase abort did not restore the head")
                 return JobResult(
                     ok=False,
-                    value=False,
-                    error="mechanical rebase hit conflicts; aborted",
+                    error="rebase conflict restart required",
+                    value={
+                        "rebase_restart_required": True,
+                        "base_sha": base_sha,
+                        "head_sha": expected,
+                    },
                 )
             policy = self._select_rebase_policy(job.repo)
             if policy is not None and policy.allow_unrebased_writer_fallback:
@@ -5748,10 +6156,11 @@ class WorkerPool:
                 return replace(fallback, value=value)
             receipt = self._conflict_receipt(
                 cwd,
-                remote=remote,
-                base_branch=base_branch,
-                expected_remote_sha=expected_remote_sha,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha=expected,
                 timeout=job.timeout_s,
+                base_sha=base_sha,
             )
             if isinstance(receipt, JobResult):
                 return receipt
@@ -5760,33 +6169,29 @@ class WorkerPool:
                 value=receipt,
                 error="mechanical rebase hit conflicts; resolution required",
             )
-        if not publish_rebased_head:
-            return JobResult(ok=True, value=True)
-        if required_error := verify_required_ancestors():
-            return required_error
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
-        remote_env, remote_config = self._authenticated_remote_git_configuration(
-            cwd=cwd,
-            expected_repo=job.transport_repository,
-            timeout=job.timeout_s,
-        )
-        git_utils.push_head_to_branch(
-            branch,
-            expected_remote_sha,
-            cwd,
-            source_sha=source_sha,
-            timeout=job.timeout_s,
-            env=remote_env,
-            remote_config=remote_config,
-            revalidate_remote=revalidate_remote,
-        )
+        if publish:
+            revalidate = self._authenticated_remote_revalidator(
+                cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
+            )
+            remote_env, remote_config = revalidate()
+            git_utils.push_head_to_branch(
+                branch,
+                expected,
+                cwd,
+                source_sha=source_sha,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate,
+            )
         return JobResult(
             ok=True,
             value={
                 "rebased": True,
-                "published": True,
+                "published": publish,
                 "head_sha": source_sha,
             },
         )
@@ -5938,6 +6343,7 @@ class WorkerPool:
         base_branch: str,
         expected_remote_sha: str,
         timeout: int,
+        base_sha: str | None = None,
     ) -> dict[str, object] | JobResult:
         """Capture the immutable inputs and file snapshot of a paused rebase."""
         try:
@@ -5964,11 +6370,14 @@ class WorkerPool:
             ).stdout.strip()
             if not _is_full_commit_sha(paused_head_sha):
                 return JobResult(ok=False, error="paused rebase head invalid")
-            base_sha = git_utils.run(
-                ["git", "rev-parse", f"{remote}/{base_branch}"],
-                cwd=cwd,
-                timeout=timeout,
-            ).stdout.strip()
+            base_sha = (
+                base_sha
+                or git_utils.run(
+                    ["git", "rev-parse", f"{remote}/{base_branch}"],
+                    cwd=cwd,
+                    timeout=timeout,
+                ).stdout.strip()
+            )
             if not _is_full_commit_sha(base_sha):
                 return JobResult(ok=False, error="paused rebase base head invalid")
             snapshot = {path: self._conflict_path_digest(cwd, path) for path in paths}
@@ -6109,6 +6518,26 @@ class WorkerPool:
         return self._annotate_rebase_policy_failure(result, policy, "structural validation")
 
     def _git_continue_rebase(self, job: GitJob) -> JobResult:
+        """Record an initial start after the host finishes conflict resolution."""
+        reason = job.kwargs.get("rebase_reason")
+        local_manual = reason == "manual" and not job.kwargs.get("publish_rebased_head")
+        if reason != "implementation_start" and not local_manual:
+            return self._git_continue_rebase_once(job)
+        try:
+            path, identity = self._initial_start_identity(job)
+            with file_lock(path.with_suffix(".lock"), require_exclusive=True):
+                if not local_manual and (path.exists() or path.is_symlink()):
+                    return JobResult(ok=False, error="initial implementation is already recorded")
+                return self._record_initial_start(
+                    job,
+                    self._git_continue_rebase_once(job),
+                    path,
+                    identity,
+                )
+        except (OSError, ValueError, SourceWorkspaceError) as error:
+            return JobResult(ok=False, error=f"initial implementation state failed: {error}")
+
+    def _git_continue_rebase_once(self, job: GitJob) -> JobResult:  # noqa: C901
         """Validate edit-only conflict output, finish policy rebase, and lease-publish."""
         parsed = self._parse_rebase_continuation(job)
         if isinstance(parsed, JobResult):
@@ -6124,19 +6553,23 @@ class WorkerPool:
             index_snapshot,
             paused_head_sha,
         ) = parsed
-        remote_head = self._read_remote_branch_head(
-            cwd,
-            remote=remote,
-            branch=branch,
-            expected_repo=job.transport_repository,
-            timeout=job.timeout_s,
-        )
-        if isinstance(remote_head, JobResult):
-            return remote_head
-        if remote_head != expected_remote_sha:
-            return JobResult(
-                ok=False, error="remote writer head changed during conflict resolution"
+        publish = bool(job.kwargs.get("publish_rebased_head", True))
+        if not publish and job.kwargs.get("expected_head_sha") != expected_remote_sha:
+            return JobResult(ok=False, error="rebase source head is invalid")
+        if publish:
+            remote_head = self._read_remote_branch_head(
+                cwd,
+                remote=remote,
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
             )
+            if isinstance(remote_head, JobResult):
+                return remote_head
+            if remote_head != expected_remote_sha:
+                return JobResult(
+                    ok=False, error="remote writer head changed during conflict resolution"
+                )
         edits = self._validate_rebase_conflict_edits(
             cwd,
             remote=remote,
@@ -6182,25 +6615,26 @@ class WorkerPool:
         if source_sha == expected_remote_sha:
             return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
 
-        revalidate_remote = self._authenticated_remote_revalidator(
-            cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
-        )
-        remote_env, remote_config = revalidate_remote()
-        git_utils.push_head_to_branch(
-            branch,
-            expected_remote_sha,
-            cwd,
-            source_sha=source_sha,
-            timeout=job.timeout_s,
-            env=remote_env,
-            remote_config=remote_config,
-            revalidate_remote=revalidate_remote,
-        )
+        if publish:
+            revalidate_remote = self._authenticated_remote_revalidator(
+                cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
+            )
+            remote_env, remote_config = revalidate_remote()
+            git_utils.push_head_to_branch(
+                branch,
+                expected_remote_sha,
+                cwd,
+                source_sha=source_sha,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
+            )
         return JobResult(
             ok=True,
             value={
                 "rebased": True,
-                "published": True,
+                "published": publish,
                 "head_sha": source_sha,
                 "rebase_policy": policy.name if policy is not None else None,
             },
@@ -6803,6 +7237,16 @@ class WorkerPool:
                     nonce=uuid.uuid4().hex,
                     state="armed",
                 )
+                implementation_started = self._completed_initial_start(
+                    replace(
+                        job,
+                        kwargs={
+                            **job.kwargs,
+                            "cwd": original.path,
+                            "branch": original.branch,
+                        },
+                    )
+                )
                 binding = manager._arm_dirty_direct_claim_locked(
                     issue, claim=claim, expected_generation=original.generation
                 )
@@ -6810,6 +7254,7 @@ class WorkerPool:
                     ok=True,
                     value={
                         "dirty_direct_continuation": True,
+                        "implementation_started": implementation_started,
                         "worktree_path": str(original.path),
                         "branch": original.branch,
                         "source_workspace": binding.to_dict(),
@@ -7018,6 +7463,74 @@ class WorkerPool:
                 },
             )
 
+    def _fresh_initial_creation(self, job: GitJob, manager: SourceWorkspaceManager) -> bool:
+        """Require verified absence before the host creates an issue branch."""
+        if job.kwargs.get("record_initial_creation") is not True:
+            return False
+        issue, branch = job.kwargs.get("issue_number"), job.kwargs.get("branch_name")
+        if type(issue) is not int or not isinstance(branch, str) or not branch:
+            return False
+        predecessor = manager._read_receipt(issue, SourceLane.IMPLEMENTATION)
+        if predecessor is not None:
+            manager._reject_foreign_owner(predecessor, issue, SourceLane.IMPLEMENTATION)
+            if (
+                predecessor.generation != 1
+                or predecessor.detached is not True
+                or predecessor.branch is not None
+                or predecessor.obligations
+                or not manager._physical_matches_receipt(predecessor)
+                or not git_utils.is_clean_working_tree(predecessor.path, timeout=job.timeout_s)
+            ):
+                return False
+        local = git_utils.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=manager.repo_root,
+            check=False,
+            timeout=job.timeout_s,
+        )
+        if local.returncode != 1:
+            return False
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=manager.repo_root,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        remote = git_utils.run(
+            ["git", *remote_config, "ls-remote", "--refs", "origin", f"refs/heads/{branch}"],
+            cwd=manager.repo_root,
+            check=False,
+            timeout=job.timeout_s,
+            env=remote_env,
+        )
+        return remote.returncode == 0 and not remote.stdout.strip()
+
+    def _record_fresh_initial_creation(self, job: GitJob, result: JobResult) -> JobResult:
+        """Save first-start permission only for a newly created local branch."""
+        if not result.ok or not isinstance(result.value, dict):
+            return result
+        value = result.value
+        if value.get("fresh_branch_created") is not True:
+            return result
+        head = value.get("impl_source_revision")
+        if not _is_full_commit_sha(head):
+            return JobResult(ok=False, error="initial branch creation head is invalid")
+        bound = replace(
+            job,
+            kwargs={
+                **job.kwargs,
+                "cwd": value.get("path"),
+                "branch": job.kwargs.get("branch_name"),
+            },
+        )
+        path, identity = self._initial_start_identity(bound)
+        with file_lock(path.with_suffix(".lock"), require_exclusive=True):
+            pending = path.with_suffix(".pending.json")
+            if not path.exists() and not pending.exists():
+                write_secure(
+                    pending, json.dumps({**identity, "head_sha": head}, sort_keys=True) + "\n"
+                )
+        return result
+
     def _git_create_worktree(self, job: GitJob) -> JobResult:
         """Create a worktree, holding one implementation-writer handoff."""
         kwargs = dict(job.kwargs)
@@ -7044,10 +7557,13 @@ class WorkerPool:
                 pretest = self._recover_pretest_candidate(job, source_manager)
                 if pretest is not None:
                     return pretest
+                fresh_initial = self._fresh_initial_creation(job, source_manager)
                 recovered = self._recover_prepared_remediation_worktree(job, repo_root)
                 if recovered is not None:
                     return recovered
                 result = self._git_create_worktree_with_handoff(job, source_manager, handoff)
+                if fresh_initial:
+                    result = self._record_fresh_initial_creation(job, result)
                 value = result.value if isinstance(result.value, dict) else {}
                 reservation = value.get("direct_scope_reservation")
                 if not result.ok and (
@@ -7532,6 +8048,7 @@ class WorkerPool:
         kwargs.pop("remediation_thread_snapshots", None)
         kwargs.pop("remediation_pretest_allowed_paths", None)
         kwargs.pop("remediation_pretest_scope_sha256", None)
+        kwargs.pop("record_initial_creation", None)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
@@ -7690,6 +8207,13 @@ class WorkerPool:
                 requested_branch=branch_name,
                 requested_base_sha=base_sha,
             )
+        if (
+            job.kwargs.get("record_initial_creation") is True
+            and result.ok
+            and isinstance(result.value, dict)
+            and (manager.consume_fresh_branch_creation(Path(created), branch_name) is True)
+        ):
+            result = replace(result, value={**result.value, "fresh_branch_created": True})
         return result
 
     def _create_managed_worktree(
@@ -9960,8 +10484,14 @@ class WorkerPool:
         return self._writer_publication_receipt("published", source_sha, baseline, source_sha)
 
     def _refresh_writer_publication(self, job: GitJob, worktree: Path, branch: str) -> JobResult:
-        """Replay one bounded local change and publish with an exact lease."""
+        """Publish a saved local change with an exact lease."""
         refresh = job.kwargs.get("writer_refresh")
+        if isinstance(refresh, dict) and refresh.get("phase") == "rebase":
+            return JobResult(
+                ok=False,
+                value={"writer_refresh_failure": "remote_changed"},
+                error="remote writer head changed; automatic rebase is not allowed",
+            )
         invalid = JobResult(
             ok=False, value={"writer_refresh_failure": "invalid"}, error="writer refresh invalid"
         )
@@ -9969,7 +10499,7 @@ class WorkerPool:
             not isinstance(refresh, dict)
             or set(refresh) != {"phase", "source_sha", "expected_remote_sha"}
             or not isinstance(refresh.get("phase"), str)
-            or refresh.get("phase") not in {"rebase", "publish"}
+            or refresh.get("phase") != "publish"
             or not _is_full_commit_sha(refresh.get("source_sha"))
             or not _is_full_commit_sha(refresh.get("expected_remote_sha"))
             or "expected_remote_sha" in job.kwargs
@@ -9993,11 +10523,7 @@ class WorkerPool:
                 return invalid
             if self._read_publish_head(worktree, timeout=job.timeout_s) != source:
                 return invalid
-            scope_job = (
-                job
-                if refresh["phase"] == "rebase"
-                else replace(job, kwargs={**job.kwargs, "scope_history_base_sha": expected})
-            )
+            scope_job = replace(job, kwargs={**job.kwargs, "scope_history_base_sha": expected})
             allowed = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
             if (
                 self._verify_implementation_edit_scope(scope_job, worktree, allowed_paths=allowed)
@@ -10008,13 +10534,6 @@ class WorkerPool:
                 cwd=worktree, expected_repo=job.transport_repository, timeout=job.timeout_s
             )
             remote_env, remote_config = revalidate()
-            if refresh["phase"] == "rebase":
-                rewritten = self._rebase_publication_writer(
-                    job, worktree, branch, expected, remote_env, remote_config
-                )
-                if isinstance(rewritten, JobResult):
-                    return rewritten
-                source = rewritten
             scope_job = replace(job, kwargs={**job.kwargs, "scope_history_base_sha": expected})
             if (
                 self._verify_implementation_edit_scope(scope_job, worktree, allowed_paths=allowed)
@@ -10045,68 +10564,6 @@ class WorkerPool:
             )
         except (OSError, RuntimeError, subprocess.SubprocessError):
             return invalid
-
-    def _rebase_publication_writer(
-        self,
-        job: GitJob,
-        worktree: Path,
-        branch: str,
-        expected: str,
-        remote_env: dict[str, str],
-        remote_config: tuple[str, ...],
-    ) -> str | JobResult:
-        """Create one signed replay and require its exact fetched base."""
-        signing_env = _required_git_signing_env(worktree, timeout=job.timeout_s)
-        rebased = git_utils.rebase_worktree_onto(
-            worktree,
-            base_branch=branch,
-            timeout=job.timeout_s,
-            env=signing_env,
-            fetch_env=remote_env,
-            fetch_config=remote_config,
-        )
-        if not rebased:
-            return JobResult(
-                ok=False,
-                value={"writer_refresh_failure": "conflict"},
-                error="writer refresh conflict",
-            )
-        source = self._read_publish_head(worktree, timeout=job.timeout_s)
-        if isinstance(source, JobResult):
-            return JobResult(
-                ok=False,
-                value={"writer_refresh_failure": "invalid"},
-                error="writer refresh invalid",
-            )
-        fetched = self._writer_tracking_head(worktree, branch, timeout=job.timeout_s)
-        if fetched != expected:
-            if not isinstance(fetched, str):
-                return JobResult(
-                    ok=False,
-                    value={"writer_refresh_failure": "invalid"},
-                    error="writer refresh invalid",
-                )
-            scope_job = replace(job, kwargs={**job.kwargs, "scope_history_base_sha": fetched})
-            if (
-                self._verify_implementation_edit_scope(
-                    scope_job,
-                    worktree,
-                    allowed_paths=cast(Collection[str] | None, job.kwargs.get("allowed_paths")),
-                )
-                is not None
-                or self._verify_scope_retraction(job, worktree) is not None
-                or not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s)
-                or self._read_publish_head(worktree, timeout=job.timeout_s) != source
-            ):
-                return JobResult(
-                    ok=False,
-                    value={"writer_refresh_failure": "invalid"},
-                    error="writer refresh invalid",
-                )
-            return self._writer_publication_receipt(
-                "remote_changed", source, expected, fetched, refresh_phase="publish"
-            )
-        return source
 
     @staticmethod
     def _writer_tracking_head(

@@ -53,7 +53,7 @@ class IssueClassificationCoordinator(_CoordinatorHost):
             scope_stages = self.config.scope.stages if self.config.scope is not None else None
             if source.wave_lease is None or entry.stage is not ct.StageName.FINISHED:
                 stage, reason, passed = self._scope_seed_decision(
-                    number, entry.stage, entry.reason, scope_stages
+                    number, entry.stage, entry.reason, scope_stages, repo=repo
                 )
                 entry = replace(entry, stage=stage, reason=reason, passed=passed)
             return entry

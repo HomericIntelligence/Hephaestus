@@ -1228,10 +1228,8 @@ def test_405_conflicting_or_dirty_readiness_returns_to_implementer(
     assert github.mutation_log == []
 
 
-def test_reviewed_behind_head_returns_to_implementer_for_rebase(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A reviewer does not validate against current main; implementation rebases later."""
+def test_reviewed_behind_head_waits_without_rebase(make_ctx: Any, make_work_item: Any) -> None:
+    """A branch that is only behind main waits without a rebase."""
     github = _ConditionalGitHub(
         readiness={
             **_open_pr(),
@@ -1243,8 +1241,8 @@ def test_reviewed_behind_head_returns_to_implementer_for_rebase(
 
     result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FAIL_BACK, "post_review_rebase_required")
-    assert item.payload["post_review_rebase_required"] is True
+    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert "post_review_rebase_required" not in item.payload
     assert github.merge_attempts == []
 
 

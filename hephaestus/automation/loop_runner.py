@@ -275,6 +275,8 @@ class LoopConfig:
     issues: list[int] = field(default_factory=list)
     reset_plan_review_session: bool = False
     prs: list[int] = field(default_factory=list)
+    rebase: bool = False
+    update_plan: bool = False
     dry_run: bool = False
     no_advise: bool = False
     no_learn: bool = False
@@ -371,6 +373,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_positive_int,
         default=5,
         help="Repository discovery reseed passes; does not change review budgets (default: 5)",
+    )
+    p.add_argument(
+        "--update-plan",
+        action="store_true",
+        help="Update each selected issue plan from current origin/main, then continue the loop",
+    )
+    p.add_argument(
+        "--rebase",
+        action="store_true",
+        help="Rebase each selected worktree against origin/main, then continue the loop",
     )
     p.add_argument(
         "--reset-plan-review-session",
@@ -670,6 +682,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.issue_limit is not None and (args.issues is not None or args.prs is not None):
         parser.error("--issue-limit cannot be combined with --issues or --prs")
+    if args.update_plan and not args.issues:
+        parser.error("--update-plan requires explicit --issues")
+    if args.update_plan and "plan" not in _validate_phases(args.phases):
+        parser.error("--update-plan requires the plan phase")
+    if args.rebase and not (args.issues or args.prs):
+        parser.error("--rebase requires explicit --issues or --prs")
+    if args.rebase and "implement" not in _validate_phases(args.phases):
+        parser.error("--rebase requires the implement phase")
     if args.reset_plan_review_session and not args.issues:
         parser.error("--reset-plan-review-session requires explicit --issues")
     return args
@@ -956,6 +976,8 @@ def _build_pipeline_config(
             frozenset(cfg.issues) if cfg.reset_plan_review_session else frozenset()
         ),
         prs=cfg.prs,
+        rebase=cfg.rebase,
+        update_plan=cfg.update_plan,
         issue_limit=cfg.issue_limit,
         loops=cfg.loops,
         max_workers=cfg.max_workers,
@@ -1197,6 +1219,8 @@ def main(argv: list[str] | None = None) -> int:
         issues=args.issues or [],
         reset_plan_review_session=args.reset_plan_review_session,
         prs=args.prs or [],
+        rebase=args.rebase,
+        update_plan=args.update_plan,
         issue_limit=args.issue_limit,
         dry_run=args.dry_run,
         no_advise=args.no_advise,
