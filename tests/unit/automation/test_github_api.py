@@ -4849,6 +4849,31 @@ class TestValidReviewPositions:
         kept = _filter_comments_to_diff(comments, self._DIFF)
         assert [c["body"] for c in kept] == ["ok"]
 
+    def test_validation_returns_typed_corrections_and_preserves_evidence(self) -> None:
+        from hephaestus.automation.github_api import _validate_comments_to_diff
+
+        comments = [
+            {"path": "mod.py", "line": 11, "side": "RIGHT", "body": "ok"},
+            {
+                "path": "mod.py",
+                "line": 500,
+                "side": "RIGHT",
+                "body": "bad line",
+                "evidence": "the state is not carried into the worker",
+            },
+        ]
+
+        validation = _validate_comments_to_diff(comments, self._DIFF)
+
+        assert [comment["body"] for comment in validation.valid] == ["ok"]
+        assert len(validation.corrections) == 1
+        correction = validation.corrections[0]
+        assert correction.path == "mod.py"
+        assert correction.line == 500
+        assert correction.side == "RIGHT"
+        assert correction.reason == "anchor_not_in_reviewed_diff"
+        assert correction.finding["evidence"] == "the state is not carried into the worker"
+
     def test_filter_defaults_side_to_right(self) -> None:
         from hephaestus.automation.github_api import _filter_comments_to_diff
 

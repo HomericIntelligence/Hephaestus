@@ -167,6 +167,7 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             # in-memory audit. A malformed payload is an agent failure, not
             # a NOGO result that can burn the review budget or write a label.
             return self._handle_error_verdict(item, audit)
+        correction_retry = bool(payload.pop(_ANCHOR_CORRECTION_RETRY, False))
         if not item.payload.get("reviewed_pr_head_sha"):
             # Addressing a finding or pushing a new commit clears the prior
             # head proof. A fresh negative transition may still be based on
@@ -184,9 +185,13 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             if bind_outcome is not None:
                 return bind_outcome
             payload["review_error_retries"] = 0
-            round_done = payload.get("pr_review_round", 0) + 1
-            payload["pr_review_round"] = round_done
-            item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
+            round_done = payload.get("pr_review_round", 0)
+            if not correction_retry:
+                round_done += 1
+                payload["pr_review_round"] = round_done
+                item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
+            else:
+                round_done = max(round_done, 1)
             return self._handle_non_go(
                 item,
                 ctx,
@@ -235,9 +240,13 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         # A clean implementation-state transition requires the reviewer's
         # explicit GO verdict. The grade is audit metadata only.
         payload["review_error_retries"] = 0
-        round_done = payload.get("pr_review_round", 0) + 1
-        payload["pr_review_round"] = round_done
-        item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
+        round_done = payload.get("pr_review_round", 0)
+        if not correction_retry:
+            round_done += 1
+            payload["pr_review_round"] = round_done
+            item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
+        else:
+            round_done = max(round_done, 1)
         soft_cap = ctx.budget("pr_review_iter")
         hard_cap = ctx.budget("pr_review_hard")
         if round_done > soft_cap:

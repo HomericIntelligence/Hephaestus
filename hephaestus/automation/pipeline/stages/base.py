@@ -452,6 +452,8 @@ class StageGitHub(Protocol):
         GitHub accepts a review bound to the older commit and marks affected
         comments outdated when appropriate.  Eligibility for the GO label is
         checked separately against the current head.
+        The production result is list-compatible and carries typed anchor
+        corrections for findings that the reviewed diff cannot publish.
         """
         ...
 

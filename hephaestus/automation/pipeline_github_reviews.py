@@ -1,5 +1,7 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
+from collections.abc import Sequence
+
 import hephaestus.automation.pipeline_github_reply_recovery as reply_recovery
 
 from .pipeline.github_jobs import ImplementationReplyProgress
@@ -7,6 +9,39 @@ from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 
 __all__ = ["reply_recovery"]
+
+
+class ReviewPublicationResult(list[dict[str, Any]]):
+    """Return published receipts and preserve findings that need correction."""
+
+    def __init__(
+        self,
+        receipts: Sequence[dict[str, Any]],
+        *,
+        validated_findings: Sequence[dict[str, Any]] = (),
+        corrections: Sequence[object] = (),
+        unpublishable: Sequence[object] = (),
+    ) -> None:
+        """Create a result for one immutable review publication attempt."""
+        super().__init__(dict(receipt) for receipt in receipts)
+        self.validated_findings = tuple(dict(finding) for finding in validated_findings)
+        self.corrections = tuple(corrections)
+        self.unpublishable = tuple(unpublishable)
+
+    @property
+    def published_receipts(self) -> tuple[dict[str, Any], ...]:
+        """Return the immutable view of receipts accepted by the host."""
+        return tuple(self)
+
+    @property
+    def anchor_corrections(self) -> tuple[object, ...]:
+        """Return findings that need a valid anchor selected by the reviewer."""
+        return self.corrections
+
+    @property
+    def not_publishable(self) -> tuple[object, ...]:
+        """Return findings that the current review cannot publish inline."""
+        return self.unpublishable
 
 
 class PipelineGitHubReviews(_PipelineGitHubHost):
@@ -1398,7 +1433,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         *,
         expected_head_sha: str,
         review_diff: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> ReviewPublicationResult:
         """Post one source-anchored review batch for an immutable snapshot."""
         # GitHub renders a review-level ``body`` as an unanchored general
         # comment. Publish only reviews that contain source-positioned threads.
@@ -1407,9 +1442,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 "PR #%s: skipped review publication without source-anchored threads",
                 pr_number,
             )
-            return []
-        if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
-            return []
+            return ReviewPublicationResult([])
         if self._repo_slug is not None:
             snapshot_diff = review_diff
             if snapshot_diff is None:
@@ -1417,12 +1450,24 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 # compatibility. The review stage always supplies its local
                 # snapshot, so its anchors never move with the remote PR.
                 snapshot_diff = self._gh(["pr", "diff", str(pr_number)], check=False).stdout or ""
-            postable_threads = github_api._filter_comments_to_diff(threads, snapshot_diff)
-            if len(postable_threads) != len(threads):
-                raise RuntimeError(
-                    "review-thread batch contains an anchor outside the reviewed diff"
+            validation = github_api._validate_comments_to_diff(
+                threads,
+                snapshot_diff,
+            )
+            threads = list(validation.valid)
+            if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
+                return ReviewPublicationResult(
+                    [],
+                    validated_findings=threads,
+                    corrections=validation.corrections,
+                    unpublishable=validation.corrections,
                 )
-            threads = postable_threads
+            if not threads:
+                return ReviewPublicationResult(
+                    [],
+                    corrections=validation.corrections,
+                    unpublishable=validation.corrections,
+                )
             review_comments = [
                 {
                     "path": c["path"],
@@ -1456,7 +1501,12 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             review_node_id = review.get("node_id")
             if not review_node_id:
                 logger.warning("Posted PR review on #%s but no review node id returned", pr_number)
-                return []
+                return ReviewPublicationResult(
+                    [],
+                    validated_findings=threads,
+                    corrections=validation.corrections,
+                    unpublishable=validation.corrections,
+                )
             receipts = self._repo_review_thread_receipts_for_review(
                 pr_number,
                 str(review_node_id),
@@ -1471,5 +1521,10 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                     pr_number,
                     len(review_comments),
                 )
-            return receipts
-        return []
+            return ReviewPublicationResult(
+                receipts,
+                validated_findings=threads,
+                corrections=validation.corrections,
+                unpublishable=validation.corrections,
+            )
+        return ReviewPublicationResult([])

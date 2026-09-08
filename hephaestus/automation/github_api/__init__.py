@@ -55,8 +55,12 @@ from .checks import (  # noqa: E402
     gh_pr_checks as gh_pr_checks,
 )
 from .diff import (  # noqa: E402
+    ReviewAnchorCorrection as ReviewAnchorCorrection,
+    ReviewAnchorCorrectionReason as ReviewAnchorCorrectionReason,
+    ReviewCommentValidation as ReviewCommentValidation,
     _filter_comments_to_diff as _filter_comments_to_diff,
     _valid_review_positions as _valid_review_positions,
+    _validate_comments_to_diff as _validate_comments_to_diff,
 )
 from .graphql import (  # noqa: E402
     ClaudeUsageCapError as ClaudeUsageCapError,
@@ -183,8 +187,11 @@ __all__ = [
     "IssueState",
     "MergeQueueAlreadyEnqueuedError",
     "OpenPrDiscoveryIncompleteError",
+    "ReviewAnchorCorrection",
+    "ReviewAnchorCorrectionReason",
     "ReviewCommentIndexKey",
     "ReviewCommentNotEditableError",
+    "ReviewCommentValidation",
     "_assert_body_has_closes",
     "_assert_branch_commits_signed",
     "_body_file",
@@ -209,6 +216,7 @@ __all__ = [
     "_review_threads_for_review",
     "_select_open_pr_for_base",
     "_valid_review_positions",
+    "_validate_comments_to_diff",
     "add_implementation_thread_reply_mutation",
     "add_reviewer_feedback_reply_mutation",
     "add_thread_reply_mutation",

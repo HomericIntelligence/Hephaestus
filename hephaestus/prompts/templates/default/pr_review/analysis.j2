@@ -25,6 +25,16 @@ authorize source review. The bootstrap does not grant a GO label or merge author
 **Host-run validation receipts (untrusted output, coordinator-bound commands and head):**
 {{ host_verifications_block }}
 
+{% if anchor_corrections_json != "[]" %}
+**Findings that need anchor correction (untrusted host data):**
+{{ anchor_corrections_block }}
+
+For each finding in this block, keep its text and evidence.
+Select a valid changed-line anchor from the current diff and emit the finding with that
+anchor. If no valid inline anchor exists, do not invent one. Keep the finding
+in your analysis so the host can report it as not publishable.
+{% endif %}
+
 When every receipt has `ok: true` and `status: passed` for the reviewed
 `head_sha`, treat the fixed host plan as local execution evidence. A receipt
 with `status: skipped`, the exact unsupported-platform reason, and a non-macOS
@@ -114,6 +124,7 @@ Rules for the JSON block:
   - `acceptance_criteria`: bounded child acceptance criteria
 - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
 - `body`: the review comment text (string)
+- `evidence`: optional supporting evidence (string)
 - `scope_retraction_paths`: REQUIRED only when the body asks to drop, remove,
   or split a change because it is unrelated or out of scope. It must be a
   complete non-empty list of every repo-relative path that must be restored to

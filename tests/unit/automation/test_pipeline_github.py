@@ -7348,17 +7348,21 @@ class TestRepoScoping:
             }
         ]
 
-    def test_repo_scoped_review_post_rejects_mixed_anchor_batch_before_write(
+    def test_repo_scoped_review_post_preserves_valid_findings_and_returns_correction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An invalid anchor must not leave a partially posted review batch."""
+        """An invalid anchor must not discard a valid finding or its evidence."""
         calls: list[list[str]] = []
+        review_payloads: list[dict[str, object]] = []
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(argv)
             if argv[:2] == ["pr", "diff"]:
                 return SimpleNamespace(stdout=diff)
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
             raise AssertionError(f"unexpected GitHub write/query: {argv}")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
@@ -7369,18 +7373,168 @@ class TestRepoScoping:
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
-        with pytest.raises(RuntimeError, match="anchor outside the reviewed diff"):
-            adapter.post_review_threads(
-                7,
-                [
-                    {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
-                    {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
-                ],
-                expected_head_sha="a" * 40,
-            )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_review_thread_receipts_for_review",
+            lambda *_args: [
+                {
+                    "id": "thread-valid",
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "body": "valid",
+                }
+            ],
+        )
 
-        assert len(calls) == 1
+        result = adapter.post_review_threads(
+            7,
+            [
+                {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
+                {
+                    "path": "a.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "stale",
+                    "evidence": "descriptor state is not propagated",
+                },
+            ],
+            expected_head_sha="a" * 40,
+        )
+
+        assert len(result) == 1
+        assert result[0]["id"] == "thread-valid"
+        assert len(result.corrections) == 1
+        correction = result.corrections[0]
+        assert correction.path == "a.py"
+        assert correction.line == 2
+        assert correction.side == "RIGHT"
+        assert correction.reason == "anchor_not_in_reviewed_diff"
+        assert correction.finding["body"] == "stale"
+        assert correction.finding["evidence"] == "descriptor state is not propagated"
+        assert len(review_payloads) == 1
+        assert [comment["line"] for comment in review_payloads[0]["comments"]] == [1]
+        assert len(calls) == 2
         assert calls[0][:3] == ["pr", "diff", "7"]
+
+    def test_repo_scoped_review_post_reports_all_invalid_findings_without_writing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An all-invalid batch keeps every finding without creating a review."""
+        calls: list[list[str]] = []
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            raise AssertionError(f"unexpected GitHub write: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        result = adapter.post_review_threads(
+            7,
+            [
+                {
+                    "path": "a.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "stale one",
+                    "evidence": "evidence one",
+                },
+                {
+                    "path": "missing.py",
+                    "line": 4,
+                    "side": "RIGHT",
+                    "body": "stale two",
+                    "evidence": "evidence two",
+                },
+            ],
+            expected_head_sha="a" * 40,
+            review_diff=diff,
+        )
+
+        assert result == []
+        assert len(result.corrections) == 2
+        assert [correction.path for correction in result.corrections] == [
+            "a.py",
+            "missing.py",
+        ]
+        assert [correction.finding["evidence"] for correction in result.corrections] == [
+            "evidence one",
+            "evidence two",
+        ]
+        assert result.unpublishable == result.corrections
+        assert calls == []
+
+    def test_repo_scoped_review_post_uses_the_supplied_snapshot_for_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Validation uses the reviewed snapshot when the remote head changed."""
+        review_payloads: list[dict[str, object]] = []
+        snapshot_diff = (
+            "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+snapshot\n"
+        )
+        remote_diff = "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -0,0 +1 @@\n+remote\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout=remote_diff)
+            raise AssertionError(f"unexpected GitHub call: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_review_thread_receipts_for_review",
+            lambda *_args: [{"id": "snapshot-thread"}],
+        )
+
+        result = adapter.post_review_threads(
+            7,
+            [
+                {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
+                {
+                    "path": "b.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "body": "valid only on a later head",
+                    "evidence": "new head evidence",
+                },
+            ],
+            expected_head_sha="a" * 40,
+            review_diff=snapshot_diff,
+        )
+
+        assert len(result) == 1
+        assert result.corrections[0].path == "b.py"
+        assert result.corrections[0].reason == "anchor_not_in_reviewed_diff"
+        assert [comment["path"] for comment in review_payloads[0]["comments"]] == ["a.py"]
+
+    def test_repo_scoped_review_post_reports_missing_snapshot_as_unpublishable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing immutable diff never permits an inline review write."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            raise AssertionError(f"unexpected GitHub write: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        result = adapter.post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+            expected_head_sha="a" * 40,
+            review_diff="",
+        )
+
+        assert result == []
+        assert len(result.corrections) == 1
+        assert result.corrections[0].reason == "reviewed_diff_unavailable"
+        assert calls == []
 
     def test_repo_scoped_review_post_does_not_reject_a_reviewed_commit_after_a_push(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -7462,13 +7616,15 @@ class TestRepoScoping:
     ) -> None:
         """A posted review with comments that matches no GraphQL thread logs a warning.
 
-        The ``pr diff`` call below is unmatched by ``fake_gh_call`` and returns
-        empty stdout, so ``_filter_comments_to_diff`` fails open (diff.py:95-96)
-        and ``review_comments`` stays non-empty — required for the warning branch
-        (posted comments but zero matched threads) to trigger.
+        The diff contains the proposed source line, so ``review_comments``
+        stays non-empty — required for the warning branch (posted comments
+        but zero matched threads) to trigger.
         """
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout=diff)
             if argv[:2] == ["api", "graphql"]:
                 payload = {
                     "data": {

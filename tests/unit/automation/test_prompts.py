@@ -547,6 +547,39 @@ def test_address_prompt_round_trips_curly_braced_thread_data() -> None:
     assert json.dumps([{"thread_id": "T1", "path": "a.py", "line": 1, "body": body}]) in rendered
 
 
+def test_pr_review_analysis_prompt_keeps_anchor_correction_evidence() -> None:
+    """The correction prompt carries finding text and evidence as fenced data."""
+    correction = json.dumps(
+        [
+            {
+                "finding": {
+                    "path": "gateway.py",
+                    "line": 1050,
+                    "side": "RIGHT",
+                    "body": "worker state is not retained",
+                    "evidence": "descriptor-bound state is rebuilt in the child",
+                },
+                "path": "gateway.py",
+                "line": 1050,
+                "side": "RIGHT",
+                "reason": "anchor_not_in_reviewed_diff",
+            }
+        ],
+        sort_keys=True,
+    )
+
+    rendered = prompts.get_pr_review_analysis_prompt(
+        pr_number=7,
+        issue_number=3,
+        anchor_corrections_json=correction,
+    )
+
+    assert "ANCHOR_CORRECTIONS" in rendered
+    assert "worker state is not retained" in rendered
+    assert "descriptor-bound state is rebuilt in the child" in rendered
+    assert "Select a valid changed-line anchor from the current diff" in rendered
+
+
 def test_pr_review_prompts_classify_platform_skips_as_evidence_gaps() -> None:
     """Unsupported-platform skips do not satisfy required host evidence."""
     rendered = (
