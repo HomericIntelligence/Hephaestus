@@ -29,7 +29,6 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import replace
-from pathlib import Path
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -139,6 +138,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _repo_state_root,
     _require_issue_labels,
     agent_provider,
     athena_advise_failure_reason,
@@ -431,7 +431,7 @@ def _wave_non_code_binding(
     lease = item.payload.get(WAVE_LEASE_PAYLOAD)
     if not isinstance(lease, WaveLease):
         return None
-    return IssueWaveStore(Path(str(ctx.paths.repo_root)), ctx.org, item.repo), lease
+    return IssueWaveStore(_repo_state_root(ctx, item.repo), ctx.org, item.repo), lease
 
 
 def _persist_wave_non_code_intent(

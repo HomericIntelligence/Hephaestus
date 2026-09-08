@@ -13,6 +13,29 @@ The automation pipeline creates one worktree per issue at
 invocation to resume or surface. A non-forced removal of a worktree with
 uncommitted changes raises `WorktreeDirtyError`.
 
+Repository intake uses a separate detached worktree outside the caller
+checkout. The path is recorded in a private receipt below
+`.hephaestus-repo-intake` beside the Git common directory. The caller checkout
+can contain local work. Intake does not switch, reset, clean, stash, or change
+its index. It also does not attach the remote default branch a second time.
+
+## Locate a repository-intake worktree
+
+Use the caller checkout to read the shared worktree registry. Do not remove an
+intake path when its receipt is missing, its path does not match, or its state
+is dirty. These conditions mean that ownership is not proven.
+
+```bash
+git -C <caller-repo> worktree list --porcelain
+find <caller-parent> -maxdepth 3 -path '*/.hephaestus-repo-intake/*' -print
+```
+
+If the intake receipt and registered path are both valid but the checkout is
+dirty, preserve the path and inspect it before a later run. If the path is
+foreign, symlinked, or ambiguously registered, stop and recover it manually.
+The automation path uses the shared Git metadata lock, so a second process
+waits instead of allocating a conflicting intake worktree.
+
 ## Locate
 
 ```bash

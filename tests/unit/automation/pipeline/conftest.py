@@ -237,6 +237,27 @@ class FakeWorkerPool:
             return JobResult(ok=True, value=True)
         if job.op == "sync_checkout":
             return JobResult(ok=True, value="a" * 40)
+        if job.op == "prepare_intake":
+            caller_root = Path(str(job.kwargs.get("caller_root") or ""))
+            intake_path = caller_root.parent / f".{caller_root.name}-intake"
+            intake_path.mkdir(parents=True, exist_ok=True)
+            (intake_path / ".git").write_text("gitdir: fake\n", encoding="utf-8")
+            return JobResult(
+                ok=True,
+                value={
+                    "schema_version": 1,
+                    "repository": job.kwargs.get("repo", ""),
+                    "repository_identity": "fake:repo",
+                    "ownership_key": "fake:repo:intake",
+                    "common_dir": str(caller_root),
+                    "path": str(intake_path),
+                    "default_branch": "main",
+                    "revision": "a" * 40,
+                    "generation": 1,
+                    "detached": True,
+                    "branch": None,
+                },
+            )
         if job.op == "verify_pr_review_checkout":
             return JobResult(ok=True, value={"ready": True, "diff": "checkout diff"})
         return JobResult(ok=True)

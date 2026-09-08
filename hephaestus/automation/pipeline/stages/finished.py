@@ -55,6 +55,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _repo_state_root,
     stage_timeout,
 )
 from .repo import (
@@ -144,7 +145,7 @@ class FinishedStage(Stage):
                 non_code = bool(item.payload.get(WAVE_NON_CODE_PAYLOAD, False))
                 try:
                     IssueWaveStore(
-                        Path(str(ctx.paths.repo_root)), ctx.org, item.repo
+                        _repo_state_root(ctx, item.repo), ctx.org, item.repo
                     ).record_terminal_outcome(
                         lease,
                         issue_number=item.issue,
@@ -164,7 +165,7 @@ class FinishedStage(Stage):
                     )
                     try:
                         IssueWaveStore(
-                            Path(str(ctx.paths.repo_root)), ctx.org, item.repo
+                            _repo_state_root(ctx, item.repo), ctx.org, item.repo
                         ).record_terminal_outcome(
                             lease,
                             issue_number=item.issue,

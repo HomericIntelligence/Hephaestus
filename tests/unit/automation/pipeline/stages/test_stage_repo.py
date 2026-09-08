@@ -119,10 +119,10 @@ class TestOnEnterAndCloneStates:
         }
         assert result.on_done_state == "CLONE_WAIT"
 
-    def test_existing_checkout_submits_sync_job_before_discovery(
+    def test_existing_checkout_submits_intake_job_before_discovery(
         self, repo_item: WorkItem, repo_ctx: Any, tmp_path: Path
     ) -> None:
-        """A pre-existing checkout is synchronized before its issues are read."""
+        """A pre-existing checkout is prepared before its issues are read."""
         (tmp_path / "repo-a").mkdir()
         repo_item.state = "CLONE_WAIT"
 
@@ -130,10 +130,10 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
-        assert result.job.op == "sync_checkout"
+        assert result.job.op == "prepare_intake"
         assert result.job.kwargs == {
             "repo": "test-org/repo-a",
-            "dest": str(tmp_path / "repo-a"),
+            "caller_root": str(tmp_path / "repo-a"),
         }
         assert result.on_done_state == "CLONE_WAIT"
 
@@ -160,10 +160,10 @@ class TestOnEnterAndCloneStates:
         assert isinstance(ready, Continue)
         assert ready.next_state == "WAVE_ADMIT"
 
-    def test_explicit_existing_repo_root_submits_sync_job(
+    def test_explicit_existing_repo_root_submits_intake_job(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
     ) -> None:
-        """An isolated existing checkout is synchronized at its explicit path."""
+        """An isolated existing checkout is prepared at its explicit path."""
         projects_dir = tmp_path / "projects"
         checkout = tmp_path / "isolated" / "repo-a-worktree"
         checkout.mkdir(parents=True)
@@ -174,10 +174,10 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
-        assert result.job.op == "sync_checkout"
+        assert result.job.op == "prepare_intake"
         assert result.job.kwargs == {
             "repo": "test-org/repo-a",
-            "dest": str(checkout),
+            "caller_root": str(checkout),
         }
 
     def test_clone_skipped_in_dry_run(

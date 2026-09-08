@@ -576,6 +576,18 @@ type StepResult = "Continue | JobRequest | StageOutcome"
 type BranchWorktreeOwnerStatus = Literal["verified", "pending", "unverified"]
 
 
+def _repo_state_root(ctx: StageContext, repo: str) -> Path:
+    """Return the durable state root for a repository context.
+
+    The intake checkout can be removed and rebound when the remote default
+    branch advances.  A coordinator context therefore keeps its journals in
+    the receipt-owned state area instead of the replaceable worktree.  The
+    fallback preserves lightweight stage-context compatibility.
+    """
+    state_roots = getattr(ctx.config, "repo_state_roots", {})
+    return Path(str(state_roots.get(repo, ctx.paths.repo_root)))
+
+
 @dataclass(frozen=True)
 class StageContext:
     """Context passed to every stage call.
