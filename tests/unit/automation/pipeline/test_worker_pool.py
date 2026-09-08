@@ -12920,6 +12920,112 @@ class TestGitOps:
         read_head.assert_called_once_with(tmp_path, timeout=60)
         normal_push.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            None,
+            "head",
+            "branch",
+            "dirty",
+            "publish",
+            "remote_changed",
+            "remote_absent",
+            "changed_to_base",
+        ],
+    )
+    def test_owned_direct_publication_keeps_verified_local_receipt(
+        self, pool: WorkerPool, tmp_path: Path, mutation: str | None
+    ) -> None:
+        """An empty writer releases its remote reservation and retains local identity."""
+        repo, predecessor, pin = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+        binding = manager.prepare(
+            7, SourceLane.IMPLEMENTATION, predecessor if mutation == "changed_to_base" else pin
+        )
+        branch = "7-empty-writer"
+        _git(binding.cwd, "switch", "-c", branch)
+        receipt = manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+        assert receipt is not None
+        receipt = replace(receipt, branch=branch, detached=False)
+        manager._write_receipt(receipt)
+        job = GitJob(
+            repo="Hephaestus",
+            op="commit_push",
+            timeout_s=60,
+            expected_repository="HomericIntelligence/Hephaestus",
+            kwargs={
+                "issue_number": 7,
+                "worktree_path": binding.cwd,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "branch": branch,
+                "agent": "claude",
+                "expected_remote_sha": pin,
+            },
+        )
+
+        publish = mutation in {"publish", "remote_changed", "remote_absent"}
+
+        def commit(*args: object, **kwargs: object) -> bool:
+            if mutation == "changed_to_base":
+                _git(binding.cwd, "reset", "--hard", pin)
+            if publish:
+                (binding.cwd / "tracked.txt").write_text("implementation\n")
+                _git(binding.cwd, "commit", "-am", "fix: implement change")
+            return publish
+
+        def remote_head(*args: object, **kwargs: object) -> str | None:
+            return {"remote_absent": None, "remote_changed": pin}.get(
+                mutation or "", _git(binding.cwd, "rev-parse", "HEAD")
+            )
+
+        def release(*args: object, **kwargs: object) -> bool:
+            if mutation == "head":
+                _git(binding.cwd, "reset", "--hard", predecessor)
+            elif mutation == "branch":
+                _git(binding.cwd, "switch", "-c", "unexpected-branch")
+            elif mutation == "dirty":
+                (binding.cwd / "tracked.txt").write_text("unexpected edit\n")
+            return True
+
+        with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+            patch("hephaestus.automation.git_utils.commit_if_changes", side_effect=commit),
+            patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as push,
+            patch(
+                "hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged",
+                side_effect=release,
+            ) as delete,
+            patch.object(pool, "_read_remote_branch_head", side_effect=remote_head) as remote_read,
+        ):
+            result = pool._git_commit_push(job)
+
+        current = manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+        if publish:
+            delete.assert_not_called()
+            push.assert_called_once()
+            remote_read.assert_called_once()
+        else:
+            delete.assert_called_once()
+            push.assert_not_called()
+        if mutation == "publish":
+            assert result.ok is True, result.error
+            assert current == replace(
+                receipt,
+                revision=_git(binding.cwd, "rev-parse", "HEAD"),
+                generation=receipt.generation + 1,
+            )
+            assert result.value == {"pushed": True, "head_sha": current.revision}
+            return
+        assert current == receipt
+        if mutation is None:
+            assert result.ok is True, result.error
+            assert result.value == {"pushed": False, "head_sha": pin}
+            remote_read.assert_not_called()
+        else:
+            assert result.ok is False
+            assert "publication binding invalid" in str(result.error)
+
     def test_commit_push_returns_clean_head_without_pushing_when_nothing_committed(
         self,
         pool: WorkerPool,
