@@ -266,8 +266,6 @@ def test_ci_wrapper_forwards_codex_writer_isolation(tmp_path: Path) -> None:
     assert config.codex_isolation_deployment_lock_sha256 == "a" * 64
 
 
-
-
 def test_bootstrap_comment_reaches_pipeline_config() -> None:
     """The CLI supplies only the selected comment ID to the pipeline."""
     captured = _run_main_capturing_config(

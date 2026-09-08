@@ -101,7 +101,7 @@ native auto-merge.
 
 An unsupported host-verification boundary has two recovery paths. Use the
 supported macOS host for ordinary immutable review, or use the narrow
-[ADR-0044 protocol](../adr/0044-review-host-verification-bootstrap.md) for
+[ADR-0046 protocol](../adr/0046-review-host-verification-bootstrap.md) for
 PR #3006. Other PRs cannot use this exception.
 
 1. Review and merge #3007 on the supported macOS host from clean, signed
@@ -113,7 +113,7 @@ PR #3006. Other PRs cannot use this exception.
    30-record map, with every row present and no extra operations or paths.
 4. Obtain a fresh review and a separate authenticated operator grant for the
    new head and checkout-derived branch point. The grant must use the exact
-   marker and closed raw JSON schema in ADR-0044. Do not copy an old grant or
+   marker and closed raw JSON schema in ADR-0046. Do not copy an old grant or
    treat this runbook, an observed diff, or a CI result as approval.
 5. From the Hephaestus checkout, select the existing grant comment ID:
 

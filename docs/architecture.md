@@ -1168,7 +1168,7 @@ cannot grant implementation authority. Add a Linux or Windows backend as a
 separately reviewed isolation implementation; there is no unsandboxed fallback.
 
 A narrow source-review exception for PR #3006 is specified in
-[ADR-0044](adr/0044-review-host-verification-bootstrap.md). An authenticated
+[ADR-0046](adr/0046-review-host-verification-bootstrap.md). An authenticated
 operator comment must bind the exact head, checkout branch point, and complete
 30-record operation map. The CLI comment ID only selects that grant. The
 Linux skip remains failed host evidence; a separate process-local proof

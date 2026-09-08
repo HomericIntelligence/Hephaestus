@@ -1,4 +1,4 @@
-# ADR-0044: Target-specific source-review bootstrap
+# ADR-0046: Target-specific source-review bootstrap
 
 - Status: Accepted
 - Date: 2026-09-07
