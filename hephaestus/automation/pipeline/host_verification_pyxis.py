@@ -20,7 +20,9 @@ from hephaestus.automation.pyxis_artifact_io import (
 )
 from hephaestus.config.child_environments import build_host_verification_env
 
-DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE = Path("build/host-verification/hephaestus-ci.sqsh")
+DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE = (
+    Path.home() / ".agent_brain/automation/host-verification/hephaestus-ci.sqsh"
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

@@ -17,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+from hephaestus.automation.pipeline.host_verification_pyxis import (
+    DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+    PyxisExecutionPlacement,
+)
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import BuildTestJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -162,11 +165,7 @@ def test_linux_pyxis_host_verification_boundary(
 
     missing = [name for name in ("srun", "enroot") if shutil.which(name) is None]
     image_text = os.environ.get("HEPHAESTUS_HOST_VERIFICATION_PYXIS_IMAGE", "")
-    image = (
-        Path(image_text)
-        if image_text
-        else Path.cwd() / "build/host-verification/hephaestus-ci.sqsh"
-    )
+    image = Path(image_text) if image_text else DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
     expected_sha256 = os.environ.get("HEPHAESTUS_HOST_VERIFICATION_PYXIS_SHA256", "")
     authority_text = os.environ.get("HEPHAESTUS_HOST_VERIFICATION_PYXIS_AUTHORITY", "")
     quota_root_text = os.environ.get("HEPHAESTUS_HOST_VERIFICATION_PYXIS_QUOTA_ROOT", "")

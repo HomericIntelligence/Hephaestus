@@ -270,16 +270,8 @@ def prepare_image(
 ) -> dict[str, object]:
     """Build, export, and authorize one content-addressed local CI image."""
     root = repo_root.expanduser().resolve()
-    _regular_path(root, _CONTAINERFILE)
-    if (root / "ci").is_symlink():
-        raise HostVerificationImagePreparationError("CI build context cannot be a symlink")
     target = _safe_output_path(root, output)
     authority_path = _safe_output_path(root, _authority_path(target))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    selected_engine = engine or _select_engine(which)
-    executable = _engine_command(selected_engine)
-    revision = _source_revision(root, runner)
-    committed_containerfile_sha256 = _committed_containerfile_sha256(root, revision, runner)
 
     if target.exists() and not rebuild:
         if authority_path.is_symlink() or not authority_path.is_file():
@@ -297,29 +289,27 @@ def prepare_image(
             )
         except (OSError, ValueError) as exc:
             raise HostVerificationImagePreparationError("existing image is not authorized") from exc
-        current_id = _read_image_id(
-            _run(
-                (*executable, "image", "inspect", "--format={{.Id}}", metadata.container_image_id),
-                cwd=root,
-                runner=runner,
-            )
-        )
-        if (
-            current_id != metadata.container_image_id
-            or metadata.source_revision != revision
-            or metadata.containerfile_sha256 != committed_containerfile_sha256
-        ):
-            raise HostVerificationImagePreparationError("existing image provenance is stale")
         return {
             "image": str(metadata.path),
             "sha256": metadata.sha256,
             "image_id": metadata.container_image_id,
             "image_reference": metadata.container_image_reference,
             "authority": str(authority_path),
-            "engine": selected_engine,
-            "source_revision": revision,
+            "engine": "podman"
+            if metadata.container_image_reference.startswith("podman://")
+            else "docker",
+            "source_revision": metadata.source_revision,
             "reused": True,
         }
+
+    _regular_path(root, _CONTAINERFILE)
+    if (root / "ci").is_symlink():
+        raise HostVerificationImagePreparationError("CI build context cannot be a symlink")
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    selected_engine = engine or _select_engine(which)
+    executable = _engine_command(selected_engine)
+    revision = _source_revision(root, runner)
+    committed_containerfile_sha256 = _committed_containerfile_sha256(root, revision, runner)
 
     with tempfile.TemporaryDirectory(prefix="hephaestus-pyxis-build-") as temp_dir:
         temporary_root = Path(temp_dir)
@@ -401,7 +391,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path, default=DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE)
-    parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Replace the saved image with a build from the current commit.",
+    )
     return parser
 
 

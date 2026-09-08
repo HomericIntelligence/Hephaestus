@@ -122,7 +122,20 @@ hosts. Use a dedicated verification account with sufficient process capacity.
 A busy account can fail to launch a check. The worker keeps the limit in force
 and reports the failure; it does not remove the limit to retry.
 
-The preparation command builds an exact committed Git tree. It exports the
+The image is a host-owned toolchain for isolated verification. Normal CI jobs
+and automation runs do not build it. The preparation command stores it at
+`~/.agent_brain/automation/host-verification/hephaestus-ci.sqsh`, with a
+separate `hephaestus-ci.authority.json` file in the same directory.
+
+The command reuses these files across checkouts and runs after it verifies
+the saved digest and authority. Reuse does not need Git, Podman, Docker, or
+Enroot. A new candidate commit does not invalidate the host toolchain. Its
+authority keeps the original build revision. To update the toolchain, run
+`uv run python scripts/prepare_host_verification_pyxis_image.py --rebuild`.
+An invalid saved artifact causes a failure; it is not silently rebuilt.
+The global directory and its ancestors must not permit other users to write.
+
+On first preparation or an explicit rebuild, the command builds an exact committed Git tree. It exports the
 immutable local OCI image ID, not a mutable tag. It writes an owner-read-only
 squashfs and a separate owner-read-only authority file on a filesystem that is
 visible at the same absolute path on each Slurm compute node:

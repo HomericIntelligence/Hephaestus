@@ -138,10 +138,10 @@ def test_prepare_image_publishes_from_the_target_filesystem(
     assert stat.S_IMODE(output.stat().st_mode) == 0o400
 
 
-def test_prepare_image_reuse_validates_exact_id_and_does_not_rewrite_authority(
+def test_prepare_image_reuse_preserves_saved_authority(
     tmp_path: Path,
 ) -> None:
-    """Reuse reads the frozen authority and checks its exact local image ID."""
+    """Reuse verifies the saved image and does not rewrite its authority."""
     module = _module()
     calls: list[tuple[str, ...]] = []
     output = tmp_path / "out" / "hephaestus-ci.sqsh"
@@ -162,28 +162,57 @@ def test_prepare_image_reuse_validates_exact_id_and_does_not_rewrite_authority(
     assert (authority.read_bytes(), authority.stat().st_mtime_ns) == before
 
 
-def test_prepare_image_reuse_rejects_substituted_engine_image(tmp_path: Path) -> None:
-    """Reuse cannot report provenance when the content-addressed OCI ID changed."""
+def test_prepare_image_reuses_global_artifact_without_checkout_or_builder(tmp_path: Path) -> None:
+    """A prepared host toolchain remains usable without its build checkout."""
     module = _module()
     calls: list[tuple[str, ...]] = []
     output = tmp_path / "out" / "hephaestus-ci.sqsh"
     root = _repo(tmp_path)
-    original = "sha256:" + ("c" * 64)
+    first = module.prepare_image(
+        repo_root=root,
+        output=output,
+        engine="podman",
+        runner=_engine_runner(output=output, image_id="c" * 64, calls=calls),
+    )
+    calls.clear()
+
+    def unavailable(argv: tuple[str, ...], **kwargs: Any) -> Any:
+        pytest.fail(f"Reuse must not invoke a builder or Git: {argv}")
+
+    result = module.prepare_image(
+        repo_root=tmp_path / "another-checkout",
+        output=output,
+        which=lambda name: None,
+        runner=unavailable,
+    )
+    assert result == {**first, "reused": True}
+
+
+def test_prepare_image_reuse_rejects_changed_squashfs(tmp_path: Path) -> None:
+    """Reuse must reject bytes that differ from the saved authority."""
+    module = _module()
+    output = tmp_path / "out" / "hephaestus-ci.sqsh"
+    root = _repo(tmp_path)
     module.prepare_image(
         repo_root=root,
         output=output,
-        rebuild=True,
         engine="podman",
-        runner=_engine_runner(output=output, image_id=original, calls=calls),
+        runner=_engine_runner(output=output, image_id="sha256:" + "c" * 64, calls=[]),
     )
+    output.chmod(0o600)
+    output.write_bytes(b"hsqs" + b"changed")
+    output.chmod(0o400)
+    with pytest.raises(module.HostVerificationImagePreparationError, match="not authorized"):
+        module.prepare_image(repo_root=root, output=output, which=lambda name: None)
 
-    with pytest.raises(module.HostVerificationImagePreparationError, match="stale"):
-        module.prepare_image(
-            repo_root=root,
-            output=output,
-            engine="podman",
-            runner=_engine_runner(output=output, image_id="sha256:" + ("d" * 64), calls=calls),
-        )
+
+def test_prepare_cli_defaults_to_global_automation_directory() -> None:
+    """The preparation command stores its reusable image outside checkouts."""
+    module = _module()
+    args = module._build_parser().parse_args([])
+    assert (
+        args.output == Path.home() / ".agent_brain/automation/host-verification/hephaestus-ci.sqsh"
+    )
 
 
 def test_prepare_image_rejects_unverifiable_local_image_id(tmp_path: Path) -> None:
