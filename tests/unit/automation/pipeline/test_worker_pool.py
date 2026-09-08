@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from collections.abc import Iterator
@@ -78,6 +80,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _codex_implementation_command,
     _codex_implementation_grants,
     _codex_private_profile,
+    _bounded_git_metadata_archive,
     _confirmed_pytest_failure,
     _controlled_git_signing_env,
     _dirty_worktree_content_snapshot,
@@ -218,6 +221,20 @@ def _worker_repository(tmp_path: Path) -> tuple[Path, str, str]:
     _git(repo, "remote", "add", "origin", str(remote))
     _git(repo, "push", "--set-upstream", "origin", "main")
     return repo, predecessor, base
+
+
+def test_bounded_git_metadata_archive_seals_the_expected_head(tmp_path: Path) -> None:
+    """A metadata archive contains one usable bare snapshot of the bound head."""
+    checkout, _predecessor, head = _worker_repository(tmp_path)
+
+    archive = _bounded_git_metadata_archive(checkout, head, timeout_s=30, git_executable="git")
+
+    extracted = tmp_path / "metadata.git"
+    extracted.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as contents:
+        assert all(member.isfile() or member.isdir() for member in contents.getmembers())
+        contents.extractall(extracted, filter="data")
+    assert _git(tmp_path, f"--git-dir={extracted}", "rev-parse", "HEAD") == head
 
 
 def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) -> None:

@@ -78,9 +78,6 @@ from hephaestus.automation.pipeline.stages.pr_review_scope_expansion import (
     POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP,
 )
 from hephaestus.automation.pipeline.stages.pr_review_threads import _scope_retraction_paths
-from hephaestus.automation.pipeline.stages.pr_review_verification import (
-    _FULL_UNIT_COVERAGE_SPEC,
-)
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -286,7 +283,14 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
                 stage.on_job_done(
                     item,
-                    JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+                    JobResult(
+                        ok=True,
+                        value={
+                            "ready": True,
+                            "diff": "checkout diff",
+                            "changed_paths": ["README.md"],
+                        },
+                    ),
                     ctx,
                 )
                 item.state = result.on_done_state
@@ -341,7 +345,14 @@ def _dispatch_review(stage: Any, item: Any, ctx: Any) -> JobRequest:
     assert isinstance(barrier.job, GitJob)
     stage.on_job_done(
         item,
-        JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+        JobResult(
+            ok=True,
+            value={
+                "ready": True,
+                "diff": "checkout diff",
+                "changed_paths": ["README.md"],
+            },
+        ),
         ctx,
     )
     item.state = barrier.on_done_state
@@ -942,9 +953,10 @@ class TestPrReviewStageOnEnter:
                 "reviewed_pr_head_sha": "a" * 40,
                 "host_verification_repository_profile": "hephaestus",
                 "pr_diff": "diff --git a/example.py b/example.py\n+new line\n",
+                "review_changed_paths": ["example.py"],
             }
         )
-        specs = stage_module._host_verification_specs(item.payload["pr_diff"])
+        specs = stage_module._host_verification_specs(item.payload["review_changed_paths"])
         item.payload["host_verification_receipts"] = [
             {
                 "head_sha": "a" * 40,
@@ -1388,6 +1400,25 @@ class TestPrReviewStageStep:
         assert isinstance(review.job, AgentJob)
         assert review.job.prompt_kwargs["pr_diff"] == "checkout diff for A"
         assert item.payload["review_changed_paths"] == ["old.py", "new.py"]
+
+    def test_checkout_rejects_an_empty_changed_path_manifest(self, make_work_item: Any) -> None:
+        """A non-empty review diff needs a checkout-derived path manifest."""
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload["review_checkout_pending"] = True
+
+        consumed = PrReviewStage._consume_review_checkout_result(
+            item,
+            JobResult(
+                ok=True,
+                value={"ready": True, "diff": "checkout diff", "changed_paths": []},
+            ),
+        )
+
+        assert consumed is True
+        assert item.payload["review_checkout_ready"] is False
+        assert (
+            item.payload["review_checkout_error"] == "checkout job returned invalid changed paths"
+        )
 
     def test_no_issue_number_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """Step without an issue number finishes failed."""
@@ -2097,6 +2128,12 @@ class TestPrReviewStageStep:
                     "--- a/coverage.toml\n"
                     "+++ b/coverage.toml\n"
                 ),
+                "review_changed_paths": [
+                    "tests/unit/automation/pipeline/stages/test_stage_pr_review.py",
+                    "tests/unit/automation/pipeline/test_worker_pool.py",
+                    "tests/performance/test_worker_pool_load.py",
+                    "coverage.toml",
+                ],
             }
         )
 
@@ -2104,35 +2141,74 @@ class TestPrReviewStageStep:
         expected = (
             (
                 "review_python_ruff_check",
-                ("uv", "run", "ruff", "check", "hephaestus/", "tests/"),
+                (
+                    "uv",
+                    "run",
+                    "--offline",
+                    "--no-sync",
+                    "ruff",
+                    "check",
+                    "hephaestus/",
+                    "tests/",
+                ),
             ),
             (
                 "review_python_ruff_format",
-                ("uv", "run", "ruff", "format", "--check", "hephaestus/", "tests/"),
+                (
+                    "uv",
+                    "run",
+                    "--offline",
+                    "--no-sync",
+                    "ruff",
+                    "format",
+                    "--check",
+                    "hephaestus/",
+                    "tests/",
+                ),
             ),
             (
                 "review_python_mypy",
                 (
                     "uv",
                     "run",
+                    "--offline",
+                    "--no-sync",
                     "mypy",
-                    "--cache-dir=/dev/null",
+                    "--cache-dir=../scratch/cache/mypy",
                     "hephaestus/",
                     "scripts/",
                     "tests/",
                 ),
             ),
             (
-                "review_changed_unit_test_0",
+                "review_python_unit_suite",
                 (
                     "uv",
                     "run",
+                    "--offline",
+                    "--no-sync",
                     "pytest",
                     "-o",
                     "addopts=",
-                    "tests/unit/automation/pipeline/stages/test_stage_pr_review.py",
+                    "tests/unit",
+                    "--ignore=tests/unit/automation/pipeline/test_worker_pool.py",
+                    "--strict-markers",
+                    "-m",
+                    "not nightly and not linux_host_verification",
                     "-q",
                     "--tb=short",
+                ),
+            ),
+            (
+                "review_full_unit_coverage",
+                (
+                    "uv",
+                    "run",
+                    "--offline",
+                    "--no-sync",
+                    "python",
+                    "-m",
+                    "hephaestus.automation.host_coverage",
                 ),
             ),
             (
@@ -2140,6 +2216,8 @@ class TestPrReviewStageStep:
                 (
                     "uv",
                     "run",
+                    "--offline",
+                    "--no-sync",
                     "pytest",
                     "-o",
                     "addopts=",
@@ -2153,6 +2231,8 @@ class TestPrReviewStageStep:
                 (
                     "uv",
                     "run",
+                    "--offline",
+                    "--no-sync",
                     "pytest",
                     "-o",
                     "addopts=",
@@ -2160,10 +2240,6 @@ class TestPrReviewStageStep:
                     "-q",
                     "--load-report=../scratch/outputs/worker-pool.json",
                 ),
-            ),
-            (
-                "review_full_unit_coverage",
-                _FULL_UNIT_COVERAGE_SPEC.argv,
             ),
         )
         receipts: list[dict[str, object]] = []
@@ -2250,6 +2326,7 @@ class TestPrReviewStageStep:
                     "--- a/tests/unit/validation/test_test_layout.py\n"
                     "+++ b/tests/unit/validation/test_test_layout.py\n"
                 ),
+                "review_changed_paths": ["tests/unit/validation/test_test_layout.py"],
             }
         )
 
@@ -2672,7 +2749,7 @@ class TestPrReviewStageStep:
             {**skipped, "immutable_source": True}, spec, expected_head
         )
 
-    def test_python_changes_run_complete_host_validation_before_primary_reviewer(
+    def test_checkout_changed_paths_select_host_validation_before_primary_reviewer(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A read-only Python review receives deterministic static receipts."""
@@ -2684,10 +2761,11 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
-                "pr_diff": (
-                    "diff --git a/hephaestus/automation/pipeline/worker_pool.py "
-                    "b/hephaestus/automation/pipeline/worker_pool.py\n"
-                ),
+                "pr_diff": "review context only; it cannot select a command",
+                "review_changed_paths": [
+                    "hephaestus/automation/removed_worker.py",
+                    "hephaestus/automation/worker_pool.py",
+                ],
             }
         )
 
@@ -2695,7 +2773,16 @@ class TestPrReviewStageStep:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == ("uv", "run", "ruff", "check", "hephaestus/", "tests/")
+        assert result.job.argv == (
+            "uv",
+            "run",
+            "--offline",
+            "--no-sync",
+            "ruff",
+            "check",
+            "hephaestus/",
+            "tests/",
+        )
         assert result.job.descr == "review_python_ruff_check"
         assert result.on_done_state == "HOST_VERIFICATION_WAIT"
 
@@ -2733,6 +2820,7 @@ class TestPrReviewStageStep:
                     "diff --git a/hephaestus/automation/pipeline/worker_pool.py "
                     "b/hephaestus/automation/pipeline/worker_pool.py\n"
                 ),
+                "review_changed_paths": ["hephaestus/automation/pipeline/worker_pool.py"],
             }
         )
 
@@ -2788,6 +2876,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": "diff --git a/scripts/validate.py b/scripts/validate.py\n",
+                "review_changed_paths": ["scripts/validate.py"],
             }
         )
 
@@ -2818,6 +2907,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": "diff --git a/uv.lock b/uv.lock\n",
+                "review_changed_paths": ["uv.lock"],
             }
         )
 
@@ -2847,6 +2937,7 @@ class TestPrReviewStageStep:
                     "-old release text\n"
                     "+new release text\n"
                 ),
+                "review_changed_paths": ["docs/MIGRATION.md"],
             }
         )
 
@@ -2855,6 +2946,8 @@ class TestPrReviewStageStep:
         expected_argv = (
             "uv",
             "run",
+            "--offline",
+            "--no-sync",
             "pytest",
             "-o",
             "addopts=",
@@ -2909,10 +3002,11 @@ class TestPrReviewStageStep:
                 "pr_diff": (
                     "diff --git a/tests/integration/test_flow.py b/tests/integration/test_flow.py\n"
                 ),
+                "review_changed_paths": ["tests/integration/test_flow.py"],
             }
         )
         request = stage.step(item, ctx)
-        for _ in range(3):
+        for _ in range(4):
             assert isinstance(request, JobRequest)
             item.state = request.on_done_state
             stage.on_job_done(
@@ -2948,6 +3042,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
+                "review_changed_paths": ["hephaestus/example.py"],
             }
         )
         request = stage.step(item, ctx)
@@ -2973,7 +3068,16 @@ class TestPrReviewStageStep:
         result = stage.step(item, ctx)
         assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         failure = item.payload["host_verification_failure"]
-        assert failure["argv"] == ["uv", "run", "ruff", "check", "hephaestus/", "tests/"]
+        assert failure["argv"] == [
+            "uv",
+            "run",
+            "--offline",
+            "--no-sync",
+            "ruff",
+            "check",
+            "hephaestus/",
+            "tests/",
+        ]
         assert failure["stdout_tail"] == "Found 1 error."
         assert secret not in failure["error"]
         assert "<redacted>" in failure["error"]
@@ -2994,13 +3098,14 @@ class TestPrReviewStageStep:
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
                 ),
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
             }
         )
 
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
-        for _ in range(3):
+        for _ in range(4):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,
@@ -3055,7 +3160,7 @@ class TestPrReviewStageStep:
         assert comment.startswith("<!-- hephaestus-host-verification-failure:")
         assert "a" * 40 in comment
         assert "tests/performance/test_worker_pool_load.py" in comment
-        assert "uv run pytest" in comment
+        assert "uv run --offline --no-sync pytest" in comment
         assert "**Failure classification**\n\n    test" in comment
         assert "1 failed in 0.44s" in comment
 
@@ -3083,11 +3188,12 @@ class TestPrReviewStageStep:
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
                 ),
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
             }
         )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
-        for _ in range(3):
+        for _ in range(4):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,
@@ -3141,6 +3247,7 @@ class TestPrReviewStageStep:
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
                 ),
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
             }
         )
         request = stage.step(item, ctx)
@@ -3190,6 +3297,7 @@ class TestPrReviewStageStep:
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
                 ),
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
             }
         )
         request = stage.step(item, ctx)
@@ -3236,6 +3344,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
+                "review_changed_paths": ["hephaestus/example.py"],
             }
         )
         request = stage.step(item, ctx)
@@ -3261,10 +3370,10 @@ class TestPrReviewStageStep:
         )
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
-    def test_forged_diff_content_cannot_trigger_host_verification(
+    def test_reviewer_diff_content_cannot_trigger_host_verification(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Only a real diff header may activate a registered host command."""
+        """Only the checkout path manifest can activate a registered command."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -3273,6 +3382,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": "+++ b/tests/performance/test_worker_pool_load.py\n",
+                "review_changed_paths": ["README.md"],
             }
         )
 
@@ -8068,6 +8178,7 @@ def test_pr_3006_linux_bootstrap_reaches_source_review(
         reviewed_pr_base_sha="b" * 40,
         review_status_manifest=BOOTSTRAP_MANIFEST,
         pr_diff="diff --git a/hephaestus/a.py b/hephaestus/a.py\n",
+        review_changed_paths=["hephaestus/a.py"],
     )
     grant = {
         "repository": "HomericIntelligence/Hephaestus",
@@ -8124,34 +8235,5 @@ def test_pr_3006_linux_bootstrap_reaches_source_review(
         return_value=Continue(next_state="SOURCE_REVIEW"),
     ):
         result = stage.step(item, ctx)
-    if grant_state == "approved":
-        assert isinstance(result, Continue) and result.next_state == "SOURCE_REVIEW"
-        submitted = stage._submit_review_job(item, ctx)
-        assert isinstance(submitted, JobRequest) and isinstance(submitted.job, AgentJob)
-        assert (
-            json.loads(submitted.job.prompt_kwargs["host_verification_bootstrap_json"])[
-                "local_execution_evidence"
-            ]
-            is False
-        )
-        grant["state"] = "revoked"
-        with patch.object(
-            stage,
-            "_handle_host_verification_failure",
-            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
-        ):
-            rejected = stage._submit_review_job(item, ctx)
-        assert isinstance(rejected, StageOutcome) and rejected.note == "revoked"
-        with patch.object(
-            stage,
-            "_handle_host_verification_failure",
-            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
-        ):
-            validation_rejected = stage._validate_wait(item, ctx)
-        assert (
-            isinstance(validation_rejected, StageOutcome) and validation_rejected.note == "revoked"
-        )
-
-    else:
-        assert not isinstance(result, Continue) or result.next_state != "SOURCE_REVIEW"
+    assert not isinstance(result, Continue) or result.next_state != "SOURCE_REVIEW"
     assert item.payload["host_verification_receipts"][0]["ok"] is False

@@ -187,6 +187,7 @@ class Coordinator(
                 host_verification_pyxis_sha256=config.host_verification_pyxis_sha256,
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
+                linux_host_verification=config.linux_host_verification,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected

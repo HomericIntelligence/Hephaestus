@@ -87,6 +87,7 @@ from hephaestus.automation.host_verification_bootstrap import (
 )
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
+from hephaestus.automation.linux_host_verification import LinuxHostVerificationConfig
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
@@ -1572,6 +1573,89 @@ def _bounded_git_archive(
                 f"immutable_source_snapshot_failed:{stderr_tail[-_ERR_MAX:]}"
             )
     return bytes(archive), stderr_tail
+
+
+def _bounded_git_metadata_archive(
+    checkout: Path, expected_head_sha: str, timeout_s: int, git_executable: str
+) -> bytes:
+    """Return a bounded tar archive of one bare Git snapshot at the bound head.
+
+    Linux allocation nodes cannot read the submit checkout.  This distinct
+    archive gives the allocation driver the minimal Git database that a
+    repository-aware catalog command needs, without widening the source
+    archive into a writable checkout.  The clone is local and transient; only
+    regular files and directories can enter the staged payload.
+    """
+    with tempfile.TemporaryDirectory(prefix="hephaestus-git-metadata-") as temporary:
+        metadata = Path(temporary) / "metadata.git"
+        deadline = time.monotonic() + timeout_s
+
+        def remaining_timeout() -> float:
+            return max(deadline - time.monotonic(), 0.01)
+
+        clone = subprocess.run(
+            (git_executable, "clone", "--bare", "--no-local", str(checkout), str(metadata)),
+            env=_controlled_git_env(),
+            capture_output=True,
+            text=True,
+            timeout=remaining_timeout(),
+            check=False,
+        )
+        if clone.returncode != 0:
+            raise _HostVerificationBoundaryError("immutable_git_metadata_snapshot_failed")
+        head = subprocess.run(
+            (git_executable, f"--git-dir={metadata}", "rev-parse", "HEAD"),
+            env=_controlled_git_env(),
+            capture_output=True,
+            text=True,
+            timeout=remaining_timeout(),
+            check=False,
+        )
+        if head.returncode != 0 or head.stdout.strip() != expected_head_sha:
+            raise _HostVerificationBoundaryError("immutable_git_metadata_head_changed")
+
+        entries: list[tuple[str, Path, os.stat_result]] = []
+        payload_size = 0
+        for directory, directory_names, file_names in os.walk(metadata, followlinks=False):
+            directory_path = Path(directory)
+            directory_names.sort()
+            file_names.sort()
+            for name in (*directory_names, *file_names):
+                path = directory_path / name
+                relative = path.relative_to(metadata).as_posix()
+                status = os.lstat(path)
+                if stat.S_ISLNK(status.st_mode) or not (
+                    stat.S_ISDIR(status.st_mode) or stat.S_ISREG(status.st_mode)
+                ):
+                    raise _HostVerificationBoundaryError("unsafe_git_metadata_member")
+                if stat.S_ISREG(status.st_mode):
+                    payload_size += status.st_size
+                entries.append((relative, path, status))
+        # Each member needs a tar header and the stream has end blocks.  Keep
+        # the preflight intentionally conservative so a crafted Git object
+        # cannot allocate an unbounded in-memory staging buffer.
+        if (
+            len(entries) > _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS
+            or payload_size + (len(entries) + 2) * 1024 > _HOST_VERIFICATION_ARCHIVE_MAX_BYTES
+        ):
+            raise _HostVerificationBoundaryError("git_metadata_archive_size_limit_exceeded")
+
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:") as output:
+            for relative, path, status in entries:
+                info = tarfile.TarInfo(relative)
+                info.mode = stat.S_IMODE(status.st_mode)
+                info.mtime = 0
+                if stat.S_ISDIR(status.st_mode):
+                    info.type = tarfile.DIRTYPE
+                    output.addfile(info)
+                    continue
+                info.size = status.st_size
+                with path.open("rb") as member:
+                    output.addfile(info, member)
+                if archive.tell() > _HOST_VERIFICATION_ARCHIVE_MAX_BYTES:
+                    raise _HostVerificationBoundaryError("git_metadata_archive_size_limit_exceeded")
+    return archive.getvalue()
 
 
 def _prepare_immutable_git_metadata(
@@ -3574,6 +3658,7 @@ class WorkerPool:
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
         host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
+        linux_host_verification: LinuxHostVerificationConfig | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -3601,6 +3686,8 @@ class WorkerPool:
             host_verification_pyxis_authority: Host-owned image provenance file.
             host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
             host_verification_pyxis_placement: Optional host-selected allocation and node.
+            linux_host_verification: Optional sealed configuration for the
+                Linux host-verification backend.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -3624,6 +3711,7 @@ class WorkerPool:
         self._host_verification_pyxis_authority = host_verification_pyxis_authority
         self._host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
         self._host_verification_pyxis_placement = host_verification_pyxis_placement
+        self._linux_host_verification = linux_host_verification
 
     @contextmanager
     def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:

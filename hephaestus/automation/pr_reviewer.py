@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation.role_selection import resolve_role_agents
@@ -41,6 +42,7 @@ from hephaestus.config.paths import resolve_projects_dir
 from ._review_utils import build_review_parser
 from .agent_config import fallback_model, reviewer_model
 from .git_utils import get_repo_info
+from .linux_host_verification import load_linux_host_verification_config
 from .pipeline.routing import PipelineScope, StageName
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,13 @@ Examples:
         timeouts=("network", "gh", "metadata", "diff-collect"),
         plugin_skills=True,
     )
+    parser.add_argument(
+        "--linux-host-verification-config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Sealed TOML configuration for the optional Linux host-verification backend.",
+    )
     return parser
 
 
@@ -165,6 +174,11 @@ def main() -> int:
         # canonical "ordered set" trick) so ``--issues 123 123`` never queues
         # the same issue twice.
         issues = list(dict.fromkeys(args.issues))
+        linux_host_verification = (
+            load_linux_host_verification_config(args.linux_host_verification_config)
+            if args.linux_host_verification_config is not None
+            else None
+        )
 
         config = PipelineConfig(
             org=org,
@@ -211,6 +225,7 @@ def main() -> int:
             host_verification_pyxis_sha256=args.host_verification_pyxis_sha256,
             host_verification_pyxis_authority=args.host_verification_pyxis_authority,
             host_verification_pyxis_quota_root=args.host_verification_pyxis_quota_root,
+            linux_host_verification=linux_host_verification,
         )
 
         rc = run_pipeline(config)

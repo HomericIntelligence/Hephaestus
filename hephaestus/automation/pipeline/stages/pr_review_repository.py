@@ -43,8 +43,8 @@ def _prepare_host_checks(
     """Bind a repository plan or explicit unsupported evidence to the review payload."""
     profile = _repository_host_verification_profile(repository_root)
     payload[_HOST_VERIFICATION_PROFILE] = profile
-    verifications = _host_verification_specs(payload.get("pr_diff"), profile=profile)
-    requested = _host_verification_specs(payload.get("pr_diff"), profile="hephaestus")
+    verifications = _host_verification_specs(payload.get("review_changed_paths"), profile=profile)
+    requested = _host_verification_specs(payload.get("review_changed_paths"), profile="hephaestus")
     if profile is None and requested:
         payload["host_verification_receipts"] = [
             {
@@ -60,7 +60,7 @@ def _prepare_host_checks(
 def _payload_host_verification_specs(payload: dict[str, Any]) -> tuple[_HostVerificationSpec, ...]:
     """Rebuild the bound host plan for a later stage transition."""
     return _host_verification_specs(
-        payload.get("pr_diff"), profile=payload.get(_HOST_VERIFICATION_PROFILE)
+        payload.get("review_changed_paths"), profile=payload.get(_HOST_VERIFICATION_PROFILE)
     )
 
 
