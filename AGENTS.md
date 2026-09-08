@@ -294,6 +294,24 @@ Keep all applicable task, skill, and repository requirements.
 For a subagent task, use the installed catalog for the assigned scope and
 follow the task prompt.
 
+### Delegated Verification
+
+The main agent must not run local verification commands. It must start one
+test-only subagent for each verification task and wait for its report. Use
+`gpt-5.6-luna` with `xhigh` reasoning by default for this subagent.
+
+Verification includes unit, integration, and shell tests; lint checks;
+formatter checks; type checks; and pre-commit checks. Give the subagent the
+exact commands that are necessary. The subagent must only run verification
+commands. It must not edit repository files. Use a check-only command when a
+tool can change files.
+
+For a pass, the subagent report must list each command and confirm that it
+passed. For a failure, the report must include the command, its exit status,
+concise failure evidence, the affected tests or checks, and a first-stage
+root-cause analysis. The subagent must not fix a failure unless it receives a
+separate direction to do so.
+
 ### Skill Catalog
 
 Invoke an Athena skill with `Skill(skill: "athena:<name>", args: "<argument>")`, or
@@ -500,8 +518,8 @@ uv run pytest tests/unit
 # Run linter
 uv run ruff check hephaestus/ tests/
 
-# Run formatter
-uv run ruff format hephaestus/ tests/
+# Check formatter
+uv run ruff format --check hephaestus/ tests/
 
 # Run type checking
 uv run mypy hephaestus/ scripts/ tests/
