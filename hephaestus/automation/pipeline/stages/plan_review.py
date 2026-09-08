@@ -73,7 +73,10 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.comment_identity import validate_planning_body_for_write
-from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
+from hephaestus.automation.plan_review_session import (
+    PlanReviewSession,
+    PlanReviewSessionLostError,
+)
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
     get_plan_loop_review_prompt,
@@ -645,7 +648,168 @@ class PlanReviewStage(Stage):
             item.payload.pop("review_error_retries", None)
         return None
 
-    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+    def _load_review_session(
+        self, item: WorkItem, ctx: StageContext
+    ) -> tuple[PlanReviewSession | None, str] | StepResult:
+        """Load the current reviewer session or start its recovery path."""
+        store = ctx.plan_review_sessions
+        cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+        try:
+            review_session = store.load(cycle_id) if store is not None and cycle_id else None
+            transcript = store.transcript(cycle_id) if review_session is not None else ""
+        except PlanReviewSessionLostError as exc:
+            logger.error("plan_review:%d: review-session-lost: %s", item.issue, exc)
+            assert store is not None and cycle_id  # noqa: S101 - guarded store access above
+            store.mark_recovery_required(cycle_id)
+            item.payload["review_session_error"] = "review-session-lost"
+            recovery_outcome = _restart_review_conversation(item, ctx)
+            if recovery_outcome is not None:
+                return recovery_outcome
+            return Continue(next_state="REVIEW_WAIT")
+        return review_session, transcript
+
+    def _build_review_job(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        review_session: PlanReviewSession | None,
+        transcript: str,
+    ) -> JobRequest:
+        """Build the reviewer request for the current plan-review round."""
+        assert item.issue is not None  # noqa: S101 - step validates the issue
+        cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+        round_index = item.payload.get("review_round", 0)
+        logger.info(
+            "plan_review:%d: requesting review job cycle=%s session=%s round=%d revision=%s",
+            item.issue,
+            cycle_id or "legacy",
+            (review_session.session_id if review_session is not None else None) or "pending",
+            round_index,
+            item.payload.get("plan_revision", 1),
+        )
+        workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=(review_session.provider if review_session is not None else agent_provider(ctx)),
+            model=(
+                review_session.reviewer_model
+                if review_session is not None
+                else stage_model(ctx, "reviewer", reviewer_model)
+            ),
+            prompt_builder=get_plan_loop_review_prompt,
+            cwd=workspace.cwd if workspace else ctx.paths.worktree,
+            timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLAN_REVIEWER,
+            session_key=review_session.session_key if review_session is not None else "",
+            resume_session_id=review_session.session_id if review_session is not None else None,
+            resume_binding=(
+                AgentSessionBinding.from_json(review_session.session_binding)
+                if review_session is not None and review_session.session_binding
+                else None
+            ),
+            session_checkpoint=_review_session_checkpoint(ctx, cycle_id),
+            execution_request=ExecutionRequest(
+                AgentRole.PLAN_REVIEWER,
+                AgentOperation.PLAN_REVIEW,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if review_session is not None and review_session.session_id
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "plan_text": item.payload.get("plan_text", ""),
+                "learnings": item.payload.get("learnings", ""),
+                "iteration": round_index,
+                "prior_review": item.payload.get("prior_review") or None,
+                "advise_findings": item.payload.get("advise_findings", ""),
+                "plan_history": "",
+                "planning_cycle_id": cycle_id,
+                "reviewer_session_id": (
+                    review_session.session_id or "pending" if review_session is not None else ""
+                ),
+                "plan_revision": int(item.payload.get("plan_revision") or 1),
+                "plan_fingerprint": plan_fingerprint(str(item.payload.get("plan_text") or "")),
+                "review_transcript": transcript,
+            },
+            parse=parse_plan_review_verdict,
+            descr="review",
+        )
+        return JobRequest(job, on_done_state="EVAL")
+
+    def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit the reviewer job after the pending-transition guards."""
+        assert item.issue is not None  # noqa: S101 - step validates the issue
+        transition_outcome = _confirm_pending_amendment_transition(item, ctx)
+        if transition_outcome is not None:
+            return transition_outcome
+        no_progress_reason = str(item.payload.get("no_progress_reason") or "")
+        if no_progress_reason:
+            raw_review = (
+                "Planning is stuck and needs external feedback. "
+                f"{no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
+            )
+            confirmed = _publish_plan_blocked(
+                item.issue,
+                ctx,
+                raw_review=raw_review,
+                revision=int(item.payload.get("plan_revision") or 1),
+            )
+            if not confirmed:
+                return StageOutcome(Disposition.RETRY, "blocked label was not confirmed")
+            return StageOutcome(
+                Disposition.BLOCKED,
+                "planning made no progress; external feedback required",
+            )
+        session_data = self._load_review_session(item, ctx)
+        if not isinstance(session_data, tuple):
+            return session_data
+        review_session, transcript = session_data
+        item.payload.pop("review_verdict", None)
+        item.payload.pop("review_comment_published", None)
+        return self._build_review_job(item, ctx, review_session, transcript)
+
+    def _amend_wait(self, item: WorkItem, ctx: StageContext) -> JobRequest:
+        """Build the planner amendment request."""
+        assert item.issue is not None  # noqa: S101 - step validates the issue
+        logger.info("plan_review:%d: requesting amend job", item.issue)
+        workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "planner", planner_model),
+            prompt_builder=build_amend_prompt,
+            cwd=workspace.cwd if workspace else ctx.paths.worktree,
+            timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLANNER,
+            execution_request=ExecutionRequest(
+                AgentRole.PLANNER, AgentOperation.AMEND, SessionLifecycle.RESUME_REQUIRED
+            ),
+            resume_binding=item.session_bindings.get(AGENT_PLANNER),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "advise_findings": item.payload.get("advise_findings", ""),
+                "prior_review": item.payload.get("prior_review", ""),
+                "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
+            },
+            descr="amend",
+        )
+        return JobRequest(job, on_done_state="REVIEW_WAIT")
+
+    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Execute the next plan-review action for the item's current state.
 
         Args:
@@ -676,274 +840,87 @@ class PlanReviewStage(Stage):
             return Continue(next_state="REVIEW_WAIT")
 
         if item.state == "REVIEW_WAIT":
-            transition_outcome = _confirm_pending_amendment_transition(item, ctx)
-            if transition_outcome is not None:
-                return transition_outcome
-
-            no_progress_reason = str(item.payload.get("no_progress_reason") or "")
-            if no_progress_reason:
-                raw_review = (
-                    "Planning is stuck and needs external feedback. "
-                    f"{no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
-                )
-                revision = int(item.payload.get("plan_revision") or 1)
-                confirmed = _publish_plan_blocked(
-                    item.issue,
-                    ctx,
-                    raw_review=raw_review,
-                    revision=revision,
-                )
-                if not confirmed:
-                    return StageOutcome(Disposition.RETRY, "blocked label was not confirmed")
-                return StageOutcome(
-                    Disposition.BLOCKED,
-                    "planning made no progress; external feedback required",
-                )
-
-            # Counters advance in EVAL, and only for real verdicts — a
-            # submission is not an iteration (#1554/#1794). The 0-based
-            # prompt iteration is the cycle-relative round count.
-            round_index = item.payload.get("review_round", 0)
-            store = ctx.plan_review_sessions
-            cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
-            try:
-                review_session = store.load(cycle_id) if store is not None and cycle_id else None
-                transcript = store.transcript(cycle_id) if review_session is not None else ""
-            except PlanReviewSessionLostError as exc:
-                logger.error("plan_review:%d: review-session-lost: %s", item.issue, exc)
-                assert store is not None and cycle_id  # noqa: S101 - guarded store access above
-                store.mark_recovery_required(cycle_id)
-                item.payload["review_session_error"] = "review-session-lost"
-                recovery_outcome = _restart_review_conversation(item, ctx)
-                if recovery_outcome is not None:
-                    return recovery_outcome
-                return Continue(next_state="REVIEW_WAIT")
-            # Clear any stale verdict at submission so a failed later round
-            # can never replay an earlier round's verdict in EVAL.
-            item.payload.pop("review_verdict", None)
-            item.payload.pop("review_comment_published", None)
-            logger.info(
-                "plan_review:%d: requesting review job cycle=%s session=%s round=%d revision=%s",
-                item.issue,
-                cycle_id or "legacy",
-                (review_session.session_id if review_session is not None else None) or "pending",
-                round_index,
-                item.payload.get("plan_revision", 1),
-            )
-            workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=(
-                    review_session.provider if review_session is not None else agent_provider(ctx)
-                ),
-                model=(
-                    review_session.reviewer_model
-                    if review_session is not None
-                    else stage_model(ctx, "reviewer", reviewer_model)
-                ),
-                prompt_builder=get_plan_loop_review_prompt,
-                cwd=workspace.cwd if workspace else ctx.paths.worktree,
-                timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
-                workspace=workspace,
-                sandbox="read-only",
-                allowed_tools="Read,Glob,Grep",
-                session_agent=AGENT_PLAN_REVIEWER,
-                session_key=review_session.session_key if review_session is not None else "",
-                resume_session_id=(
-                    review_session.session_id if review_session is not None else None
-                ),
-                resume_binding=(
-                    AgentSessionBinding.from_json(review_session.session_binding)
-                    if review_session is not None and review_session.session_binding
-                    else None
-                ),
-                session_checkpoint=_review_session_checkpoint(ctx, cycle_id),
-                execution_request=ExecutionRequest(
-                    AgentRole.PLAN_REVIEWER,
-                    AgentOperation.PLAN_REVIEW,
-                    (
-                        SessionLifecycle.RESUME_REQUIRED
-                        if review_session is not None and review_session.session_id
-                        else SessionLifecycle.START_NEW
-                    ),
-                ),
-                # get_plan_loop_review_prompt takes a 0-based iteration index
-                # (full-sweep suffix on the final iteration). Issue title/body
-                # are seeded into item.payload by the coordinator (#1817).
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "issue_title": item.payload.get("issue_title", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "plan_text": item.payload.get("plan_text", ""),
-                    # Populated from the payload when present; wiring the
-                    # legacy capture_planner_learnings step into the pipeline
-                    # is deferred to the coordinator slice (#1817).
-                    "learnings": item.payload.get("learnings", ""),
-                    "iteration": round_index,
-                    "prior_review": item.payload.get("prior_review") or None,
-                    "advise_findings": item.payload.get("advise_findings", ""),
-                    # The reviewer already receives the complete current plan
-                    # and direct prior critique; superseded journal entries
-                    # would only duplicate stale feedback.
-                    "plan_history": "",
-                    "planning_cycle_id": cycle_id,
-                    "reviewer_session_id": (
-                        review_session.session_id or "pending" if review_session is not None else ""
-                    ),
-                    "plan_revision": int(item.payload.get("plan_revision") or 1),
-                    "plan_fingerprint": plan_fingerprint(str(item.payload.get("plan_text") or "")),
-                    "review_transcript": transcript,
-                },
-                parse=parse_plan_review_verdict,  # verdict parsed in-worker
-                descr="review",
-            )
-            return JobRequest(job, on_done_state="EVAL")
+            return self._review_wait(item, ctx)
 
         if item.state == "EVAL":
             return self._eval(item, ctx)
 
         if item.state == "AMEND_WAIT":
-            logger.info("plan_review:%d: requesting amend job", item.issue)
-            workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "planner", planner_model),
-                prompt_builder=build_amend_prompt,
-                cwd=workspace.cwd if workspace else ctx.paths.worktree,
-                timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
-                workspace=workspace,
-                sandbox="read-only",
-                allowed_tools="Read,Glob,Grep",
-                session_agent=AGENT_PLANNER,
-                execution_request=ExecutionRequest(
-                    AgentRole.PLANNER, AgentOperation.AMEND, SessionLifecycle.RESUME_REQUIRED
-                ),
-                resume_binding=item.session_bindings.get(AGENT_PLANNER),
-                # build_amend_prompt composes get_plan_prompt with the
-                # reviewer feedback block in-worker (doc: "resume planner
-                # session with feedback block"). The worker resumes the planner
-                # session (#1817 wires that session setup).
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "issue_title": item.payload.get("issue_title", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "advise_findings": item.payload.get("advise_findings", ""),
-                    "prior_review": item.payload.get("prior_review", ""),
-                    "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
-                },
-                descr="amend",
-            )
-            return JobRequest(job, on_done_state="REVIEW_WAIT")
+            return self._amend_wait(item, ctx)
 
         logger.warning("plan_review:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
-    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """EVAL [M]: decide the next action from the parsed reviewer verdict.
-
-        Every durable label write below happens BEFORE the outcome that
-        causes a queue push (the load-bearing pipeline invariant). Both
-        iteration counters (lifetime ``attempts["plan_review_iter"]`` audit
-        trail and cycle-relative ``payload["review_round"]`` gate) advance
-        here, and only for real verdicts — never for ERROR or missing
-        verdicts (#911/#1554/#1794).
-        """
-        if item.issue is None:  # guarded by step(); kept for type narrowing
-            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
-        issue_number = item.issue
-        verdict = item.payload.get("review_verdict")
-
-        # ERROR verdict or missing verdict (the review job failed, so
-        # on_job_done stored nothing) = reviewer-infrastructure failure:
-        # labels untouched, no iteration burned, RETRY — bounded by the
-        # consecutive-failure cap so the retry loop cannot spin forever.
-        if verdict is None or verdict.verdict not in {"GO", "NOGO", "BLOCKED"}:
-            reason = "no verdict found" if verdict is None else "reviewer error"
-            retries = item.payload.get("review_error_retries", 0) + 1
-            item.payload["review_error_retries"] = retries
-            if retries > REVIEW_ERROR_RETRY_CAP:
-                logger.error(
-                    "plan_review:%d: %s; %d consecutive reviewer failures "
-                    "(cap %d) — failing without labels",
-                    item.issue,
-                    reason,
-                    retries,
-                    REVIEW_ERROR_RETRY_CAP,
-                )
-                return StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    f"reviewer error retries exhausted ({reason})",
-                )
-            logger.warning(
-                "plan_review:%d: %s; retry %d/%d (no iteration burned)",
+    def _reviewer_error_outcome(self, item: WorkItem, verdict: object) -> StageOutcome | None:
+        """Return the bounded retry outcome for an invalid reviewer result."""
+        if verdict is not None and getattr(verdict, "verdict", None) in {
+            "GO",
+            "NOGO",
+            "BLOCKED",
+        }:
+            return None
+        reason = "no verdict found" if verdict is None else "reviewer error"
+        retries = item.payload.get("review_error_retries", 0) + 1
+        item.payload["review_error_retries"] = retries
+        if retries > REVIEW_ERROR_RETRY_CAP:
+            logger.error(
+                "plan_review:%d: %s; %d consecutive reviewer failures "
+                "(cap %d) — failing without labels",
                 item.issue,
                 reason,
                 retries,
                 REVIEW_ERROR_RETRY_CAP,
             )
-            return StageOutcome(Disposition.RETRY, reason)
-
-        # An operator may apply BLOCKED while the reviewer agent is running.
-        # Re-read immediately before any audit or label write; automation must
-        # neither overwrite the blocked explanation nor clear the latch.
-        live_labels = _require_issue_labels(item, ctx)
-        if STATE_PLAN_BLOCKED in live_labels and verdict.verdict != "BLOCKED":
             return StageOutcome(
-                Disposition.BLOCKED,
-                "plan was blocked externally while review was in flight",
+                Disposition.FINISH_FAIL,
+                f"reviewer error retries exhausted ({reason})",
             )
+        logger.warning(
+            "plan_review:%d: %s; retry %d/%d (no iteration burned)",
+            item.issue,
+            reason,
+            retries,
+            REVIEW_ERROR_RETRY_CAP,
+        )
+        return StageOutcome(Disposition.RETRY, reason)
 
-        # Re-read on every verdict replay. A completed comment write can be
-        # replayed after a crash, but it must not make a conflicting journal
-        # eligible for a later label mutation.
-        current_revision = _current_revision(ctx.github.issue_comments(issue_number))
-
-        # Real verdict: this review round counts. Advance the cycle-relative
-        # gate and the lifetime audit trail; reset the consecutive-failure cap.
+    def _record_review_verdict(self, item: WorkItem, ctx: StageContext) -> tuple[int, int]:
+        """Read the journal and advance counters for a real verdict."""
+        assert item.issue is not None  # noqa: S101 - _eval narrows the issue
+        current_revision = _current_revision(ctx.github.issue_comments(item.issue))
         item.payload["review_error_retries"] = 0
         round_done = item.payload.get("review_round", 0) + 1
         item.payload["review_round"] = round_done
         item.attempts["plan_review_iter"] = item.attempts.get("plan_review_iter", 0) + 1
+        return current_revision, round_done
 
-        def publish_review_comment() -> None:
-            """Idempotently update the explanatory journal after safe state ordering."""
-            if item.payload.get("review_comment_published"):
-                return
-            revision = int(item.payload.get("plan_revision") or current_revision)
-            ctx.github.upsert_issue_comment(
-                issue_number,
-                PLAN_REVIEW_CANONICAL_MARKER,
-                _normalize_review_comment(verdict.raw, revision=revision),
-            )
-            item.payload["review_comment_published"] = True
+    def _publish_review_comment(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        verdict: ReviewVerdict,
+        current_revision: int,
+    ) -> None:
+        """Persist the current review explanation once."""
+        if item.payload.get("review_comment_published"):
+            return
+        assert item.issue is not None  # noqa: S101 - _eval narrows the issue
+        revision = int(item.payload.get("plan_revision") or current_revision)
+        ctx.github.upsert_issue_comment(
+            item.issue,
+            PLAN_REVIEW_CANONICAL_MARKER,
+            _normalize_review_comment(verdict.raw, revision=revision),
+        )
+        item.payload["review_comment_published"] = True
 
-        if verdict.verdict == "BLOCKED":
-            # BLOCKED is the safety latch. Make it durable first so an audit
-            # write failure cannot resume autonomous work; the retry still
-            # attempts to persist the required explanation idempotently.
-            return self._complete_blocked_with_audit(item, ctx, verdict)
-
-        # GO/NOGO audit text is durable before its proposed label. Regardless
-        # of prose, only the confirmed exclusive label below can route.
-        publish_review_comment()
-
-        if verdict.is_go:
-            return self._complete_go(item, ctx)
-
-        # Every NOGO is durable control state, including rounds that can still
-        # amend. The replacement plan publication transitions back to
-        # state:needs-plan only after both canonical comments are updated.
+    def _handle_nogo(
+        self, item: WorkItem, ctx: StageContext, verdict: ReviewVerdict, round_done: int
+    ) -> StepResult:
+        """Persist NOGO state and select amendment or cycle-failure routing."""
+        assert item.issue is not None  # noqa: S101 - _eval narrows the issue
         self._write_verdict_labels(item.issue, ctx, is_go=False)
-        if not is_exclusive_plan_state(
-            _require_issue_labels(item, ctx),
-            STATE_PLAN_NO_GO,
-        ):
+        if not is_exclusive_plan_state(_require_issue_labels(item, ctx), STATE_PLAN_NO_GO):
             return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
-
-        # NOGO: amend within the cycle-relative budget.
         budget_iter = ctx.budget("plan_review_iter")
         if round_done < budget_iter:
             logger.info(
@@ -954,10 +931,6 @@ class PlanReviewStage(Stage):
                 budget_iter,
             )
             return Continue(next_state="AMEND_WAIT")
-
-        # Iteration cap: fail back with state:plan-no-go already durable —
-        # "nogo" while plan_cycles remain, "plan_cycles_exhausted" once the
-        # cycle budget is consumed (routes to finished(fail) via ROUTES).
         logger.warning(
             "plan_review:%d: %s exhausted (round %d/%d); applying no-go label",
             item.issue,
@@ -967,16 +940,40 @@ class PlanReviewStage(Stage):
         )
         cycles = item.attempts.get("plan_cycles", 0) + 1
         item.attempts["plan_cycles"] = cycles
-        if cycles >= ctx.budget("plan_cycles"):
+        cycle_budget = ctx.budget("plan_cycles")
+        if cycles >= cycle_budget:
             _complete_review_cycle(item, ctx)
             logger.error(
                 "plan_review:%d: plan_cycles exhausted (%d/%d)",
                 item.issue,
                 cycles,
-                ctx.budget("plan_cycles"),
+                cycle_budget,
             )
             return StageOutcome(Disposition.FAIL_BACK, "plan_cycles_exhausted")
         return StageOutcome(Disposition.FAIL_BACK, "nogo")
+
+    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Apply the review verdict after durable state checks."""
+        if item.issue is None:  # guarded by step(); kept for type narrowing
+            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        verdict = item.payload.get("review_verdict")
+        error_outcome = self._reviewer_error_outcome(item, verdict)
+        if error_outcome is not None:
+            return error_outcome
+        assert isinstance(verdict, ReviewVerdict)  # noqa: S101 - error gate narrows the verdict
+        live_labels = _require_issue_labels(item, ctx)
+        if STATE_PLAN_BLOCKED in live_labels and verdict.verdict != "BLOCKED":
+            return StageOutcome(
+                Disposition.BLOCKED,
+                "plan was blocked externally while review was in flight",
+            )
+        current_revision, round_done = self._record_review_verdict(item, ctx)
+        if verdict.verdict == "BLOCKED":
+            return self._complete_blocked_with_audit(item, ctx, verdict)
+        self._publish_review_comment(item, ctx, verdict, current_revision)
+        if verdict.is_go:
+            return self._complete_go(item, ctx)
+        return self._handle_nogo(item, ctx, verdict, round_done)
 
     def _complete_blocked(self, item: WorkItem, ctx: StageContext) -> StageOutcome:
         """Apply and confirm BLOCKED before returning its routing outcome."""

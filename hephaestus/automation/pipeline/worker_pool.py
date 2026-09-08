@@ -2073,142 +2073,181 @@ class WorkerPool:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
 
-    def _run_agent(  # noqa: C901 - provider and session dispatch are one atomic boundary
-        self, job: AgentJob
-    ) -> JobResult:
-        """Run an agent job (Claude or other runtime).
+    def _prepare_agent_job(self, job: AgentJob) -> tuple[Path, str, str, str, str]:
+        """Resolve an agent job workspace, provider, session, and prompt."""
+        cwd = validate_job_workspace(job)
+        agent = resolve_agent(
+            job.agent,
+            cwd=cwd,
+            disable_pi_automation=job.disable_pi_automation,
+            auth_status_timeout=job.auth_status_timeout,
+            pi_isolation_adapter=job.pi_isolation_adapter,
+            pi_dir=job.pi_dir,
+        )
+        session_agent = job.session_agent or job.agent
+        session_key = job.session_key or session_agent
+        with plugin_skills_context(job.plugin_skills_dir):
+            prompt = job.prompt_builder(**job.prompt_kwargs)
+        return cwd, agent, session_agent, session_key, prompt
 
-        Retry tradeoff: the whole agent invocation is wrapped in
-        :func:`resilient_call`, so a *transient* failure (network reset, gh
-        flake) re-runs the ENTIRE agent session — expensive, and the retried
-        session may redo work the failed one partially completed. We accept
-        that because agent invocations are idempotent-by-design at the
-        workflow level (plan/review comments upsert; implementation re-runs
-        converge on the same branch), and the alternative — no retry — turns
-        every blip into a failed pipeline stage. Non-transient errors (rc!=0
-        with non-transient stderr, timeouts) are NOT retried; they surface
-        immediately as error results.
-
-        Unexpected Exception subclasses from agent resolution, prompt
-        construction, and the resilience wrapper are classified in this method
-        for symmetry with the specific agent failures below. Process-control
-        escapes are converted by :meth:`_run` so the returned result preserves
-        the executing worker identity.
-        """
-        try:
-            cwd = validate_job_workspace(job)
-            agent = resolve_agent(
-                job.agent,
+    @staticmethod
+    def _run_non_claude_agent(
+        job: AgentJob, agent: str, cwd: Path, prompt: str
+    ) -> tuple[str, str | None, AgentSessionBinding | None, tuple[str, ...]]:
+        """Run or resume a non-Claude agent session."""
+        if job.resume_binding is not None:
+            agent_result = resume_agent_session(
+                agent=agent,
+                session_id=job.resume_binding.session_id,
+                prompt=prompt,
                 cwd=cwd,
+                timeout=job.timeout_s,
+                model=job.model,
+                sandbox=job.sandbox,
+                approval="never",
+                process_tracker=subprocess_registry.track_process_group,
+                execution_request=job.execution_request,
+                resume_binding=job.resume_binding,
                 disable_pi_automation=job.disable_pi_automation,
-                auth_status_timeout=job.auth_status_timeout,
-                pi_isolation_adapter=job.pi_isolation_adapter,
                 pi_dir=job.pi_dir,
             )
-            is_claude = agent == "claude"
-            session_agent = job.session_agent or job.agent
-            session_key = job.session_key or session_agent
-            with plugin_skills_context(job.plugin_skills_dir):
-                prompt = job.prompt_builder(**job.prompt_kwargs)
+        elif job.resume_session_id:
+            agent_result = resume_agent_session(
+                agent=agent,
+                session_id=job.resume_session_id,
+                prompt=prompt,
+                cwd=cwd,
+                timeout=job.timeout_s,
+                model=job.model,
+                sandbox=job.sandbox,
+                approval="never",
+                process_tracker=subprocess_registry.track_process_group,
+                execution_request=job.execution_request,
+                resume_binding=job.resume_binding,
+                disable_pi_automation=job.disable_pi_automation,
+                pi_dir=job.pi_dir,
+            )
+        else:
+            agent_result = run_agent_session(
+                agent=agent,
+                prompt=prompt,
+                cwd=cwd,
+                timeout=job.timeout_s,
+                model=job.model,
+                sandbox=job.sandbox,
+                approval="never",
+                process_tracker=subprocess_registry.track_process_group,
+                execution_request=job.execution_request,
+                resume_binding=job.resume_binding,
+                disable_pi_automation=job.disable_pi_automation,
+                pi_dir=job.pi_dir,
+            )
+        return (
+            agent_result.stdout or "",
+            agent_result.session_id or job.resume_session_id,
+            agent_result.session_binding,
+            agent_result.observed_skill_invocations,
+        )
 
-            def _invoke() -> tuple[str, str | None, AgentSessionBinding | None, tuple[str, ...]]:
-                if is_claude:
-                    # Scope priority: an explicit per-job grant (a stage that
-                    # knows its exact needs, e.g. pr_review) wins; a read-only
-                    # sandbox without one clamps to the fail-closed default;
-                    # everything else resolves by session-agent role.
-                    if job.allowed_tools:
-                        scope = ToolScope(job.allowed_tools)
-                    elif job.sandbox == "read-only":
-                        scope = DEFAULT_TOOL_SCOPE
-                    else:
-                        scope = tool_scope_for(session_agent)
-                    stdout, claude_session_id = claude_invoke.invoke_claude_with_session(
-                        repo=job.repo,
-                        issue=job.issue,
-                        agent=session_key,
-                        prompt=prompt,
-                        model=job.model,
-                        cwd=cwd,
-                        timeout=job.timeout_s,
-                        output_format=job.output_format,
-                        allowed_tools=scope.allowed_tools,
-                        permission_mode=scope.permission_mode,
-                        input_via_stdin=True,
-                        session_lifecycle=(
-                            job.execution_request.lifecycle.value
-                            if job.execution_request is not None
-                            else None
-                        ),
-                    )
-                    return stdout, claude_session_id, None, ()
-                if job.resume_binding is not None:
-                    agent_result = resume_agent_session(
-                        agent=agent,
-                        session_id=job.resume_binding.session_id,
-                        prompt=prompt,
-                        cwd=cwd,
-                        timeout=job.timeout_s,
-                        model=job.model,
-                        sandbox=job.sandbox,
-                        approval="never",
-                        process_tracker=subprocess_registry.track_process_group,
-                        execution_request=job.execution_request,
-                        resume_binding=job.resume_binding,
-                        disable_pi_automation=job.disable_pi_automation,
-                        pi_dir=job.pi_dir,
-                    )
-                elif job.resume_session_id:
-                    agent_result = resume_agent_session(
-                        agent=agent,
-                        session_id=job.resume_session_id,
-                        prompt=prompt,
-                        cwd=cwd,
-                        timeout=job.timeout_s,
-                        model=job.model,
-                        sandbox=job.sandbox,
-                        approval="never",
-                        process_tracker=subprocess_registry.track_process_group,
-                        execution_request=job.execution_request,
-                        resume_binding=job.resume_binding,
-                        disable_pi_automation=job.disable_pi_automation,
-                        pi_dir=job.pi_dir,
-                    )
-                else:
-                    agent_result = run_agent_session(
-                        agent=agent,
-                        prompt=prompt,
-                        cwd=cwd,
-                        timeout=job.timeout_s,
-                        model=job.model,
-                        sandbox=job.sandbox,
-                        approval="never",
-                        process_tracker=subprocess_registry.track_process_group,
-                        execution_request=job.execution_request,
-                        resume_binding=job.resume_binding,
-                        disable_pi_automation=job.disable_pi_automation,
-                        pi_dir=job.pi_dir,
-                    )
-                # A resumed command may not repeat the session-start event;
-                # retain the known id in that case.
-                return (
-                    agent_result.stdout or "",
-                    agent_result.session_id or job.resume_session_id,
-                    agent_result.session_binding,
-                    agent_result.observed_skill_invocations,
+    @staticmethod
+    def _invoke_agent_session(
+        job: AgentJob,
+        agent: str,
+        cwd: Path,
+        session_agent: str,
+        session_key: str,
+        prompt: str,
+    ) -> tuple[str, str | None, AgentSessionBinding | None, tuple[str, ...]]:
+        """Invoke the selected provider with the job's permission scope."""
+        if agent != "claude":
+            return WorkerPool._run_non_claude_agent(job, agent, cwd, prompt)
+        if job.allowed_tools:
+            scope = ToolScope(job.allowed_tools)
+        elif job.sandbox == "read-only":
+            scope = DEFAULT_TOOL_SCOPE
+        else:
+            scope = tool_scope_for(session_agent)
+        stdout, session_id = claude_invoke.invoke_claude_with_session(
+            repo=job.repo,
+            issue=job.issue,
+            agent=session_key,
+            prompt=prompt,
+            model=job.model,
+            cwd=cwd,
+            timeout=job.timeout_s,
+            output_format=job.output_format,
+            allowed_tools=scope.allowed_tools,
+            permission_mode=scope.permission_mode,
+            input_via_stdin=True,
+            session_lifecycle=(
+                job.execution_request.lifecycle.value if job.execution_request is not None else None
+            ),
+        )
+        return stdout, session_id, None, ()
+
+    @staticmethod
+    def _agent_result(
+        job: AgentJob,
+        stdout: str,
+        session_id: str | None,
+        session_binding: AgentSessionBinding | None,
+        observed_skill_invocations: tuple[str, ...],
+    ) -> JobResult:
+        """Parse an agent response and build its job result."""
+        value: Any = None
+        if job.parse is not None:
+            try:
+                value = job.parse(stdout)
+            except Exception as exc:
+                logger.exception("Parse callable raised for agent job")
+                return JobResult(
+                    ok=False,
+                    error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                    stdout_tail=stdout[-_TAIL:],
+                    session_id=session_id,
+                    session_binding=session_binding,
                 )
+        return JobResult(
+            ok=True,
+            value=value if value is not None else stdout,
+            stdout_tail=stdout[-_TAIL:],
+            session_id=session_id,
+            session_binding=session_binding,
+            observed_skill_invocations=observed_skill_invocations,
+        )
 
-            def _invoke_leased() -> tuple[
+    @staticmethod
+    def _resume_session_lost(job: AgentJob, message: str) -> bool:
+        """Return whether an error reports a lost resumed session."""
+        return bool(job.resume_session_id or job.resume_binding) and any(
+            phrase in message.casefold()
+            for phrase in (
+                "session not found",
+                "session expired",
+                "cannot resume",
+                "resume failed",
+                "no conversation found",
+            )
+        )
+
+    def _run_agent(self, job: AgentJob) -> JobResult:
+        """Run an agent job through its provider and session boundary."""
+        try:
+            cwd, agent, session_agent, session_key, prompt = self._prepare_agent_job(job)
+
+            def invoke_leased() -> tuple[
                 str,
                 str | None,
                 AgentSessionBinding | None,
                 tuple[str, ...],
             ]:
                 with _agent_workspace_lease(job):
-                    return _invoke()
+                    return self._invoke_agent_session(
+                        job, agent, cwd, session_agent, session_key, prompt
+                    )
 
             stdout, session_id, session_binding, observed_skill_invocations = resilient_call(
-                _invoke_leased,
+                invoke_leased,
                 circuit_breaker_name=f"agent:{agent}",
                 retry_predicate=lambda exc: (
                     not self._shutdown.is_set()
@@ -2220,62 +2259,20 @@ class WorkerPool:
             )
             if session_id is not None and job.session_checkpoint is not None:
                 job.session_checkpoint(session_id, session_binding)
-
-            value = None
-            if job.parse is not None:
-                try:
-                    value = job.parse(stdout)
-                except Exception as exc:
-                    logger.exception("Parse callable raised for agent job")
-                    return JobResult(
-                        ok=False,
-                        error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-                        stdout_tail=stdout[-_TAIL:],
-                        session_id=session_id,
-                        session_binding=session_binding,
-                    )
-
-            return JobResult(
-                ok=True,
-                value=value if value is not None else stdout,
-                stdout_tail=stdout[-_TAIL:],
-                session_id=session_id,
-                session_binding=session_binding,
-                observed_skill_invocations=observed_skill_invocations,
+            return self._agent_result(
+                job, stdout, session_id, session_binding, observed_skill_invocations
             )
-
         except CircuitBreakerOpenError:
             return JobResult(ok=False, error="circuit_open")
         except subprocess.TimeoutExpired:
             return JobResult(ok=False, error="timeout")
         except AgentExecutionError as exc:
-            message = str(exc).casefold()
-            resume_lost = bool(job.resume_session_id or job.resume_binding) and any(
-                phrase in message
-                for phrase in (
-                    "session not found",
-                    "session expired",
-                    "cannot resume",
-                    "resume failed",
-                    "no conversation found",
-                )
-            )
-            if resume_lost:
+            if self._resume_session_lost(job, str(exc)):
                 return JobResult(ok=False, error="review-session-lost", session_lost=True)
             return _agent_exception_result(exc)
         except subprocess.CalledProcessError as exc:
-            message = f"{exc.stdout or ''}\n{exc.stderr or ''}".casefold()
-            resume_lost = bool(job.resume_session_id or job.resume_binding) and any(
-                phrase in message
-                for phrase in (
-                    "session not found",
-                    "session expired",
-                    "cannot resume",
-                    "resume failed",
-                    "no conversation found",
-                )
-            )
-            if resume_lost:
+            message = f"{exc.stdout or ''}\n{exc.stderr or ''}"
+            if self._resume_session_lost(job, message):
                 return JobResult(ok=False, error="review-session-lost", session_lost=True)
             return JobResult(
                 ok=False,

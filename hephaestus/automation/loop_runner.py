@@ -303,34 +303,20 @@ class LoopConfig:
 # ---------------------------------------------------------------------------
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    """Build the argparse parser for the loop runner."""
-    p = build_automation_parser(
-        prog="hephaestus-automation-loop",
-        description=("Run the queue-based automation pipeline across HomericIntelligence repos."),
-        max_workers_help=(
-            "Parallel workers per repo per phase (1-32, default: 6). Passes to child phases."
-        ),
-        max_workers_default=LOOP_DEFAULT_MAX_WORKERS,
-        add_github_throttle=True,
-        add_gh_extra_path_root=True,
-        dry_run_prefix=(
-            "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."
-        ),
-        verbose_help="Enable DEBUG logging",
-    )
-    p.add_argument(
+def _add_loop_control_args(parser: argparse.ArgumentParser) -> None:
+    """Add loop count and worker-lane options."""
+    parser.add_argument(
         "--loops",
         type=_parse_positive_int,
         default=5,
         help="Repository discovery reseed passes; does not change review budgets (default: 5)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--reset-plan-review-session",
         action="store_true",
         help="Explicitly discard reviewer conversation state for the selected --issues",
     )
-    p.add_argument(
+    parser.add_argument(
         "--review-iterations",
         type=_parse_positive_int,
         default=None,
@@ -340,7 +326,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Omit to preserve the routing defaults (plan 3; implementation soft 3/hard 6)."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--drive-green-loops",
         type=_parse_positive_int,
         default=5,
@@ -350,25 +336,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: 5; replaces --max-merge-attempts)."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--parallel-repos",
         type=_parse_positive_int,
         default=1,
         help="Repos processed in parallel per loop iteration (default: 1)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--learning-workers",
         type=_parse_positive_int,
         default=1,
         help="Independent host-learning workers (default: 1)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--learning-queue-capacity",
         type=_parse_positive_int,
         default=1,
         help="Bounded auxiliary learning queue capacity (default: 1)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--issue-limit",
         type=_parse_positive_int,
         default=None,
@@ -378,7 +364,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "The staged rollout advances 1, 2, 4, 8, then all eligible issues."
         ),
     )
-    p.add_argument(
+
+
+def _add_phase_scope_args(parser: argparse.ArgumentParser) -> None:
+    """Add phase selection and issue-scope options."""
+    parser.add_argument(
         "--phases",
         default=",".join(ALL_SELECTABLE),
         help=(
@@ -388,7 +378,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "when selected and also does one final repo-level catch-up sweep)."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--issues",
         type=_parse_issue_list,
         default=None,
@@ -397,7 +387,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "(plan, implement, drive-green). Default: phase auto-discovery."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--prs",
         type=_parse_pr_list,
         default=None,
@@ -406,17 +396,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Default: no direct PR scope."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--no-advise",
         action="store_true",
         help="Pass --no-advise to phases that support the advise preflight",
     )
-    p.add_argument(
+    parser.add_argument(
         "--no-learn",
         action="store_true",
         help="Do not create or execute auxiliary learning intents",
     )
-    p.add_argument(
+    parser.add_argument(
         "--no-serialize-file-overlap",
         action="store_false",
         dest="serialize_file_overlap",
@@ -426,12 +416,12 @@ def _build_parser() -> argparse.ArgumentParser:
             " concurrently even when their plans touch the same file (#1623)"
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--nitpick",
         action="store_true",
         help="Pass --nitpick to review phases (reviewer emits nitpick comments)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--drive-green-all",
         action="store_true",
         help=(
@@ -440,7 +430,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "unrelated open PRs; use --prs for an explicit PR scope."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--run-pre-pr-tests",
         action="store_true",
         help=(
@@ -449,7 +439,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "PR creation."
         ),
     )
-    p.add_argument(
+
+
+def _add_model_args(parser: argparse.ArgumentParser) -> None:
+    """Add model and Codex reasoning options."""
+    parser.add_argument(
         "--model",
         default="",
         help=(
@@ -459,18 +453,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "overrides this for that phase."
         ),
     )
-    p.add_argument("--planner-model", default="", help="Model ID for planner child processes")
+    parser.add_argument("--planner-model", default="", help="Model ID for planner child processes")
     reasoning_help = (
         "Explicit Codex reasoning effort for this role. Use default to omit "
         "model_reasoning_effort; when omitted, the selected model alias keeps its default."
     )
-    p.add_argument(
+    parser.add_argument(
         "--planner-reasoning-effort",
         choices=("default", "low", "medium", "high", "xhigh"),
         default="",
         help=reasoning_help,
     )
-    p.add_argument(
+    parser.add_argument(
         "--reviewer-model",
         default="",
         help=(
@@ -478,25 +472,29 @@ def _build_parser() -> argparse.ArgumentParser:
             "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--implementer-model",
         default="",
         help="Model ID for implementer child processes (implement, address-review, drive-green)",
     )
-    p.add_argument("--fallback-model", default="", help="Claude quota fallback model ID")
-    p.add_argument(
+    parser.add_argument("--fallback-model", default="", help="Claude quota fallback model ID")
+    parser.add_argument(
         "--reviewer-reasoning-effort",
         choices=("default", "low", "medium", "high", "xhigh"),
         default="",
         help=reasoning_help,
     )
-    p.add_argument(
+    parser.add_argument(
         "--implementer-reasoning-effort",
         choices=("default", "low", "medium", "high", "xhigh"),
         default="",
         help=reasoning_help,
     )
-    p.add_argument(
+
+
+def _add_repository_args(parser: argparse.ArgumentParser) -> None:
+    """Add repository discovery and local checkout options."""
+    parser.add_argument(
         "--org",
         nargs="?",
         const=_ORG_AUTODETECT,
@@ -509,7 +507,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Default (no flag): run only for the current repo."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--projects-dir",
         type=str,
         default=None,
@@ -519,7 +517,11 @@ def _build_parser() -> argparse.ArgumentParser:
             f"``{DEFAULT_PROJECTS_DIR}``."
         ),
     )
-    p.add_argument(
+
+
+def _add_timeout_args(parser: argparse.ArgumentParser) -> None:
+    """Add phase, provider, and polling timeout options."""
+    parser.add_argument(
         "--phase-timeout",
         type=float,
         default=_default_phase_timeout_s(),
@@ -529,14 +531,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "This bounds each AGENT JOB the pipeline runs, not a whole phase subprocess."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--rate-guard",
         action="store_true",
         dest="rate_guard_enabled",
         default=True,
         help="Enable the GraphQL remaining-budget guard (default).",
     )
-    p.add_argument(
+    parser.add_argument(
         "--no-rate-guard",
         action="store_false",
         dest="rate_guard_enabled",
@@ -557,34 +559,38 @@ def _build_parser() -> argparse.ArgumentParser:
         ("pre-pr-test", None),
     )
     for timeout_name, timeout_default in timeout_defaults:
-        p.add_argument(
+        parser.add_argument(
             f"--{timeout_name}-timeout",
             dest=f"{timeout_name.replace('-', '_')}_timeout",
             type=_parse_positive_int,
             default=timeout_default,
             metavar="SECONDS",
         )
-    p.add_argument(
+    parser.add_argument(
         "--poll-max-wait",
         type=_parse_positive_int,
         default=1200,
         metavar="SECONDS",
     )
-    p.add_argument(
+    parser.add_argument(
         "--rate-guard-threshold",
         type=_parse_positive_int,
         default=200,
         metavar="N",
         help="Park agent jobs below this GraphQL remaining budget (default: 200).",
     )
-    p.add_argument(
+
+
+def _add_observability_args(parser: argparse.ArgumentParser) -> None:
+    """Add skill, metrics, and event-log options."""
+    parser.add_argument(
         "--plugin-skills-dir",
         type=Path,
         default=None,
         metavar="PATH",
         help="Explicit root containing installed automation skills.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--metrics-port",
         type=_parse_metrics_port,
         default=0,
@@ -594,7 +600,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "(0 disables it)."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--event-log-retention-days",
         type=_parse_non_negative_int,
         default=DEFAULT_EVENT_LOG_RETENTION_DAYS,
@@ -602,7 +608,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Delete inactive pipeline event logs older than this many days; 0 disables age cleanup."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--event-log-retention-count",
         type=_parse_non_negative_int,
         default=DEFAULT_EVENT_LOG_RETENTION_COUNT,
@@ -611,14 +617,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "0 disables the count limit."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--evidence-receipt-dir",
         type=Path,
         default=None,
         metavar="PATH",
         help="Write private typed queue-job receipts beneath PATH (disabled by default).",
     )
-    p.add_argument(
+
+
+def _add_repo_selection_args(parser: argparse.ArgumentParser) -> None:
+    """Add explicit repository selection options."""
+    parser.add_argument(
         "--repos",
         type=_parse_repo_list,
         default=None,
@@ -627,7 +637,32 @@ def _build_parser() -> argparse.ArgumentParser:
             "enumeration. Space-separated input is NOT accepted."
         ),
     )
-    return p
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the loop runner."""
+    parser = build_automation_parser(
+        prog="hephaestus-automation-loop",
+        description=("Run the queue-based automation pipeline across HomericIntelligence repos."),
+        max_workers_help=(
+            "Parallel workers per repo per phase (1-32, default: 6). Passes to child phases."
+        ),
+        max_workers_default=LOOP_DEFAULT_MAX_WORKERS,
+        add_github_throttle=True,
+        add_gh_extra_path_root=True,
+        dry_run_prefix=(
+            "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."
+        ),
+        verbose_help="Enable DEBUG logging",
+    )
+    _add_loop_control_args(parser)
+    _add_phase_scope_args(parser)
+    _add_model_args(parser)
+    _add_repository_args(parser)
+    _add_timeout_args(parser)
+    _add_observability_args(parser)
+    _add_repo_selection_args(parser)
+    return parser
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

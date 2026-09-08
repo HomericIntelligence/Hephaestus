@@ -6,27 +6,19 @@ from .pr_review_threads import *
 class PrReviewGate(_PrReviewHost):
     """Own bounded review iteration, label proofs, and GO/NO-GO routing."""
 
-    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
-        """EVAL [M]: apply the structural-audit gate and review budget.
+    _HANDOFF_RETRY_STATUSES = frozenset({"retry"})
+    _DETACHED_PUSH_FAILURES = frozenset(
+        {
+            "remote_changed_unrecorded",
+            "remote_unconfirmed",
+            "retry_checkout_changed",
+            "retry_checkout_unconfirmed",
+        }
+    )
 
-        Every durable write below happens BEFORE the outcome that causes a
-        queue push. The round counters (lifetime ``attempts`` audit trail
-        and cycle-relative ``payload`` gate) advance here, and only for real
-        audits — never for malformed or missing audits (#911/#1554/#1794).
-        """
-        if item.pr is None:  # guarded by step(); kept for restart safety
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        if item.issue is None:  # guarded by step(); kept for type narrowing
-            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+    def _handle_reply_handoff(self, item: WorkItem) -> StepResult | None:
+        """Consume the implementation-reply handoff decision."""
         payload = item.payload
-
-        if payload.pop("scope_retraction_failure", False):
-            logger.warning(
-                "pr_review:%d: refusing to publish incomplete scope retraction",
-                item.issue,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
-
         if payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF) and not (
             payload.get(_REPLY_HANDOFF_RECEIPT) or payload.get(_REPLY_HANDOFF_RECEIPT_ERROR)
         ):
@@ -48,28 +40,29 @@ class PrReviewGate(_PrReviewHost):
                 item.issue,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
-        if handoff_status == "retry":
-            retries = payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, 0)
-            if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
-                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
-            retries += 1
-            payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES] = retries
-            if retries <= IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP:
-                logger.warning(
-                    "pr_review:%d: retrying exact implementation reply handoff %d/%d",
-                    item.issue,
-                    retries,
-                    IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
-                )
-                return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_retry")
-            logger.error(
-                "pr_review:%d: implementation reply handoff retry cap reached",
+        if handoff_status not in self._HANDOFF_RETRY_STATUSES:
+            return None
+        retries = payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, 0)
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        retries += 1
+        payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES] = retries
+        if retries <= IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP:
+            logger.warning(
+                "pr_review:%d: retrying exact implementation reply handoff %d/%d",
                 item.issue,
+                retries,
+                IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
             )
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_failed")
+            return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_retry")
+        logger.error("pr_review:%d: implementation reply handoff retry cap reached", item.issue)
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_failed")
 
-        detached_push_failure = payload.pop("detached_push_failure", None)
-        if detached_push_failure == "remote_unchanged":
+    def _handle_detached_push_failure(self, item: WorkItem) -> StepResult | None:
+        """Apply the detached-push recovery decision table."""
+        payload = item.payload
+        failure = payload.pop("detached_push_failure", None)
+        if failure == "remote_unchanged":
             source_sha = payload.pop("detached_push_head_sha", None)
             if not is_full_commit_sha(source_sha):
                 logger.warning(
@@ -87,13 +80,12 @@ class PrReviewGate(_PrReviewHost):
                     item.issue,
                 )
                 return Continue(next_state=PUSH_WAIT)
-            payload["detached_push_failure"] = detached_push_failure
+            payload["detached_push_failure"] = failure
             logger.warning(
-                "pr_review:%d: detached push retry cap reached; preserving checkout",
-                item.issue,
+                "pr_review:%d: detached push retry cap reached; preserving checkout", item.issue
             )
             return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
-        if detached_push_failure == "remote_changed":
+        if failure == "remote_changed":
             restarts = payload.get("direct_push_remote_changed_restarts", 0)
             if isinstance(restarts, bool) or not isinstance(restarts, int) or restarts < 0:
                 return StageOutcome(
@@ -101,7 +93,7 @@ class PrReviewGate(_PrReviewHost):
                     "detached_push_recovery_receipt_invalid",
                 )
             if restarts >= DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP:
-                payload["detached_push_failure"] = detached_push_failure
+                payload["detached_push_failure"] = failure
                 logger.warning(
                     "pr_review:%d: detached push remote-change recovery cap reached; "
                     "preserving checkout",
@@ -118,26 +110,111 @@ class PrReviewGate(_PrReviewHost):
                 item.issue,
             )
             return Continue(next_state=ENTER)
-        if detached_push_failure == "remote_changed_unrecorded":
-            payload["detached_push_failure"] = detached_push_failure
+        if failure == "remote_changed_unrecorded":
+            payload["detached_push_failure"] = failure
             logger.warning(
                 "pr_review:%d: detached push remote-change receipt could not be recorded; "
                 "preserving checkout",
                 item.issue,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
-        if detached_push_failure in {
-            "remote_unconfirmed",
-            "retry_checkout_changed",
-            "retry_checkout_unconfirmed",
-        }:
-            payload["detached_push_failure"] = detached_push_failure
+        if failure in self._DETACHED_PUSH_FAILURES:
+            payload["detached_push_failure"] = failure
             logger.warning(
                 "pr_review:%d: detached push recovery state %s; preserving checkout",
                 item.issue,
-                detached_push_failure,
+                failure,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
+        return None
+
+    def _evaluate_unbound_audit(
+        self, item: WorkItem, ctx: StageContext, audit: ReviewAudit
+    ) -> StepResult:
+        """Evaluate a valid audit when the current head proof is absent."""
+        assert item.pr is not None  # noqa: S101 - _eval narrows the PR
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+        except Exception:
+            return self._compact_before_next_review(item, ctx)
+        unresolved_count = len(live_threads)
+        if not unresolved_count:
+            return self._compact_before_next_review(item, ctx)
+        bind_outcome = self._bind_current_head_for_negative(item, ctx)
+        if bind_outcome is not None:
+            return bind_outcome
+        payload = item.payload
+        payload["review_error_retries"] = 0
+        round_done = payload.get("pr_review_round", 0) + 1
+        payload["pr_review_round"] = round_done
+        item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
+        return self._handle_non_go(
+            item,
+            ctx,
+            audit,
+            unresolved_count,
+            unresolved_count,
+            round_done,
+            ctx.budget("pr_review_iter"),
+            ctx.budget("pr_review_hard"),
+        )
+
+    def _evaluate_bound_audit(
+        self, item: WorkItem, ctx: StageContext, audit: ReviewAudit
+    ) -> StepResult:
+        """Read fresh threads and route a valid current-head audit."""
+        assert item.pr is not None  # noqa: S101 - _eval narrows the PR
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: fresh review-thread read failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return self._handle_error_verdict(item, None)
+        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
+        open_thread_count = len(live_threads)
+        item.payload["review_error_retries"] = 0
+        round_done = item.payload.get("pr_review_round", 0) + 1
+        item.payload["pr_review_round"] = round_done
+        item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
+        soft_cap = ctx.budget("pr_review_iter")
+        hard_cap = ctx.budget("pr_review_hard")
+        if round_done > soft_cap:
+            item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
+        if not open_thread_count:
+            return self._handle_clean_go(item, ctx)  # type: ignore[attr-defined,no-any-return]
+        return self._handle_non_go(
+            item, ctx, audit, open_thread_count, open_thread_count, round_done, soft_cap, hard_cap
+        )
+
+    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Apply the structural-audit gate and review budget.
+
+        Every durable write below happens BEFORE the outcome that causes a
+        queue push. The round counters (lifetime ``attempts`` audit trail
+        and cycle-relative ``payload`` gate) advance here, and only for real
+        audits — never for malformed or missing audits (#911/#1554/#1794).
+        """
+        if item.pr is None:  # guarded by step(); kept for restart safety
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        if item.issue is None:  # guarded by step(); kept for type narrowing
+            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        payload = item.payload
+
+        if payload.pop("scope_retraction_failure", False):
+            logger.warning(
+                "pr_review:%d: refusing to publish incomplete scope retraction",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
+        handoff_outcome = self._handle_reply_handoff(item)
+        if handoff_outcome is not None:
+            return handoff_outcome
+        detached_outcome = self._handle_detached_push_failure(item)
+        if detached_outcome is not None:
+            return detached_outcome
 
         address_error = self._handle_address_error(item)
         if address_error is not None:
@@ -167,70 +244,10 @@ class PrReviewGate(_PrReviewHost):
             # durable blocking-thread facts, but a clean result must return
             # through REVIEW_WAIT so its positive label is bound to a fresh
             # checkout/review.
-            try:
-                live_threads = ctx.github.list_unresolved_review_threads(item.pr)
-            except Exception:
-                return self._compact_before_next_review(item, ctx)
-            unresolved_count = len(live_threads)
-            if not unresolved_count:
-                return self._compact_before_next_review(item, ctx)
-            bind_outcome = self._bind_current_head_for_negative(item, ctx)
-            if bind_outcome is not None:
-                return bind_outcome
-            payload["review_error_retries"] = 0
-            round_done = payload.get("pr_review_round", 0) + 1
-            payload["pr_review_round"] = round_done
-            item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
-            return self._handle_non_go(
-                item,
-                ctx,
-                audit,
-                unresolved_count,
-                unresolved_count,
-                round_done,
-                ctx.budget("pr_review_iter"),
-                ctx.budget("pr_review_hard"),
-            )
-
+            return self._evaluate_unbound_audit(item, ctx, audit)
         # A fresh total open-thread count after the address/push leg is the
         # only thread fact that can downgrade a GO decision.
-        try:
-            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: fresh review-thread read failed (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            return self._handle_error_verdict(item, None)
-        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        open_thread_count = len(live_threads)
-
-        # A valid structural audit is a real review result. Grade, summary,
-        # and supplemental feedback never select the implementation state.
-        payload["review_error_retries"] = 0
-        round_done = payload.get("pr_review_round", 0) + 1
-        payload["pr_review_round"] = round_done
-        item.attempts["pr_review_iter"] = item.attempts.get("pr_review_iter", 0) + 1
-        soft_cap = ctx.budget("pr_review_iter")
-        hard_cap = ctx.budget("pr_review_hard")
-        if round_done > soft_cap:
-            # Audit trail of progress-earned extension rounds (4..hard_cap).
-            item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
-
-        if not open_thread_count:
-            return self._handle_clean_go(item, ctx)  # type: ignore[attr-defined,no-any-return]
-
-        return self._handle_non_go(
-            item,
-            ctx,
-            audit,
-            open_thread_count,
-            open_thread_count,
-            round_done,
-            soft_cap,
-            hard_cap,
-        )
+        return self._evaluate_bound_audit(item, ctx, audit)
 
     def _handle_non_go(
         self,
