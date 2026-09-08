@@ -23,7 +23,15 @@ import json
 import logging
 import traceback
 from datetime import UTC, datetime
-from typing import Any
+from threading import Lock
+from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:
+    from hephaestus._localization import Localizer
+
+_RECORD_LOCALIZERS: WeakKeyDictionary[logging.LogRecord, Localizer] = WeakKeyDictionary()
+_RECORD_LOCALIZERS_LOCK = Lock()
 
 # Fields that are reserved for the formatter and cannot be overridden by
 # context or extra data.  If a context key collides with one of these, it

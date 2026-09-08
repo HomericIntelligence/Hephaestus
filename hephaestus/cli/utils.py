@@ -174,12 +174,12 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
     logging_group.add_argument(
         "-q", "--quiet", action="store_true", help=text("Suppress informational messages")
     )
-    logging_group.add_argument("--log-file", help="Log to file instead of stdout")
+    logging_group.add_argument("--log-file", help=text("Log to file instead of stdout"))
     logging_group.add_argument(
         "--log-format",
         choices=("text", "json"),
         default="text",
-        help="Log record format (default: text; independent of --json output).",
+        help=text("Log record format (default: text; independent of --json output)."),
     )
 
 
@@ -347,9 +347,13 @@ def positive_int(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)r", value0=value)
+        ) from exc
     if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -615,7 +619,7 @@ def add_agent_timeout_arg(
         type=_positive_int,
         default=default,
         metavar="SECONDS",
-        help=(
+        help=text(
             f"Agent subprocess timeout in seconds (default: {default})."
             f"{extra}{_POSITIVE_TIMEOUT_HELP}"
         ),
@@ -635,8 +639,9 @@ def add_advise_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=7200,
         metavar="SECONDS",
-        help="Timeout for the advise sub-agent in seconds (default: 7200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Timeout for the advise sub-agent in seconds (default: 7200)." + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -653,8 +658,10 @@ def add_poll_max_wait_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=1200,
         metavar="SECONDS",
-        help="Max wall-clock seconds to poll CI before backing off (default: 1200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Max wall-clock seconds to poll CI before backing off (default: 1200)."
+            + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -671,8 +678,10 @@ def add_git_message_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=1200,
         metavar="SECONDS",
-        help="Timeout for the lightweight commit/PR message agent (default: 1200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Timeout for the lightweight commit/PR message agent (default: 1200)."
+            + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -689,7 +698,7 @@ def add_learn_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=1200,
         metavar="SECONDS",
-        help="Timeout for the /learn agent session (default: 1200)." + _POSITIVE_TIMEOUT_HELP,
+        help=text("Timeout for the /learn agent session (default: 1200)." + _POSITIVE_TIMEOUT_HELP),
     )
 
 
@@ -706,8 +715,10 @@ def add_follow_up_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=7200,
         metavar="SECONDS",
-        help="Timeout for the follow-up-issue agent session (default: 7200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Timeout for the follow-up-issue agent session (default: 7200)."
+            + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -720,7 +731,7 @@ def add_role_agent_args(parser: argparse.ArgumentParser) -> None:
             f"--{role}-agent",
             choices=AGENT_CHOICES,
             default=None,
-            help=f"Tool for the {role} role. Uses --agent when omitted.",
+            help=text("Tool for the %(role)s role. Uses --agent when omitted.", role=role),
         )
 
 
@@ -738,13 +749,13 @@ def add_pipeline_runtime_args(
             f"--{flag}",
             default="",
             metavar="MODEL[:EFFORT]",
-            help=MODEL_REFERENCE_HELP,
+            help=text(MODEL_REFERENCE_HELP),
         )
     for extra_role in ("planner", "implementer", "reviewer"):
         flag = f"--{extra_role}-model"
         if flag not in parser._option_string_actions:
             parser.add_argument(
-                flag, default="", metavar="MODEL[:EFFORT]", help=MODEL_REFERENCE_HELP
+                flag, default="", metavar="MODEL[:EFFORT]", help=text(MODEL_REFERENCE_HELP)
             )
     add_host_verification_pyxis_image_arg(parser)
     parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")

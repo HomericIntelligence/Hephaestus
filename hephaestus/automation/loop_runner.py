@@ -389,7 +389,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--loops",
         type=_parse_positive_int,
         default=5,
-        help=text("Repository discovery reseed passes; does not change review budgets (default: 5)"),
+        help=text(
+            "Repository discovery reseed passes; does not change review budgets (default: 5)"
+        ),
     )
     p.add_argument(
         "--reset-plan-review-session",
@@ -480,7 +482,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-learn",
         action="store_true",
-        help="Do not create or execute auxiliary learning intents",
+        help=text("Do not create or execute auxiliary learning intents"),
     )
     p.add_argument(
         "--no-serialize-file-overlap",
@@ -700,7 +702,11 @@ def _validate_phases(phases_csv: str) -> tuple[str, ...]:
     invalid = [p for p in selected if p not in ALL_SELECTABLE]
     if invalid:
         raise SystemExit(
-            text("Unknown phase(s): %(invalid)s. Valid: %(valid)s", invalid=invalid, valid=",".join(ALL_SELECTABLE))
+            text(
+                "Unknown phase(s): %(invalid)s. Valid: %(valid)s",
+                invalid=invalid,
+                valid=",".join(ALL_SELECTABLE),
+            )
         )
     return selected
 

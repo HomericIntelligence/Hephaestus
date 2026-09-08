@@ -39,7 +39,7 @@ def _add_agent_options(parser: argparse.ArgumentParser) -> None:
         "--model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help="Model name and optional effort; omit to use the tool default",
+        help=text("Model name and optional effort; omit to use the tool default"),
     )
 
 
@@ -47,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for hephaestus-fleet-sync."""
     parser = create_parser(
         prog_name="hephaestus-fleet-sync",
-        description="Sync all PRs across a configurable GitHub organization's fleet",
+        description=text("Sync all PRs across a configurable GitHub organization's fleet"),
         epilog=None,
     )
     parser.add_argument(
@@ -59,14 +59,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--org",
         metavar="ORG",
         default=None,
-        help="GitHub organization (overrides .fleet.yml)",
+        help=text("GitHub organization (overrides .fleet.yml)"),
     )
     parser.add_argument(
         "--repos",
         nargs="+",
         metavar="REPO",
         default=None,
-        help="Restrict to specific repos (overrides .fleet.yml)",
+        help=text("Restrict to specific repos (overrides .fleet.yml)"),
     )
     parser.add_argument(
         "--config",
@@ -83,12 +83,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resign-email",
         default=None,
-        help="explicit email used when re-signing rewritten commits",
+        help=text("Explicit email used when re-signing rewritten commits"),
     )
     parser.add_argument(
         "--skip-email-key-check",
         action="store_true",
-        help="explicitly bypass matching --resign-email to the configured signing key",
+        help=text("Explicitly bypass matching --resign-email to the configured signing key"),
     )
     _add_agent_options(parser)
     add_prompt_dir_argument(parser)
@@ -97,35 +97,35 @@ def _build_parser() -> argparse.ArgumentParser:
         type=positive_timeout,
         default=DEFAULT_FLEET_TIMEOUTS.gh,
         metavar="SECONDS",
-        help="per-call GitHub CLI timeout (default: 120)",
+        help=text("Per-call GitHub CLI timeout (default: 120)"),
     )
     parser.add_argument(
         "--metadata-timeout",
         type=positive_timeout,
         default=DEFAULT_FLEET_TIMEOUTS.metadata,
         metavar="SECONDS",
-        help="local metadata probe timeout (default: 10)",
+        help=text("Local metadata probe timeout (default: 10)"),
     )
     parser.add_argument(
         "--network-timeout",
         type=positive_timeout,
         default=DEFAULT_FLEET_TIMEOUTS.network,
         metavar="SECONDS",
-        help="Git network operation timeout (default: 120)",
+        help=text("Git network operation timeout (default: 120)"),
     )
     parser.add_argument(
         "--clone-timeout",
         type=positive_timeout,
         default=DEFAULT_FLEET_TIMEOUTS.clone,
         metavar="SECONDS",
-        help="Git clone timeout (default: 120)",
+        help=text("Git clone timeout (default: 120)"),
     )
     parser.add_argument(
         "--rebase-timeout",
         type=positive_timeout,
         default=DEFAULT_FLEET_TIMEOUTS.rebase,
         metavar="SECONDS",
-        help="Git/agent rebase timeout (default: 2400)",
+        help=text("Git/agent rebase timeout (default: 2400)"),
     )
     add_logging_args(parser)
     parser.add_argument(

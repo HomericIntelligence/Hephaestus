@@ -434,10 +434,10 @@ def check_workflow_inventory_main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(
+        description=text(
             "Detect drift between .github/workflows/*.yml and *.yaml files and README.md table."
         ),
-        epilog="Example: %(prog)s --repo-root /path/to/repo",
+        epilog=text("Example: %(prog)s --repo-root /path/to/repo"),
     )
     parser.add_argument(
         "--repo-root",
@@ -487,8 +487,10 @@ def check_workflow_inventory_main() -> int:
         print()
 
     print(
-        "Fix: update the Workflow Summary table in .github/workflows/README.md "
-        "so it exactly matches the *.yml and *.yaml files on disk."
+        text(
+            "Fix: update the Workflow Summary table in .github/workflows/README.md "
+            "so it exactly matches the *.yml and *.yaml files on disk."
+        )
     )
     return 1
 
@@ -512,7 +514,7 @@ def validate_workflow_checkout_main() -> int:
     parser.add_argument(
         "--allow-empty",
         action="store_true",
-        help="Allow readable requested targets to contain no workflow YAML files",
+        help=text("Allow readable requested targets to contain no workflow YAML files"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -583,28 +585,43 @@ def validate_workflow_checkout_main() -> int:
 
     for error in tool_errors:
         print(
-            f"TOOL ERROR [{error.code}]: {error.target}: {error.message}",
+            text(
+                "TOOL ERROR [%(code)s]: %(target)s: %(message)s",
+                code=error.code,
+                target=error.target,
+                message=error.message,
+            ),
             file=sys.stderr,
         )
 
     if empty_inventory and not args.allow_empty:
-        print("POLICY VIOLATION [empty_inventory]: no workflow files found to validate.")
+        print(text("POLICY VIOLATION [empty_inventory]: no workflow files found to validate."))
 
     for violation in all_violations:
         print(
-            f"POLICY VIOLATION [checkout_order]: {violation.workflow_file} :: "
-            f"job '{violation.job_name}' :: step {violation.step_index} "
-            f"uses '{violation.composite_action}' before actions/checkout."
+            text(
+                "POLICY VIOLATION [checkout_order]: %(file)s :: job '%(job)s' :: "
+                "step %(index)s uses '%(action)s' before actions/checkout.",
+                file=violation.workflow_file,
+                job=violation.job_name,
+                index=violation.step_index,
+                action=violation.composite_action,
+            )
         )
 
     if exit_code:
         return 1
 
     if empty_inventory:
-        print("No workflow files found to validate.")
+        print(text("No workflow files found to validate."))
         return 0
 
-    print(f"OK: {len(workflow_files)} workflow file(s) checked. All pass checkout-first invariant.")
+    print(
+        text(
+            "OK: %(count)s workflow file(s) checked. All pass checkout-first invariant.",
+            count=len(workflow_files),
+        )
+    )
     return 0
 
 

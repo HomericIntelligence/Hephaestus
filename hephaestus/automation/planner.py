@@ -159,7 +159,7 @@ Examples:
         "--reviewer-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=MODEL_REFERENCE_HELP,
+        help=text(MODEL_REFERENCE_HELP),
     )
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
     add_pipeline_runtime_args(parser, role="planner", timeouts=("gh", "metadata"))

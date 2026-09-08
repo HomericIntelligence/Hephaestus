@@ -51,7 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_timeout,
         default=DEFAULT_GH_TIMEOUT,
         metavar="SECONDS",
-        help=f"per-call gh timeout in seconds (default: {DEFAULT_GH_TIMEOUT})",
+        help=text(
+            "Per-call gh timeout in seconds (default: %(value0)s)", value0=DEFAULT_GH_TIMEOUT
+        ),
     )
     parser.add_argument(
         "gh_args",

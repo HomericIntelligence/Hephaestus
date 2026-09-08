@@ -68,13 +68,13 @@ from hephaestus.agents.pi_session import (
     create_pi_binding,
     validate_pi_binding,
 )
+from hephaestus.cli.localization import text
 from hephaestus.config.child_environments import (
     build_claude_child_env,
     build_codex_child_env,
     build_pi_child_env,
     read_approved_parent_env,
 )
-from hephaestus.cli.localization import text
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
@@ -540,48 +540,48 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--disable-pi-automation",
         action="store_true",
-        help="Reject Pi automation before preflight or provider execution",
+        help=text("Reject Pi automation before preflight or provider execution"),
     )
     parser.add_argument(
         "--auth-status-timeout",
         type=_positive_timeout,
         default=agent_auth_status_timeout(),
         metavar="SECONDS",
-        help="Positive timeout for provider authentication probes (default: 10)",
+        help=text("Positive timeout for provider authentication probes (default: 10)"),
     )
     parser.add_argument(
         "--pi-isolation-adapter",
         default=None,
         metavar="ENTRY_POINT",
-        help="Explicit registered Pi OS-isolation adapter entry point",
+        help=text("Explicit registered Pi OS-isolation adapter entry point"),
     )
     parser.add_argument(
         "--pi-dir",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Explicit Pi coding-agent configuration directory",
+        help=text("Explicit Pi coding-agent configuration directory"),
     )
     parser.add_argument(
         "--codex-isolation-adapter",
         type=_codex_adapter_name,
         default=None,
         metavar="NAME",
-        help="Exact external Codex implementation-isolation entry point",
+        help=text("Exact external Codex implementation-isolation entry point"),
     )
     parser.add_argument(
         "--codex-isolation-deployment-lock",
         type=_absolute_cli_path,
         default=None,
         metavar="PATH",
-        help="Absolute detached Codex adapter deployment-lock path",
+        help=text("Absolute detached Codex adapter deployment-lock path"),
     )
     parser.add_argument(
         "--codex-isolation-deployment-lock-sha256",
         type=_lowercase_sha256,
         default=None,
         metavar="SHA256",
-        help="Expected SHA-256 digest for the detached deployment lock",
+        help=text("Expected SHA-256 digest for the detached deployment lock"),
     )
 
 
@@ -592,7 +592,7 @@ def _codex_adapter_name(value: str) -> str:
         or any(character.isspace() for character in value)
         or any(token in value for token in ("/", "\\", ":", ";"))
     ):
-        raise argparse.ArgumentTypeError("Codex isolation adapter name is invalid")
+        raise argparse.ArgumentTypeError(text("Codex isolation adapter name is invalid"))
     return value
 
 
@@ -600,14 +600,16 @@ def _absolute_cli_path(value: str) -> Path:
     """Parse one lexical absolute path without file-system access."""
     path = Path(value)
     if not path.is_absolute() or "\x00" in value:
-        raise argparse.ArgumentTypeError("Codex deployment-lock path must be absolute")
+        raise argparse.ArgumentTypeError(text("Codex deployment-lock path must be absolute"))
     return path
 
 
 def _lowercase_sha256(value: str) -> str:
     """Parse one lowercase SHA-256 value."""
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
-        raise argparse.ArgumentTypeError("Codex deployment-lock digest must be lowercase SHA-256")
+        raise argparse.ArgumentTypeError(
+            text("Codex deployment-lock digest must be lowercase SHA-256")
+        )
     return value
 
 
@@ -616,9 +618,9 @@ def _positive_timeout(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("timeout must be a positive integer") from exc
+        raise argparse.ArgumentTypeError(text("timeout must be a positive integer")) from exc
     if parsed <= 0:
-        raise argparse.ArgumentTypeError("timeout must be a positive integer")
+        raise argparse.ArgumentTypeError(text("timeout must be a positive integer"))
     return parsed
 
 
@@ -4854,10 +4856,10 @@ def _opencode_failure_diagnostic(*texts: str | None) -> str | None:
     structured shape converts CLI crashes into actionable automation errors
     instead of opaque exit codes; the message is bounded like the Codex path.
     """
-    for text in texts:
-        if not text:
+    for output_text in texts:
+        if not output_text:
             continue
-        for line in text.splitlines():
+        for line in output_text.splitlines():
             if not line.strip():
                 continue
             try:

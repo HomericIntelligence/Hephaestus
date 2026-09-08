@@ -145,7 +145,7 @@ Examples:
         type=positive_int,
         default=None,
         metavar="ID",
-        help=(
+        help=text(
             "Select an authenticated source-review grant comment for PR #3006. "
             "Requires only --prs 3006 in HomericIntelligence/Hephaestus. "
             "The selector does not grant authority."
@@ -211,7 +211,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.host_verification_bootstrap_comment is not None and (args.issues or args.prs != [3006]):
-        parser.error("--host-verification-bootstrap-comment requires only --prs 3006")
+        parser.error(text("--host-verification-bootstrap-comment requires only --prs 3006"))
     return args
 
 

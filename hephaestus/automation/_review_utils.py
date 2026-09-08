@@ -247,13 +247,13 @@ def _parse_gh_extra_path_root(value: str) -> Path:
     """Validate an explicit root whose only admitted executable is ``bin/gh``."""
     root = Path(value).expanduser()
     if not root.is_absolute():
-        raise argparse.ArgumentTypeError("--gh-extra-path-root must be an absolute path")
+        raise argparse.ArgumentTypeError(text("--gh-extra-path-root must be an absolute path"))
     try:
         resolved_root = root.resolve(strict=True)
         executable = (resolved_root / "bin" / "gh").resolve(strict=True)
     except OSError as exc:
         raise argparse.ArgumentTypeError(
-            "--gh-extra-path-root must contain an executable bin/gh"
+            text("--gh-extra-path-root must contain an executable bin/gh")
         ) from exc
     if (
         not resolved_root.is_dir()
@@ -262,7 +262,7 @@ def _parse_gh_extra_path_root(value: str) -> Path:
         or not executable.is_relative_to(resolved_root)
     ):
         raise argparse.ArgumentTypeError(
-            "--gh-extra-path-root must contain an executable bin/gh without symlink escapes"
+            text("--gh-extra-path-root must contain an executable bin/gh without symlink escapes")
         )
     return resolved_root
 

@@ -168,14 +168,14 @@ def main(argv: list[str] | None = None) -> int:
         "--body-file",
         required=True,
         metavar="PATH",
-        help="issue body path, or - to read standard input",
+        help=text("Issue body path, or - to read standard input"),
     )
     parser.add_argument(
         "--gh-timeout",
         type=positive_timeout,
         default=DEFAULT_GH_TIMEOUT,
         metavar="SECONDS",
-        help=f"per-call GitHub CLI timeout (default: {DEFAULT_GH_TIMEOUT})",
+        help=text("Per-call GitHub CLI timeout (default: %(value0)s)", value0=DEFAULT_GH_TIMEOUT),
     )
     args = parser.parse_args(argv)
     configure_github_throttle_from_args(args)
@@ -200,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
             emit_json_status(1, message)
         else:
             print(
-                text("Unexpected ISSUE_NUMBER %(number)r (not a positive integer)", number=raw),
+                text(
+                    "Unexpected --issue-number %(number)r (not a positive integer)",
+                    number=args.issue_number,
+                ),
                 file=sys.stderr,
             )
         return 1
@@ -212,7 +215,11 @@ def main(argv: list[str] | None = None) -> int:
             emit_json_status(1, message)
         else:
             print(
-                text("Unexpected ISSUE_NUMBER %(number)r (not a positive integer)", number=raw),
+                text(
+                    "Could not read --body-file %(path)r: %(error)s",
+                    path=args.body_file,
+                    error=exc,
+                ),
                 file=sys.stderr,
             )
         return 1

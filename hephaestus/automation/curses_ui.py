@@ -22,6 +22,7 @@ from collections import deque
 from typing import Any
 
 from hephaestus.cli.colors import Colors
+from hephaestus.cli.localization import get_localizer
 from hephaestus.utils.terminal import restore_terminal
 
 from .status_tracker import StatusTracker
