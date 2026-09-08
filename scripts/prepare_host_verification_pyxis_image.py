@@ -111,6 +111,9 @@ def _run(
 def _read_image_id(result: subprocess.CompletedProcess[str]) -> str:
     """Return one immutable OCI image ID from an inspect result."""
     image_id = result.stdout.strip()
+    # Podman reports the complete SHA-256 value without the algorithm prefix.
+    if re.fullmatch(r"[0-9a-f]{64}", image_id):
+        image_id = f"sha256:{image_id}"
     if not _IMAGE_ID_RE.fullmatch(image_id):
         raise HostVerificationImagePreparationError("container engine returned an invalid image ID")
     return image_id

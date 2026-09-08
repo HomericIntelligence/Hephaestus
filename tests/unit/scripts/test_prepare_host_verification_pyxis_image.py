@@ -58,9 +58,12 @@ def _engine_runner(*, output: Path, image_id: str, calls: list[tuple[str, ...]])
     return runner
 
 
-@pytest.mark.parametrize(("engine", "scheme"), [("podman", "podman"), ("docker", "dockerd")])
+@pytest.mark.parametrize(
+    ("engine", "scheme", "prefix"),
+    [("podman", "podman", "sha256:"), ("podman", "podman", ""), ("docker", "dockerd", "sha256:")],
+)
 def test_prepare_image_uses_content_addressed_import_and_private_authority(
-    tmp_path: Path, engine: str, scheme: str
+    tmp_path: Path, engine: str, scheme: str, prefix: str
 ) -> None:
     """The export uses immutable local bytes and a separate private authority."""
     module = _module()
@@ -73,7 +76,7 @@ def test_prepare_image_uses_content_addressed_import_and_private_authority(
         output=output,
         rebuild=True,
         engine=engine,
-        runner=_engine_runner(output=output, image_id=image_id, calls=calls),
+        runner=_engine_runner(output=output, image_id=prefix + ("c" * 64), calls=calls),
     )
 
     build = next(call for call in calls if len(call) > 1 and call[1] == "build")
