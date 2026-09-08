@@ -558,10 +558,6 @@ def archived_old_plan(body: str) -> str:
     return old_plan.strip()
 
 
-def _owned_comments(comments: Sequence[IssueComment | str]) -> list[IssueComment]:
-    return [c for raw in comments if (c := as_issue_comment(raw)).viewer_did_author]
-
-
 def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     """Reconstruct current plan/review and ordered legacy history."""
     normalized_comments = [as_issue_comment(comment) for comment in comments]
