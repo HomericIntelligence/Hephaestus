@@ -30,6 +30,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -544,7 +545,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print actions without executing",
+        help=text("Print actions without executing"),
     )
     parser.add_argument(
         "--cleanup-stale-worktrees",
@@ -557,19 +558,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trunk",
         metavar="BRANCH",
-        help="Trunk branch (default: auto-detected)",
+        help=text("Trunk branch (default: auto-detected)"),
     )
     parser.add_argument(
         "--no-swarm",
         action="store_true",
-        help="Skip swarm dispatch; only report failures",
+        help=text("Skip swarm dispatch; only report failures"),
     )
     parser.add_argument(
         "--max-concurrent",
         type=int,
         default=5,
         metavar="N",
-        help="Max parallel swarm agents (default: 5)",
+        help=text("Max parallel swarm agents (default: 5)"),
     )
     add_agent_argument(parser)
     parser.add_argument(

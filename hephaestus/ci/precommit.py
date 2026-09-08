@@ -10,6 +10,7 @@ from typing import cast
 
 import yaml
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 _VALID_HOOK_STATUSES = ("failed", "passed")
@@ -149,9 +150,12 @@ def bench_precommit_main(argv: list[str] | None = None) -> int:
     write_step_summary(table)
     if over_threshold:
         emit_warning(
-            f"Pre-commit hooks took {args.elapsed}s, which exceeds "
-            f"the {args.threshold}s threshold. "
-            "Consider reviewing hook configuration for performance regressions."
+            text(
+                "Pre-commit hooks took %(elapsed)ds, which exceeds the %(threshold)ds "
+                "threshold. Consider reviewing hook configuration for performance regressions.",
+                elapsed=args.elapsed,
+                threshold=args.threshold,
+            )
         )
     return 0
 

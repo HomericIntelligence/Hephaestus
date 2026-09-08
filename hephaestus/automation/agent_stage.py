@@ -20,6 +20,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation.agent_config import normalize_claude_model
 from hephaestus.automation.mnemosyne_skill_host import MnemosyneSkillHost
 from hephaestus.automation.pipeline.athena_skill_jobs import build_athena_skill_request
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
@@ -28,21 +29,29 @@ from hephaestus.utils.terminal import install_sigtstp_only, terminal_guard
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for the agent stage runner."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prompt-file", required=True, help="Prompt file to send to the agent")
-    parser.add_argument("--repo-root", required=True, help="Repository root for the agent")
-    parser.add_argument("--stage", required=True, help="Human-readable automation stage name")
-    parser.add_argument("--output", required=True, help="Where to write the agent's final response")
-    parser.add_argument("--log-file", help="Where to write combined agent stdout/stderr")
-    parser.add_argument("--skill-file", help="Optional skill instructions to prepend to the prompt")
+    parser = argparse.ArgumentParser(description=text(__doc__))
+    parser.add_argument(
+        "--prompt-file", required=True, help=text("Prompt file to send to the agent")
+    )
+    parser.add_argument("--repo-root", required=True, help=text("Repository root for the agent"))
+    parser.add_argument("--stage", required=True, help=text("Human-readable automation stage name"))
+    parser.add_argument(
+        "--output", required=True, help=text("Where to write the agent's final response")
+    )
+    parser.add_argument(
+        "--log-file", help=text("Where to write combined agent stdout/stderr")
+    )
+    parser.add_argument(
+        "--skill-file", help=text("Optional skill instructions to prepend to the prompt")
+    )
     parser.add_argument(
         "--athena-skill",
         choices=["advise", "learn"],
-        help="Run a host-owned Athena skill request instead of a generic agent prompt",
+        help=text("Run a host-owned Athena skill request instead of a generic agent prompt"),
     )
     parser.add_argument(
         "--athena-delivery-file",
-        help="JSON host-owned delivery request required when --athena-skill=learn",
+        help=text("JSON host-owned delivery request required when --athena-skill=learn"),
     )
     add_agent_argument(parser)
     add_prompt_dir_argument(parser)
@@ -50,13 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help="Optional agent model and effort override",
+        help=text("Optional agent model and effort override"),
     )
     parser.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default="workspace-write",
-        help=(
+        help=text(
             "Execution policy: Codex sandbox mode; Claude read-only applies "
             "a fixed non-mutating tool surface"
         ),
@@ -65,13 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--approval",
         choices=["untrusted", "on-request", "never"],
         default="never",
-        help="Approval policy for agents that support it",
+        help=text("Approval policy for agents that support it"),
     )
-    parser.add_argument("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")
+    parser.add_argument(
+        "--timeout", type=int, default=1800, help=text("Subprocess timeout in seconds")
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print the agent command before running",
+        help=text("Print the agent command before running"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -111,7 +122,7 @@ def run_claude(
 ) -> int:
     """Run one stage with Claude Code, the default Hephaestus agent."""
     if args.debug:
-        print("Running: claude --print", file=sys.stderr)
+        print(text("Running: claude --print"), file=sys.stderr)
 
     try:
         result = run_claude_text(
@@ -139,7 +150,7 @@ def run_direct_agent(
 ) -> int:
     """Run one stage with a provider-neutral direct agent."""
     if args.debug:
-        print(f"Running: {args.agent} direct session", file=sys.stderr)
+        print(text("Running: %(value0)s direct session", value0=args.agent), file=sys.stderr)
 
     try:
         result = run_agent_session(
@@ -220,9 +231,12 @@ def validate_agent_flags(parser: argparse.ArgumentParser, args: argparse.Namespa
             offending.append(f"{flag}={value}")
     if offending:
         parser.error(
-            f"--agent={args.agent} does not honor "
-            + ", ".join(offending)
-            + f" (these flag values are not supported by the {args.agent} agent)"
+            text(
+                "--agent=%(agent)s does not honor %(flags)s (these flag values are not "
+                "supported by the %(agent)s agent)",
+                agent=args.agent,
+                flags=", ".join(offending),
+            )
         )
 
 
@@ -238,11 +252,15 @@ def validate_input_files(parser: argparse.ArgumentParser, args: argparse.Namespa
     """
     prompt_file = Path(args.prompt_file).expanduser().resolve()
     if not prompt_file.is_file():
-        parser.error(f"--prompt-file does not exist or is not a file: {prompt_file}")
+        parser.error(
+            text("--prompt-file does not exist or is not a file: %(path)s", path=prompt_file)
+        )
     if args.skill_file:
         skill_file = Path(args.skill_file).expanduser().resolve()
         if not skill_file.is_file():
-            parser.error(f"--skill-file does not exist or is not a file: {skill_file}")
+            parser.error(
+                text("--skill-file does not exist or is not a file: %(path)s", path=skill_file)
+            )
 
 
 def run_agent(args: argparse.Namespace) -> int:

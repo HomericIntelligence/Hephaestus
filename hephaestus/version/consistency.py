@@ -37,6 +37,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     create_validation_parser,
     emit_json_status,
@@ -314,14 +315,22 @@ def _check_init_version_errors(
         return []
     if not package_init.is_file():
         if verbose:
-            print(f"INFO: {package_init} not found — skipping __version__ check")
+            print(
+                text("INFO: %(value0)s not found — skipping __version__ check", value0=package_init)
+            )
         return []
     content = package_init.read_text(encoding="utf-8")
     m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
     if m and m.group(1) != canonical:
         return [f"{package_init}: __version__ is '{m.group(1)}', expected '{canonical}'"]
     if verbose and m:
-        print(f"PASS: {package_init} __version__ matches ({canonical})")
+        print(
+            text(
+                "PASS: %(value0)s __version__ matches (%(value1)s)",
+                value0=package_init,
+                value1=canonical,
+            )
+        )
     return []
 
 
@@ -354,7 +363,7 @@ def _check_skill_version_errors(
             rel = md_file.relative_to(repo_root)
             errors.extend(_find_aspirational_versions(md_file, canonical_tuple, str(rel)))
     if not errors and verbose:
-        print("PASS: skill markdown files have no aspirational version references")
+        print(text("PASS: skill markdown files have no aspirational version references"))
     return errors
 
 
@@ -395,15 +404,18 @@ def check_package_version_consistency(
 
     if all_errors:
         for error in all_errors:
-            print(f"ERROR: {error}", file=sys.stderr)
+            print(text("ERROR: %(value0)s", value0=error), file=sys.stderr)
         print(
-            f"\nFound {len(all_errors)} package version consistency violation(s).",
+            text(
+                "\nFound %(value0)s package version consistency violation(s).",
+                value0=len(all_errors),
+            ),
             file=sys.stderr,
         )
         return 1
 
     if verbose:
-        print(f"\nOK: all package version checks passed ({canonical})")
+        print(text("\nOK: all package version checks passed (%(value0)s)", value0=canonical))
     return 0
 
 
@@ -554,7 +566,7 @@ def check_version_consistency_main() -> int:
         "--verbose",
         "-v",
         action="store_true",
-        help="Print parsed versions even when they match",
+        help=text("Print parsed versions even when they match"),
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)
@@ -590,7 +602,7 @@ def check_package_versions_main() -> int:
         "--package-init",
         type=Path,
         default=None,
-        help=(
+        help=text(
             "Path to the package __init__.py to check for __version__. "
             "Example: hephaestus/__init__.py"
         ),
@@ -598,13 +610,13 @@ def check_package_versions_main() -> int:
     parser.add_argument(
         "--scan-skills",
         action="store_true",
-        help="Also scan .claude-plugin/skills/ and .claude/ markdown files",
+        help=text("Also scan .claude-plugin/skills/ and .claude/ markdown files"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print passing check names and canonical version",
+        help=text("Print passing check names and canonical version"),
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)
@@ -652,7 +664,7 @@ def bump_version_main() -> int:
     parser.add_argument(
         "part",
         choices=["major", "minor", "patch"],
-        help="Which version part to bump",
+        help=text("Which version part to bump"),
     )
     parser.add_argument(
         "--dry-run",
@@ -666,7 +678,7 @@ def bump_version_main() -> int:
         "--verbose",
         "-v",
         action="store_true",
-        help="Print additional details",
+        help=text("Print additional details"),
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)

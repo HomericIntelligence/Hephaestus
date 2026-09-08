@@ -24,6 +24,7 @@ import tokenize
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root as resolve_repo_root
 
 # Dirs (relative to repo root) whose .py files the policy governs.
@@ -108,9 +109,11 @@ def find_violations(repo_root: Path) -> list[UnlinkedMarkerFinding]:
 def format_report(findings: list[UnlinkedMarkerFinding]) -> str:
     """Render *findings* as a human-readable text report."""
     if not findings:
-        return "OK: every tech-debt marker references a tracking issue."
-    lines = [f"FAIL: {len(findings)} unlinked marker(s):"]
-    lines.extend(f"  [{f.marker}] {f.detail}" for f in findings)
+        return text("OK: every tech-debt marker references a tracking issue.")
+    lines = [text("FAIL: %(count)d unlinked marker(s):", count=len(findings))]
+    lines.extend(
+        text("  [%(marker)s] %(detail)s", marker=f.marker, detail=f.detail) for f in findings
+    )
     return "\n".join(lines)
 
 

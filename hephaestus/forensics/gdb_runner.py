@@ -67,6 +67,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.config.child_environments import read_approved_parent_env
 
@@ -303,7 +304,7 @@ def on_stop(event):
     # We never set breakpoints, so the only stops we expect are signals.
     if isinstance(event, gdb.SignalEvent):
         signo = event.stop_signal
-        print("[run-under-gdb] caught " + signo + "; dumping " + CORE_FILE)
+        print(CRASH_MESSAGE % {{"signal": signo, "core": CORE_FILE}})
         gdb.execute("generate-core-file " + CORE_FILE)
         gdb.execute("bt full")
         gdb.execute("info threads")
@@ -429,7 +430,10 @@ def run_under_gdb(
     command_bin = resolve_command(command)
     if command_bin is None:
         print(
-            f"[run-under-gdb] ERROR: could not resolve command '{command}' on PATH",
+            text(
+                "[run-under-gdb] ERROR: could not resolve command '%(value0)s' on PATH",
+                value0=command,
+            ),
             file=sys.stderr,
         )
         return 127
@@ -497,7 +501,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``hephaestus-run-under-gdb`` CLI."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-run-under-gdb",
-        description=(
+        description=text(
             "Run a command under gdb -batch so a real ELF core and backtrace "
             "are captured before the inferior's own signal handler runs."
         ),
@@ -524,16 +528,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "core_dir",
-        help="directory for cores and gdb logs (created if absent)",
+        help=text("directory for cores and gdb logs (created if absent)"),
     )
     parser.add_argument(
         "command",
-        help="the program to run (resolved via PATH if not an explicit path)",
+        help=text("the program to run (resolved via PATH if not an explicit path)"),
     )
     parser.add_argument(
         "command_args",
         nargs=argparse.REMAINDER,
-        help="arguments passed to the command verbatim",
+        help=text("arguments passed to the command verbatim"),
     )
     add_json_arg(parser)
     add_version_arg(parser)

@@ -50,6 +50,7 @@ from pydantic import BaseModel
 
 from hephaestus.agents.runtime import add_agent_argument, session_agent_matches
 from hephaestus.automation.prompts.catalog import add_prompt_dir_argument
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
@@ -238,7 +239,7 @@ def add_max_workers_arg(
         default=default,
         choices=range(1, 33),
         metavar="N",
-        help=help_text,
+        help=text(help_text),
     )
 
 
@@ -273,7 +274,7 @@ def add_gh_extra_path_root_arg(parser: argparse.ArgumentParser) -> None:
         type=_parse_gh_extra_path_root,
         default=None,
         metavar="ROOT",
-        help=(
+        help=text(
             "Explicitly allow only ROOT/bin/gh in addition to system gh locations. "
             "ROOT must be absolute and contain an executable bin/gh that does not escape ROOT."
         ),
@@ -367,13 +368,13 @@ def _automation_parser_kwargs(
     formatter_class: type[argparse.HelpFormatter] | None,
 ) -> dict[str, Any]:
     """Build ArgumentParser kwargs while omitting unset optional parameters."""
-    kwargs: dict[str, Any] = {"description": description}
+    kwargs: dict[str, Any] = {"description": text(description)}
     if prog is not None:
         kwargs["prog"] = prog
     if formatter_class is not None:
         kwargs["formatter_class"] = formatter_class
     if epilog is not None:
-        kwargs["epilog"] = epilog
+        kwargs["epilog"] = text(epilog)
     return kwargs
 
 
@@ -444,7 +445,7 @@ def build_automation_parser(
             default=3,
             choices=range(1, 33),
             metavar="N",
-            help=parallel_help,
+            help=text(parallel_help),
         )
     if add_github_throttle:
         add_github_throttle_args(parser)
@@ -452,14 +453,14 @@ def build_automation_parser(
         add_gh_extra_path_root_arg(parser)
     if add_dry_run:
         if dry_run_help is not None:
-            parser.add_argument("--dry-run", action="store_true", help=dry_run_help)
+            parser.add_argument("--dry-run", action="store_true", help=text(dry_run_help))
         else:
             add_dry_run_arg(parser, prefix=dry_run_prefix)
     if add_no_ui:
         parser.add_argument(
             "--no-ui",
             action="store_true",
-            help="Disable curses UI (use plain logging instead)",
+            help=text("Disable curses UI (use plain logging instead)"),
         )
     if add_verbose:
         add_logging_args(parser)
@@ -509,7 +510,7 @@ def build_review_parser(
         type=int,
         nargs="+",
         required=True,
-        help=issues_help,
+        help=text(issues_help),
     )
     return parser
 

@@ -74,6 +74,7 @@ from hephaestus.config.child_environments import (
     build_pi_child_env,
     read_approved_parent_env,
 )
+from hephaestus.cli.localization import text
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
@@ -531,7 +532,7 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
         "--agent",
         choices=AGENT_CHOICES,
         default=None,
-        help=(
+        help=text(
             "Agent backend to invoke for model-driven steps "
             "(default: auto-detect authenticated backend, preferring claude when authenticated)"
         ),

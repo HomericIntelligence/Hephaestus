@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
 
 _yaml: Any | None = None
@@ -442,7 +443,7 @@ def check_workflow_inventory_main() -> int:
         "--repo-root",
         type=Path,
         default=None,
-        help="Repository root (default: auto-detect via git)",
+        help=text("Repository root (default: auto-detect via git)"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -468,21 +469,21 @@ def check_workflow_inventory_main() -> int:
         return 0 if in_sync else 1
 
     if not undocumented and not missing_files:
-        print("OK: workflow inventory is in sync.")
+        print(text("OK: workflow inventory is in sync."))
         return 0
 
-    print("ERROR: workflow inventory drift detected!\n")
+    print(text("ERROR: workflow inventory drift detected!\n"))
 
     if undocumented:
-        print("Files on disk but NOT documented in .github/workflows/README.md:")
+        print(text("Files on disk but NOT documented in .github/workflows/README.md:"))
         for name in undocumented:
-            print(f"  + {name}")
+            print(text("  + %(value0)s", value0=name))
         print()
 
     if missing_files:
-        print("Files documented in README.md table but NOT present on disk:")
+        print(text("Files documented in README.md table but NOT present on disk:"))
         for name in missing_files:
-            print(f"  - {name}")
+            print(text("  - %(value0)s", value0=name))
         print()
 
     print(
@@ -500,13 +501,13 @@ def validate_workflow_checkout_main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Validate that composite actions are preceded by actions/checkout.",
-        epilog="Example: %(prog)s .github/workflows/ci.yml",
+        description=text("Validate that composite actions are preceded by actions/checkout."),
+        epilog=text("Example: %(prog)s .github/workflows/ci.yml"),
     )
     parser.add_argument(
         "paths",
         nargs="*",
-        help="Workflow files or directories (default: .github/workflows/)",
+        help=text("Workflow files or directories (default: .github/workflows/)"),
     )
     parser.add_argument(
         "--allow-empty",

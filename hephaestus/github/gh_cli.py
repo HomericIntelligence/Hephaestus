@@ -7,6 +7,7 @@ import subprocess
 import sys
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -37,7 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the parser for ``hephaestus-gh``."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-gh",
-        description="Run gh through Hephaestus's retry, circuit-breaker, and throttle adapter.",
+        description=text(
+            "Run gh through Hephaestus's retry, circuit-breaker, and throttle adapter."
+        ),
         allow_abbrev=False,
     )
     add_github_throttle_args(parser)
@@ -54,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         "gh_args",
         nargs=argparse.REMAINDER,
         metavar="GH_ARG",
-        help="Arguments passed through to gh. Prefix with -- if they start with a dash.",
+        help=text("Arguments passed through to gh. Prefix with -- if they start with a dash."),
     )
     return parser
 
@@ -92,7 +95,14 @@ def _handle_timeout(
         emit_json_status(124, message, stdout=stdout, stderr=stderr)
     else:
         _write_streams(stdout, stderr)
-        print(message, file=sys.stderr)
+        print(
+            text(
+                "gh %(command)s timed out after %(timeout)ss",
+                command=" ".join(gh_args),
+                timeout=exc.timeout,
+            ),
+            file=sys.stderr,
+        )
     return 124
 
 
@@ -131,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     if gh_args and gh_args[0] == "--":
         gh_args = gh_args[1:]
     if not gh_args:
-        parser.error("missing gh arguments")
+        parser.error(text("missing gh arguments"))
 
     configure_github_throttle_from_args(args)
     try:

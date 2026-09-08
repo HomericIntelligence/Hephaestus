@@ -26,6 +26,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -153,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(
+        description=text(
             "Reconcile the severity:* label for a GitHub issue from its issue-form "
             "Severity answer supplied as an explicit file or standard input."
         )
@@ -185,14 +186,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text(
+                    "Unexpected GITHUB_REPOSITORY %(repository)r (expected owner/name)",
+                    repository=repo,
+                ),
+                file=sys.stderr,
+            )
         return 1
     if args.issue_number <= 0:
         message = f"Unexpected --issue-number {args.issue_number!r} (not a positive integer)"
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text("Unexpected ISSUE_NUMBER %(number)r (not a positive integer)", number=raw),
+                file=sys.stderr,
+            )
         return 1
     try:
         body = _read_body(args.body_file)
@@ -201,7 +211,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text("Unexpected ISSUE_NUMBER %(number)r (not a positive integer)", number=raw),
+                file=sys.stderr,
+            )
         return 1
     selected = parse_severity(body)
     apply_severity_label(
@@ -214,7 +227,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         emit_json_status(0, message, severity=selected)
     else:
-        print(message)
+        print(
+            text(
+                "Reconciled severity label to: %(selected)s",
+                selected=selected or text("(none)"),
+            )
+        )
     return 0
 
 

@@ -29,12 +29,96 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 _tomllib = import_tomllib()
+
+
+def _format_consistency_error(error: str) -> str:
+    """Localize a human report while keeping checker and JSON results raw."""
+    if (value := error.removeprefix("AGENTS.md not found at ")) != error:
+        return text("AGENTS.md not found at %(value0)s", value0=value)
+    if error == (
+        "AGENTS.md: No coverage threshold mention found (expected pattern: '<N>%+ test coverage')"
+    ):
+        return text(
+            "AGENTS.md: No coverage threshold mention found "
+            "(expected pattern: '<N>%%+ test coverage')"
+        )
+    if match := re.fullmatch(
+        r"AGENTS\.md: Coverage threshold mismatch — AGENTS\.md says (?P<found>\d+)%, "
+        r"pyproject\.toml says (?P<expected>\d+)%",
+        error,
+    ):
+        return text(
+            "AGENTS.md: Coverage threshold mismatch — AGENTS.md says %(found)d%%, "
+            "pyproject.toml says %(expected)d%%",
+            found=int(match["found"]),
+            expected=int(match["expected"]),
+        )
+    if (value := error.removeprefix("DEFINITION_OF_DONE.md not found at ")) != error:
+        return text("DEFINITION_OF_DONE.md not found at %(value0)s", value0=value)
+    if error == (
+        "DEFINITION_OF_DONE.md: No coverage threshold mention found "
+        "(expected '--cov-fail-under=<N>' or 'drops total under <N>%')"
+    ):
+        return text(
+            "DEFINITION_OF_DONE.md: No coverage threshold mention found "
+            "(expected '--cov-fail-under=<N>' or 'drops total under <N>%%')"
+        )
+    if match := re.fullmatch(
+        r"DEFINITION_OF_DONE\.md: Coverage threshold mismatch — "
+        r"DEFINITION_OF_DONE\.md says (?P<found>\d+)%, pyproject\.toml says (?P<expected>\d+)%",
+        error,
+    ):
+        return text(
+            "DEFINITION_OF_DONE.md: Coverage threshold mismatch — "
+            "DEFINITION_OF_DONE.md says %(found)d%%, pyproject.toml says %(expected)d%%",
+            found=int(match["found"]),
+            expected=int(match["expected"]),
+        )
+    if (value := error.removeprefix("README.md not found at ")) != error:
+        return text("README.md not found at %(value0)s", value0=value)
+    if match := re.fullmatch(
+        r"README\.md: --cov path mismatch — README\.md has '--cov=(?P<found>.+)', "
+        r"pyproject\.toml uses '--cov=(?P<expected>.+)'",
+        error,
+    ):
+        return text(
+            "README.md: --cov path mismatch — README.md has '--cov=%(found)s', "
+            "pyproject.toml uses '--cov=%(expected)s'",
+            **match.groupdict(),
+        )
+    if match := re.fullmatch(
+        r"pyproject\.toml: --cov-fail-under mismatch — "
+        r"addopts has --cov-fail-under=(?P<found>\d+), "
+        r"but \[tool\.coverage\.report\]\.fail_under=(?P<expected>\d+)",
+        error,
+    ):
+        return text(
+            "pyproject.toml: --cov-fail-under mismatch — "
+            "addopts has --cov-fail-under=%(found)d, "
+            "but [tool.coverage.report].fail_under=%(expected)d",
+            found=int(match["found"]),
+            expected=int(match["expected"]),
+        )
+    if match := re.fullmatch(
+        r"README\.md: Test count mismatch — README\.md says (?P<found>\d+), "
+        r"actual pytest count is (?P<actual>\d+) \(tolerance: (?P<tolerance>\d+)%\)",
+        error,
+    ):
+        return text(
+            "README.md: Test count mismatch — README.md says %(found)d, "
+            "actual pytest count is %(actual)d (tolerance: %(tolerance)d%%)",
+            found=int(match["found"]),
+            actual=int(match["actual"]),
+            tolerance=int(match["tolerance"]),
+        )
+    return error
 
 
 def _load_pyproject(repo_root: Path) -> dict[str, Any]:
@@ -52,14 +136,22 @@ def _load_pyproject(repo_root: Path) -> dict[str, Any]:
     """
     pyproject_path = repo_root / "pyproject.toml"
     if not pyproject_path.is_file():
-        print(f"ERROR: pyproject.toml not found: {pyproject_path}", file=sys.stderr)
+        print(
+            text("ERROR: pyproject.toml not found: %(value0)s", value0=pyproject_path),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
         with open(pyproject_path, "rb") as f:
             return cast(dict[str, Any], _tomllib.load(f))
     except Exception as exc:
-        print(f"ERROR: Could not parse {pyproject_path}: {exc}", file=sys.stderr)
+        print(
+            text(
+                "ERROR: Could not parse %(value0)s: %(value1)s", value0=pyproject_path, value1=exc
+            ),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -81,7 +173,7 @@ def load_coverage_threshold(repo_root: Path) -> int:
         threshold = data["tool"]["coverage"]["report"]["fail_under"]
     except KeyError:
         print(
-            "ERROR: [tool.coverage.report].fail_under not found in pyproject.toml",
+            text("ERROR: [tool.coverage.report].fail_under not found in pyproject.toml"),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -111,7 +203,7 @@ def extract_cov_path(repo_root: Path) -> str:
             return m.group(1)
 
     print(
-        "ERROR: No --cov=<path> found in [tool.pytest.ini_options].addopts",
+        text("ERROR: No --cov=<path> found in [tool.pytest.ini_options].addopts"),
         file=sys.stderr,
     )
     sys.exit(1)
@@ -380,9 +472,9 @@ def check_doc_config_consistency(
 
     if all_errors:
         for error in all_errors:
-            print(error, file=sys.stderr)
+            print(_format_consistency_error(error), file=sys.stderr)
         print(
-            f"\nFound {len(all_errors)} doc/config consistency violation(s).",
+            text("\nFound %(value0)s doc/config consistency violation(s).", value0=len(all_errors)),
             file=sys.stderr,
         )
         return 1
@@ -405,8 +497,11 @@ def _run_threshold_check(repo_root: Path, expected: int, verbose: bool) -> list[
     errors += check_dod_threshold(repo_root, expected)
     if not errors and verbose:
         print(
-            f"PASS: AGENTS.md and DEFINITION_OF_DONE.md coverage threshold "
-            f"match pyproject.toml ({expected}%)"
+            text(
+                "PASS: AGENTS.md and DEFINITION_OF_DONE.md coverage threshold "
+                "match pyproject.toml (%(expected)d%%)",
+                expected=expected,
+            )
         )
     return errors
 
@@ -425,7 +520,12 @@ def _run_cov_path_check(repo_root: Path, verbose: bool) -> list[str]:
     expected_cov_path = extract_cov_path(repo_root)
     errors = check_readme_cov_path(repo_root, expected_cov_path)
     if not errors and verbose:
-        print(f"PASS: README.md --cov path matches pyproject.toml (--cov={expected_cov_path})")
+        print(
+            text(
+                "PASS: README.md --cov path matches pyproject.toml (--cov=%(value0)s)",
+                value0=expected_cov_path,
+            )
+        )
     return errors
 
 
@@ -446,13 +546,20 @@ def _run_addopts_check(repo_root: Path, expected: int, verbose: bool) -> list[st
         addopts_val = extract_cov_fail_under_from_addopts(repo_root)
         if addopts_val is not None:
             print(
-                f"PASS: addopts --cov-fail-under matches "
-                f"[tool.coverage.report].fail_under ({expected}%)"
+                text(
+                    "PASS: addopts --cov-fail-under matches "
+                    "[tool.coverage.report].fail_under (%(expected)d%%)",
+                    expected=expected,
+                )
             )
         else:
             print(
-                f"PASS: No --cov-fail-under in addopts — "
-                f"[tool.coverage.report].fail_under ({expected}%) is single source of truth"
+                text(
+                    "PASS: No --cov-fail-under in addopts — "
+                    "[tool.coverage.report].fail_under (%(expected)d%%) "
+                    "is single source of truth",
+                    expected=expected,
+                )
             )
     return errors
 
@@ -471,11 +578,16 @@ def _run_test_count_check(repo_root: Path, verbose: bool) -> list[str]:
     actual_count = collect_actual_test_count(repo_root)
     if actual_count is None:
         if verbose:
-            print("SKIP: Could not collect actual test count (pytest unavailable)")
+            print(text("SKIP: Could not collect actual test count (pytest unavailable)"))
         return []
     errors = check_readme_test_count(repo_root, actual_count)
     if not errors and verbose:
-        print(f"PASS: README.md test count is within 10% of actual ({actual_count})")
+        print(
+            text(
+                "PASS: README.md test count is within 10%% of actual (%(value0)s)",
+                value0=actual_count,
+            )
+        )
     return errors
 
 
@@ -494,12 +606,12 @@ def main() -> int:
         "--verbose",
         "-v",
         action="store_true",
-        help="Print passing check names",
+        help=text("Print passing check names"),
     )
     parser.add_argument(
         "--skip-test-count",
         action="store_true",
-        help="Skip the live pytest --collect-only test count check",
+        help=text("Skip the live pytest --collect-only test count check"),
     )
 
     args = parser.parse_args()

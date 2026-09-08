@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_role_agent_args
 
 if TYPE_CHECKING:
@@ -150,9 +151,13 @@ def _parse_positive_int(value: str) -> int:
     try:
         number = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)r", value0=value)
+        ) from exc
     if number <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {number}")
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)s", value0=number)
+        )
     return number
 
 
@@ -161,9 +166,13 @@ def _parse_non_negative_int(value: str) -> int:
     try:
         number = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative integer, got %(value0)r", value0=value)
+        ) from exc
     if number < 0:
-        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {number}")
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative integer, got %(value0)s", value0=number)
+        )
     return number
 
 
@@ -178,11 +187,19 @@ def _parse_positive_int_list(value: str, label: str) -> list[int]:
             number = int(item)
         except ValueError as exc:
             raise argparse.ArgumentTypeError(
-                f"expected comma-separated {label} numbers, got {item!r}"
+                text(
+                    "expected comma-separated %(label)s numbers, got %(value0)r",
+                    label=label,
+                    value0=item,
+                )
             ) from exc
         if number <= 0:
             raise argparse.ArgumentTypeError(
-                f"{label} numbers must be positive integers, got {number}"
+                text(
+                    "%(label)s numbers must be positive integers, got %(value0)s",
+                    label=label,
+                    value0=number,
+                )
             )
         numbers.append(number)
     return numbers
@@ -203,9 +220,11 @@ def _parse_metrics_port(value: str) -> int:
     try:
         port = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"metrics port must be an integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("metrics port must be an integer, got %(value0)r", value0=value)
+        ) from exc
     if not 0 <= port <= 65535:
-        raise argparse.ArgumentTypeError("metrics port must be in 0..65535")
+        raise argparse.ArgumentTypeError(text("metrics port must be in 0..65535"))
     return port
 
 
@@ -370,19 +389,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--loops",
         type=_parse_positive_int,
         default=5,
-        help="Repository discovery reseed passes; does not change review budgets (default: 5)",
+        help=text("Repository discovery reseed passes; does not change review budgets (default: 5)"),
     )
     p.add_argument(
         "--reset-plan-review-session",
         action="store_true",
-        help="Explicitly discard reviewer conversation state for the selected --issues",
+        help=text("Explicitly discard reviewer conversation state for the selected --issues"),
     )
     p.add_argument(
         "--review-iterations",
         type=_parse_positive_int,
         default=None,
         metavar="N",
-        help=(
+        help=text(
             "Exact per-cycle cap for both plan-review and implementation-review rounds. "
             "Omit to preserve the routing defaults (plan 3; implementation soft 3/hard 6)."
         ),
@@ -391,7 +410,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--drive-green-loops",
         type=_parse_positive_int,
         default=5,
-        help=(
+        help=text(
             "Compatibility iteration bound for the historical drive-green CLI; current "
             "merge-wait conditionally merges reviewed heads and does not manage native auto-merge "
             "(default: 5; replaces --max-merge-attempts)."
@@ -401,26 +420,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--parallel-repos",
         type=_parse_positive_int,
         default=1,
-        help="Repos processed in parallel per loop iteration (default: 1)",
+        help=text("Repos processed in parallel per loop iteration (default: 1)"),
     )
     p.add_argument(
         "--learning-workers",
         type=_parse_positive_int,
         default=1,
-        help="Independent host-learning workers (default: 1)",
+        help=text("Independent host-learning workers (default: 1)"),
     )
     p.add_argument(
         "--learning-queue-capacity",
         type=_parse_positive_int,
         default=1,
-        help="Bounded auxiliary learning queue capacity (default: 1)",
+        help=text("Bounded auxiliary learning queue capacity (default: 1)"),
     )
     p.add_argument(
         "--issue-limit",
         type=_parse_positive_int,
         default=None,
         metavar="N",
-        help=(
+        help=text(
             "Run the next checkpointed issue wave with at most N eligible issues. "
             "The staged rollout advances 1, 2, 4, 8, then all eligible issues."
         ),
@@ -428,18 +447,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phases",
         default=",".join(ALL_SELECTABLE),
-        help=(
-            "Comma-separated subset of phases/stages to run. "
-            f"Valid: {','.join(ALL_SELECTABLE)} "
+        help=text(
+            "Comma-separated subset of phases/stages to run. Valid: %(valid)s "
             "(plan/implement are loop-body phases; drive-green runs per issue "
-            "when selected and also does one final repo-level catch-up sweep)."
+            "when selected and also does one final repo-level catch-up sweep).",
+            valid=",".join(ALL_SELECTABLE),
         ),
     )
     p.add_argument(
         "--issues",
         type=_parse_issue_list,
         default=None,
-        help=(
+        help=text(
             "Comma-separated issue numbers to pass to issue-scoped phases "
             "(plan, implement, drive-green). Default: phase auto-discovery."
         ),
@@ -448,7 +467,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--prs",
         type=_parse_pr_list,
         default=None,
-        help=(
+        help=text(
             "Comma-separated PR numbers to seed directly into pipeline PR stages. "
             "Default: no direct PR scope."
         ),
@@ -456,7 +475,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-advise",
         action="store_true",
-        help="Pass --no-advise to phases that support the advise preflight",
+        help=text("Pass --no-advise to phases that support the advise preflight"),
     )
     p.add_argument(
         "--no-learn",
@@ -468,7 +487,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         dest="serialize_file_overlap",
         default=True,
-        help=(
+        help=text(
             "Disable file-overlap serialization; dispatch all issues in a round"
             " concurrently even when their plans touch the same file (#1623)"
         ),
@@ -476,12 +495,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--nitpick",
         action="store_true",
-        help="Pass --nitpick to review phases (reviewer emits nitpick comments)",
+        help=text("Pass --nitpick to review phases (reviewer emits nitpick comments)"),
     )
     p.add_argument(
         "--drive-green-all",
         action="store_true",
-        help=(
+        help=text(
             "Compatibility option for the retired broad drive-green sweep. "
             "Repository discovery remains linked-issue based and never scans "
             "unrelated open PRs; use --prs for an explicit PR scope."
@@ -490,7 +509,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--run-pre-pr-tests",
         action="store_true",
-        help=(
+        help=text(
             "Run the configurable pre-PR test gate for repositories without an automatic "
             "required-check profile; Hephaestus runs its required checks before initial "
             "PR creation."
@@ -500,42 +519,43 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=(
+        help=text(
             "MODEL[:EFFORT] for planner, reviewer, and implementer child processes. "
-            f"{MODEL_REFERENCE_HELP} A role model option overrides this selection. "
-            "Host-owned advice and learning do not use this model."
+            "%(reference)s A role model option overrides this selection. "
+            "Host-owned advice and learning do not use this model.",
+            reference=MODEL_REFERENCE_HELP,
         ),
     )
     p.add_argument(
         "--planner-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=MODEL_REFERENCE_HELP,
+        help=text(MODEL_REFERENCE_HELP),
     )
     p.add_argument(
         "--reviewer-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=MODEL_REFERENCE_HELP,
+        help=text(MODEL_REFERENCE_HELP),
     )
     p.add_argument(
         "--implementer-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=MODEL_REFERENCE_HELP,
+        help=text(MODEL_REFERENCE_HELP),
     )
     p.add_argument(
         "--fallback-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help="Claude quota fallback model; Claude uses its default effort",
+        help=text("Claude quota fallback model; Claude uses its default effort"),
     )
     p.add_argument(
         "--org",
         nargs="?",
         const=_ORG_AUTODETECT,
         default=None,
-        help=(
+        help=text(
             "Enumerate non-fork, non-archived repos in a GitHub org. "
             "Pass `--org NAME` for a specific org, or `--org` alone to auto-detect "
             "the org from the current repo's git remote. "
@@ -547,7 +567,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--projects-dir",
         type=str,
         default=None,
-        help=(
+        help=text(
             "Local directory containing repo clones. When omitted, resolved from "
             "the current checkout parent when available, then "
             f"``{DEFAULT_PROJECTS_DIR}``."
@@ -557,7 +577,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--phase-timeout",
         type=float,
         default=_default_phase_timeout_s(),
-        help=(
+        help=text(
             f"Per-phase timeout in seconds (default: {int(_default_phase_timeout_s())}s). "
             "Pass 0 or a negative value to disable. "
             "This bounds each AGENT JOB the pipeline runs, not a whole phase subprocess."
@@ -568,13 +588,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="rate_guard_enabled",
         default=True,
-        help="Enable the GraphQL remaining-budget guard (default).",
+        help=text("Enable the GraphQL remaining-budget guard (default)."),
     )
     p.add_argument(
         "--no-rate-guard",
         action="store_false",
         dest="rate_guard_enabled",
-        help="Disable the GraphQL remaining-budget guard.",
+        help=text("Disable the GraphQL remaining-budget guard."),
     )
     timeout_defaults = (
         ("planner", 1200),
@@ -609,21 +629,21 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_positive_int,
         default=200,
         metavar="N",
-        help="Park agent jobs below this GraphQL remaining budget (default: 200).",
+        help=text("Park agent jobs below this GraphQL remaining budget (default: 200)."),
     )
     p.add_argument(
         "--plugin-skills-dir",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Explicit root containing installed automation skills.",
+        help=text("Explicit root containing installed automation skills."),
     )
     p.add_argument(
         "--metrics-port",
         type=_parse_metrics_port,
         default=0,
         metavar="PORT",
-        help=(
+        help=text(
             "Loopback-only port for the local Prometheus /metrics and /health server "
             "(0 disables it)."
         ),
@@ -632,7 +652,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--event-log-retention-days",
         type=_parse_non_negative_int,
         default=DEFAULT_EVENT_LOG_RETENTION_DAYS,
-        help=(
+        help=text(
             "Delete inactive pipeline event logs older than this many days; 0 disables age cleanup."
         ),
     )
@@ -640,7 +660,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--event-log-retention-count",
         type=_parse_non_negative_int,
         default=DEFAULT_EVENT_LOG_RETENTION_COUNT,
-        help=(
+        help=text(
             "Retain at most this many pipeline event logs when inactive logs permit; "
             "0 disables the count limit."
         ),
@@ -650,13 +670,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="PATH",
-        help="Write private typed queue-job receipts beneath PATH (disabled by default).",
+        help=text("Write private typed queue-job receipts beneath PATH (disabled by default)."),
     )
     p.add_argument(
         "--repos",
         type=_parse_repo_list,
         default=None,
-        help=(
+        help=text(
             "Comma-separated repo list (e.g. `--repos foo,bar`). Overrides org "
             "enumeration. Space-separated input is NOT accepted."
         ),
@@ -669,9 +689,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.issue_limit is not None and (args.issues is not None or args.prs is not None):
-        parser.error("--issue-limit cannot be combined with --issues or --prs")
+        parser.error(text("--issue-limit cannot be combined with --issues or --prs"))
     if args.reset_plan_review_session and not args.issues:
-        parser.error("--reset-plan-review-session requires explicit --issues")
+        parser.error(text("--reset-plan-review-session requires explicit --issues"))
     return args
 
 
@@ -679,7 +699,9 @@ def _validate_phases(phases_csv: str) -> tuple[str, ...]:
     selected = tuple(p.strip() for p in phases_csv.split(",") if p.strip())
     invalid = [p for p in selected if p not in ALL_SELECTABLE]
     if invalid:
-        raise SystemExit(f"Unknown phase(s): {invalid}. Valid: {','.join(ALL_SELECTABLE)}")
+        raise SystemExit(
+            text("Unknown phase(s): %(invalid)s. Valid: %(valid)s", invalid=invalid, valid=",".join(ALL_SELECTABLE))
+        )
     return selected
 
 

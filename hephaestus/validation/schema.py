@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
@@ -298,24 +299,24 @@ def main() -> int:
         "files",
         nargs="*",
         type=Path,
-        help="Config files to validate",
+        help=text("Config files to validate"),
     )
     parser.add_argument(
         "--schema-map",
         type=Path,
         default=None,
-        help="JSON file defining pattern-to-schema mappings",
+        help=text("JSON file defining pattern-to-schema mappings"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print passing file names",
+        help=text("Print passing file names"),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print errors but exit 0",
+        help=text("Print errors but exit 0"),
     )
     parser.add_argument(
         "--allow-unmapped",
@@ -351,8 +352,10 @@ def main() -> int:
             )
         else:
             print(
-                "ERROR: --schema-map is required. Provide a JSON file mapping "
-                "file patterns to schema paths.",
+                text(
+                    "ERROR: --schema-map is required. Provide a JSON file mapping "
+                    "file patterns to schema paths."
+                ),
                 file=sys.stderr,
             )
         return 1

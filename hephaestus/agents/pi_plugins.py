@@ -29,6 +29,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_version_arg
 from hephaestus.config.child_environments import build_pi_child_env
 
@@ -1448,7 +1449,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the ``hephaestus-install-pi-plugins`` argument parser."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-install-pi-plugins",
-        description="Install and preflight the catalog-pinned Pi package set.",
+        description=text("Install and preflight the catalog-pinned Pi package set."),
     )
     add_version_arg(parser)
     scope = parser.add_mutually_exclusive_group()
@@ -1468,14 +1469,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="PATH",
-        help="explicit Pi executable path",
+        help=text("explicit Pi executable path"),
     )
     parser.add_argument(
         "--pi-dir",
         type=Path,
         default=None,
         metavar="PATH",
-        help="explicit Pi coding-agent configuration directory",
+        help=text("explicit Pi coding-agent configuration directory"),
     )
     return parser
 
@@ -1504,7 +1505,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     yes = args.yes
     if not args.dry_run and not yes and sys.stdin.isatty() and not args.json_output:
-        answer = input("Install the catalog-pinned Pi packages? [y/N] ").strip().lower()
+        answer = input(text("Install the catalog-pinned Pi packages? [y/N] ")).strip().lower()
         yes = answer in {"y", "yes"}
     options = InstallOptions(
         dry_run=args.dry_run,
@@ -1520,12 +1521,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_output:
         print(json.dumps(_report_document(report), sort_keys=True))
     else:
-        print(f"Pi package bootstrap: {report.status}")
+        print(text("Pi package bootstrap: %(status)s", status=report.status))
         if report.detail:
             print(report.detail, file=sys.stderr)
         if report.status == "dry_run":
             for command in report.commands:
-                print("  " + " ".join(command))
+                print(text("  %(command)s", command=" ".join(command)))
     if report.ready or report.status == "dry_run":
         return 0
     if report.status in {
