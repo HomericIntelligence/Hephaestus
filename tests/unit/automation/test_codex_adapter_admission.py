@@ -2439,7 +2439,10 @@ def test_isolated_adapter_retains_control_after_provider_deadline(
     assert operations == ["prepare", "invoke_prepared", "destroy_prepared"]
 
 
-def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delayed_dispatch", [False, True], ids=["normal", "delayed-guest-entry"])
+def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delayed_dispatch: bool
+) -> None:
     """The helper processes terminal control while one invocation is active."""
     module = _module()
     source = (
@@ -2450,13 +2453,18 @@ def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(tmp_path: Path) 
         b"    adapter_distribution = 'example-adapter'\n"
         b"    adapter_version = '1.0.0'\n"
         b"    installed_tree_sha256 = 'a' * 64\n"
-        b"    def prepare(self, request): return request\n"
+        b"    def prepare(self, request):\n"
+        b"        if request == 'wait-for-entry':\n"
+        b"            if not entered.wait(5.0): raise RuntimeError('invoke did not run')\n"
+        b"            return 'guest-entered'\n"
+        b"        return request\n"
         b"    def invoke(self, prepared, auth_path):\n"
         b"        del auth_path\n"
         b"        entered.set()\n"
         b"        if not released.wait(5.0): raise RuntimeError('destroy did not run')\n"
         b"        return prepared\n"
         b"    def destroy(self, prepared):\n"
+        b"        if prepared == 'guest-entered': return\n"
         b"        del prepared\n"
         b"        if not entered.wait(5.0): raise RuntimeError('invoke did not run')\n"
         b"        released.set()\n"
@@ -2469,20 +2477,81 @@ def test_isolated_adapter_destroy_interrupts_one_blocked_invoke(tmp_path: Path) 
     factory = module._default_importer(tree, "example_adapter", "factory")
     adapter = factory()
     outcome: list[object] = []
+    errors: list[BaseException] = []
+    readiness_handles: list[object] = []
     prepared = adapter.prepare("prepared")
+    primary_handle = adapter._claim_prepared_handle(prepared, remove=False)[0]
+    invoke_held = threading.Event()
+    allow_invoke = threading.Event()
+    control_requested = threading.Event()
+    readiness_requested = threading.Event()
+    guest_acknowledged = threading.Event()
+    primary_destroy_sent = threading.Event()
+    original_write = adapter._process._write
 
-    invoke = threading.Thread(
-        target=lambda: outcome.append(adapter.invoke(prepared, "/private/auth.json")),
-        daemon=True,
-    )
-    invoke.start()
+    def observe_write(value: Any, *, deadline: float) -> None:
+        operation = value.get("operation")
+        if operation == "invoke_prepared" and delayed_dispatch:
+            invoke_held.set()
+            assert allow_invoke.wait(5), "Invocation dispatch was not released"
+        if operation == "prepare":
+            readiness_requested.set()
+            control_requested.set()
+        if operation == "destroy_prepared" and value.get("cleanup_handle") == primary_handle:
+            primary_destroy_sent.set()
+            control_requested.set()
+        original_write(value, deadline=deadline)
+
+    monkeypatch.setattr(adapter._process, "_write", observe_write)
+
+    def invoke_adapter() -> None:
+        try:
+            outcome.append(adapter.invoke(prepared, "/private/auth.json"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def destroy_after_entry() -> None:
+        try:
+            readiness = adapter.prepare("wait-for-entry")
+            readiness_handles.append(readiness)
+            assert readiness == "guest-entered"
+            guest_acknowledged.set()
+            adapter.destroy(prepared)
+            adapter.destroy(readiness)
+            readiness_handles.remove(readiness)
+        except BaseException as exc:
+            errors.append(exc)
+
+    invoke = threading.Thread(target=invoke_adapter, daemon=True)
+    controller = threading.Thread(target=destroy_after_entry, daemon=True)
+    started: list[threading.Thread] = []
     try:
-        adapter.destroy(prepared)
-    finally:
+        invoke.start()
+        started.append(invoke)
+        if delayed_dispatch:
+            assert invoke_held.wait(5), "Invocation did not reach the dispatch gate"
+        controller.start()
+        started.append(controller)
+        if delayed_dispatch:
+            assert control_requested.wait(5), "The controller did not request readiness"
+            assert readiness_requested.is_set(), "Destruction bypassed guest readiness"
+            assert not guest_acknowledged.is_set()
+            assert not primary_destroy_sent.is_set()
+            allow_invoke.set()
         invoke.join(timeout=5)
-
-    assert not invoke.is_alive()
-    assert outcome == ["prepared"]
+        controller.join(timeout=5)
+        assert not invoke.is_alive()
+        assert not controller.is_alive()
+        assert not errors
+        assert guest_acknowledged.is_set()
+        assert primary_destroy_sent.is_set()
+        assert not readiness_handles
+        assert outcome == ["prepared"]
+    finally:
+        allow_invoke.set()
+        adapter._close()
+        for thread in started:
+            thread.join(timeout=5)
 
 
 def test_retained_sigstore_fixture_verifies_offline_and_rejects_tampering(
