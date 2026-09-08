@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import BuildTestJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
@@ -21,6 +27,126 @@ def _git(cwd: Path, *argv: str) -> str:
     """Run one fixture Git command."""
     result = subprocess.run(("git", *argv), cwd=cwd, capture_output=True, text=True, check=True)
     return result.stdout.strip()
+
+
+def _validate_network_control(
+    result: subprocess.CompletedProcess[str], boot_id: str, hostname: str, token: str
+) -> None:
+    """Require the exact host boot and a successful listener challenge."""
+    assert result.returncode == 0, "network control command failed"
+    assert len(result.stdout) <= 4096, "network control output is oversized"
+    try:
+        value = json.loads(result.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AssertionError("network control output is invalid") from exc
+    assert value == {"boot_id": boot_id, "hostname": hostname, "token": token}, (
+        "network control did not prove the same host and listener"
+    )
+
+
+def _run_controlled_job(
+    pool: WorkerPool, job: BuildTestJob, control: Callable[[], None]
+) -> JobResult:
+    """Require positive controls on both sides of the worker execution."""
+    control()
+    try:
+        return pool._run_build_test(job)
+    finally:
+        control()
+
+
+@contextmanager
+def _control_listener() -> Iterator[tuple[int, str]]:
+    """Keep one local challenge listener alive for both positive controls."""
+    token = secrets.token_hex(32)
+    stopped = threading.Event()
+    failures: queue.Queue[Exception] = queue.Queue()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.2)
+
+        def serve() -> None:
+            try:
+                while not stopped.is_set():
+                    try:
+                        connection, _ = listener.accept()
+                    except TimeoutError:
+                        continue
+                    with connection:
+                        connection.settimeout(2)
+                        connection.sendall(token.encode("ascii"))
+            except Exception as exc:
+                failures.put(exc)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            yield listener.getsockname()[1], token
+        finally:
+            stopped.set()
+            thread.join(timeout=3)
+            assert not thread.is_alive(), "network control listener did not stop"
+            assert failures.empty(), "network control listener failed"
+
+
+def _same_node_network_control(
+    executable: str,
+    placement: PyxisExecutionPlacement,
+    port: int,
+    token: str,
+    boot_id: str,
+    hostname: str,
+) -> None:
+    """Run a benign positive control in the selected allocation and node."""
+    program = """
+import json
+import socket
+import sys
+from pathlib import Path
+
+with socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=2) as connection:
+    connection.settimeout(2)
+    chunks = []
+    while sum(map(len, chunks)) < 64:
+        chunk = connection.recv(64 - sum(map(len, chunks)))
+        if not chunk:
+            break
+        chunks.append(chunk)
+print(json.dumps({
+    'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+    'hostname': socket.gethostname(),
+    'token': b''.join(chunks).decode('ascii'),
+}))
+"""
+    result = subprocess.run(
+        (
+            executable,
+            f"--jobid={placement.allocation_id}",
+            f"--nodelist={placement.node}",
+            "--exclusive",
+            "--nodes=1",
+            "--ntasks=1",
+            "--cpus-per-task=2",
+            "--mem=4096M",
+            "--time=00:00:30",
+            "--kill-on-bad-exit=1",
+            "--export=NONE",
+            "/usr/bin/env",
+            "-i",
+            sys.executable,
+            "-I",
+            "-c",
+            program,
+            str(port),
+        ),
+        env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    _validate_network_control(result, boot_id, hostname, token)
 
 
 @pytest.mark.integration
@@ -51,6 +177,20 @@ def test_linux_pyxis_host_verification_boundary(
     if not expected_sha256 or not authority_text or not quota_root_text:
         pytest.fail("live Pyxis authority digest, provenance, and quota root are required")
 
+    try:
+        placement = PyxisExecutionPlacement(
+            allocation_id=os.environ.get("SLURM_JOB_ID", ""),
+            node=os.environ.get("SLURMD_NODENAME", ""),
+        )
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        assert boot_id, "host boot identity is missing"
+    except (OSError, ValueError, AssertionError) as exc:
+        pytest.fail(f"live Pyxis acceptance requires an allocated-node batch process: {exc}")
+    hostname = socket.gethostname()
+    executable = shutil.which("srun", path="/usr/local/bin:/usr/bin:/bin")
+    if executable is None:
+        pytest.fail("trusted srun is unavailable for the placement control")
+
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     _git(checkout, "init", "--initial-branch", "main")
@@ -61,11 +201,8 @@ def test_linux_pyxis_host_verification_boundary(
     _git(checkout, "commit", "-m", "fixture")
     head = _git(checkout, "rev-parse", "HEAD")
 
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    port = listener.getsockname()[1]
-    program = f"""
+    with _control_listener() as (port, token):
+        program = f"""
 from pathlib import Path
 import socket
 import subprocess
@@ -92,45 +229,49 @@ Path('build/probe.txt').write_text('scratch')
 Path('coverage.xml').write_text('coverage')
 Path('pi-smoke-logs/probe.txt').write_text('logs')
 """
-    pool = WorkerPool(
-        size=1,
-        shutdown=threading.Event(),
-        completion_q=queue.Queue(),
-        lock_dir=tmp_path / "locks",
-        host_verification_pyxis_image=image,
-        host_verification_pyxis_sha256=expected_sha256,
-        host_verification_pyxis_authority=Path(authority_text),
-        host_verification_pyxis_quota_root=Path(quota_root_text),
-    )
-    try:
-        result = pool._run_build_test(
-            BuildTestJob(
-                repo="fixture/repo",
-                cwd=checkout,
-                argv=("uv", "run", "python", "-c", program),
-                timeout_s=300,
-                expected_head_sha=head,
-                immutable_source=True,
-            )
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+            host_verification_pyxis_image=image,
+            host_verification_pyxis_sha256=expected_sha256,
+            host_verification_pyxis_authority=Path(authority_text),
+            host_verification_pyxis_quota_root=Path(quota_root_text),
+            host_verification_pyxis_placement=placement,
         )
-    finally:
-        listener.close()
-        pool.shutdown(mark_interrupted=False)
+        try:
+            result = _run_controlled_job(
+                pool,
+                BuildTestJob(
+                    repo="fixture/repo",
+                    cwd=checkout,
+                    argv=("uv", "run", "python", "-c", program),
+                    timeout_s=300,
+                    expected_head_sha=head,
+                    immutable_source=True,
+                ),
+                lambda: _same_node_network_control(
+                    executable, placement, port, token, boot_id, hostname
+                ),
+            )
+        finally:
+            pool.shutdown(mark_interrupted=False)
 
-    assert result.ok is True, (
-        f"Pyxis host verification failed: {result.error}\n{result.stderr_tail}"
-    )
-    assert result.value == {
-        "container_image": result.value["container_image"],
-        "container_image_sha256": result.value["container_image_sha256"],
-        "container_image_id": result.value["container_image_id"],
-        "container_image_reference": result.value["container_image_reference"],
-        "containerfile_sha256": result.value["containerfile_sha256"],
-        "container_source_revision": result.value["container_source_revision"],
-        "container_runtime": "pyxis",
-        "failure_kind": "none",
-        "head_sha": head,
-        "immutable_source": True,
-        "platform": "linux",
-        "status": "passed",
-    }
+        assert result.ok is True, (
+            f"Pyxis host verification failed: {result.error}\n{result.stderr_tail}"
+        )
+        assert result.value == {
+            "container_image": result.value["container_image"],
+            "container_image_sha256": result.value["container_image_sha256"],
+            "container_image_id": result.value["container_image_id"],
+            "container_image_reference": result.value["container_image_reference"],
+            "containerfile_sha256": result.value["containerfile_sha256"],
+            "container_source_revision": result.value["container_source_revision"],
+            "container_runtime": "pyxis",
+            "failure_kind": "none",
+            "head_sha": head,
+            "immutable_source": True,
+            "platform": "linux",
+            "status": "passed",
+        }

@@ -62,6 +62,31 @@ class PyxisImageValidationError(ValueError):
 
 
 @dataclass(frozen=True)
+class PyxisExecutionPlacement:
+    """Bind execution to one host-selected allocation and node."""
+
+    allocation_id: str
+    node: str
+
+    def __post_init__(self) -> None:
+        """Reject allocation or node values that can select multiple targets."""
+        if (
+            not isinstance(self.allocation_id, str)
+            or re.fullmatch(r"[1-9][0-9]*", self.allocation_id) is None
+        ):
+            raise ValueError("Pyxis allocation ID must be a positive decimal string")
+        if (
+            not isinstance(self.node, str)
+            or len(self.node) > 253
+            or any(
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None
+                for label in self.node.split(".")
+            )
+        ):
+            raise ValueError("Pyxis node must be one hostname")
+
+
+@dataclass(frozen=True)
 class PyxisImageMetadata:
     """Verified local squashfs metadata used by the worker and receipt."""
 
@@ -213,6 +238,7 @@ def build_pyxis_srun_command(
     argv: tuple[str, ...],
     environment: Mapping[str, str],
     timeout_s: int,
+    placement: PyxisExecutionPlacement | None = None,
 ) -> tuple[str, ...]:
     """Build one fixed ``srun`` command with Pyxis isolation flags."""
     if not argv:
@@ -237,6 +263,11 @@ def build_pyxis_srun_command(
     hours, seconds = divmod(timeout_s, 3600)
     minutes, seconds = divmod(seconds, 60)
     slurm_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    placement_options = (
+        (f"--jobid={placement.allocation_id}", f"--nodelist={placement.node}")
+        if placement is not None
+        else ()
+    )
     return (
         "srun",
         "--exclusive",
@@ -248,6 +279,7 @@ def build_pyxis_srun_command(
         "--kill-on-bad-exit=1",
         "--wait=10",
         "--propagate=CPU,FSIZE,NPROC,NOFILE",
+        *placement_options,
         "--container-image=" + str(image.path),
         "--container-readonly",
         "--no-container-mount-home",
@@ -293,6 +325,7 @@ def image_sha256(image: Path) -> str:
 
 __all__ = [
     "DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE",
+    "PyxisExecutionPlacement",
     "PyxisImageMetadata",
     "PyxisImageValidationError",
     "build_pyxis_environment",

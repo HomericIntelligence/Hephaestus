@@ -132,6 +132,24 @@ does not produce a passing skip. macOS continues to use its native sandbox
 boundary. Other platforms remain fail-closed until a reviewed isolation
 backend exists.
 
+Run this acceptance test from the allocated node's batch process. The process
+must have `SLURM_JOB_ID` and `SLURMD_NODENAME`. Reserve at least two CPUs and
+4096 MiB for each child step. Do not run the harness in an exclusive step
+that consumes those resources.
+
+The harness constructs a validated `PyxisExecutionPlacement` and passes it to
+`WorkerPool(host_verification_pyxis_placement=...)`. Both the positive control
+and the container command use explicit Slurm allocation and node selectors.
+The normal worker leaves placement to Slurm when this optional setting is
+absent. See the [Slurm srun options](https://slurm.schedmd.com/srun.html).
+
+Before and after the container command, an uncontained step must reach the
+harness listener and return its random challenge. It must also report the
+same host boot ID and hostname. A different node, unreachable listener,
+missing allocation, failed command, or malformed control result fails the
+test. A refusal inside the container counts only after both controls pass.
+A passing mocked test does not replace this live acceptance evidence.
+
 ## Current required contexts
 
 Classic branch protection requires:

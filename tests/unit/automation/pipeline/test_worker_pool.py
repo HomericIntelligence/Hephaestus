@@ -2475,10 +2475,15 @@ class TestWorkerPoolSubmitComplete:
         assert result.value["status"] != "skipped"
         archive.assert_not_called()
 
+    @pytest.mark.parametrize("placed", [False, True])
     def test_immutable_build_test_runs_linux_pyxis_and_records_image_digest(
-        self, pool: WorkerPool, tmp_path: Path
+        self, pool: WorkerPool, tmp_path: Path, placed: bool
     ) -> None:
         """Linux host verification records the exact local Pyxis image proof."""
+        from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+
+        placement = PyxisExecutionPlacement("123", "node-1") if placed else None
+        pool._host_verification_pyxis_placement = placement
         image = tmp_path / "host-verification.sqsh"
         launch_binding = MagicMock()
         metadata = PyxisImageMetadata(
@@ -2515,11 +2520,14 @@ class TestWorkerPoolSubmitComplete:
             patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata"),
             patch(f"{_WP}._prepare_host_output_aliases"),
             patch(f"{_WP}._build_pyxis_environment", return_value={"UV_OFFLINE": "1"}),
-            patch(f"{_WP}._build_pyxis_srun_command", return_value=("srun", "true")),
+            patch(
+                f"{_WP}._build_pyxis_srun_command", return_value=("srun", "true")
+            ) as build_command,
             patch(f"{_WP}._run_bounded_host_command", return_value=command_result) as run_command,
         ):
             result = pool._run_build_test(job)
 
+        assert build_command.call_args.kwargs["placement"] is placement
         assert result.ok is True
         assert result.value == {
             "container_image": str(image.resolve()),
@@ -16464,3 +16472,21 @@ def test_pyxis_runtime_preflight_stops_without_executable_or_on_shutdown(cancell
     ):
         assert not worker_pool_module._pyxis_runtime_available(shutdown=shutdown)
     run.assert_not_called()
+
+
+def test_worker_pool_retains_explicit_pyxis_placement(tmp_path: Path) -> None:
+    """The constructor preserves host-selected placement by identity."""
+    from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+
+    placement = PyxisExecutionPlacement("123", "node-1")
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_verification_pyxis_placement=placement,
+    )
+    try:
+        assert pool._host_verification_pyxis_placement is placement
+    finally:
+        pool.shutdown()
