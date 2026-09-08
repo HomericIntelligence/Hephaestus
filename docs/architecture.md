@@ -2269,3 +2269,21 @@ Exit-code priority is:
   is complete.
 
 ---
+
+### Codex primary-review network policy
+
+The Codex primary PR review selects a per-invocation permission profile that
+extends the built-in read-only filesystem policy and enables network access
+for normal Athena evidence collection. The host selects this profile only for
+the typed PR_REVIEWER role and PR_REVIEW operation with approval never. Each
+process attempt uses a new profile name with 128 random bits to avoid a
+collision with a fixed ambient profile. This does not claim protection against
+a same-user process that changes configuration after it observes the name. Fresh,
+resumed, and effort-retry commands use the same policy. Other read-only jobs
+keep their existing restrictions. Configuration rejection does not permit a
+less restrictive retry.
+
+Network capability does not authorize forge publication or imply domain
+filtering. The agent returns its audit; the host retains label and protected
+merge authority. Detached-source and head guards remain in force. This repair
+does not add the full Git-family boundary proposed in issue #2315.

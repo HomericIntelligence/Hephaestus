@@ -6694,3 +6694,163 @@ def test_isolated_effort_rejection_is_reported_only_after_cleanup(
         assert not agent_runtime._codex_active_receipt_path(
             Path(request.private_profile_path)
         ).exists()
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_primary_review_uses_network_read_only_profile(tmp_path: Path, resume: bool) -> None:
+    """The exact primary-review operation keeps read-only files and enables collection."""
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+    )
+    with patch.object(
+        agent_runtime,
+        "_run_codex_command",
+        return_value=agent_runtime.AgentRunResult(stdout="", stderr=""),
+    ) as run:
+        kwargs: dict[str, Any] = {
+            "cwd": tmp_path,
+            "timeout": 10,
+            "sandbox": "read-only",
+            "execution_request": request,
+        }
+        if resume:
+            agent_runtime.resume_agent_session("codex", "session", "review", **kwargs)
+        else:
+            agent_runtime.run_agent_session("codex", "review", **kwargs)
+    argv = run.call_args.args[0]
+    assert "--sandbox" not in argv
+    assert 'sandbox_mode="read-only"' not in argv
+    assert "--strict-config" in argv
+    settings = [argv[i + 1] for i, part in enumerate(argv) if part == "-c"]
+    selected = next(part for part in settings if part.startswith("default_permissions="))
+    name = json.loads(selected.split("=", 1)[1])
+    assert name.startswith("hephaestus-review-")
+    assert f'permissions.{name}={{extends=":read-only",network={{enabled=true}}}}' in settings
+    assert 'approval_policy="never"' in settings
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("operation", [AgentOperation.REVIEW_VALIDATE, AgentOperation.AUDIT_REVIEW])
+def test_other_review_operations_do_not_inherit_network_profile(
+    tmp_path: Path, resume: bool, operation: AgentOperation
+) -> None:
+    """A previous primary session cannot grant network to another operation."""
+    request = ExecutionRequest(AgentRole.PR_REVIEWER, operation, SessionLifecycle.ONE_SHOT)
+    with patch.object(
+        agent_runtime,
+        "_run_codex_command",
+        return_value=agent_runtime.AgentRunResult(stdout="", stderr=""),
+    ) as run:
+        kwargs: dict[str, Any] = {
+            "cwd": tmp_path,
+            "timeout": 10,
+            "sandbox": "read-only",
+            "execution_request": request,
+        }
+        if resume:
+            agent_runtime.resume_agent_session("codex", "former-primary", "validate", **kwargs)
+        else:
+            agent_runtime.run_agent_session("codex", "validate", **kwargs)
+    argv = run.call_args.args[0]
+    assert not any("hephaestus-review" in part for part in argv)
+    assert (
+        ('sandbox_mode="read-only"' in argv)
+        if resume
+        else (argv[argv.index("--sandbox") + 1] == "read-only")
+    )
+
+
+def test_primary_review_effort_retry_keeps_exact_profile(tmp_path: Path) -> None:
+    """The one effort retry keeps the same permissions."""
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+    )
+    with patch.object(
+        agent_runtime,
+        "_run_codex_command",
+        side_effect=[
+            agent_runtime._CodexReasoningEffortRejectedError("unsupported effort"),
+            agent_runtime.AgentRunResult(stdout="", stderr=""),
+        ],
+    ) as run:
+        agent_runtime.run_agent_session(
+            "codex",
+            "review",
+            cwd=tmp_path,
+            timeout=10,
+            sandbox="read-only",
+            model="gpt-6-astra:low",
+            execution_request=request,
+        )
+    assert run.call_count == 2
+    for call in run.call_args_list:
+        assert any(
+            part.startswith('default_permissions="hephaestus-review-') for part in call.args[0]
+        )
+        assert "--sandbox" not in call.args[0]
+
+
+def test_primary_review_invalid_profile_does_not_retry(tmp_path: Path) -> None:
+    """A configuration rejection cannot downgrade the primary review."""
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+    )
+    with patch.object(
+        agent_runtime,
+        "_run_codex_command",
+        side_effect=subprocess.CalledProcessError(
+            1, ["codex"], stderr="unknown permissions profile"
+        ),
+    ) as run:
+        with pytest.raises(subprocess.CalledProcessError):
+            agent_runtime.run_agent_session(
+                "codex",
+                "review",
+                cwd=tmp_path,
+                timeout=10,
+                sandbox="read-only",
+                model="gpt-6-astra:low",
+                execution_request=request,
+            )
+    assert run.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("role", "sandbox", "approval"),
+    [
+        (AgentRole.IMPLEMENTER, "read-only", "never"),
+        (AgentRole.PR_REVIEWER, "workspace-write", "never"),
+        (AgentRole.PR_REVIEWER, "read-only", "on-request"),
+    ],
+)
+def test_primary_profile_requires_all_typed_scope_facts(
+    tmp_path: Path, role: AgentRole, sandbox: str, approval: str
+) -> None:
+    """A partial primary-review match does not add network authority."""
+    argv = agent_runtime._codex_base_cmd(
+        cwd=tmp_path,
+        sandbox=sandbox,
+        approval=approval,
+        execution_request=ExecutionRequest(
+            role, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+        ),
+    )
+    assert not any("hephaestus-review" in part for part in argv)
+
+
+def test_primary_review_uses_a_new_profile_name_for_each_attempt(tmp_path: Path) -> None:
+    """Each fresh or resumed attempt avoids reusing an ambient profile name."""
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+    )
+    names = []
+    for session in (None, "existing-session", "existing-session"):
+        argv = agent_runtime._codex_base_cmd(
+            cwd=tmp_path, sandbox="read-only", execution_request=request, resume_id=session
+        )
+        selected = next(part for part in argv if part.startswith("default_permissions="))
+        name = json.loads(selected.split("=", 1)[1])
+        assert name.startswith("hephaestus-review-")
+        assert len(name.removeprefix("hephaestus-review-")) == 32
+        names.append(name)
+    assert len(set(names)) == 3

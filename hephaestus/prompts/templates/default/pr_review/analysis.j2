@@ -51,8 +51,9 @@ missing, skipped, or failed receipt does not satisfy the fixed host plan.
 > material finding into the mandatory structured comments below and retain a
 > bounded summary for the informational audit comment.
 > If it is unavailable, perform the equivalent review directly using this
-> prompt. In either case, review evidence may select only the confirmed GitHub
-> implementation-state label; `merge_wait` independently verifies the
+> prompt. Collect evidence and return the structured audit. Do not publish
+> pipeline labels. The host owns the implementation-state label transition;
+> `merge_wait` independently verifies the
 > reviewed-head proof before each individual SHA-conditional normal REST
 > squash-merge request. It may make a bounded sequence (default: five); only
 > classified retryable HTTP 405 readiness and unresolved transport ambiguity can
