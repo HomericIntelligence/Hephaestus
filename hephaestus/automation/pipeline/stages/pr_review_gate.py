@@ -214,6 +214,23 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
         open_thread_count = len(live_threads)
 
+        if (
+            audit.verdict == "BLOCKED"
+            and not audit.findings
+            and not audit.scope_expansions
+            and not open_thread_count
+        ):
+            guard_outcome = self._require_reviewed_unarmed(item, ctx)
+            if guard_outcome is not None:
+                return guard_outcome
+            prefix = f"review_evidence_blocked {item.payload['reviewed_pr_head_sha']}"
+            summary = audit.summary
+            available = 320 - len(prefix) - 1
+            if len(summary) > available:
+                summary = f"{summary[: available - 3].rstrip()}..."
+            note = f"{prefix} {summary}" if summary else prefix
+            return StageOutcome(Disposition.BLOCKED, note)
+
         # A clean implementation-state transition requires the reviewer's
         # explicit GO verdict. The grade is audit metadata only.
         payload["review_error_retries"] = 0

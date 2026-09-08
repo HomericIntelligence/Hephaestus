@@ -4932,6 +4932,13 @@ class TestEvalVerdicts:
             assert audit.valid is False
             assert audit.verdict is None
             assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        elif case == "BLOCKED":
+            assert audit.valid is True
+            assert audit.verdict == case
+            assert result == StageOutcome(
+                Disposition.BLOCKED,
+                f"review_evidence_blocked {'a' * 40} Cannot review",
+            )
         else:
             assert audit.valid is True
             assert audit.verdict == case
