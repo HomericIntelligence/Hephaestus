@@ -416,7 +416,7 @@ class SourceCoordinator(_CoordinatorHost):
         self._direct_issue_source = None
         if not self.config.issues:
             return
-        open_issues = _admission._filter_open_issues(repo, self.config.issues)
+        open_issues = _admission._filter_open_issues((self.config.org, repo), self.config.issues)
         unique_open_issues = list(dict.fromkeys(open_issues))
         self._direct_issue_source = ct._DirectIssueSource(
             repo=repo,
@@ -682,7 +682,7 @@ class SourceCoordinator(_CoordinatorHost):
         compatibility helper remains for direct classifier tests.
         """
         entries: list[_seeding.SeedEntry] = []
-        issue_numbers = _admission._filter_open_issues(repo, self.config.issues)
+        issue_numbers = _admission._filter_open_issues((self.config.org, repo), self.config.issues)
         for issue in issue_numbers:
             entries.append(self._seed_direct_issue_entry(repo, issue))
         entries.extend(self._seed_direct_pr_scope(repo))

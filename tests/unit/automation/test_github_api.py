@@ -425,6 +425,23 @@ class TestIsIssueClosed:
 
         assert is_issue_closed(123) is False
 
+    @pytest.mark.parametrize("state", ["OPEN", "CLOSED", "MERGED"])
+    @patch("hephaestus.automation.github_api.gh_issue_json")
+    def test_cache_miss_uses_explicit_repo(self, mock_gh_json: Any, state: str) -> None:
+        """Read the selected repository when its state map has no entry."""
+        mock_gh_json.return_value = {"state": state}
+
+        assert is_issue_closed(123, {}, repo=("target", "project")) is (state != "OPEN")
+        mock_gh_json.assert_called_once_with(123, repo=("target", "project"))
+
+    @patch("hephaestus.automation.github_api.gh_issue_json")
+    def test_explicit_repo_not_found_is_not_closed(self, mock_gh_json: Any) -> None:
+        """If the selected repository cannot supply an issue state, keep the issue."""
+        mock_gh_json.side_effect = RuntimeError("NOT_FOUND")
+
+        assert is_issue_closed(123, {}, repo=("target", "project")) is False
+        mock_gh_json.assert_called_once_with(123, repo=("target", "project"))
+
 
 class TestPrefetchIssueStates:
     """Tests for prefetch_issue_states function."""
@@ -686,6 +703,165 @@ class TestPrefetchIssueStates:
         assert mock_issue_json.call_count == 2
         assert states[11] == IssueState.OPEN
         assert states[22] == IssueState.CLOSED
+
+    @staticmethod
+    def _batch_response(
+        repo: tuple[str, str], states: dict[int, str]
+    ) -> subprocess.CompletedProcess[str]:
+        """Return a GitHub response with the specified repository identity."""
+        repository: dict[str, Any] = {"owner": {"login": repo[0]}, "name": repo[1]}
+        repository.update(
+            {
+                f"issue{index}": {"number": number, "state": state}
+                for index, (number, state) in enumerate(states.items())
+            }
+        )
+        return subprocess.CompletedProcess(
+            ["gh"], 0, json.dumps({"data": {"repository": repository}}), ""
+        )
+
+    @pytest.mark.parametrize("second_repo", [("other", "repo"), ("owner", "other")])
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_cache_separates_colliding_issue_numbers_by_repository(
+        self, mock_repo_info: Any, mock_gh_call: Any, second_repo: tuple[str, str]
+    ) -> None:
+        """Keep different states for the same issue number in two repositories."""
+        first_repo = ("owner", "repo")
+        mock_repo_info.side_effect = [first_repo, second_repo, first_repo, second_repo]
+        mock_gh_call.side_effect = [
+            self._batch_response(first_repo, {123: "CLOSED"}),
+            self._batch_response(second_repo, {123: "OPEN"}),
+        ]
+
+        assert prefetch_issue_states([123]) == {123: IssueState.CLOSED}
+        assert prefetch_issue_states([123]) == {123: IssueState.OPEN}
+        assert prefetch_issue_states([123]) == {123: IssueState.CLOSED}
+        assert prefetch_issue_states([123]) == {123: IssueState.OPEN}
+        assert mock_gh_call.call_count == 2
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_unresolved_repository_does_not_read_cached_state(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """Do not return a cached state when repository identity is unknown."""
+        mock_repo_info.side_effect = [("owner", "repo"), RuntimeError("Not in repo")]
+        mock_gh_call.return_value = self._batch_response(("owner", "repo"), {123: "CLOSED"})
+
+        assert prefetch_issue_states([123]) == {123: IssueState.CLOSED}
+        assert prefetch_issue_states([123]) == {}
+        assert mock_gh_call.call_count == 1
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_invalid_repository_does_not_read_cached_state(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """Validate repository identity before a cache lookup."""
+        mock_repo_info.side_effect = [("owner", "repo"), ("owner", "invalid/repo")]
+        mock_gh_call.return_value = self._batch_response(("owner", "repo"), {123: "CLOSED"})
+
+        assert prefetch_issue_states([123]) == {123: IssueState.CLOSED}
+        assert prefetch_issue_states([123]) == {}
+        assert mock_gh_call.call_count == 1
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_explicit_repo_scopes_graphql(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
+        """Use the selected repository without a current-checkout lookup."""
+        mock_gh_call.return_value = self._batch_response(("target", "project"), {123: "OPEN"})
+
+        assert prefetch_issue_states([123], repo=("target", "project")) == {123: IssueState.OPEN}
+        argv = mock_gh_call.call_args.args[0]
+        assert "owner=target" in argv
+        assert "name=project" in argv
+        mock_repo_info.assert_not_called()
+
+    @pytest.mark.parametrize("failure", ["batch-error", "partial-response"])
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_all_individual_fallbacks_use_explicit_repo(
+        self, mock_repo_info: Any, mock_gh_call: Any, failure: str
+    ) -> None:
+        """Use the selected repository for every fallback after a batch failure."""
+        target = ("target", "project")
+        first: Any = (
+            subprocess.CalledProcessError(1, "gh", stderr="HTTP 400: invalid query")
+            if failure == "batch-error"
+            else self._batch_response(target, {11: "OPEN"})
+        )
+        mock_gh_call.side_effect = [
+            first,
+            subprocess.CompletedProcess(["gh"], 0, json.dumps({"number": 11, "state": "OPEN"})),
+            subprocess.CompletedProcess(["gh"], 0, json.dumps({"number": 22, "state": "CLOSED"})),
+        ]
+
+        assert prefetch_issue_states([11, 22], repo=target) == {
+            11: IssueState.OPEN,
+            22: IssueState.CLOSED,
+        }
+        for call in mock_gh_call.call_args_list[1:]:
+            argv = call.args[0]
+            assert argv[:2] == ["issue", "view"]
+            assert argv[argv.index("--repo") + 1] == "target/project"
+        assert mock_gh_call.call_count == 3
+        mock_repo_info.assert_not_called()
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_not_found_does_not_cache_unknown_state(self, mock_gh_call: Any) -> None:
+        """Leave an unreadable state absent so a later request can read it."""
+        mock_gh_call.side_effect = [
+            subprocess.CalledProcessError(1, "gh", stderr="HTTP 404: NOT_FOUND"),
+            subprocess.CalledProcessError(1, "gh", stderr="HTTP 404: NOT_FOUND"),
+            self._batch_response(("target", "project"), {123: "OPEN"}),
+        ]
+
+        assert prefetch_issue_states([123], repo=("target", "project")) == {}
+        assert prefetch_issue_states([123], repo=("target", "project")) == {123: IssueState.OPEN}
+        assert mock_gh_call.call_count == 3
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_refresh_updates_only_selected_repository(self, mock_gh_call: Any) -> None:
+        """Refresh one repository and keep the state of the other repository."""
+        first, second = ("owner", "first"), ("owner", "second")
+        mock_gh_call.side_effect = [
+            self._batch_response(first, {123: "CLOSED"}),
+            self._batch_response(second, {123: "CLOSED"}),
+            self._batch_response(second, {123: "OPEN"}),
+        ]
+
+        assert prefetch_issue_states([123], repo=first) == {123: IssueState.CLOSED}
+        assert prefetch_issue_states([123], repo=second) == {123: IssueState.CLOSED}
+        assert prefetch_issue_states([123], repo=second, refresh=True) == {123: IssueState.OPEN}
+        assert prefetch_issue_states([123], repo=first) == {123: IssueState.CLOSED}
+        assert mock_gh_call.call_count == 3
+
+    @pytest.mark.parametrize("check", ["projection", "admission"])
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_failed_refresh_does_not_return_closed_state(
+        self, mock_gh_call: Any, check: str
+    ) -> None:
+        """Keep an issue when a requested state refresh fails."""
+        target = ("target", "project")
+        other = ("other", "project")
+        mock_gh_call.side_effect = [
+            self._batch_response(other, {123: "CLOSED"}),
+            self._batch_response(target, {123: "CLOSED"}),
+            subprocess.CalledProcessError(1, "gh", stderr="HTTP 404: NOT_FOUND"),
+            subprocess.CalledProcessError(1, "gh", stderr="HTTP 404: NOT_FOUND"),
+            subprocess.CalledProcessError(1, "gh", stderr="HTTP 404: NOT_FOUND"),
+        ]
+        assert prefetch_issue_states([123], repo=other) == {123: IssueState.CLOSED}
+        assert prefetch_issue_states([123], repo=target) == {123: IssueState.CLOSED}
+
+        refreshed = prefetch_issue_states([123], repo=target, refresh=True)
+        assert prefetch_issue_states([123], repo=other) == {123: IssueState.CLOSED}
+        if check == "projection":
+            assert refreshed == {}
+        else:
+            assert is_issue_closed(123, refreshed, repo=target) is False
+        assert mock_gh_call.call_count == (4 if check == "projection" else 5)
 
 
 class TestGhCall:

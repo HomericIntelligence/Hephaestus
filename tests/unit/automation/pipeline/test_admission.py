@@ -7,13 +7,16 @@ implementation queue, and the filtered-open-issues helper.
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.models import IssueInfo
+from hephaestus.automation import github_api
+from hephaestus.automation.models import IssueInfo, IssueState
 from hephaestus.automation.pipeline import admission
 from hephaestus.automation.pipeline.admission import (
     _filter_open_issues,
@@ -468,23 +471,24 @@ class TestFilterOpenIssues:
         """Open issues are kept."""
         mock_prefetch.return_value = {}
         mock_is_closed.return_value = False
-        result = _filter_open_issues("repo", [1, 2, 3])
+        result = _filter_open_issues(("owner", "repo"), [1, 2, 3])
         assert result == [1, 2, 3]
+        mock_prefetch.assert_called_once_with([1, 2, 3], repo=("owner", "repo"))
 
     @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
     @patch("hephaestus.automation.pipeline.admission.is_issue_closed")
     def test_filter_open_issues_excludes_closed(self, mock_is_closed, mock_prefetch) -> None:
         """Closed issues are excluded."""
         mock_prefetch.return_value = {}
-        mock_is_closed.side_effect = lambda num, _: num == 2
-        result = _filter_open_issues("repo", [1, 2, 3])
+        mock_is_closed.side_effect = lambda num, _, **kwargs: num == 2
+        result = _filter_open_issues(("owner", "repo"), [1, 2, 3])
         assert result == [1, 3]
 
     @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
     def test_filter_open_issues_fails_open_on_api_error(self, mock_prefetch) -> None:
         """Transient API failure → keep all, don't drop work (fail-open)."""
         mock_prefetch.side_effect = RuntimeError("API error")
-        result = _filter_open_issues("repo", [1, 2, 3])
+        result = _filter_open_issues(("owner", "repo"), [1, 2, 3])
         assert result == [1, 2, 3]
 
     @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
@@ -492,6 +496,50 @@ class TestFilterOpenIssues:
     def test_filter_open_issues_preserves_order(self, mock_is_closed, mock_prefetch) -> None:
         """Excluded issues maintain the original order."""
         mock_prefetch.return_value = {}
-        mock_is_closed.side_effect = lambda num, _: num in {2, 4}
-        result = _filter_open_issues("repo", [1, 2, 3, 4, 5])
+        mock_is_closed.side_effect = lambda num, _, **kwargs: num in {2, 4}
+        result = _filter_open_issues(("owner", "repo"), [1, 2, 3, 4, 5])
         assert result == [1, 3, 5]
+
+    def test_selected_repository_ignores_checkout_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Select issues from the specified repository."""
+        monkeypatch.setattr(github_api, "_issue_state_cache", {})
+        monkeypatch.setattr(github_api, "get_repo_info", lambda: ("ambient", "checkout"))
+
+        def response(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            owner = next(
+                value.removeprefix("owner=") for value in argv if value.startswith("owner=")
+            )
+            name = next(value.removeprefix("name=") for value in argv if value.startswith("name="))
+            states = (
+                ["OPEN", "CLOSED"] if (owner, name) == ("target", "project") else ["CLOSED", "OPEN"]
+            )
+            repository = {
+                "owner": {"login": owner},
+                "name": name,
+                "issue0": {"number": 1, "state": states[0]},
+                "issue1": {"number": 2, "state": states[1]},
+            }
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"data": {"repository": repository}}), ""
+            )
+
+        monkeypatch.setattr(github_api, "_gh_call", response)
+        assert _filter_open_issues(("target", "project"), [1, 2]) == [1]
+
+    @patch("hephaestus.automation.github_api.gh_issue_json")
+    @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
+    def test_partial_graphql_and_not_found_keep_unverified_issue(
+        self, mock_prefetch, mock_issue_json, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Keep an unknown issue when the remaining repository read fails."""
+        mock_prefetch.return_value = {1: IssueState.CLOSED}
+        mock_issue_json.side_effect = RuntimeError("NOT_FOUND")
+
+        with caplog.at_level(logging.INFO):
+            assert _filter_open_issues(("target", "project"), [1, 2]) == [2]
+        mock_issue_json.assert_called_once_with(2, repo=("target", "project"))
+        assert not any(
+            "issue #2 is closed — excluding" in record.message for record in caplog.records
+        )

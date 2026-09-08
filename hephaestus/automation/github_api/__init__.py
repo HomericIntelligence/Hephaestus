@@ -41,7 +41,8 @@ io_write_secure = write_secure
 # multithreaded pipeline coordinator let one repo's labels mask another's,
 # dropping durable state:* label writes. Mirrors git_utils._repo_info_cache.
 _label_cache: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
-_issue_state_cache: dict[int, IssueState] = {}
+# Issue-state cache identity includes the owner, repository, and issue number.
+_issue_state_cache: dict[tuple[str, str, int], IssueState] = {}
 
 from hephaestus.github.client import (  # noqa: E402
     _GH_BREAKER as _GH_BREAKER,
