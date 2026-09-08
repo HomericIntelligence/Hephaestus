@@ -112,6 +112,7 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
     build_pyxis_environment as _build_pyxis_environment,
     build_pyxis_srun_command as _build_pyxis_srun_command,
+    pyxis_help_supports_namespace_isolation as _pyxis_help_supports_namespace_isolation,
     stage_verified_pyxis_image as _stage_verified_pyxis_image,
     validate_pyxis_image as _validate_pyxis_image,
     validate_pyxis_quota_root as _validate_pyxis_quota_root,
@@ -1725,6 +1726,38 @@ def _tail_file(path: Path) -> str:
             return output.read().decode(errors="replace")
     except OSError:
         return ""
+
+
+def _pyxis_runtime_available(*, shutdown: threading.Event) -> bool:
+    """Check runtime capability without starting candidate code."""
+    executable = _trusted_executable("srun", path="/usr/local/bin:/usr/bin:/bin")
+    if executable is None or shutdown.is_set():
+        return False
+    try:
+        root = Path.cwd() / "build" / "host-verification-preflight"
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as directory:
+            scratch = Path(directory)
+            environment = _host_verification_env(scratch, executable, Path(sys.prefix))
+            argv = (executable, "--help")
+            result = _run_bounded_host_command(
+                _linux_resource_limited_command(argv, timeout_s=_HOST_VERIFICATION_SETUP_TIMEOUT_S),
+                validation_argv=argv,
+                source=scratch,
+                scratch=scratch,
+                environment=environment,
+                timeout_s=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+                shutdown=shutdown,
+            )
+            if not result.ok:
+                return False
+            with (scratch / "outputs" / "stdout.log").open("rb") as output:
+                help_bytes = output.read(65_537)
+            if len(help_bytes) > 65_536:
+                return False
+            return _pyxis_help_supports_namespace_isolation(help_bytes.decode("utf-8"))
+    except (OSError, ValueError):
+        return False
 
 
 def _confirmed_pytest_failure(returncode: int, stdout: str, stderr: str) -> bool:
@@ -4976,10 +5009,20 @@ class WorkerPool:
 
     def _run_linux_immutable_build_test(self, job: BuildTestJob) -> JobResult:
         """Run one fixed check in the local, read-only Pyxis CI image."""
+        if not _pyxis_runtime_available(shutdown=self._shutdown):
+            return JobResult(
+                ok=False,
+                error="host_verification_pyxis_runtime_unavailable",
+                value={
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": False,
+                    "failure_kind": "runner",
+                    "platform": "linux",
+                    "status": "failed",
+                },
+            )
         configured_image = self._host_verification_pyxis_image
-        image_path = Path(configured_image or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE)
-        if not image_path.is_absolute():
-            image_path = Path.cwd() / image_path
+        image_path = Path.cwd() / Path(configured_image or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE)
         try:
             image = _validate_pyxis_image(
                 image_path,

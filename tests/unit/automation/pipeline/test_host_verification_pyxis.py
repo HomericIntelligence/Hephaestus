@@ -655,3 +655,24 @@ def test_linux_pyxis_receipt_requires_exact_image_digest(tmp_path: Path) -> None
         {**receipt, "container_image": "docker://image"}, spec, "a" * 40
     )
     assert not _host_verification_receipt_matches({**receipt, "status": "skipped"}, spec, "a" * 40)
+
+
+@pytest.mark.parametrize(
+    ("help_text", "expected"),
+    [
+        ("      --container-unshare=NS,...\n        Unshare namespaces.\n", True),
+        ("      --container-unshare NS,...\n", True),
+        ("      --container-unshare\n", True),
+        ("      --container-unshare-extra=NS\n", False),
+        ("Description mentions --container-unshare=NS\n", False),
+        ("      --container-image=PATH\n", False),
+        ("", False),
+    ],
+)
+def test_pyxis_help_requires_exact_option(help_text: str, expected: bool) -> None:
+    """Only a declared namespace option satisfies the runtime prerequisite."""
+    from hephaestus.automation.pipeline.host_verification_pyxis import (
+        pyxis_help_supports_namespace_isolation,
+    )
+
+    assert pyxis_help_supports_namespace_isolation(help_text) is expected

@@ -1210,8 +1210,9 @@ read-only. The host virtual environment is not mounted.
 
 Scratch and Pi logs are on an owner-private shared filesystem with a maximum
 1 GiB capacity. Slurm and inherited OS limits bound CPU, memory, process count,
-file size, and wall-clock time. The authoritative Linux lane runs the real
-integration test with `--require-pyxis-host-verification`. A missing image,
+file size, and wall-clock time. Acceptance requires a real Linux Pyxis run of
+the integration test with `--require-pyxis-host-verification`. A skipped test
+supplies no acceptance evidence. A missing image,
 authority, bounded filesystem, Pyxis allocation, or Enroot runtime produces a
 failed receipt. It cannot become a passing skip. Other platforms remain
 fail-closed until a separately reviewed isolation backend exists. There is no

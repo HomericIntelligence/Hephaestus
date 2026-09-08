@@ -93,10 +93,14 @@ Linux PR-review host verification runs the candidate command in a read-only
 Pyxis/Enroot container. The host mounts the candidate source and Git metadata
 read-only. It mounts scratch and Pi logs from an owner-private filesystem whose
 total capacity is not more than 1 GiB. Slurm enforces the CPU, memory, process,
-file-size, and wall-clock limits. The container has no network namespace and
+file-size, and wall-clock limits. The container uses an isolated network namespace and
 receives a scrubbed offline environment. Home, temporary files, and tool
-caches use the disposable scratch paths. The coverage runner writes raw data
-under `build/host-coverage/`, through the writable build alias.
+caches use the disposable scratch paths. The coverage runner preserves the
+validated `COVERAGE_FILE` path in external disposable scratch.
+
+The worker checks `srun --help` before it stages the image. The help output
+must declare `--container-unshare`. A missing option or a failed capability
+check stops validation. This check does not prove runtime isolation.
 
 Linux applies a process limit of 64 for the real user ID. This limit includes
 other processes and threads for that user on the submission and execution
