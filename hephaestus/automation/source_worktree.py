@@ -2321,16 +2321,16 @@ class SourceWorkspaceManager:
                 raise SourceWorkspaceError("source workspace transition checkout is dirty")
             physical_revision = self._head_revision(path)
             physical_branch = self._head_branch(path)
+            if physical_revision == predecessor.revision and physical_branch == (
+                None if predecessor.detached else f"refs/heads/{predecessor.branch}"
+            ):
+                self._restore_transition_target_ref(journal)
+                return
             expected_successor_branch = f"refs/heads/{journal.successor.branch}"
             if not (
                 physical_revision == journal.successor.revision
                 and physical_branch == expected_successor_branch
             ):
-                if physical_revision == predecessor.revision and physical_branch == (
-                    None if predecessor.detached else f"refs/heads/{predecessor.branch}"
-                ):
-                    self._restore_transition_target_ref(journal)
-                    return
                 raise SourceWorkspaceError("source workspace transition checkout is ambiguous")
             removed = _git(self.repo_root, "worktree", "remove", str(path), check=False)
             if removed.returncode:
