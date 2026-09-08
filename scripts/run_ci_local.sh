@@ -91,16 +91,17 @@ CANDIDATE_INDEX_CONTAINER=""
 CANDIDATE_OBJECTS_CONTAINER=""
 REPOSITORY_OBJECTS_CONTAINER=""
 CI_BUILD_ROOT=""
+SHELLCHECK_MANIFEST=""
 CI_RUN_IMAGE=""
 CONTAINER_RUNNER_FAILURE_CODE=""
 
 cleanup_candidate_snapshot() {
     if [ -z "${CANDIDATE_ROOT}" ]; then
-        return
+        return 0
     fi
     case "${CANDIDATE_ROOT}" in
         "${PROJECT_ROOT}"/build/ci-candidate.*)
-            rm -rf -- "${CANDIDATE_ROOT}"
+            rm -rf -- "${CANDIDATE_ROOT}" || return "$?"
             ;;
         *)
             log_error "Refusing to remove unexpected candidate path: ${CANDIDATE_ROOT}"
@@ -130,7 +131,7 @@ cleanup_ci_build() {
     if [ -n "${CI_BUILD_ROOT}" ]; then
         case "${CI_BUILD_ROOT}" in
             "${PROJECT_ROOT}"/build/ci-build.*)
-                rm -rf -- "${CI_BUILD_ROOT}"
+                rm -rf -- "${CI_BUILD_ROOT}" || return "$?"
                 ;;
             *)
                 log_error "Refusing to remove unexpected CI build path: ${CI_BUILD_ROOT}"
@@ -141,8 +142,12 @@ cleanup_ci_build() {
 }
 
 cleanup() {
-    cleanup_candidate_snapshot
-    cleanup_ci_build
+    cleanup_candidate_snapshot || return "$?"
+    cleanup_ci_build || return "$?"
+    if [ -n "${SHELLCHECK_MANIFEST}" ]; then
+        rm -f -- "${SHELLCHECK_MANIFEST}" || return 1
+        SHELLCHECK_MANIFEST=""
+    fi
 }
 
 prepare_candidate_snapshot() {
@@ -153,7 +158,7 @@ prepare_candidate_snapshot() {
     local path
     local repository_objects
 
-    cleanup_candidate_snapshot
+    cleanup_candidate_snapshot || return "$?"
     if ! mkdir -p "${PROJECT_ROOT}/build"; then
         log_error "Unable to create the local CI candidate directory."
         return 1
@@ -243,7 +248,23 @@ prepare_candidate_snapshot() {
     esac
 }
 
-trap cleanup EXIT
+RUN_COMPLETED=0
+
+finish_runner() {
+    local status="$1"
+    local cleanup_status=0
+    cleanup || cleanup_status=$?
+    if [ "${status}" -eq 0 ] && [ "${RUN_COMPLETED}" -ne 1 ]; then
+        status=1
+    fi
+    if [ "${status}" -eq 0 ]; then
+        status="${cleanup_status}"
+    fi
+    trap - EXIT
+    exit "${status}"
+}
+
+trap 'finish_runner "$?"' EXIT
 
 # ============================================================================
 # Container engine detection
@@ -484,13 +505,14 @@ _run_in_container() {
         )
     fi
 
+    # Bash 3.2 needs the presence test to expand an empty array under nounset.
     "${CONTAINER_ENGINE}" run --rm \
-        "${engine_flags[@]}" \
-        "${GIT_METADATA_MOUNT[@]}" \
-        "${candidate_mount[@]}" \
+        ${engine_flags[@]+"${engine_flags[@]}"} \
+        ${GIT_METADATA_MOUNT[@]+"${GIT_METADATA_MOUNT[@]}"} \
+        ${candidate_mount[@]+"${candidate_mount[@]}"} \
         --tmpfs /tmp:rw,size=4g,mode=1777 \
         --volume "${PROJECT_ROOT}:/workspace:Z" \
-        "${codex_fixture_mount[@]}" \
+        ${codex_fixture_mount[@]+"${codex_fixture_mount[@]}"} \
         --workdir /workspace \
         "${CI_IMAGE}" \
         "${cmd[@]}"
@@ -620,8 +642,23 @@ run_justfile() {
 
 run_shellcheck() {
     log_step "ShellCheck"
-    shopt -s nullglob globstar
-    local files=(scripts/**/*.sh scripts/**/*.sbatch)
+    local directory
+    local files=()
+    shopt -s nullglob
+    mkdir -p "${PROJECT_ROOT}/build" || return 1
+    SHELLCHECK_MANIFEST="$(mktemp "${PROJECT_ROOT}/build/ci-shellcheck.XXXXXX")" || return 1
+    # Visit real directories and match one level below directory links, as globstar did.
+    if ! find scripts -name '.*' -prune -o \
+        \( -type d -o -type l \) -print0 > "${SHELLCHECK_MANIFEST}"; then
+        return 1
+    fi
+    while IFS= read -r -d '' directory; do
+        if [ -d "${directory}" ]; then
+            files+=("${directory}"/*.sh "${directory}"/*.sbatch)
+        fi
+    done < "${SHELLCHECK_MANIFEST}"
+    rm -f -- "${SHELLCHECK_MANIFEST}" || return 1
+    SHELLCHECK_MANIFEST=""
     if [ "${#files[@]}" -eq 0 ]; then
         log_info "No shell scripts found — nothing to lint."
         return 0
@@ -644,7 +681,7 @@ run_secrets() {
         candidate_args+=(--config=.gitleaks.toml)
     fi
     "${CONTAINER_ENGINE}" run --rm \
-        "${GIT_METADATA_MOUNT[@]}" \
+        ${GIT_METADATA_MOUNT[@]+"${GIT_METADATA_MOUNT[@]}"} \
         --volume "${PROJECT_ROOT}:/repo:Z" \
         --workdir /repo \
         "${GITLEAKS_IMAGE}" \
@@ -795,3 +832,5 @@ else
     log_error "Failed: ${FAILED[*]}"
     exit 1
 fi
+
+RUN_COMPLETED=1

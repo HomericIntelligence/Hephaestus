@@ -91,6 +91,7 @@ def _fake_engine(
             '>> "$FAKE_ENGINE_LOG"\n'
             "fi\n"
             'if [[ "$1" == "run" ]]; then\n'
+            '  printf "%s\\0" "$#" "$@" >> "$FAKE_ENGINE_ARGV_LOG"\n'
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
             '  workspace_root=""\n'
@@ -216,6 +217,7 @@ def _run_runner(
     machine_system: str | None = None,
     execution_path: str | None = None,
     zstd_available: bool = True,
+    shell: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -233,7 +235,7 @@ def _run_runner(
         external_git_common_dir=external_git_common_dir,
         zstd_available=zstd_available,
     )
-    bash = shutil.which("bash")
+    bash = shell or shutil.which("bash")
     assert bash is not None
     (tmp_path / "bash").symlink_to(bash)
     if engine_name is None:
@@ -286,6 +288,7 @@ def _run_runner(
         uname.chmod(0o755)
     environment = os.environ | {
         "FAKE_ENGINE_LOG": str(log),
+        "FAKE_ENGINE_ARGV_LOG": str(tmp_path / "engine.argv"),
         "FAKE_LICENSE_VIOLATION": "1" if license_violation else "0",
         "PATH": execution_path or f"{tmp_path}{os.pathsep}{SYSTEM_PATH}",
     }
@@ -297,7 +300,7 @@ def _run_runner(
         environment.pop(name, None)
     if color_environment:
         environment.update(color_environment)
-    command = ["bash", str(repo_root / "scripts" / "run_ci_local.sh"), subset]
+    command = [bash, str(repo_root / "scripts" / "run_ci_local.sh"), subset]
     if rebuild_image:
         command.append("--rebuild")
     result = subprocess.run(
@@ -446,10 +449,8 @@ def test_all_preserves_failure_from_multi_command_check(
     assert "detect --source=. --verbose --exit-code=1" in log
 
 
-def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
-    """The advertised all target invokes every required local check."""
-    result, log = _run_runner(tmp_path, "all")
-
+def _assert_all_required_gates(result: subprocess.CompletedProcess[str], log: str) -> None:
+    """Require every local gate and the final success summary."""
     assert result.returncode == 0, result.stderr
     assert "All locally executable CI checks passed." in result.stdout
     for command in (
@@ -954,3 +955,178 @@ def test_podman_maps_the_ci_user_to_the_invoking_user(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "--userns=keep-id:uid=1000\\,gid=1000" in log
+
+
+def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
+    """The advertised all target invokes every required local check."""
+    _assert_all_required_gates(*_run_runner(tmp_path, "all"))
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "/opt/homebrew/bin/bash"])
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("failure", ["", "smoke", "step"])
+def test_all_preserves_bash_array_arguments(
+    tmp_path: Path, shell: str, linked: bool, failure: str
+) -> None:
+    """Both Bash versions must run each gate with exact optional mount arguments."""
+    if not Path(shell).is_file():
+        pytest.skip("This Bash installation is not available")
+    source = _candidate_repo(tmp_path / "source root with spaces")
+    subprocess.run(["git", "add", "scripts"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=CI Test",
+            "-c",
+            "user.email=ci@example.invalid",
+            "commit",
+            "--no-gpg-sign",
+            "-qm",
+            "test: add runner fixture",
+        ],
+        cwd=source,
+        check=True,
+    )
+    if linked:
+        repo = tmp_path / "linked candidate with spaces"
+        subprocess.run(["git", "worktree", "add", "--detach", str(repo)], cwd=source, check=True)
+    else:
+        repo = source
+    result, log = _run_runner(
+        tmp_path,
+        "all",
+        repo_root=repo,
+        shell=shell,
+        start_probe_fails=failure == "smoke",
+        failing_command="uv run pre-commit" if failure == "step" else "",
+    )
+    calls = _engine_calls(tmp_path)
+    assert calls, result.stderr
+    assert calls[0][-1] == "true"
+    assert all("" not in call for call in calls)
+    assert f"{repo}:/workspace:Z" in calls[0]
+    metadata = f"{source / '.git'}:{source / '.git'}:ro"
+    assert (metadata in calls[0]) == linked
+    if failure == "smoke":
+        _assert_runner_handoff(result, "container-start-failed")
+        assert len(calls) == 1
+    elif failure == "step":
+        assert result.returncode != 0
+        assert "Failed: lint" in result.stderr
+        assert "detect --source=. --verbose --exit-code=1" in log
+        assert "All locally executable CI checks passed." not in result.stdout
+    else:
+        _assert_all_required_gates(result, log)
+        fixture = f"{repo}/build/test-fixtures/codex-sigstore/rust-v0.153.4"
+        assert any(f"{fixture}:/codex-sigstore/rust-v0.153.4:ro" in call for call in calls)
+        assert any(any(arg.endswith(":/candidate:ro") for arg in call) for call in calls)
+
+
+def test_premature_zero_exit_cannot_report_success(tmp_path: Path) -> None:
+    """An early shell exit cannot report a completed validation run."""
+    injection = tmp_path / "early-exit.bash"
+    injection.write_text(
+        'trap \'if [[ "$BASH_COMMAND" == *"CI subset:"* ]]; then '
+        "printf EARLY_EXIT >&2; exit 0; fi' DEBUG\n",
+        encoding="utf-8",
+    )
+    result, log = _run_runner(tmp_path, "all", color_environment={"BASH_ENV": str(injection)})
+    assert "EARLY_EXIT" in result.stderr
+    assert "uv run pre-commit" not in log
+    assert result.returncode != 0
+    assert "All locally executable CI checks passed." not in result.stdout
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "/opt/homebrew/bin/bash"])
+def test_shellcheck_preserves_recursive_path_selection(tmp_path: Path, shell: str) -> None:
+    """Preserve one-level directory-link matches without recursive traversal."""
+    if not Path(shell).is_file():
+        pytest.skip("This Bash installation is not available")
+    repo = _candidate_repo(tmp_path)
+    scripts = repo / "scripts"
+    nested = scripts / "nested with spaces"
+    nested.mkdir()
+    (nested / "scan this.sh").write_text("true\n")
+    (nested / "line\nbreak.sh").write_text("true\n")
+    (nested / "batch.sbatch").write_text("true\n")
+    (scripts / ".hidden.sh").write_text("true\n")
+    hidden = scripts / ".hidden"
+    hidden.mkdir()
+    (hidden / "skip.sh").write_text("true\n")
+    (scripts / "linked.sh").symlink_to(repo / "tracked.py")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "skip.sh").write_text("true\n")
+    (outside / "deeper").mkdir()
+    (outside / "deeper" / "not-selected.sh").write_text("true\n")
+    (scripts / "linked-directory").symlink_to(outside, target_is_directory=True)
+    (scripts / "matching-directory.sh").mkdir()
+    result, _log = _run_runner(tmp_path, "shellcheck", repo_root=repo, shell=shell)
+    assert result.returncode == 0, result.stderr
+    calls = _engine_calls(tmp_path)
+    call = next(call for call in calls if "shellcheck" in call)
+    assert set(call[call.index("--severity=error") + 1 :]) == {
+        "scripts/run_ci_local.sh",
+        "scripts/shell/lib/install_helpers.sh",
+        "scripts/nested with spaces/scan this.sh",
+        "scripts/nested with spaces/line\nbreak.sh",
+        "scripts/nested with spaces/batch.sbatch",
+        "scripts/linked.sh",
+        "scripts/linked-directory/skip.sh",
+        "scripts/matching-directory.sh",
+    }
+    assert not list((repo / "build").glob("ci-shellcheck.*"))
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "/opt/homebrew/bin/bash"])
+def test_shellcheck_collection_failure_is_not_success(tmp_path: Path, shell: str) -> None:
+    """A failed path producer must not validate a partial file list."""
+    if not Path(shell).is_file():
+        pytest.skip("This Bash installation is not available")
+    repo = _candidate_repo(tmp_path)
+    find = tmp_path / "find"
+    find.write_text("#!/bin/bash\nprintf 'scripts/run_ci_local.sh\\0'\nexit 23\n")
+    find.chmod(0o755)
+    result, log = _run_runner(tmp_path, "shellcheck", repo_root=repo, shell=shell)
+    assert result.returncode != 0
+    assert "shellcheck --severity=error" not in log
+    assert "passed." not in result.stdout
+    assert not list((repo / "build").glob("ci-shellcheck.*"))
+
+
+def _engine_calls(tmp_path: Path) -> list[list[str]]:
+    """Read argument records without shell parsing or loss of empty arguments."""
+    path = tmp_path / "engine.argv"
+    if not path.exists():
+        return []
+    values = path.read_bytes().split(b"\0")
+    terminator = values.pop()
+    assert terminator == b""
+    calls = []
+    offset = 0
+    while offset < len(values):
+        size = int(values[offset])
+        offset += 1
+        calls.append([os.fsdecode(value) for value in values[offset : offset + size]])
+        offset += size
+    assert offset == len(values)
+    return calls
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "/opt/homebrew/bin/bash"])
+@pytest.mark.parametrize("kind", ["candidate", "build"])
+def test_cleanup_failure_cannot_report_success(tmp_path: Path, shell: str, kind: str) -> None:
+    """A failed cleanup retains its path and makes the completed run fail."""
+    if not Path(shell).is_file():
+        pytest.skip("This Bash installation is not available")
+    repo = _buildable_candidate_repo(tmp_path)
+    remove = tmp_path / "rm"
+    remove.write_text(
+        f'#!/bin/bash\ncase "$*" in *ci-{kind}.*) exit 39 ;; esac\nexec /bin/rm "$@"\n',
+        encoding="utf-8",
+    )
+    remove.chmod(0o755)
+    result, _log = _run_runner(tmp_path, "version", repo_root=repo, shell=shell, rebuild_image=True)
+    assert result.returncode == 39
+    assert list((repo / "build").glob(f"ci-{kind}.*"))
