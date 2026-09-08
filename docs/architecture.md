@@ -2196,7 +2196,6 @@ Exit-code priority is:
  short-circuit through earlier stages when it carries a later-stage
  label. Never equality.
 - **Head-bound** — an artifact or check whose correctness depends on
-- **Head-bound** — an artifact or check whose correctness depends on
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
