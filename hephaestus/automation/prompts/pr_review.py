@@ -32,6 +32,7 @@ SEVERITY_MARKER_PREFIX = "<!-- hephaestus-severity:"
 #: request also contains agent and repository instructions. Keep sufficient
 #: space below the provider's 1 MiB request limit.
 MAX_PR_REVIEW_RENDERED_CHARS = 350_000
+MAX_OPENCODE_PR_REVIEW_RENDERED_CHARS = 5_000
 
 _MAX_PR_REVIEW_ISSUE_BODY_CHARS = 30_000
 _MAX_PR_REVIEW_DESCRIPTION_CHARS = 20_000
@@ -40,6 +41,10 @@ _MAX_PR_REVIEW_RECEIPTS_CHARS = 64_000
 _MAX_HOST_RECEIPT_STREAM_CHARS = 512
 _MAX_REVIEW_VALIDATION_COMMENTS_CHARS = 40_000
 _MAX_REVIEW_VALIDATION_TITLE_CHARS = 4_000
+_MAX_OPENCODE_ISSUE_BODY_CHARS = 192
+_MAX_OPENCODE_DESCRIPTION_CHARS = 192
+_MAX_OPENCODE_ADVISE_CHARS = 128
+_MAX_OPENCODE_RECEIPTS_CHARS = 256
 
 _HOST_RECEIPT_IDENTITY_FIELDS = (
     "argv",
@@ -54,10 +59,14 @@ _HOST_RECEIPT_SUMMARY_POLICY = "host-receipt-identities-v1"
 _HOST_RECEIPT_DIGEST_SUMMARY_POLICY = "host-receipt-digests-v1"
 _HOST_RECEIPT_AGGREGATE_SUMMARY_POLICY = "host-receipt-aggregate-v1"
 _HOST_RECEIPT_TRUNCATION_MARKER = "[... host verification receipts truncated ...]"
-_PROMPT_LIMIT_ERROR = (
-    "pr_review_prompt_limit_exceeded: required prompt content exceeds "
-    f"{MAX_PR_REVIEW_RENDERED_CHARS} characters"
-)
+
+
+def _prompt_limit_error(limit: int) -> str:
+    """Return the stable prompt-limit error for one provider budget."""
+    return f"pr_review_prompt_limit_exceeded: required prompt content exceeds {limit} characters"
+
+
+_PROMPT_LIMIT_ERROR = _prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS)
 
 
 class PrReviewPromptSizeError(RuntimeError):
@@ -88,7 +97,11 @@ def _summary_metadata(policy: str, receipt_count: int) -> dict[str, object]:
     }
 
 
-def _compact_host_verifications_json(host_verifications_json: str) -> str:
+def _compact_host_verifications_json(
+    host_verifications_json: str,
+    *,
+    max_chars: int = _MAX_PR_REVIEW_RECEIPTS_CHARS,
+) -> str:
     """Keep valid, bounded receipt evidence and an explicit summary policy."""
     if not host_verifications_json:
         return "[]"
@@ -138,7 +151,7 @@ def _compact_host_verifications_json(host_verifications_json: str) -> str:
                 )
         compacted.append(compact)
     serialized = json.dumps(compacted, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    if len(serialized) <= _MAX_PR_REVIEW_RECEIPTS_CHARS:
+    if len(serialized) <= max_chars:
         return serialized
 
     identity_records = [
@@ -158,7 +171,7 @@ def _compact_host_verifications_json(host_verifications_json: str) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    if len(identity_summary) <= _MAX_PR_REVIEW_RECEIPTS_CHARS:
+    if len(identity_summary) <= max_chars:
         return identity_summary
 
     receipt_digests = [
@@ -185,7 +198,7 @@ def _compact_host_verifications_json(host_verifications_json: str) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    if len(digest_summary) <= _MAX_PR_REVIEW_RECEIPTS_CHARS:
+    if len(digest_summary) <= max_chars:
         return digest_summary
 
     return json.dumps(
@@ -230,9 +243,9 @@ def _compact_prior_comments_json(prior_comments_json: str) -> str:
     try:
         parsed = json.loads(prior_comments_json)
     except (TypeError, json.JSONDecodeError) as error:
-        raise PrReviewPromptSizeError(_PROMPT_LIMIT_ERROR) from error
+        raise PrReviewPromptSizeError(_prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS)) from error
     if not isinstance(parsed, list):
-        raise PrReviewPromptSizeError(_PROMPT_LIMIT_ERROR)
+        raise PrReviewPromptSizeError(_prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS))
     for max_chars in (2_048, 1_024, 512, 256, 128, 64):
         compacted = json.dumps(
             _truncate_thread_text(parsed, max_chars=max_chars),
@@ -242,7 +255,7 @@ def _compact_prior_comments_json(prior_comments_json: str) -> str:
         )
         if len(compacted) <= _MAX_REVIEW_VALIDATION_COMMENTS_CHARS:
             return compacted
-    raise PrReviewPromptSizeError(_PROMPT_LIMIT_ERROR)
+    raise PrReviewPromptSizeError(_prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS))
 
 
 def _budget_review_diff(diff_text: str, *, max_chars: int) -> str:
@@ -260,6 +273,7 @@ def get_pr_review_analysis_prompt(
     host_verifications_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
+    reviewer_provider: str = "",
 ) -> str:
     """Get the `$athena:pr-review` analysis prompt for inline review comments.
 
@@ -287,6 +301,8 @@ def get_pr_review_analysis_prompt(
             prompt header. Pipeline reviews use the default ``"issue"``;
             callers with an independently verified alternate context may
             provide another label.
+        reviewer_provider: Direct provider that receives the prompt. OpenCode
+            uses its compact structural-audit prompt.
 
     Returns:
         Formatted PR review analysis prompt
@@ -302,6 +318,7 @@ def get_pr_review_analysis_prompt(
         host_verifications_json=host_verifications_json,
         include_nitpicks=include_nitpicks,
         review_context_kind=review_context_kind,
+        reviewer_provider=reviewer_provider,
         fenced=fence_content(),
     )
 
@@ -317,6 +334,7 @@ def _render_pr_review_analysis_prompt(
     host_verifications_json: str,
     include_nitpicks: bool,
     review_context_kind: str,
+    reviewer_provider: str,
     fenced: FencedContent,
 ) -> str:
     """Render an analysis prompt with one caller-owned fence nonce."""
@@ -324,8 +342,13 @@ def _render_pr_review_analysis_prompt(
         "pr_review/nitpick_include.j2" if include_nitpicks else "pr_review/nitpick_suppress.j2"
     )
     nitpick_directive = PromptCatalog.current().render(nitpick_template).strip()
+    template = (
+        "pr_review/analysis_opencode.j2"
+        if reviewer_provider == "opencode"
+        else "pr_review/analysis.j2"
+    )
     return PromptCatalog.current().render(
-        "pr_review/analysis.j2",
+        template,
         pr_number=pr_number,
         issue_number=issue_number,
         review_context_kind=review_context_kind,
@@ -343,12 +366,16 @@ def _render_pr_review_analysis_prompt(
         untrusted_notice=fenced.untrusted_notice,
         review_rubric=get_pr_review_rubric().strip(),
         nitpick_directive=nitpick_directive,
-        terse_output_directive=get_terse_output_directive(
-            terminal_output_contract=(
-                "End with exactly one fenced structural review-audit JSON object "
-                "that includes a typed verdict field (`GO`, `NOGO`, or `BLOCKED`); "
-                "missing or malformed verdicts are invalid. Do not emit a Verdict "
-                "line or any other textual decision token."
+        terse_output_directive=(
+            ""
+            if reviewer_provider == "opencode"
+            else get_terse_output_directive(
+                terminal_output_contract=(
+                    "End with exactly one fenced structural review-audit JSON object "
+                    "that includes a typed verdict field (`GO`, `NOGO`, or `BLOCKED`); "
+                    "missing or malformed verdicts are invalid. Do not emit a Verdict "
+                    "line or any other textual decision token."
+                )
             )
         ),
     )
@@ -364,6 +391,7 @@ def build_bounded_pr_review_analysis_prompt(
     host_verifications_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
+    reviewer_provider: str = "",
 ) -> str:
     """Render a direct analysis prompt within the provider-safe limit."""
     fenced = fence_content()
@@ -386,8 +414,15 @@ def build_bounded_pr_review_analysis_prompt(
             host_verifications_json=receipts,
             include_nitpicks=include_nitpicks,
             review_context_kind=review_context_kind,
+            reviewer_provider=reviewer_provider,
             fenced=fenced,
         )
+
+    prompt_limit = (
+        MAX_OPENCODE_PR_REVIEW_RENDERED_CHARS
+        if reviewer_provider == "opencode"
+        else MAX_PR_REVIEW_RENDERED_CHARS
+    )
 
     prompt = render(
         diff=pr_diff,
@@ -396,35 +431,58 @@ def build_bounded_pr_review_analysis_prompt(
         advise=advise_findings,
         receipts=host_verifications_json,
     )
-    if len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS:
+    if len(prompt) <= prompt_limit:
         return prompt
 
+    issue_limit = (
+        _MAX_OPENCODE_ISSUE_BODY_CHARS
+        if reviewer_provider == "opencode"
+        else _MAX_PR_REVIEW_ISSUE_BODY_CHARS
+    )
+    description_limit = (
+        _MAX_OPENCODE_DESCRIPTION_CHARS
+        if reviewer_provider == "opencode"
+        else _MAX_PR_REVIEW_DESCRIPTION_CHARS
+    )
+    advise_limit = (
+        _MAX_OPENCODE_ADVISE_CHARS
+        if reviewer_provider == "opencode"
+        else _MAX_PR_REVIEW_ADVISE_CHARS
+    )
+    receipts_limit = (
+        _MAX_OPENCODE_RECEIPTS_CHARS
+        if reviewer_provider == "opencode"
+        else _MAX_PR_REVIEW_RECEIPTS_CHARS
+    )
     bounded_context = {
         "issue": _truncate_review_text(
             issue_body,
-            max_chars=_MAX_PR_REVIEW_ISSUE_BODY_CHARS,
+            max_chars=issue_limit,
             label="issue body",
         ),
         "description": _truncate_review_text(
             pr_description,
-            max_chars=_MAX_PR_REVIEW_DESCRIPTION_CHARS,
+            max_chars=description_limit,
             label="PR description",
         ),
         "advise": _truncate_review_text(
             advise_findings,
-            max_chars=_MAX_PR_REVIEW_ADVISE_CHARS,
+            max_chars=advise_limit,
             label="advise findings",
         ),
-        "receipts": _compact_host_verifications_json(host_verifications_json),
+        "receipts": _compact_host_verifications_json(
+            host_verifications_json,
+            max_chars=receipts_limit,
+        ),
     }
     fixed_prompt = render(diff="", **bounded_context)
-    remaining = MAX_PR_REVIEW_RENDERED_CHARS - len(fixed_prompt)
+    remaining = prompt_limit - len(fixed_prompt)
     if remaining < 0:
-        raise PrReviewPromptSizeError(_PROMPT_LIMIT_ERROR)
+        raise PrReviewPromptSizeError(_prompt_limit_error(prompt_limit))
     bounded_diff = _budget_review_diff(pr_diff, max_chars=remaining)
     prompt = render(diff=bounded_diff, **bounded_context)
-    if len(prompt) > MAX_PR_REVIEW_RENDERED_CHARS:
-        raise PrReviewPromptSizeError(_PROMPT_LIMIT_ERROR)
+    if len(prompt) > prompt_limit:
+        raise PrReviewPromptSizeError(_prompt_limit_error(prompt_limit))
     return prompt
 
 

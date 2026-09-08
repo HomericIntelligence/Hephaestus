@@ -4851,12 +4851,13 @@ def _opencode_sandbox_args(sandbox: str) -> list[str]:
 
     Verified against v1.18.21 built-ins: ``--agent plan`` denies ``edit`` on
     every project path (the model confirmed refusal and no file was written),
-    giving real read-only enforcement; the default build agent is full-access
-    within the workspace. ``danger-full-access`` has no distinct CLI surface
-    and stays fail-closed (#773 precedent).
+    giving real read-only enforcement. ``--pure`` disables skill invocation so
+    read-only review jobs keep their structured output contract. The default
+    build agent is full-access within the workspace. ``danger-full-access`` has
+    no distinct CLI surface and stays fail-closed (#773 precedent).
     """
     if sandbox == "read-only":
-        return ["--agent", OPENCODE_PLAN_AGENT]
+        return ["--pure", "--agent", OPENCODE_PLAN_AGENT]
     if sandbox == "workspace-write":
         return []
     raise AgentExecutionError(
@@ -4880,7 +4881,8 @@ def run_opencode_session(
     Model selections pass through in ``provider/model[:effort]`` form. When empty,
     OpenCode applies its own configured default. The CLI exposes no approval
     flag, so that compatibility input is accepted but unused. ``read-only``
-    is enforced via the built-in ``plan`` agent (verified edit-deny).
+    is enforced via the built-in ``plan`` agent (verified edit-deny) and
+    ``--pure`` prevents skill invocation from changing the review output mode.
     """
     del approval
     cmd = _opencode_base_cmd(cwd=cwd, model=model, sandbox=sandbox)

@@ -66,6 +66,7 @@ COMPLETE_AGENT_PROMPTS = (
     "pr_management/commit_message.j2",
     "pr_management/pr_message.j2",
     "pr_review/analysis.j2",
+    "pr_review/analysis_opencode.j2",
     "pr_review/validation.j2",
     "tidy/rebase_fix.j2",
 )

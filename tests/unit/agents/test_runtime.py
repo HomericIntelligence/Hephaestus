@@ -4392,6 +4392,7 @@ def test_opencode_base_cmd_passes_model_through_and_omits_empty(tmp_path: Path) 
         str(tmp_path),
         "--format",
         "json",
+        "--pure",
         "--agent",
         "plan",
     ]
