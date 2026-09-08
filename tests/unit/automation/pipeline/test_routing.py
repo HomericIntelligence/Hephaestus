@@ -237,7 +237,7 @@ class TestROUTES:
         """The repo item advances to FINISHED; seeded issues enter their own queues."""
         assert ROUTES[StageName.REPO].next == StageName.FINISHED
         assert ROUTES[StageName.REPO].fail_routes["*"] == StageName.FINISHED
-        assert ROUTES[StageName.REPO].budgets == {"clone": 2}
+        assert ROUTES[StageName.REPO].budgets == {"clone": 2, "repo_contention": 3}
 
     def test_planning_has_a_separate_source_workspace_budget(self) -> None:
         """Source preparation has its own retry budget before agent work."""

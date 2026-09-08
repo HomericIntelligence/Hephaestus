@@ -56,3 +56,5 @@ class _StageRunConfig:
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
     issue_limit: int | None = None
     reset_plan_review_sessions: set[int] = field(default_factory=set)
+    # Appended to preserve positional construction of this stage DTO.
+    repo_lock_timeout: int = 600

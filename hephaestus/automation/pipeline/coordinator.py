@@ -183,6 +183,7 @@ class Coordinator(
                 # selects a policy for each repository job.
                 rebase_policy_selector=partial(select_rebase_policy, config.org),
                 evidence_receipt_dir=config.evidence_receipt_dir,
+                repo_lock_timeout_s=config.repo_lock_timeout,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected
@@ -391,6 +392,7 @@ class Coordinator(
             poll_max_wait=config.poll_max_wait,
             clone_timeout=config.clone_timeout,
             network_timeout=config.network_timeout,
+            repo_lock_timeout=config.repo_lock_timeout,
             gh_timeout=config.gh_timeout,
             metadata_timeout=config.metadata_timeout,
             rebase_timeout=config.rebase_timeout,

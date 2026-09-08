@@ -192,3 +192,31 @@ def test_source_workspace_recovery_is_durable_and_redacted() -> None:
     assert recovery["item_number"] == 2969
     assert token not in recovery["manual_action"]
     assert recovery["manual_action"] == "Use token=<redacted> only after preserving the checkout."
+
+
+def test_lock_timeout_event_keeps_typed_contention_diagnostics() -> None:
+    """Lock timeout events retain the typed reason and wait details."""
+    result = JobResult(
+        ok=False,
+        error="lock_timeout",
+        value={
+            "failure_kind": "repository_lock",
+            "lock_path": "/tmp/git-repo.lock",
+            "wait_s": 120.006,
+            "repository": "org/repo",
+            "operation": "sync_checkout",
+            "run_identity": "pid:123",
+        },
+        duration_s=120.006,
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result)
+
+    assert fields["error"] == "lock_timeout"
+    assert fields["lock_diagnostic"] == {
+        "lock_path": "/tmp/git-repo.lock",
+        "wait_s": 120.006,
+        "repository": "org/repo",
+        "operation": "sync_checkout",
+        "run_identity": "pid:123",
+    }

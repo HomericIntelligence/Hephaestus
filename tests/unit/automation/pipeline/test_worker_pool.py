@@ -81,6 +81,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _controlled_git_signing_env,
     _dirty_worktree_content_snapshot,
     _GitInspectionResourceLimitError,
+    _GitLockTimeoutError,
     _hdiutil_create_argv,
     _host_validation_failure_kind,
     _host_verification_command,
@@ -14706,6 +14707,17 @@ class TestGitLocking:
         lock_path = _repo_lock_path("test/repo", tmp_path / "locks")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         held_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "repository": "holder/repo",
+                    "operation": "commit_push",
+                    "run_identity": "pid:99",
+                    "started_at": 123.0,
+                }
+            ),
+            encoding="utf-8",
+        )
         job = GitJob(repo="test/repo", op="create_worktree", timeout_s=0, kwargs={})
 
         try:
@@ -14719,8 +14731,134 @@ class TestGitLocking:
         manager.assert_not_called()
         assert result.ok is False
         assert result.error == "lock_timeout"
+        assert isinstance(result.value, dict)
+        assert result.value["lock_path"] == str(lock_path)
+        assert result.value["repository"] == "test/repo"
+        assert result.value["operation"] == "create_worktree"
+        assert result.value["run_identity"].startswith("pid:")
+        assert result.value["wait_s"] >= 0
+        assert result.value["holder"] == {
+            "repository": "holder/repo",
+            "operation": "commit_push",
+            "run_identity": "pid:99",
+            "started_at": 123.0,
+        }
+
+    def test_released_git_lock_allows_waiting_job_to_continue(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A waiting Git job continues after a separate process releases the lock."""
+        pytest.importorskip("fcntl")
+        lock_path = _repo_lock_path("test/repo", tmp_path / "locks")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        ready_path = tmp_path / "holder-ready"
+        release_path = tmp_path / "holder-release"
+        holder_code = (
+            "import fcntl, os, pathlib, sys, time\n"
+            "lock_path, ready_path, release_path = map(pathlib.Path, sys.argv[1:])\n"
+            "fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "ready_path.write_text('ready')\n"
+            "while not release_path.exists():\n"
+            "    time.sleep(0.01)\n"
+            "fcntl.flock(fd, fcntl.LOCK_UN)\n"
+            "os.close(fd)\n"
+        )
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                holder_code,
+                str(lock_path),
+                str(ready_path),
+                str(release_path),
+            ]
+        )
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=1,
+            lock_timeout_s=2,
+            kwargs={},
+        )
+        result_holder: list[JobResult] = []
+        attempted = threading.Event()
+
+        def try_lock(path: Path, *, blocking: bool) -> Any:
+            attempted.set()
+            return file_lock(path, blocking=blocking)
+
+        try:
+            deadline = time.monotonic() + 5.0
+            while not ready_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready_path.exists()
+            with (
+                patch(f"{_WP}.file_lock", side_effect=try_lock),
+                patch(f"{_WP}.WorktreeManager") as manager,
+            ):
+                manager.return_value.create_worktree.return_value = None
+                thread = threading.Thread(
+                    target=lambda: result_holder.append(pool._run_git(job)),
+                )
+                thread.start()
+                assert attempted.wait(timeout=5)
+                release_path.write_text("release")
+                thread.join(timeout=5)
+
+            assert not thread.is_alive()
+            assert len(result_holder) == 1
+            assert result_holder[0].ok is True
+            manager.assert_called_once()
+            assert holder.wait(timeout=5) == 0
+        finally:
+            if holder.poll() is None:
+                release_path.write_text("release")
+                try:
+                    holder.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    holder.terminate()
+                    holder.wait(timeout=2)
         with pool._repo_locks_guard:
             assert pool._repo_locks == {}
+
+    def test_git_lock_uses_timeout_separate_from_git_operation_timeout(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """The repository lock has its own timeout budget."""
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=1,
+            lock_timeout_s=9,
+            kwargs={},
+        )
+
+        with (
+            patch(
+                f"{_WP}._interruptible_file_lock",
+                side_effect=_GitLockTimeoutError(),
+            ) as lock,
+            patch(f"{_WP}.WorktreeManager") as manager,
+        ):
+            result = pool._run_git(job)
+
+        lock.assert_called_once()
+        lock_path = lock.call_args.args[0]
+        lock_kwargs = lock.call_args.kwargs
+        assert lock_path == _repo_lock_path("test/repo", tmp_path / "locks")
+        assert lock_kwargs["shutdown"] is pool._shutdown
+        assert 0 < lock_kwargs["timeout_s"] <= 9
+        assert lock_kwargs["repository"] == "test/repo"
+        assert lock_kwargs["operation"] == "create_worktree"
+        assert lock_kwargs["run_identity"] is not None
+        manager.assert_not_called()
+        assert result.ok is False
+        assert result.error == "lock_timeout"
 
     def test_git_file_lock_wait_is_interrupted_by_shutdown(
         self,

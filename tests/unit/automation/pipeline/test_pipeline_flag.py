@@ -101,6 +101,10 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
             "--no-advise",
             "--no-serialize-file-overlap",
             "--nitpick",
+            "--repo-lock-timeout",
+            "900",
+            "--repo-contention-budget",
+            "4",
         ]
     )
 
@@ -116,6 +120,8 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.no_advise is True
     assert config.serialize_file_overlap is False
     assert config.nitpick is True
+    assert config.repo_lock_timeout == 900
+    assert config.budget_overrides["repo_contention"] == 4
     assert config.scope is None
     assert config.event_log_path is not None
     assert config.event_log_path.name.startswith("pipeline-events-")

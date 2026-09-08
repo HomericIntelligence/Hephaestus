@@ -12,7 +12,8 @@ Steps:
    fast-forwards only a clean default-branch checkout. Both operations are
    logged-skipped under dry-run — the
    coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
-   Budget ``clone`` = 2; exhaustion -> finished(fail).
+   Budget ``clone`` = 2; repository-lock contention has a separate bounded
+   budget and backoff; exhaustion -> finished(fail) with ``repository_busy``.
 2. [M] LABELS: ``ctx.github.ensure_state_labels()`` only after checkout
    synchronization succeeds.
 3. [M] DISCOVER: initialize one page-at-a-time metadata cursor. It never
@@ -94,6 +95,10 @@ SYNCED_MAIN_SHA_KEY = "_synced_default_branch_sha"
 WAVE_PLAN_KEY = "_issue_wave_admission_plan"
 WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
 WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
+REPO_CONTENTION_KEY = "_repository_contention"
+REPO_BUSY_KEY = "_repository_busy"
+REPO_CONTENTION_BUDGET_KEY = "repo_contention"
+_REPO_CONTENTION_BACKOFF_CAP_S = 60.0
 
 # Stage consumers retain this public compatibility name. The issue-wave wrapper
 # delegates validation to the shared Git utility without adding a direct I/O
@@ -120,6 +125,33 @@ def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
     repo_root = Path(str(ctx.paths.repo_root))
     projects_dir = Path(str(ctx.paths.projects_dir))
     return projects_dir / item.repo if repo_root == projects_dir else repo_root
+
+
+def _repository_lock_diagnostic(item: WorkItem, result: JobResult) -> dict[str, object]:
+    """Return bounded repository-lock data for retry and terminal messages."""
+    value = result.value if isinstance(result.value, dict) else {}
+    wait_s = value.get("wait_s", result.duration_s)
+    return {
+        "lock_path": str(value.get("lock_path") or "unknown")[:500],
+        "wait_s": round(float(wait_s), 3) if isinstance(wait_s, (int, float)) else 0.0,
+        "repository": str(value.get("repository") or item.repo)[:200],
+        "operation": str(value.get("operation") or item.payload.get("checkout_op") or "unknown")[
+            :100
+        ],
+        "run_identity": str(value.get("run_identity") or "unknown")[:200],
+    }
+
+
+def _repository_busy_note(diagnostic: dict[str, object]) -> str:
+    """Return a short typed reason for an expired repository contention budget."""
+    return (
+        "repository_busy: "
+        f"repository={diagnostic['repository']} "
+        f"operation={diagnostic['operation']} "
+        f"lock={diagnostic['lock_path']} "
+        f"waited={diagnostic['wait_s']}s "
+        f"run={diagnostic['run_identity']}"
+    )
 
 
 @dataclass
@@ -395,6 +427,27 @@ class RepoStage(Stage):
 
     def _clone_or_skip(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Prepare a checkout by cloning or safely synchronizing it."""
+        if diagnostic := item.payload.pop(REPO_BUSY_KEY, None):
+            if isinstance(diagnostic, dict):
+                return StageOutcome(Disposition.FINISH_FAIL, note=_repository_busy_note(diagnostic))
+            return StageOutcome(Disposition.FINISH_FAIL, note="repository_busy: lock contention")
+
+        diagnostic = item.payload.pop(REPO_CONTENTION_KEY, None)
+        if isinstance(diagnostic, dict):
+            contention_attempt = item.attempts.get(REPO_CONTENTION_BUDGET_KEY, 1)
+            delay_s = min(
+                float(2 ** max(0, contention_attempt - 1)),
+                _REPO_CONTENTION_BACKOFF_CAP_S,
+            )
+            item.payload["retry_delay_s"] = delay_s
+            return StageOutcome(
+                Disposition.RETRY,
+                note=(
+                    "repository contention: lock wait timed out; "
+                    f"waited={diagnostic['wait_s']}s; retrying"
+                ),
+            )
+
         # Checkout preparation failure handling (budget clone=2): on_job_done
         # records the failure while retaining CLONE_WAIT, so retry cannot fall
         # through into label work or discovery after a failed fetch.
@@ -434,6 +487,7 @@ class RepoStage(Stage):
                 repo=item.repo,
                 op="sync_checkout",
                 timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                lock_timeout_s=stage_timeout(ctx, "repo_lock", GIT_JOB_TIMEOUT_S),
                 kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
                 descr=f"synchronize {ctx.org}/{item.repo}",
             )
@@ -444,6 +498,7 @@ class RepoStage(Stage):
             repo=item.repo,
             op="clone",
             timeout_s=stage_timeout(ctx, "clone", GIT_JOB_TIMEOUT_S),
+            lock_timeout_s=stage_timeout(ctx, "repo_lock", GIT_JOB_TIMEOUT_S),
             # worker_pool._dispatch_git_op clone contract: 'repo' (org/name
             # slug for gh repo clone) + 'dest' (checkout path).
             kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
@@ -515,6 +570,24 @@ class RepoStage(Stage):
                 )
             return
         if item.state != "CLONE_WAIT":
+            return
+        if result.error == "lock_timeout":
+            diagnostic = _repository_lock_diagnostic(item, result)
+            contention_attempt = item.attempts.get(REPO_CONTENTION_BUDGET_KEY, 0) + 1
+            item.attempts[REPO_CONTENTION_BUDGET_KEY] = contention_attempt
+            item.payload[REPO_CONTENTION_KEY] = diagnostic
+            if contention_attempt >= max(1, ctx.budget(REPO_CONTENTION_BUDGET_KEY)):
+                item.payload[REPO_BUSY_KEY] = {"error": "repository_busy", **diagnostic}
+            logger.warning(
+                "repo:%s: repository lock contention operation=%s path=%s waited=%.3fs "
+                "run=%s attempt=%d",
+                item.repo,
+                diagnostic["operation"],
+                diagnostic["lock_path"],
+                diagnostic["wait_s"],
+                diagnostic["run_identity"],
+                contention_attempt,
+            )
             return
         if result.ok:
             operation = item.payload.get("checkout_op")

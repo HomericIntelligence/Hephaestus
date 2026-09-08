@@ -73,6 +73,7 @@ from hephaestus.automation.loop_repo_manager import (
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.routing import DEFAULT_REPO_CONTENTION_BUDGET
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
     configure_cli_logging,
@@ -333,6 +334,9 @@ class LoopConfig:
     issue_limit: int | None = None
     event_log_retention_days: int = DEFAULT_EVENT_LOG_RETENTION_DAYS
     event_log_retention_count: int = DEFAULT_EVENT_LOG_RETENTION_COUNT
+    # Repository lock waits use a separate bounded policy from Git operations.
+    repo_lock_timeout: int = 600
+    repo_contention_budget: int = DEFAULT_REPO_CONTENTION_BUDGET
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +390,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Compatibility iteration bound for the historical drive-green CLI; current "
             "merge-wait conditionally merges reviewed heads and does not manage native auto-merge "
             "(default: 5; replaces --max-merge-attempts)."
+        ),
+    )
+    p.add_argument(
+        "--repo-contention-budget",
+        type=_parse_positive_int,
+        default=DEFAULT_REPO_CONTENTION_BUDGET,
+        metavar="N",
+        help=(
+            "Lock-contention retries before the repo stage returns repository_busy "
+            f"(default: {DEFAULT_REPO_CONTENTION_BUDGET})."
         ),
     )
     p.add_argument(
@@ -575,6 +589,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("git-message", 1200),
         ("clone", 120),
         ("network", 120),
+        ("repo-lock", 600),
         ("gh", 120),
         ("metadata", 10),
         ("rebase", 2400),
@@ -927,6 +942,8 @@ def _build_pipeline_config(
         circuit_breaker_snapshot_provider = all_circuit_breaker_snapshots
 
     budget_overrides = {"merge": cfg.drive_green_loops}
+    if cfg.repo_contention_budget != DEFAULT_REPO_CONTENTION_BUDGET:
+        budget_overrides["repo_contention"] = cfg.repo_contention_budget
     if cfg.review_iterations is not None:
         budget_overrides.update(
             {
@@ -984,6 +1001,7 @@ def _build_pipeline_config(
         poll_max_wait=cfg.poll_max_wait,
         clone_timeout=cfg.clone_timeout,
         network_timeout=cfg.network_timeout,
+        repo_lock_timeout=cfg.repo_lock_timeout,
         gh_timeout=cfg.gh_timeout,
         metadata_timeout=cfg.metadata_timeout,
         rebase_timeout=cfg.rebase_timeout,
@@ -1224,6 +1242,7 @@ def main(argv: list[str] | None = None) -> int:
         poll_max_wait=args.poll_max_wait,
         clone_timeout=args.clone_timeout,
         network_timeout=args.network_timeout,
+        repo_lock_timeout=args.repo_lock_timeout,
         gh_timeout=args.gh_timeout,
         metadata_timeout=args.metadata_timeout,
         rebase_timeout=args.rebase_timeout,
@@ -1240,6 +1259,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics_port=args.metrics_port,
         event_log_retention_days=args.event_log_retention_days,
         event_log_retention_count=args.event_log_retention_count,
+        repo_contention_budget=args.repo_contention_budget,
         evidence_receipt_dir=args.evidence_receipt_dir,
     )
 

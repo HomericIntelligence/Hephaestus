@@ -59,6 +59,9 @@ class GitJob:
     # transport validates a separate canonical OWNER/REPOSITORY identity.
     expected_repository: str | None = None
     deadline_s: float | None = None
+    # Repository-lock waiting is independent from the Git operation timeout.
+    # None keeps compatibility with callers that do not set this policy.
+    lock_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         """Reject an operation outside the closed Git vocabulary."""
@@ -71,6 +74,13 @@ class GitJob:
             or self.deadline_s <= 0
         ):
             raise ValueError("deadline_s must be a finite positive monotonic time")
+        if self.lock_timeout_s is not None and (
+            isinstance(self.lock_timeout_s, bool)
+            or not isinstance(self.lock_timeout_s, (int, float))
+            or not math.isfinite(self.lock_timeout_s)
+            or self.lock_timeout_s < 0
+        ):
+            raise ValueError("lock_timeout_s must be a finite nonnegative duration")
 
     @property
     def transport_repository(self) -> str:

@@ -20,6 +20,9 @@ from enum import StrEnum
 #: coordinator overrides it from config when the pipeline is wired up
 #: (epic #1809 coordinator slice).
 DEFAULT_DRIVE_GREEN_LOOPS = 5
+# The repo stage may requeue lock contention three times before it reports
+# repository_busy. Operators can override this per pipeline run.
+DEFAULT_REPO_CONTENTION_BUDGET = 3
 
 
 class StageName(StrEnum):
@@ -76,8 +79,9 @@ class Route:
 # target. Budget provenance:
 #   plan_review_iter=3, pr_review_iter=3, pr_review_hard=6
 #                                             <- architecture doc stage sections
-#   clone=2, plan=2, source_workspace=2, plan_cycles=2,
-#   implement=2, rebase_conflict=2, test_fix=1, remediation_reply=1
+#   clone=2, repo_contention=DEFAULT_REPO_CONTENTION_BUDGET, plan=2,
+#   source_workspace=2, plan_cycles=2, implement=2, rebase_conflict=2,
+#   test_fix=1, remediation_reply=1
 #                                             <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops
 #                                             and --drive-green-loops defaults
@@ -87,7 +91,7 @@ ROUTES: dict[StageName, Route] = {
     StageName.REPO: Route(
         next=StageName.FINISHED,
         fail_routes={"*": StageName.FINISHED},
-        budgets={"clone": 2},
+        budgets={"clone": 2, "repo_contention": DEFAULT_REPO_CONTENTION_BUDGET},
     ),
     StageName.PLANNING: Route(
         next=StageName.PLAN_REVIEW,

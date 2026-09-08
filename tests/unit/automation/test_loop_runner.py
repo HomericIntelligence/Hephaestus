@@ -241,6 +241,18 @@ def test_parse_args_accepts_issue_scope() -> None:
     assert args.issues == [8, 13]
 
 
+def test_parse_args_accepts_repository_lock_timeout() -> None:
+    """The repository lock wait limit is independent from network timeout."""
+    args = loop_runner._parse_args(["--repo-lock-timeout", "900"])
+    assert args.repo_lock_timeout == 900
+
+
+def test_parse_args_accepts_repository_contention_budget() -> None:
+    """The repo stage accepts a bounded lock-contention retry budget."""
+    args = loop_runner._parse_args(["--repo-contention-budget", "4"])
+    assert args.repo_contention_budget == 4
+
+
 def test_parse_args_accepts_pr_scope() -> None:
     """The loop runner can scope pipeline seeding to a comma-separated PR list."""
     args = loop_runner._parse_args(["--prs", "77, 78"])

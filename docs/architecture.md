@@ -225,6 +225,14 @@ thread lock, outer) **and**
 [`_interruptible_file_lock`](../hephaestus/automation/pipeline/worker_pool.py)
 (cross-process flock, inner). Worktrees share `.git`, so two concurrent
 operations on the same checkout would race.
+The `GitJob.lock_timeout_s` limit is separate from `GitJob.timeout_s`, which
+limits the Git operation. Repo intake sets the lock limit from
+`--repo-lock-timeout` (600 seconds by default). A lock wait returns the typed
+`lock_timeout` result with the lock path, repository, operation, run identity,
+and wait duration. The repo stage timer-parks that result with bounded
+backoff, without using the clone budget. After the `repo_contention` budget is
+used, it finishes with the typed `repository_busy` reason. Operators can set
+that budget with `--repo-contention-budget`.
 The only cross-thread **payload** channels are the bounded main and auxiliary
 [`CompletionQueue`](../hephaestus/automation/pipeline/queues.py) instances
 (`queue.Queue[(JobHandle, JobResult)]`). A separate
@@ -756,8 +764,11 @@ tracked changes. Untracked files stay in place and do not block intake because
 issue implementation runs in isolated worktrees. Writer-worktree commit and
 cleanup checks remain strict and include untracked files. A missing checkout is
 cloned and then subjected to the same synchronization proof. Any failure is
-terminal for that scope; it never falls through to an ambient or stale
-checkout.
+terminal for that scope, except for a live repository lock. It never falls
+through to an ambient or stale checkout. A live repository lock is contention,
+not a clone failure: intake waits with bounded backoff and reports
+`repository_busy` only when its separate contention budget expires. Other
+checkout failures remain terminal.
 
 #### Boundary diagram
 

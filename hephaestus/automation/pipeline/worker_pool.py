@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import queue as queue_mod
 import re
@@ -236,6 +237,12 @@ _CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
 _CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
 _CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS = 1.0
 _CODEX_IMPLEMENTATION_PROVIDER_RELAY = "vsock://2:443"
+_LOCK_METADATA_MAX_BYTES = 2000
+_LOCK_METADATA_FIELD_LIMITS = {
+    "repository": 200,
+    "operation": 100,
+    "run_identity": 200,
+}
 
 
 def _remediation_review_input(
@@ -2924,20 +2931,74 @@ class _RepoLockEntry:
 class _GitLockTimeoutError(TimeoutError):
     """Raised when a Git job cannot acquire its cross-process repo lock in time."""
 
+    def __init__(
+        self,
+        *,
+        path: Path | None = None,
+        repository: str = "",
+        operation: str = "",
+        run_identity: str = "",
+        wait_s: float = 0.0,
+        holder: dict[str, object] | None = None,
+    ) -> None:
+        """Store bounded lock diagnostics for the worker result."""
+        super().__init__("repository lock wait timed out")
+        self.path = path
+        self.repository = repository[:200]
+        self.operation = operation[:100]
+        self.run_identity = run_identity[:200]
+        self.wait_s = max(wait_s, 0.0) if math.isfinite(wait_s) and wait_s >= 0.0 else 0.0
+        self.holder = holder
+
 
 class _GitLockInterruptedError(RuntimeError):
     """Raised when shutdown interrupts a Git job while it waits for the repo lock."""
 
+    def __init__(
+        self,
+        *,
+        path: Path | None = None,
+        repository: str = "",
+        operation: str = "",
+        run_identity: str = "",
+        wait_s: float = 0.0,
+    ) -> None:
+        """Store bounded lock diagnostics for the worker result."""
+        super().__init__("shutdown interrupted repository lock wait")
+        self.path = path
+        self.repository = repository[:200]
+        self.operation = operation[:100]
+        self.run_identity = run_identity[:200]
+        self.wait_s = max(wait_s, 0.0) if math.isfinite(wait_s) and wait_s >= 0.0 else 0.0
+
 
 def _git_lock_failure_result(exc: _GitLockTimeoutError | _GitLockInterruptedError) -> JobResult:
     """Map a typed Git-lock failure to the corresponding bounded job result."""
+    value: dict[str, object] = {
+        "failure_kind": "repository_lock",
+        "lock_path": (str(exc.path) if exc.path is not None else "")[:500],
+        "wait_s": round(exc.wait_s, 3),
+        "repository": exc.repository,
+        "operation": exc.operation,
+        "run_identity": exc.run_identity,
+    }
     if isinstance(exc, _GitLockTimeoutError):
-        return JobResult(ok=False, error="lock_timeout")
+        if exc.holder is not None:
+            value["holder"] = exc.holder
+        return JobResult(ok=False, error="lock_timeout", value=value)
     return JobResult(
         ok=False,
         interrupted=True,
         error="interrupted_waiting_for_git_lock",
+        value=value,
     )
+
+
+def _git_lock_timeout(job: GitJob, default_timeout_s: float | None = None) -> float:
+    """Return the lock wait limit, preserving old jobs without one."""
+    if job.lock_timeout_s is not None:
+        return job.lock_timeout_s
+    return job.timeout_s if default_timeout_s is None else default_timeout_s
 
 
 def _git_environment_failure_result(
@@ -2958,13 +3019,23 @@ def _interruptible_file_lock(
     *,
     shutdown: threading.Event,
     timeout_s: float,
+    repository: str = "",
+    operation: str = "",
+    run_identity: str = "",
 ) -> Iterator[None]:
     """Acquire ``path`` without an unbounded blocking flock wait."""
-    deadline = time.monotonic() + max(timeout_s, 0.0)
+    started = time.monotonic()
+    deadline = started + max(timeout_s, 0.0)
 
     while True:
         if shutdown.is_set():
-            raise _GitLockInterruptedError
+            raise _GitLockInterruptedError(
+                path=path,
+                repository=repository,
+                operation=operation,
+                run_identity=run_identity,
+                wait_s=time.monotonic() - started,
+            )
 
         with ExitStack() as stack:
             try:
@@ -2972,17 +3043,132 @@ def _interruptible_file_lock(
             except LockUnavailableError as exc:
                 now = time.monotonic()
                 if now >= deadline:
-                    raise _GitLockTimeoutError from exc
+                    raise _GitLockTimeoutError(
+                        path=path,
+                        repository=repository,
+                        operation=operation,
+                        run_identity=run_identity,
+                        wait_s=now - started,
+                        holder=_read_lock_holder_metadata(path),
+                    ) from exc
 
                 wait_s = min(_GIT_LOCK_WAIT_POLL_S, deadline - now)
                 if shutdown.wait(timeout=wait_s):
-                    raise _GitLockInterruptedError from exc
+                    raise _GitLockInterruptedError(
+                        path=path,
+                        repository=repository,
+                        operation=operation,
+                        run_identity=run_identity,
+                        wait_s=time.monotonic() - started,
+                    ) from exc
                 continue
 
             if shutdown.is_set():
-                raise _GitLockInterruptedError
+                raise _GitLockInterruptedError(
+                    path=path,
+                    repository=repository,
+                    operation=operation,
+                    run_identity=run_identity,
+                    wait_s=time.monotonic() - started,
+                )
             yield
             return
+
+
+def _read_lock_holder_metadata(path: Path) -> dict[str, object] | None:
+    """Read valid holder metadata without treating it as lock authority."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    file_descriptor = -1
+    try:
+        file_descriptor = os.open(path, flags)
+        raw = os.read(file_descriptor, _LOCK_METADATA_MAX_BYTES).decode("utf-8")
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+    if not isinstance(value, dict):
+        return None
+    if set(value) != {"repository", "operation", "run_identity", "started_at"}:
+        return None
+    for key, limit in _LOCK_METADATA_FIELD_LIMITS.items():
+        field = value[key]
+        if not isinstance(field, str) or len(field) > limit:
+            return None
+    started_at = value["started_at"]
+    if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+        return None
+    try:
+        started_at_float = float(started_at)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(started_at_float):
+        return None
+    return {
+        "repository": value["repository"],
+        "operation": value["operation"],
+        "run_identity": value["run_identity"],
+        "started_at": started_at_float,
+    }
+
+
+def _write_lock_metadata(path: Path, metadata: dict[str, object] | None) -> None:
+    """Write or clear lock metadata through a no-following file descriptor."""
+    flags = os.O_WRONLY | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    file_descriptor = os.open(path, flags)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+            file_descriptor = -1
+            if metadata is not None:
+                stream.write(json.dumps(metadata, separators=(",", ":")))
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o600)
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+
+
+@contextmanager
+def _git_job_lock(
+    path: Path,
+    *,
+    shutdown: threading.Event,
+    timeout_s: float,
+    repository: str,
+    operation: str,
+    run_identity: str,
+) -> Iterator[None]:
+    """Hold a Git lock and expose holder data only during the lock lifetime."""
+    with _interruptible_file_lock(
+        path,
+        shutdown=shutdown,
+        timeout_s=timeout_s,
+        repository=repository,
+        operation=operation,
+        run_identity=run_identity,
+    ):
+        metadata = {
+            "repository": repository,
+            "operation": operation,
+            "run_identity": run_identity,
+            "started_at": time.time(),
+        }
+        try:
+            _write_lock_metadata(path, metadata)
+        except OSError:
+            logger.debug("could not write Git lock holder metadata", exc_info=True)
+        try:
+            yield
+        finally:
+            try:
+                _write_lock_metadata(path, None)
+            except OSError:
+                logger.debug("could not clear Git lock holder metadata", exc_info=True)
 
 
 def _evidence_patch_digest(cwd: Path, *revisions: str) -> str:
@@ -3506,6 +3692,7 @@ class WorkerPool:
         athena_skill_executor: AthenaSkillExecutor | None = None,
         rebase_policy_selector: RebasePolicySelector | None = None,
         evidence_receipt_dir: Path | None = None,
+        repo_lock_timeout_s: float | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -3527,6 +3714,8 @@ class WorkerPool:
                 repository-agnostic.
             evidence_receipt_dir: Optional private directory for bounded typed
                 agent and Athena result receipts.
+            repo_lock_timeout_s: Default repository-lock wait limit for Git jobs.
+                ``None`` keeps the job timeout fallback for compatibility.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -3549,10 +3738,25 @@ class WorkerPool:
         self._pretest_successes: dict[str, _PretestSuccess] = {}
         self._pretest_capacity = size
         self._pretest_closed = False
+        self._repo_lock_timeout_s = repo_lock_timeout_s
 
     @contextmanager
-    def _repo_lock(self, repo: str, *, deadline_s: float | None = None) -> Iterator[None]:
-        """Serialize in-process worker operations for one repository."""
+    def _repo_lock(
+        self,
+        repo: str,
+        *,
+        deadline_s: float | None = None,
+        shutdown: threading.Event | None = None,
+        timeout_s: float | None = None,
+        operation: str = "",
+        run_identity: str = "",
+    ) -> Iterator[None]:
+        """Serialize worker operations for one repository.
+
+        Git jobs pass the same bounded policy to this in-process gate and to
+        the cross-process lock. Other job types retain the historical blocking
+        behavior by omitting the optional arguments.
+        """
         with self._repo_locks_guard:
             entry = self._repo_locks.get(repo)
             if entry is None:
@@ -3561,15 +3765,57 @@ class WorkerPool:
             entry.users += 1
 
         acquired = False
+        started = time.monotonic()
+        timeout_deadline = started + max(timeout_s, 0.0) if timeout_s is not None else None
+        deadline = (
+            min(deadline_s, timeout_deadline)
+            if deadline_s is not None and timeout_deadline is not None
+            else deadline_s
+            if deadline_s is not None
+            else timeout_deadline
+        )
+        lock_path = _repo_lock_path(repo, self._lock_dir) if timeout_s is not None else None
         try:
-            if deadline_s is None:
-                entry.lock.acquire()
-                acquired = True
-            else:
-                remaining_s = deadline_s - time.monotonic()
-                if remaining_s <= 0 or not entry.lock.acquire(timeout=remaining_s):
-                    raise _GitLockTimeoutError
-                acquired = True
+            while not acquired:
+                if shutdown is not None and shutdown.is_set():
+                    raise _GitLockInterruptedError(
+                        path=lock_path,
+                        repository=repo,
+                        operation=operation,
+                        run_identity=run_identity,
+                        wait_s=time.monotonic() - started,
+                    )
+                if timeout_s is None:
+                    entry.lock.acquire()
+                    acquired = True
+                    break
+                if entry.lock.acquire(blocking=False):
+                    acquired = True
+                    break
+                now = time.monotonic()
+                if deadline is not None and now >= deadline:
+                    raise _GitLockTimeoutError(
+                        path=lock_path,
+                        repository=repo,
+                        operation=operation,
+                        run_identity=run_identity,
+                        wait_s=now - started,
+                        holder=(
+                            _read_lock_holder_metadata(lock_path) if lock_path is not None else None
+                        ),
+                    )
+                wait_s = min(_GIT_LOCK_WAIT_POLL_S, (deadline or now) - now)
+                if shutdown is not None:
+                    if shutdown.wait(timeout=wait_s):
+                        raise _GitLockInterruptedError(
+                            path=lock_path,
+                            repository=repo,
+                            operation=operation,
+                            run_identity=run_identity,
+                            wait_s=time.monotonic() - started,
+                        )
+                else:
+                    time.sleep(wait_s)
             yield
         finally:
             if acquired:
@@ -4924,20 +5170,32 @@ class WorkerPool:
         operation because worktrees share ``.git``.
         """
         lock_path = _repo_lock_path(job.repo, self._lock_dir)
+        lock_timeout_s = _git_lock_timeout(job, self._repo_lock_timeout_s)
+        run_identity = f"pid:{os.getpid()}:thread:{threading.get_ident()}"
         try:
-            with (
-                git_utils.operation_deadline(job.deadline_s),
-                self._repo_lock(job.repo, deadline_s=job.deadline_s),
-                _interruptible_file_lock(
-                    lock_path,
-                    shutdown=self._shutdown,
-                    timeout_s=cast(
-                        float,
-                        git_utils.remaining_operation_timeout(job.timeout_s),
+            with git_utils.operation_deadline(job.deadline_s):
+                lock_deadline = time.monotonic() + min(
+                    lock_timeout_s,
+                    cast(float, git_utils.remaining_operation_timeout(lock_timeout_s)),
+                )
+                with (
+                    self._repo_lock(
+                        job.repo,
+                        deadline_s=lock_deadline,
+                        shutdown=self._shutdown,
+                        operation=job.op,
+                        run_identity=run_identity,
                     ),
-                ),
-            ):
-                return self._dispatch_git_op(job)
+                    _git_job_lock(
+                        lock_path,
+                        shutdown=self._shutdown,
+                        timeout_s=max(lock_deadline - time.monotonic(), 0.0),
+                        repository=job.repo,
+                        operation=job.op,
+                        run_identity=run_identity,
+                    ),
+                ):
+                    return self._dispatch_git_op(job)
         except (_GitLockTimeoutError, _GitLockInterruptedError) as exc:
             return _git_lock_failure_result(exc)
         except (_RebaseSigningEnvironmentError, _RemoteGitAuthenticationError) as exc:
@@ -5014,8 +5272,9 @@ class WorkerPool:
     def _dispatch_git_op(self, job: GitJob) -> JobResult:  # noqa: C901
         """Dispatch a git operation to its handler.
 
-        ``job.timeout_s`` is threaded into every git helper call so network
-        operations cannot outlive the job budget while holding repo locks.
+        ``job.timeout_s`` limits Git helper calls. The repository lock uses
+        ``job.lock_timeout_s`` or the pool default so network work and lock
+        waiting have separate limits.
         """
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
@@ -6169,10 +6428,14 @@ class WorkerPool:
             return JobResult(ok=False, error=preflight_error)
 
         metadata_lock = WorktreeManager.git_metadata_lock_path(checkout)
-        with _interruptible_file_lock(
+        lock_timeout_s = _git_lock_timeout(job, self._repo_lock_timeout_s)
+        with _git_job_lock(
             metadata_lock,
             shutdown=self._shutdown,
-            timeout_s=job.timeout_s,
+            timeout_s=lock_timeout_s,
+            repository=job.repo,
+            operation=job.op,
+            run_identity=f"pid:{os.getpid()}:thread:{threading.get_ident()}",
         ):
             return self._sync_checkout_locked(
                 checkout=checkout,

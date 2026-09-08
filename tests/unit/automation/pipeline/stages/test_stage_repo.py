@@ -111,6 +111,8 @@ class TestOnEnterAndCloneStates:
             "repo": "test-org/repo-a",
             "dest": str(tmp_path / "repo-a"),
         }
+        assert result.job.timeout_s == repo_ctx.config.network_timeout
+        assert result.job.lock_timeout_s == repo_ctx.config.repo_lock_timeout
         assert result.on_done_state == "CLONE_WAIT"
 
     def test_existing_checkout_submits_sync_job_before_discovery(
@@ -129,6 +131,8 @@ class TestOnEnterAndCloneStates:
             "repo": "test-org/repo-a",
             "dest": str(tmp_path / "repo-a"),
         }
+        assert result.job.timeout_s == repo_ctx.config.network_timeout
+        assert result.job.lock_timeout_s == repo_ctx.config.repo_lock_timeout
         assert result.on_done_state == "CLONE_WAIT"
 
     def test_successful_clone_requires_follow_up_sync_before_labels(
@@ -240,6 +244,55 @@ class TestOnEnterAndCloneStates:
         assert repo_item.attempts["clone"] == 0
         assert "clone_failed" not in repo_item.payload
         assert repo_item.payload["checkout_verified"] is True
+
+    def test_lock_timeout_is_requeued_without_clone_budget_use(
+        self, repo_item: WorkItem, repo_ctx: Any
+    ) -> None:
+        """Repository lock contention uses retry routing, not clone routing."""
+        stage = RepoStage()
+        repo_item.state = "CLONE_WAIT"
+        repo_item.payload["checkout_op"] = "sync_checkout"
+
+        stage.on_job_done(
+            repo_item,
+            JobResult(
+                ok=False,
+                error="lock_timeout",
+                value={"wait_s": 4.25, "lock_path": "/tmp/git-repo-a.lock"},
+            ),
+            repo_ctx,
+        )
+
+        assert repo_item.attempts["clone"] == 0
+        result = stage.step(repo_item, repo_ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.RETRY
+        assert repo_item.payload["retry_delay_s"] > 0
+
+        stage.on_job_done(repo_item, JobResult(ok=True, value="a" * 40), repo_ctx)
+        continued = stage.step(repo_item, repo_ctx)
+        assert isinstance(continued, Continue)
+        assert continued.next_state == "WAVE_ADMIT"
+
+    def test_lock_contention_budget_finishes_repository_busy(
+        self, repo_item: WorkItem, make_ctx: Callable[..., Any]
+    ) -> None:
+        """An exhausted contention budget has a typed terminal reason."""
+        stage = RepoStage()
+        repo_item.state = "CLONE_WAIT"
+        repo_item.payload["checkout_op"] = "sync_checkout"
+        ctx = make_ctx(
+            budget_fn=lambda name: 1 if name == "repo_contention" else 2,
+        )
+
+        stage.on_job_done(repo_item, JobResult(ok=False, error="lock_timeout"), ctx)
+        result = stage.step(repo_item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert result.note.startswith("repository_busy:")
+        assert repo_item.attempts["clone"] == 0
 
 
 class TestDiscover:

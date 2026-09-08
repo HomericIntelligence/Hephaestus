@@ -793,6 +793,20 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             recovery = bounded_source_workspace_recovery(value.get("source_workspace_recovery"))
             if recovery is not None:
                 fields["source_workspace_recovery"] = recovery
+        if result.error in {"lock_timeout", "repository_busy"} and isinstance(value, dict):
+            lock_diagnostic: dict[str, ct.Any] = {}
+            for key in (
+                "lock_path",
+                "wait_s",
+                "repository",
+                "operation",
+                "run_identity",
+                "holder",
+            ):
+                if key in value:
+                    lock_diagnostic[key] = value[key]
+            if lock_diagnostic:
+                fields["lock_diagnostic"] = lock_diagnostic
         if (
             isinstance(value, dict)
             and value.get("failure_kind") in {"signing", "continuation"}
@@ -821,6 +835,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return "worker_crash"
         if error_class := durable_error_class(result.error):
             return error_class
+        if result.error in {"lock_timeout", "repository_busy"}:
+            return result.error
         value = result.value if isinstance(result.value, dict) else {}
         failure_kind = value.get("failure_kind")
         if is_durable_failure_kind(failure_kind):

@@ -317,6 +317,8 @@ class PipelineConfig:
     explicit_pr_review: bool = False
     # This selector is not grant authority. Keep new fields at the end.
     host_verification_bootstrap_comment_id: int | None = None
+    # Appended to preserve positional construction of the public config DTO.
+    repo_lock_timeout: int = 600
 
     @property
     def enable_advise(self) -> bool:

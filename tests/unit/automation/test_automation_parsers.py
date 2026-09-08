@@ -949,6 +949,8 @@ _ENV_MIGRATION_ACTIONS = frozenset(
         "--git-timeout",
         "--clone-timeout",
         "--network-timeout",
+        "--repo-lock-timeout",
+        "--repo-contention-budget",
         "--gh-timeout",
         "--metadata-timeout",
         "--rebase-timeout",
