@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..host_verification_pyxis import HOST_KEYS, pyxis_receipt_metadata_matches
 from .pr_review_verification import _HostVerificationSpec
 
 UNSUPPORTED_HOST_VERIFICATION_ERROR = "unsupported_host_verification_boundary"
@@ -43,9 +44,22 @@ def _host_verification_receipt_matches(
     receipt: object, spec: _HostVerificationSpec, reviewed_head: str
 ) -> bool:
     """Return whether *receipt* proves an exact-head host-verification pass."""
+    if not isinstance(receipt, dict):
+        return False
+    platform = receipt.get("platform")
+    if platform == "linux":
+        return bool(
+            receipt.get("head_sha") == reviewed_head
+            and receipt.get("argv") == list(spec.argv)
+            and receipt.get("immutable_source") is True
+            and receipt.get("ok") is True
+            and receipt.get("status") == "passed"
+            and pyxis_receipt_metadata_matches(receipt)
+            and isinstance(receipt.get("stdout_tail"), str)
+            and isinstance(receipt.get("stderr_tail"), str)
+        )
     return bool(
-        isinstance(receipt, dict)
-        and receipt.get("head_sha") == reviewed_head
+        receipt.get("head_sha") == reviewed_head
         and receipt.get("argv") == list(spec.argv)
         and receipt.get("immutable_source") is True
         and receipt.get("ok") is True
@@ -57,6 +71,7 @@ def _host_verification_receipt_matches(
 
 
 __all__ = [
+    "HOST_KEYS",
     "UNSUPPORTED_HOST_VERIFICATION_ERROR",
     "_host_verification_failure_kind",
     "_host_verification_receipt_matches",

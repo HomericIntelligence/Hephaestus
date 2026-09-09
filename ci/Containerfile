@@ -159,7 +159,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     openssh-client \
     shellcheck="${SHELLCHECK_VERSION}" \
+    util-linux \
     && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/bin/unshare && test -x /usr/bin/setpriv && test -x /usr/bin/prlimit \
     && test "$(bats --version)" = "Bats 1.11.1" \
     && shellcheck --version | grep -Fx "version: 0.10.0"
 

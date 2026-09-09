@@ -1198,13 +1198,25 @@ later branch push does not invalidate that posted review; only the final
 `state:implementation-go` transition requires the reviewed head to still be
 the current open, unarmed PR head.
 
-For the registered host-verification plan, the reviewed execution boundary
-currently requires macOS `sandbox-exec` plus disposable, quota-backed disk
-images. Other platforms record an exact-head, platform-bound `skipped` receipt
-before they resolve tools, archive source, or execute PR code. That receipt is
-a blocking host-verification gap. It is not passing execution evidence, and it
-cannot grant implementation authority. Add a Linux or Windows backend as a
-separately reviewed isolation implementation; there is no unsandboxed fallback.
+For the registered host-verification plan, macOS uses `sandbox-exec` plus
+disposable, quota-backed disk images. Linux uses a local Pyxis/Enroot squashfs
+image. A separate host-owned authority binds the expected digest, committed
+source revision, Containerfile digest, immutable OCI image ID, and local
+content-addressed reference. The image path must be visible at the same absolute
+path on each Slurm compute node. The worker verifies the authority and puts the
+exact image bytes, immutable source, and Git metadata in one private directory
+on that shared filesystem before dispatch. Source and Git metadata are
+read-only. The host virtual environment is not mounted.
+
+Scratch and Pi logs are on an owner-private shared filesystem with a maximum
+1 GiB capacity. Slurm and inherited OS limits bound CPU, memory, process count,
+file size, and wall-clock time. Acceptance requires a real Linux Pyxis run of
+the integration test with `--require-pyxis-host-verification`. A skipped test
+supplies no acceptance evidence. A missing image,
+authority, bounded filesystem, Pyxis allocation, or Enroot runtime produces a
+failed receipt. It cannot become a passing skip. Other platforms remain
+fail-closed until a separately reviewed isolation backend exists. There is no
+unsandboxed fallback.
 
 A narrow source-review exception for PR #3006 is specified in
 [ADR-0046](adr/0046-review-host-verification-bootstrap.md). An authenticated

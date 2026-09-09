@@ -37,6 +37,7 @@ __all__ = [
     "add_follow_up_timeout_arg",
     "add_git_message_timeout_arg",
     "add_github_throttle_args",
+    "add_host_verification_pyxis_image_arg",
     "add_json_arg",
     "add_learn_timeout_arg",
     "add_logging_args",
@@ -728,6 +729,7 @@ def add_pipeline_runtime_args(
             parser.add_argument(
                 flag, default="", metavar="MODEL[:EFFORT]", help=MODEL_REFERENCE_HELP
             )
+    add_host_verification_pyxis_image_arg(parser)
     parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
     parser.add_argument(
         "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True
@@ -756,3 +758,34 @@ def add_pipeline_runtime_args(
             default=default,
             metavar="SECONDS",
         )
+
+
+def add_host_verification_pyxis_image_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the independent Pyxis trust inputs for Linux host checks."""
+    parser.add_argument(
+        "--host-verification-pyxis-image",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=("Owner-only Enroot squashfs path shared with Slurm compute nodes."),
+    )
+    parser.add_argument(
+        "--host-verification-pyxis-sha256",
+        default=None,
+        metavar="SHA256",
+        help="Expected squashfs SHA-256 from a separate host-owned authority.",
+    )
+    parser.add_argument(
+        "--host-verification-pyxis-authority",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Owner-only provenance authority for the expected squashfs.",
+    )
+    parser.add_argument(
+        "--host-verification-pyxis-quota-root",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Private maximum-1-GiB filesystem shared with Slurm compute nodes.",
+    )

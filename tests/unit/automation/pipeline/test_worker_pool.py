@@ -55,6 +55,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     ReplyJournalAppended,
 )
+from hephaestus.automation.pipeline.host_verification_pyxis import PyxisImageMetadata
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -86,6 +87,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
+    _linux_resource_limited_command,
     _owned_codex_adapter,
     _path_content_identity,
     _prepare_host_output_aliases,
@@ -2431,10 +2433,10 @@ class TestWorkerPoolSubmitComplete:
         }
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
-    def test_immutable_build_test_skips_unsupported_platform_before_execution(
+    def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """An unsupported host records a bound skip without executing PR code."""
+        """Linux fails closed when its verified Pyxis image is unavailable."""
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -2446,6 +2448,7 @@ class TestWorkerPoolSubmitComplete:
 
         archive = MagicMock(return_value=(b"", ""))
         with (
+            patch(f"{_WP}._pyxis_runtime_available", return_value=True),
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}._trusted_executable", return_value=sys.executable),
             patch(
@@ -2465,15 +2468,279 @@ class TestWorkerPoolSubmitComplete:
             result = pool._run_build_test(job)
 
         assert result.ok is False
-        assert result.error == "unsupported_host_verification_boundary"
-        assert result.value == {
-            "failure_kind": "runner",
-            "head_sha": "a" * 40,
-            "immutable_source": False,
-            "platform": "linux",
-            "status": "skipped",
-        }
+        assert result.error == "host_verification_pyxis_image_unavailable"
+        assert result.value["failure_kind"] == "runner"
+        assert result.value["head_sha"] == "a" * 40
+        assert result.value["platform"] == "linux"
+        assert result.value["status"] != "skipped"
         archive.assert_not_called()
+
+    @pytest.mark.parametrize("placed", [False, True])
+    def test_immutable_build_test_runs_linux_pyxis_and_records_image_digest(
+        self, pool: WorkerPool, tmp_path: Path, placed: bool
+    ) -> None:
+        """Linux host verification records the exact local Pyxis image proof."""
+        from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+
+        placement = PyxisExecutionPlacement("123", "node-1") if placed else None
+        pool._host_verification_pyxis_placement = placement
+        image = tmp_path / "host-verification.sqsh"
+        launch_binding = MagicMock()
+        metadata = PyxisImageMetadata(
+            path=image.resolve(),
+            sha256="b" * 64,
+            container_image_id="sha256:" + ("c" * 64),
+            container_image_reference="podman://sha256:" + ("c" * 64),
+            containerfile_sha256="d" * 64,
+            source_revision="a" * 40,
+            launch_binding=launch_binding,
+        )
+        pool._host_verification_pyxis_sha256 = "b" * 64
+        pool._host_verification_pyxis_authority = tmp_path / "authority.json"
+        pool._host_verification_pyxis_quota_root = tmp_path
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+        command_result = JobResult(ok=True, value={"failure_kind": "none"})
+
+        with (
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._pyxis_runtime_available", return_value=True),
+            patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
+            patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
+            patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata) as stage_image,
+            patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
+            patch(f"{_WP}._extract_immutable_archive") as extract_archive,
+            patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata"),
+            patch(f"{_WP}._prepare_host_output_aliases"),
+            patch(f"{_WP}._build_pyxis_environment", return_value={"UV_OFFLINE": "1"}),
+            patch(
+                f"{_WP}._build_pyxis_srun_command", return_value=("srun", "true")
+            ) as build_command,
+            patch(f"{_WP}._run_bounded_host_command", return_value=command_result) as run_command,
+        ):
+            result = pool._run_build_test(job)
+
+        assert build_command.call_args.kwargs["placement"] is placement
+        assert result.ok is True
+        assert result.value == {
+            "container_image": str(image.resolve()),
+            "container_image_sha256": "b" * 64,
+            "container_image_id": "sha256:" + ("c" * 64),
+            "container_image_reference": "podman://sha256:" + ("c" * 64),
+            "containerfile_sha256": "d" * 64,
+            "container_source_revision": "a" * 40,
+            "container_runtime": "pyxis",
+            "failure_kind": "none",
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "platform": "linux",
+            "status": "passed",
+        }
+        (pi_smoke_logs,) = run_command.call_args.kwargs["additional_writable_paths"]
+        assert pi_smoke_logs.name == "pi-smoke-logs"
+        staging_root = stage_image.call_args.args[1]
+        immutable_source = extract_archive.call_args.args[1]
+        assert immutable_source.parent == staging_root
+        assert staging_root.parent == image.parent
+
+    @pytest.mark.parametrize("replaced_path", ("image", "source", "git_metadata", "quota_root"))
+    def test_linux_pyxis_revalidates_cross_node_paths_at_launch(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        replaced_path: str,
+    ) -> None:
+        """A path replacement after staging must stop the Slurm launch."""
+        image = tmp_path / "host-verification.sqsh"
+        image.write_bytes(b"hsqs" + b"image")
+        image.chmod(0o400)
+        digest = hashlib.sha256(image.read_bytes()).hexdigest()
+        metadata = PyxisImageMetadata(
+            path=image,
+            sha256=digest,
+            container_image_id="sha256:" + ("c" * 64),
+            container_image_reference="podman://sha256:" + ("c" * 64),
+            containerfile_sha256="d" * 64,
+            source_revision="a" * 40,
+        )
+        quota_root = tmp_path / "quota"
+        quota_root.mkdir(mode=0o700)
+        pool._host_verification_pyxis_quota_root = quota_root
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+        built: dict[str, object] = {}
+
+        def stage_image(value: PyxisImageMetadata, root: Path) -> PyxisImageMetadata:
+            target = root / f"sha256-{value.sha256}.sqsh"
+            target.write_bytes(value.path.read_bytes())
+            target.chmod(0o400)
+            return PyxisImageMetadata(
+                path=target,
+                sha256=value.sha256,
+                container_image_id=value.container_image_id,
+                container_image_reference=value.container_image_reference,
+                containerfile_sha256=value.containerfile_sha256,
+                source_revision=value.source_revision,
+            )
+
+        def prepare_git(
+            _checkout: Path,
+            _head: str,
+            _source: Path,
+            root: Path,
+            _git: str,
+        ) -> Path:
+            path = root / "metadata.git"
+            path.mkdir(mode=0o500)
+            return path
+
+        def build_command(**kwargs: object) -> tuple[str, ...]:
+            built.update(kwargs)
+            return ("srun", "true")
+
+        def replace_before_launch(*_args: object, **kwargs: object) -> JobResult:
+            selected_value = quota_root if replaced_path == "quota_root" else built[replaced_path]
+            selected = (
+                selected_value.path
+                if isinstance(selected_value, PyxisImageMetadata)
+                else cast(Path, selected_value)
+            )
+            moved = selected.with_name(f"{selected.name}.original")
+            if replaced_path != "quota_root":
+                selected.parent.chmod(0o700)
+            selected.rename(moved)
+            if replaced_path == "image":
+                selected.write_bytes(b"hsqs" + b"replacement")
+                selected.chmod(0o400)
+            else:
+                selected.mkdir(mode=0o500 if replaced_path != "quota_root" else 0o700)
+            pre_launch = kwargs.get("pre_launch")
+            if callable(pre_launch):
+                pre_launch()
+            return JobResult(ok=True, value={"failure_kind": "none"})
+
+        with (
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._pyxis_runtime_available", return_value=True),
+            patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
+            patch(f"{_WP}._validate_pyxis_quota_root", return_value=quota_root),
+            patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
+            patch(f"{_WP}._stage_verified_pyxis_image", side_effect=stage_image),
+            patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
+            patch(f"{_WP}._extract_immutable_archive"),
+            patch(f"{_WP}._prepare_immutable_git_metadata", side_effect=prepare_git),
+            patch(f"{_WP}._prepare_host_output_aliases"),
+            patch(f"{_WP}._build_pyxis_environment", return_value={"UV_OFFLINE": "1"}),
+            patch(f"{_WP}._build_pyxis_srun_command", side_effect=build_command),
+            patch(f"{_WP}._run_bounded_host_command", side_effect=replace_before_launch),
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is False
+        assert result.error is not None
+        assert "cross-node" in result.error
+
+    def test_linux_resource_wrapper_sets_all_inherited_limits(self) -> None:
+        """The Linux Slurm launcher inherits fixed OS limits before dispatch."""
+        command = _linux_resource_limited_command(("srun", "--flag"), timeout_s=300)
+
+        assert command[:4] == (sys.executable, "-I", "-S", "-c")
+        script = command[4]
+        assert "RLIMIT_CPU" in script
+        assert "RLIMIT_FSIZE" in script
+        assert "RLIMIT_NPROC" in script
+        assert "RLIMIT_NOFILE" in script
+        assert command[-2:] == ("srun", "--flag")
+
+    def test_linux_resource_wrapper_executes_dash_with_exact_limits(self, tmp_path: Path) -> None:
+        """Dash can run after the Python boundary applies every inherited limit."""
+        dash = shutil.which("dash")
+        if dash is None:
+            pytest.skip("dash is unavailable")
+        probe = tmp_path / "limits.py"
+        probe.write_text(
+            "import resource\n"
+            "assert resource.getrlimit(resource.RLIMIT_CPU)[0] == 7\n"
+            "assert resource.getrlimit(resource.RLIMIT_FSIZE)[0] == 67108864\n"
+            "assert resource.getrlimit(resource.RLIMIT_NPROC)[0] == 64\n"
+            "assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == 1024\n",
+            encoding="utf-8",
+        )
+        command = _linux_resource_limited_command(
+            (
+                dash,
+                "-c",
+                'exec "$1" -I -S "$2"',
+                "dash",
+                sys.executable,
+                str(probe),
+            ),
+            timeout_s=7,
+        )
+
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+        assert result.returncode == 0, result.stderr
+
+    def test_linux_resource_wrapper_rejects_a_lower_hard_limit(self, tmp_path: Path) -> None:
+        """The boundary stops when the host cannot supply a required limit."""
+        limiter = tmp_path / "lower-hard-limit.py"
+        limiter.write_text(
+            "import os, resource, sys\n"
+            "resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))\n"
+            "os.execv(sys.argv[1], sys.argv[1:])\n",
+            encoding="utf-8",
+        )
+        command = _linux_resource_limited_command(("/bin/true",), timeout_s=7)
+
+        result = subprocess.run(
+            (sys.executable, "-I", "-S", str(limiter), *command),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "required resource limit exceeds hard limit" in result.stderr
+
+    def test_bounded_host_command_enforces_each_writable_tree(self, tmp_path: Path) -> None:
+        """An additional writable output tree has the same fixed quota."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        logs = tmp_path / "logs"
+        for path in (source, scratch, logs):
+            path.mkdir()
+
+        with patch(
+            f"{_WP}._scratch_usage_exceeds_limit", side_effect=(False, True)
+        ) as exceeds_limit:
+            result = _run_bounded_host_command(
+                (sys.executable, "-c", "import time; time.sleep(30)"),
+                validation_argv=("uv", "run", "pytest", "tests/unit"),
+                source=source,
+                scratch=scratch,
+                additional_writable_paths=(logs,),
+                environment={},
+                timeout_s=10,
+                shutdown=threading.Event(),
+            )
+
+        assert result.error == "host_verification_resource_limit_exceeded"
+        assert [call.args[0] for call in exceeds_limit.call_args_list] == [scratch, logs]
 
     def test_host_verification_profile_keeps_source_outside_writable_root(
         self, tmp_path: Path
@@ -17072,3 +17339,127 @@ def test_pretest_job_issue_requires_an_integer(
         result = pool._run(job, "project#1", "implementation", remediation_owner_id=1)
     assert result.ok is (type(issue_value) is int)
     assert provider.call_count == int(type(issue_value) is int)
+
+
+def test_pyxis_capability_failure_prevents_image_staging(pool: WorkerPool, tmp_path: Path) -> None:
+    """An unavailable runtime cannot start image staging or reviewed code."""
+    job = BuildTestJob(
+        repo="test/repo",
+        cwd=tmp_path,
+        argv=("uv", "run", "pytest"),
+        timeout_s=60,
+        expected_head_sha="a" * 40,
+        immutable_source=True,
+    )
+    with (
+        patch(f"{_WP}._pyxis_runtime_available", return_value=False),
+        patch(f"{_WP}._validate_pyxis_image") as image,
+        patch(f"{_WP}._stage_verified_pyxis_image") as stage,
+        patch(f"{_WP}._run_bounded_host_command") as run,
+    ):
+        result = pool._run_linux_immutable_build_test(job)
+    assert result.error == "host_verification_pyxis_runtime_unavailable"
+    assert result.value == {
+        "head_sha": "a" * 40,
+        "immutable_source": False,
+        "failure_kind": "runner",
+        "platform": "linux",
+        "status": "failed",
+    }
+    image.assert_not_called()
+    stage.assert_not_called()
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "supported",
+        "missing",
+        "command",
+        "timeout",
+        "interrupted",
+        "oversize",
+        "unreadable",
+        "encoding",
+    ],
+)
+def test_pyxis_runtime_preflight_uses_bounded_scrubbed_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """The metadata check accepts only bounded successful option evidence."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PRIVATE_SENTINEL", "do-not-forward")
+    shutdown = threading.Event()
+
+    def run(command: tuple[str, ...], **kwargs: Any) -> JobResult:
+        assert command == ("limited", "/usr/bin/srun", "--help")
+        assert kwargs["timeout_s"] == 30
+        assert kwargs["shutdown"] is shutdown
+        assert "PRIVATE_SENTINEL" not in kwargs["environment"]
+        assert kwargs["source"] != tmp_path
+        output = kwargs["scratch"] / "outputs"
+        output.mkdir()
+        text = (
+            "  --container-image=PATH\n  --container-readonly\n"
+            "  --no-container-mount-home\n  --container-workdir=PATH\n  --container-mounts=MOUNTS\n"
+            if case == "supported"
+            else "  --container-image=PATH\n"
+        )
+        if case == "oversize":
+            text = "x" * 65537
+        if case == "unreadable":
+            raise OSError("output unavailable")
+        if case == "encoding":
+            (output / "stdout.log").write_bytes(b"\xff")
+        else:
+            (output / "stdout.log").write_text(text)
+        return JobResult(ok=case not in {"command", "timeout", "interrupted"}, error=case)
+
+    with (
+        patch(f"{_WP}._trusted_executable", return_value="/usr/bin/srun"),
+        patch(
+            f"{_WP}._linux_resource_limited_command",
+            side_effect=lambda command, **kw: ("limited", *command),
+        ),
+        patch(f"{_WP}._run_bounded_host_command", side_effect=run),
+    ):
+        assert worker_pool_module._pyxis_runtime_available(shutdown=shutdown) is (
+            case == "supported"
+        )
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_pyxis_runtime_preflight_stops_without_executable_or_on_shutdown(cancelled: bool) -> None:
+    """Missing launch capability and cancellation both prevent the command."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+    shutdown = threading.Event()
+    if cancelled:
+        shutdown.set()
+    with (
+        patch(f"{_WP}._trusted_executable", return_value="/usr/bin/srun" if cancelled else None),
+        patch(f"{_WP}._run_bounded_host_command") as run,
+    ):
+        assert not worker_pool_module._pyxis_runtime_available(shutdown=shutdown)
+    run.assert_not_called()
+
+
+def test_worker_pool_retains_explicit_pyxis_placement(tmp_path: Path) -> None:
+    """The constructor preserves host-selected placement by identity."""
+    from hephaestus.automation.pipeline.host_verification_pyxis import PyxisExecutionPlacement
+
+    placement = PyxisExecutionPlacement("123", "node-1")
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_verification_pyxis_placement=placement,
+    )
+    try:
+        assert pool._host_verification_pyxis_placement is placement
+    finally:
+        pool.shutdown()

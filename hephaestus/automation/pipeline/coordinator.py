@@ -183,6 +183,10 @@ class Coordinator(
                 # selects a policy for each repository job.
                 rebase_policy_selector=partial(select_rebase_policy, config.org),
                 evidence_receipt_dir=config.evidence_receipt_dir,
+                host_verification_pyxis_image=config.host_verification_pyxis_image,
+                host_verification_pyxis_sha256=config.host_verification_pyxis_sha256,
+                host_verification_pyxis_authority=config.host_verification_pyxis_authority,
+                host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected

@@ -87,6 +87,96 @@ and DCO trailers in Actions. The classic matrix contexts and
 run is early failure feedback only; it does not grant
 `state:implementation-go` and does not replace GitHub's exact-head checks.
 
+## Linux PR-review host verification
+
+Linux PR-review host verification runs the candidate command in a read-only
+Pyxis/Enroot container. The host mounts the candidate source and Git metadata
+read-only. It mounts scratch and Pi logs from an owner-private filesystem whose
+total capacity is not more than 1 GiB. Slurm enforces the CPU, memory, process,
+file-size, and wall-clock limits. The container uses an isolated network namespace and
+receives a scrubbed offline environment. Home, temporary files, and tool
+caches use the disposable scratch paths. The coverage runner preserves the
+validated `COVERAGE_FILE` path in external disposable scratch.
+
+The worker checks `srun --help` for the standard image, read-only, home-mount,
+work-directory, and mount options before it stages the image. It does not
+require `--container-unshare`. A missing option or a failed capability check
+stops validation.
+
+The verified image supplies `unshare` and `setpriv` from `util-linux`.
+After Pyxis starts the container, `unshare` creates new user, network, IPC,
+and UTS namespaces. It maps only the current host user to namespace root.
+Then `setpriv` sets `no_new_privs` and clears the bounding, inheritable,
+and ambient capability sets before it starts the candidate command.
+The candidate process has no permitted or effective capabilities after exec.
+A missing tool or a failed setup command stops execution. There is no retry
+without isolation. The host kernel must permit nested user namespaces.
+Rebuild the verified image to supply these tools.
+See the [unshare manual](https://man7.org/linux/man-pages/man1/unshare.1.html)
+and [setpriv manual](https://man7.org/linux/man-pages/man1/setpriv.1.html).
+These setup checks do not replace live acceptance evidence.
+
+Linux applies a process limit of 64 for the real user ID. This limit includes
+other processes and threads for that user on the submission and execution
+hosts. Use a dedicated verification account with sufficient process capacity.
+A busy account can fail to launch a check. The worker keeps the limit in force
+and reports the failure; it does not remove the limit to retry.
+
+The image is a host-owned toolchain for isolated verification. Normal CI jobs
+and automation runs do not build it. The preparation command stores it at
+`~/.agent_brain/automation/host-verification/hephaestus-ci.sqsh`, with a
+separate `hephaestus-ci.authority.json` file in the same directory.
+
+The command reuses these files across checkouts and runs after it verifies
+the saved digest and authority. Reuse does not need Git, Podman, Docker, or
+Enroot. A new candidate commit does not invalidate the host toolchain. Its
+authority keeps the original build revision. To update the toolchain, run
+`uv run python scripts/prepare_host_verification_pyxis_image.py --rebuild`.
+An invalid saved artifact causes a failure; it is not silently rebuilt.
+The global directory and its ancestors must not permit other users to write.
+
+On first preparation or an explicit rebuild, the command builds an exact committed Git tree. It exports the
+immutable local OCI image ID, not a mutable tag. It writes an owner-read-only
+squashfs and a separate owner-read-only authority file on a filesystem that is
+visible at the same absolute path on each Slurm compute node:
+
+```bash
+just host-verification-pyxis-image
+```
+
+The command prints the exact digest and authority path. Supply them with
+`--host-verification-pyxis-sha256 SHA256` and
+`--host-verification-pyxis-authority PATH`. Supply a capacity-bounded shared
+filesystem with `--host-verification-pyxis-quota-root PATH`. The worker verifies
+the authority. It puts the authorized image, immutable source, and Git metadata
+in one private directory beside the source image. It executes only the copied
+image. It does not mount a host virtual environment.
+
+The authoritative Linux host lane must run the integration test with
+`--require-pyxis-host-verification`. Missing Pyxis, Enroot, an allocation, the
+image authority, or the bounded filesystem causes a failure in that lane. It
+does not produce a passing skip. macOS continues to use its native sandbox
+boundary. Other platforms remain fail-closed until a reviewed isolation
+backend exists.
+
+Run this acceptance test from the allocated node's batch process. The process
+must have `SLURM_JOB_ID` and `SLURMD_NODENAME`. Reserve at least two CPUs and
+4096 MiB for each child step. Do not run the harness in an exclusive step
+that consumes those resources.
+
+The harness constructs a validated `PyxisExecutionPlacement` and passes it to
+`WorkerPool(host_verification_pyxis_placement=...)`. Both the positive control
+and the container command use explicit Slurm allocation and node selectors.
+The normal worker leaves placement to Slurm when this optional setting is
+absent. See the [Slurm srun options](https://slurm.schedmd.com/srun.html).
+
+Before and after the container command, an uncontained step must reach the
+harness listener and return its random challenge. It must also report the
+same host boot ID and hostname. A different node, unreachable listener,
+missing allocation, failed command, or malformed control result fails the
+test. A refusal inside the container counts only after both controls pass.
+A passing mocked test does not replace this live acceptance evidence.
+
 ## Current required contexts
 
 Classic branch protection requires:
