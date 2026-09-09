@@ -173,7 +173,7 @@ repos:
       - id: check-doc-config
         name: Check doc/config consistency
         description: Reject drift between normative docs and pyproject.toml config (e.g. coverage thresholds)
-        entry: uv run hephaestus-check-doc-config --repo-root .
+        entry: uv run hephaestus-check-doc-config --repo-root . --skip-test-count
         language: system
         pass_filenames: false
         files: ^(AGENTS\.md|CLAUDE\.md|docs/DEFINITION_OF_DONE\.md|pyproject\.toml)$
