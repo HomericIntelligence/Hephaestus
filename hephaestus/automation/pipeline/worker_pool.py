@@ -1168,7 +1168,13 @@ def _verifier_owned_runtime_environment(checkout: Path) -> Path:
     sandboxed command from resolving a live worker ``.venv`` path and ensures
     the verifier has one consistent read-only runtime contract.
     """
+    from hephaestus.automation.runtime_diagnostics import require_virtual_environment
+
     runtime = Path(sys.prefix).resolve()
+    try:
+        require_virtual_environment(runtime)
+    except RuntimeError as exc:
+        raise _HostVerificationBoundaryError(str(exc)) from exc
     try:
         checkout.resolve()
     except OSError as exc:
@@ -1183,6 +1189,7 @@ def _verifier_owned_runtime_environment(checkout: Path) -> Path:
     if _is_sealed_runtime_cache(target):
         return target
     lock_path = cache_root / f"{target.name}.lock"
+    preparation_step = "lock"
     try:
         with file_lock(lock_path, require_exclusive=True):
             if _is_sealed_runtime_cache(target):
@@ -1192,6 +1199,7 @@ def _verifier_owned_runtime_environment(checkout: Path) -> Path:
                     _remove_corrupted_sealed_runtime(target)
                 else:
                     raise _HostVerificationBoundaryError("host_verification_runtime_cache_unsafe")
+            preparation_step = "staging"
             staging = Path(tempfile.mkdtemp(prefix="runtime-", dir=cache_root))
             copied = staging / "environment"
             try:
@@ -1199,11 +1207,16 @@ def _verifier_owned_runtime_environment(checkout: Path) -> Path:
                 # symlink. Preserve the environment boundary by dereferencing
                 # it into the cache; otherwise UV resolves it back to the
                 # mutable host interpreter rather than this sealed snapshot.
+                preparation_step = "copy"
                 shutil.copytree(runtime, copied, symlinks=False)
+                preparation_step = "publish"
                 copied.replace(target)
                 try:
+                    preparation_step = "launchers"
                     _rewrite_runtime_launchers(target, runtime)
+                    preparation_step = "manifest"
                     _write_sealed_runtime_manifest(target)
+                    preparation_step = "seal"
                     _seal_host_runtime(target)
                     write_secure(
                         _sealed_runtime_marker(target),
@@ -1222,7 +1235,10 @@ def _verifier_owned_runtime_environment(checkout: Path) -> Path:
     except _HostVerificationBoundaryError:
         raise
     except (OSError, RuntimeError, LockUnavailableError) as exc:
-        raise _HostVerificationBoundaryError("host_verification_runtime_prepare_failed") from exc
+        raise _HostVerificationBoundaryError(
+            "host_verification_runtime_prepare_failed: "
+            f"step={preparation_step} cause={type(exc).__name__}"
+        ) from exc
     return target
 
 

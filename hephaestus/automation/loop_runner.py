@@ -1162,7 +1162,19 @@ def main(argv: list[str] | None = None) -> int:
         quiet=args.quiet,
         log_file=args.log_file,
     )
+    from hephaestus.automation.runtime_diagnostics import (
+        require_virtual_environment,
+        runtime_identity,
+    )
+
+    identity = runtime_identity()
+    LOG.info("Runtime identity: %s", identity, extra={"runtime_identity": identity})
     phases = _validate_phases(args.phases)
+    if not args.dry_run and sys.platform == "darwin" and {"implement", "drive-green"} & set(phases):
+        try:
+            require_virtual_environment(Path(sys.prefix))
+        except RuntimeError as exc:
+            return _error_exit(args, str(exc))
     active_roles = tuple(
         role
         for role, enabled in (
