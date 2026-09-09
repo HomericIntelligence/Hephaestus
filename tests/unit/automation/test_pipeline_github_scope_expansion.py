@@ -433,3 +433,513 @@ def test_issue_with_marker_ignores_forged_public_issue(
     monkeypatch.setattr(github, "_graphql", fake_graphql)
 
     assert github.issue_with_marker(marker) == issues[1]
+
+
+@pytest.mark.parametrize("state", ["", "opened", "OPEN", "closed "])
+def test_repo_issues_rejects_invalid_state(state: str) -> None:
+    """Issue discovery accepts only the documented GitHub state values."""
+    with pytest.raises(ValueError, match="issue state"):
+        PipelineGitHub("org", repo="repo")._repo_issues(state)
+
+
+def test_repo_issues_requires_repository_scope() -> None:
+    """Organization-only adapters cannot start repository issue discovery."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        PipelineGitHub("org")._repo_issues("all")
+
+
+@pytest.mark.parametrize("payload", [{}, [None]])
+def test_repo_issues_rejects_malformed_pages(
+    monkeypatch: pytest.MonkeyPatch, payload: object
+) -> None:
+    """Issue discovery rejects a non-list page and non-object page entries."""
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match="issue list is malformed"):
+        PipelineGitHub("org", repo="repo")._repo_issues("all")
+
+
+def test_repo_issues_stops_at_pagination_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full hundred-page issue traversal stops at its explicit safety bound."""
+    full_page: list[dict[str, object]] = [{"pull_request": {}}] * 100
+    call_count = 0
+
+    def fake_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal call_count
+        call_count += 1
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(full_page), stderr="")
+
+    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_call)
+    with pytest.raises(RuntimeError, match="traversal exceeded"):
+        PipelineGitHub("org", repo="repo")._repo_issues("all")
+    assert call_count == 100
+
+
+@pytest.mark.parametrize("number", [True, 0, -1, "41", None])
+def test_marker_issue_rejects_malformed_identity(
+    monkeypatch: pytest.MonkeyPatch, number: object
+) -> None:
+    """A marker match needs a positive integer issue identity."""
+    marker = "<!-- marker -->"
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(github, "all_repo_issues", lambda: [{"number": number, "body": marker}])
+    with pytest.raises(RuntimeError, match="identity is malformed"):
+        github.issues_with_marker(marker)
+
+
+def test_marker_issue_rejects_body_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A marker issue that changes during owner proof cannot be returned."""
+    marker = "<!-- marker -->"
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(github, "all_repo_issues", lambda: [{"number": 41, "body": marker}])
+    monkeypatch.setattr(
+        github,
+        "_graphql",
+        lambda spec, **fields: {"body": marker + " changed", "viewer_did_author": True},
+    )
+    with pytest.raises(RuntimeError, match="changed during ownership"):
+        github.issues_with_marker(marker)
+
+
+def test_issue_with_marker_handles_absent_and_duplicate_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unique-marker lookup reports absence and rejects duplicate ownership."""
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(github, "issues_with_marker", lambda marker: [])
+    assert github.issue_with_marker("marker") is None
+    monkeypatch.setattr(github, "issues_with_marker", lambda marker: [{}, {}])
+    with pytest.raises(RuntimeError, match="multiple repository issues"):
+        github.issue_with_marker("marker")
+
+
+def test_create_issue_dry_run_returns_sentinel() -> None:
+    """Dry-run issue creation does not make a GitHub request."""
+    assert PipelineGitHub("org", repo="repo", dry_run=True).create_issue("Title", "Body") == 0
+
+
+def test_create_issue_creates_missing_labels_and_parses_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue creation ensures missing labels and accepts a normal issue URL."""
+    github = PipelineGitHub("org", repo="repo")
+    created: list[str] = []
+    monkeypatch.setattr(github, "_label_names", lambda: {"existing"})
+    monkeypatch.setattr(github, "_create_label", created.append)
+    monkeypatch.setattr(
+        github,
+        "_gh",
+        lambda argv: subprocess.CompletedProcess(
+            argv, 0, stdout="https://github.com/org/repo/issues/42\n", stderr=""
+        ),
+    )
+
+    assert github.create_issue("Title\x00", "Body", ["existing", "new"]) == 42
+    assert created == ["new"]
+
+
+@pytest.mark.parametrize("output", ["43", "https://github.test/issue/43"])
+def test_create_issue_accepts_numeric_output_fallback(
+    monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    """Issue creation accepts the final numeric path component as a fallback."""
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(
+        github,
+        "_gh",
+        lambda argv: subprocess.CompletedProcess(argv, 0, stdout=output, stderr=""),
+    )
+    assert github.create_issue("Title", "Body") == 43
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (OSError("disk"), "failed to create issue"),
+        (subprocess.SubprocessError("gh"), "failed to create issue"),
+        (RuntimeError("request"), "failed to create issue"),
+    ],
+)
+def test_create_issue_translates_boundary_failures(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception, message: str
+) -> None:
+    """Issue creation translates body-file and GitHub boundary failures."""
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(github, "_gh", lambda argv: (_ for _ in ()).throw(failure))
+    with pytest.raises(RuntimeError, match=message) as raised:
+        github.create_issue("Title", "Body")
+    assert raised.value.__cause__ is failure
+
+
+def test_create_issue_rejects_unparseable_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue creation fails when GitHub does not return a numeric identity."""
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(
+        github,
+        "_gh",
+        lambda argv: subprocess.CompletedProcess(argv, 0, stdout="not-an-issue", stderr=""),
+    )
+    with pytest.raises(RuntimeError, match="failed to parse issue number"):
+        github.create_issue("Title", "Body")
+
+
+@pytest.mark.parametrize("issue_number", [True, 0, -1, "41"])
+def test_timeline_association_rejects_invalid_issue_number(issue_number: object) -> None:
+    """Timeline association discovery needs a positive integer issue identity."""
+    with pytest.raises(ValueError, match="positive issue number"):
+        PipelineGitHub("org", repo="repo")._scope_expansion_timeline_prs(issue_number)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        None,
+        {"event": "cross-referenced", "source": {"type": "issue", "issue": None}},
+        {
+            "event": "cross-referenced",
+            "source": {
+                "type": "issue",
+                "issue": {"number": 1, "repository_url": "relative", "pull_request": {}},
+            },
+        },
+        {
+            "event": "cross-referenced",
+            "source": {
+                "type": "issue",
+                "issue": {
+                    "number": 1,
+                    "repository_url": "https://api.github.com/repos/org/repo",
+                    "pull_request": {"url": None},
+                },
+            },
+        },
+        {
+            "event": "cross-referenced",
+            "source": {
+                "type": "issue",
+                "issue": {
+                    "number": 1,
+                    "repository_url": "https://api.github.com/repos/org/repo",
+                    "pull_request": {"url": "http://api.github.com/repos/org/repo/pulls/1"},
+                },
+            },
+        },
+    ],
+)
+def test_timeline_association_rejects_additional_malformed_events(
+    monkeypatch: pytest.MonkeyPatch, event: object
+) -> None:
+    """Timeline association rejects malformed events, URLs, and pull-request links."""
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps([event]), stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match=r"timeline is malformed|association is malformed"):
+        PipelineGitHub("org", repo="repo")._scope_expansion_timeline_prs(41)
+
+
+def test_timeline_association_requires_repository_scope() -> None:
+    """Organization-only adapters cannot inspect an issue timeline."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        PipelineGitHub("org")._scope_expansion_timeline_prs(41)
+
+
+def test_timeline_association_stops_at_pagination_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full hundred-page timeline traversal stops at its safety bound."""
+    page = [{"event": "commented"}] * 100
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(page), stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match="timeline traversal exceeded"):
+        PipelineGitHub("org", repo="repo")._scope_expansion_timeline_prs(41)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        [None],
+        [{"number": 1, "head": None}],
+        [{"number": True, "head": {"ref": "41-auto-impl", "repo": {"full_name": "org/repo"}}}],
+        [{"number": 1, "head": {"ref": "other", "repo": {"full_name": "org/repo"}}}],
+        [{"number": 1, "head": {"ref": "41-auto-impl", "repo": None}}],
+        [{"number": 1, "head": {"ref": "41-auto-impl", "repo": {"full_name": "other/repo"}}}],
+    ],
+)
+def test_canonical_branch_association_rejects_malformed_pages(
+    monkeypatch: pytest.MonkeyPatch, payload: object
+) -> None:
+    """Canonical branch discovery rejects malformed or cross-repository pull requests."""
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match="pull-request list is malformed"):
+        PipelineGitHub("org", repo="repo")._scope_expansion_canonical_branch_prs(41)
+
+
+def test_canonical_branch_association_requires_repository_scope() -> None:
+    """Organization-only adapters cannot search canonical child branches."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        PipelineGitHub("org")._scope_expansion_canonical_branch_prs(41)
+
+
+def test_canonical_branch_association_stops_at_pagination_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full hundred-page canonical branch traversal stops at its bound."""
+    page = [_canonical_pr(number, 41) for number in range(1, 101)]
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(page), stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match="pull-request traversal exceeded"):
+        PipelineGitHub("org", repo="repo")._scope_expansion_canonical_branch_prs(41)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ([], "evidence is malformed"),
+        ({"number": 73, "state": "MERGED"}, "merge timestamp is unavailable"),
+        (
+            {
+                "number": 73,
+                "state": "MERGED",
+                "mergedAt": "",
+                "baseRefName": "main",
+                "mergeCommit": {"oid": "a" * 40},
+            },
+            "merge timestamp is unavailable",
+        ),
+    ],
+)
+def test_merge_evidence_rejects_additional_malformed_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
+    message: str,
+) -> None:
+    """Merged pull-request evidence needs an object and a timestamp."""
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(
+        github,
+        "_gh",
+        lambda argv: subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr=""),
+    )
+    with pytest.raises(RuntimeError, match=message):
+        github._scope_expansion_merge_evidence(73)
+
+
+@pytest.mark.parametrize("issue_number", [True, 0, -1, "41"])
+def test_merged_scope_expansion_rejects_invalid_child_identity(issue_number: object) -> None:
+    """Merged-child lookup requires a positive integer child issue identity."""
+    with pytest.raises(ValueError, match="positive issue number"):
+        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(issue_number)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("source_pr_number", [True, 0, -1, "41"])
+def test_merged_scope_expansion_rejects_invalid_source_identity(
+    source_pr_number: object,
+) -> None:
+    """A source exclusion requires a positive integer pull-request identity."""
+    with pytest.raises(ValueError, match="source pull-request identity"):
+        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(
+            41,
+            source_pr_number=source_pr_number,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("ancestor", "descendant", "message"),
+    [
+        ("A" * 40, "main", "ancestor SHA"),
+        ("a" * 39, "main", "ancestor SHA"),
+        ("a" * 40, "MAIN", "descendant SHA"),
+        ("a" * 40, "b" * 39, "descendant SHA"),
+    ],
+)
+def test_commit_is_ancestor_rejects_invalid_identifiers(
+    ancestor: str, descendant: str, message: str
+) -> None:
+    """Commit comparison accepts only full lowercase SHAs or literal main."""
+    with pytest.raises(ValueError, match=message):
+        PipelineGitHub("org", repo="repo").commit_is_ancestor(ancestor, descendant)
+
+
+def test_commit_is_ancestor_requires_repository_scope() -> None:
+    """Organization-only adapters cannot compare repository commits."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        PipelineGitHub("org").commit_is_ancestor("a" * 40, "main")
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"status": "ahead"}, True),
+        ({"status": "identical"}, True),
+        ({"status": "behind"}, False),
+        ({"status": "diverged"}, False),
+    ],
+)
+def test_commit_is_ancestor_maps_documented_compare_statuses(
+    monkeypatch: pytest.MonkeyPatch, payload: object, expected: bool
+) -> None:
+    """Commit comparison maps each documented GitHub status to ancestry."""
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    assert PipelineGitHub("org", repo="repo").commit_is_ancestor("a" * 40, "main") is expected
+
+
+@pytest.mark.parametrize("payload", [[], {}, {"status": "unknown"}])
+def test_commit_is_ancestor_rejects_malformed_response(
+    monkeypatch: pytest.MonkeyPatch, payload: object
+) -> None:
+    """Commit comparison fails when GitHub omits a documented status."""
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match=r"comparison is malformed|status is unavailable"):
+        PipelineGitHub("org", repo="repo").commit_is_ancestor("a" * 40, "main")
+
+
+def test_blocking_review_rejects_body_without_marker() -> None:
+    """A blocking review body must keep its durable marker as the first line."""
+    with pytest.raises(ValueError, match="must start with marker"):
+        PipelineGitHub("org", repo="repo").post_scope_expansion_blocking_review(
+            7, body="text", marker="<!-- marker -->"
+        )
+
+
+def test_blocking_review_dry_run_returns_sentinel() -> None:
+    """Dry-run blocking review publication does not call GitHub."""
+    marker = "<!-- marker -->"
+    assert (
+        PipelineGitHub("org", repo="repo", dry_run=True).post_scope_expansion_blocking_review(
+            7, body=f"{marker}\ntext", marker=marker
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize("review_id", [None, ""])
+def test_existing_blocking_review_requires_identity(
+    monkeypatch: pytest.MonkeyPatch, review_id: object
+) -> None:
+    """An existing matching review needs a nonempty GraphQL node identity."""
+    marker = "<!-- marker -->"
+    body = f"{marker}\ntext"
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(
+        github,
+        "pull_request_reviews",
+        lambda number: (
+            {"state": "COMMENTED", "viewerDidAuthor": True, "body": body, "id": review_id},
+        ),
+    )
+    with pytest.raises(RuntimeError, match="review id is unavailable"):
+        github.post_scope_expansion_blocking_review(7, body=body, marker=marker)
+
+
+def test_existing_blocking_review_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A matching actor-owned review is returned without another publication."""
+    marker = "<!-- marker -->"
+    body = f"{marker}\ntext"
+    github = PipelineGitHub("org", repo="repo")
+    monkeypatch.setattr(
+        github,
+        "pull_request_reviews",
+        lambda number: ({"state": "COMMENTED", "viewerDidAuthor": True, "body": body, "id": "R1"},),
+    )
+    assert github.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R1"
+
+
+@pytest.mark.parametrize(
+    ("response", "readback", "message"),
+    [
+        ({}, (), "publication was not confirmed"),
+        ({"node_id": "R2"}, (), "publication was not confirmed"),
+        (
+            {"id": "R2"},
+            ({"state": "COMMENTED", "viewerDidAuthor": True, "body": "BODY", "id": "R3"},),
+            "unexpected review id",
+        ),
+    ],
+)
+def test_blocking_review_publication_requires_matching_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    response: dict[str, object],
+    readback: tuple[dict[str, object], ...],
+    message: str,
+) -> None:
+    """A blocking review needs a returned identity and an exact actor-owned readback."""
+    marker = "<!-- marker -->"
+    body = f"{marker}\ntext"
+    normalized = tuple(
+        {**review, "body": body if review.get("body") == "BODY" else review.get("body")}
+        for review in readback
+    )
+    github = PipelineGitHub("org", repo="repo")
+    reviews = iter([(), normalized])
+    monkeypatch.setattr(github, "pull_request_reviews", lambda number: next(reviews))
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(response), stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match=message):
+        github.post_scope_expansion_blocking_review(7, body=body, marker=marker)
+
+
+def test_blocking_review_publication_accepts_node_id_and_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A node identity with an exact readback confirms blocking review publication."""
+    marker = "<!-- marker -->"
+    body = f"{marker}\ntext"
+    github = PipelineGitHub("org", repo="repo")
+    reviews = iter(
+        [
+            (),
+            ({"state": "COMMENTED", "viewerDidAuthor": True, "body": body, "id": "R2"},),
+        ]
+    )
+    monkeypatch.setattr(github, "pull_request_reviews", lambda number: next(reviews))
+    monkeypatch.setattr(
+        scope_expansion_adapter,
+        "direct_gh_call",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"node_id": "R2"}), stderr=""
+        ),
+    )
+    assert github.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R2"

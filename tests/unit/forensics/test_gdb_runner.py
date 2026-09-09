@@ -3,12 +3,23 @@
 
 from __future__ import annotations
 
+import argparse
 import shutil
+import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from hephaestus.forensics import gdb_runner
 from hephaestus.forensics.gdb_runner import (
+    _parse_execution_timeout,
+    _read_process_group,
+    _run_bounded,
+    _terminate_and_reap,
+    _terminate_process,
+    _unlink_best_effort,
+    _validate_execution_timeout,
     _validate_gdb_cmd_prefix,
     build_gdb_script,
     main,
@@ -369,3 +380,213 @@ class TestMainPrefixValidation:
             ]
         )
         assert rc == 127
+
+
+class TestTimeoutAndCleanup:
+    """Tests for timeout parsing and bounded process cleanup."""
+
+    @pytest.mark.parametrize("timeout", [1, 7_200, 86_400])
+    def test_validate_execution_timeout_accepts_bounds(self, timeout: int) -> None:
+        """The execution timeout accepts both limits and an interior value."""
+        assert _validate_execution_timeout(timeout) == timeout
+
+    @pytest.mark.parametrize("timeout", [0, -1, 86_401])
+    def test_validate_execution_timeout_rejects_out_of_range(self, timeout: int) -> None:
+        """The execution timeout rejects values outside the documented range."""
+        with pytest.raises(ValueError, match="between 1 and 86400"):
+            _validate_execution_timeout(timeout)
+
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [("text", "integer"), ("0", "between 1 and 86400"), ("86401", "between 1 and 86400")],
+    )
+    def test_parse_execution_timeout_translates_cli_errors(self, raw: str, message: str) -> None:
+        """The argument parser receives a stable error for type and range failures."""
+        with pytest.raises(argparse.ArgumentTypeError, match=message):
+            _parse_execution_timeout(raw)
+
+    def test_read_process_group_handles_absent_missing_and_nonpositive(
+        self, tmp_path: Path
+    ) -> None:
+        """Process-group recovery returns only a recorded positive integer."""
+        path = tmp_path / "pgid"
+        assert _read_process_group(None) is None
+        assert _read_process_group(path) is None
+        path.write_text("0\n", encoding="utf-8")
+        assert _read_process_group(path) is None
+        path.write_text("42\n", encoding="utf-8")
+        assert _read_process_group(path) == 42
+
+    def test_unlink_best_effort_removes_files_and_suppresses_errors(self, tmp_path: Path) -> None:
+        """Artifact cleanup removes normal paths and does not mask an unlink failure."""
+        path = tmp_path / "artifact"
+        path.write_text("data", encoding="utf-8")
+        broken = MagicMock(spec=Path)
+        broken.unlink.side_effect = OSError("busy")
+        _unlink_best_effort(path, broken)
+        assert not path.exists()
+        broken.unlink.assert_called_once_with(missing_ok=True)
+
+    def test_terminate_process_kills_additional_and_primary_groups(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """POSIX cleanup kills the recorded inferior group and the wrapper group."""
+        pgid_file = tmp_path / "pgid"
+        pgid_file.write_text("99", encoding="utf-8")
+        process = MagicMock(pid=41)
+        killpg = MagicMock()
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", True)
+        monkeypatch.setattr("hephaestus.forensics.gdb_runner.os.killpg", killpg)
+        _terminate_process(process, additional_process_group_file=pgid_file)
+        assert [call.args[0] for call in killpg.call_args_list] == [99, 41]
+        process.kill.assert_not_called()
+
+    def test_terminate_process_falls_back_when_primary_group_is_gone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing primary group makes cleanup kill the direct child."""
+        process = MagicMock(pid=41)
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", True)
+        monkeypatch.setattr(
+            "hephaestus.forensics.gdb_runner.os.killpg",
+            MagicMock(side_effect=ProcessLookupError),
+        )
+        _terminate_process(process)
+        process.kill.assert_called_once_with()
+
+    def test_terminate_process_uses_direct_child_without_process_groups(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Platforms without process groups terminate the direct child."""
+        process = MagicMock(pid=41)
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
+        _terminate_process(process)
+        process.kill.assert_called_once_with()
+
+    def test_terminate_and_reap_returns_after_first_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cleanup returns when the first bounded reap confirms termination."""
+        process = MagicMock()
+        terminate = MagicMock()
+        monkeypatch.setattr(gdb_runner, "_terminate_process", terminate)
+        _terminate_and_reap(process)
+        terminate.assert_called_once_with(process, additional_process_group_file=None)
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_terminate_and_reap_retries_after_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cleanup terminates again and performs a final nonblocking reap."""
+        process = MagicMock()
+        process.wait.side_effect = [subprocess.TimeoutExpired(["cmd"], 5), 0]
+        terminate = MagicMock()
+        monkeypatch.setattr(gdb_runner, "_terminate_process", terminate)
+        _terminate_and_reap(process)
+        assert terminate.call_count == 2
+        assert [
+            call.kwargs["additional_process_group_file"] for call in terminate.call_args_list
+        ] == [
+            None,
+            None,
+        ]
+        assert [call.kwargs["timeout"] for call in process.wait.call_args_list] == [5, 0]
+
+    def test_terminate_and_reap_reports_unconfirmed_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two reap timeouts produce an explicit cleanup failure with the final cause."""
+        process = MagicMock()
+        first = subprocess.TimeoutExpired(["cmd"], 5)
+        final = subprocess.TimeoutExpired(["cmd"], 0)
+        process.wait.side_effect = [first, final]
+        monkeypatch.setattr(gdb_runner, "_terminate_process", MagicMock())
+        with pytest.raises(RuntimeError, match="termination was not confirmed") as raised:
+            _terminate_and_reap(process)
+        assert raised.value.__cause__ is final
+
+
+class TestBoundedExecution:
+    """Tests for the subprocess boundary used by direct and gdb execution."""
+
+    def test_run_bounded_returns_child_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A normally completed child returns its exact status."""
+        process = MagicMock()
+        process.wait.return_value = 7
+        popen = MagicMock(return_value=process)
+        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.Popen", popen)
+        monkeypatch.setattr(gdb_runner, "read_approved_parent_env", lambda: {"PATH": "/bin"})
+        assert _run_bounded(["tool"], 9) == 7
+        assert popen.call_args.kwargs["env"] == {"PATH": "/bin"}
+        process.wait.assert_called_once_with(timeout=9)
+
+    @pytest.mark.parametrize(
+        "failure",
+        [subprocess.TimeoutExpired(["tool"], 9), KeyboardInterrupt()],
+        ids=("timeout", "keyboard-interrupt"),
+    )
+    def test_run_bounded_cleans_up_before_propagation(
+        self, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+    ) -> None:
+        """A timeout or keyboard interrupt terminates and reaps before propagation."""
+        process = MagicMock()
+        process.wait.side_effect = failure
+        monkeypatch.setattr(
+            "hephaestus.forensics.gdb_runner.subprocess.Popen", MagicMock(return_value=process)
+        )
+        reap = MagicMock()
+        monkeypatch.setattr(gdb_runner, "_terminate_and_reap", reap)
+        with pytest.raises(type(failure)):
+            _run_bounded(["tool"], 9)
+        reap.assert_called_once_with(process, additional_process_group_file=None)
+
+
+@pytest.mark.parametrize(("recorded", "expected"), [("17", 17), ("bad", 5), (None, 5)])
+def test_run_under_gdb_prefers_valid_recorded_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    recorded: str | None,
+    expected: int,
+) -> None:
+    """The gdb wrapper uses a valid recorded status and otherwise uses gdb status."""
+    monkeypatch.setattr("hephaestus.forensics.gdb_runner.time.time", lambda: 123.0)
+    monkeypatch.setattr(gdb_runner, "resolve_command", lambda command: "/bin/tool")
+
+    def fake_run(
+        command: list[str],
+        timeout: int,
+        *,
+        additional_process_group_file: Path | None = None,
+    ) -> int:
+        """Create the optional gdb exit receipt before returning."""
+        del command, timeout, additional_process_group_file
+        if recorded is not None:
+            (tmp_path / "cores" / "exit-123.code").write_text(recorded, encoding="utf-8")
+        return 5
+
+    monkeypatch.setattr(gdb_runner, "_run_bounded", fake_run)
+    assert run_under_gdb(str(tmp_path / "cores"), "tool", ["arg"]) == expected
+    assert not (tmp_path / "cores" / "exit-123.code").exists()
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_main_translates_execution_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    as_json: bool,
+) -> None:
+    """The CLI returns 124 and optionally emits JSON after an execution timeout."""
+    monkeypatch.setattr(
+        gdb_runner,
+        "run_under_gdb",
+        MagicMock(side_effect=subprocess.TimeoutExpired(["gdb"], 1)),
+    )
+    argv = [str(tmp_path), "tool"]
+    if as_json:
+        argv.insert(0, "--json")
+    assert main(argv) == 124
+    captured = capsys.readouterr()
+    assert "command timed out" in captured.err
+    if as_json:
+        assert '"exit_code": 124' in captured.out

@@ -1,6 +1,6 @@
 [coverage]
 # Aggregate coverage threshold
-minimum = 80
+minimum = 85
 
 # Per-module coverage floors
 # Paths must match Cobertura XML <class filename="..."> attribute exactly.
