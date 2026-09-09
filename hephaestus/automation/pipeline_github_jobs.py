@@ -187,18 +187,7 @@ class PipelineGitHubJobRunner:
                     handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
                 )
             case AppendReplyJournalRequest():
-                github.append_issue_comment(
-                    job.request.issue_number,
-                    job.request.marker,
-                    job.request.body,
-                )
-                if job.request.prepublication_receipt_sha256 is not None and not self.dry_run:
-                    remove_prepublication_receipt(
-                        repo_root=job.repo_root,
-                        pr_number=job.request.issue_number,
-                        expected_review_input_sha256=(job.request.prepublication_receipt_sha256),
-                    )
-                return ReplyJournalAppended(request=job.request)
+                return self._append_reply_journal(job, job.request, github)
             case DeliverReplyHandoffRequest():
                 return attempt_reply_handoff(job.request, github)
             case ReconcilePrReviewRequest():
@@ -212,6 +201,22 @@ class PipelineGitHubJobRunner:
             case unknown:
                 return assert_never(unknown)
         raise AssertionError("unreachable closed GitHub request dispatch")
+
+    def _append_reply_journal(
+        self,
+        job: GitHubJob,
+        request: AppendReplyJournalRequest,
+        github: StageGitHub,
+    ) -> ReplyJournalAppended:
+        """Append the journal before removal of its prepublication receipt."""
+        github.append_issue_comment(request.issue_number, request.marker, request.body)
+        if request.prepublication_receipt_sha256 is not None and not self.dry_run:
+            remove_prepublication_receipt(
+                repo_root=job.repo_root,
+                pr_number=request.issue_number,
+                expected_review_input_sha256=request.prepublication_receipt_sha256,
+            )
+        return ReplyJournalAppended(request=request)
 
     @staticmethod
     def _reconcile_scope_expansion_dependencies(  # noqa: C901

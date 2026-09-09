@@ -5863,10 +5863,10 @@ class WorkerPool:
                     )
                 fallback = self._verify_noop_writer_rebase(
                     cwd,
-                    remote=remote,
+                    remote="origin",
                     branch=branch,
                     expected_repo=job.transport_repository,
-                    expected_remote_sha=expected_remote_sha,
+                    expected_remote_sha=expected,
                     timeout=job.timeout_s,
                 )
                 if not fallback.ok:
