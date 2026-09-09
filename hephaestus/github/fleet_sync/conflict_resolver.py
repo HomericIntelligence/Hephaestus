@@ -26,15 +26,15 @@ from hephaestus.github.fleet_sync.models import (
     PRInfo,
     Symbols,
 )
-from hephaestus.github.git_ops import (
+from hephaestus.logging.utils import get_logger
+from hephaestus.prompts import PromptCatalog
+from hephaestus.prompts.fencing import fence_untrusted as _fence_untrusted
+from hephaestus.utils.git import (
     git_ls_remote_sha,
     git_rev_list_count,
     git_unmerged_files,
     run_git,
 )
-from hephaestus.logging.utils import get_logger
-from hephaestus.prompts import PromptCatalog
-from hephaestus.prompts.fencing import fence_untrusted as _fence_untrusted
 
 logger = get_logger(__name__)
 

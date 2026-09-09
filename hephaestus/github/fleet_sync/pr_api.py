@@ -6,7 +6,6 @@ import json
 import subprocess
 from typing import Any
 
-from hephaestus.github.auto_merge import defer_auto_merge
 from hephaestus.github.client import gh_call
 from hephaestus.github.fleet_sync.models import (
     DEFAULT_FLEET_TIMEOUTS,
@@ -159,43 +158,3 @@ def list_prs(
         )
 
     return out
-
-
-def _defer_auto_merge(
-    pr: PRInfo,
-    org: str,
-    *,
-    timeouts: FleetTimeouts | None = None,
-) -> bool:
-    """Disable a pre-existing fleet PR arm and verify the read-back."""
-    return defer_auto_merge(
-        pr.number,
-        lambda args: _gh(
-            args,
-            repo=pr.repo,
-            org=org,
-            check=False,
-            **_timeouts_arg(timeouts),
-        ),
-    )
-
-
-def merge_pr(
-    pr: PRInfo,
-    org: str,
-    dry_run: bool = False,
-    *,
-    timeouts: FleetTimeouts | None = None,
-) -> bool:
-    """Contain an existing arm, then refuse fleet-sync automatic merging."""
-    if dry_run:
-        logger.info("  [dry-run] Would verify auto-merge is disabled for PR #%d", pr.number)
-        return False
-    if not _defer_auto_merge(
-        pr,
-        org,
-        **_timeouts_arg(timeouts),
-    ):
-        return False
-    logger.error("  Refusing to merge PR #%d while the PR-review gate is unavailable", pr.number)
-    return False

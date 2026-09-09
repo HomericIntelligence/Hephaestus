@@ -1737,7 +1737,7 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             (
                 f"uv run python scripts/{script_name} capture --run-id <run-id> "
                 "--stage discovery-plan --provider pi -- uv run hephaestus-plan-issues "
-                f"--issues {ISSUE_NUMBER} --parallel 1 --agent pi --json"
+                f"--issues {ISSUE_NUMBER} --max-workers 1 --agent pi --json"
             ),
             (
                 f"uv run python scripts/{script_name} capture --run-id <run-id> "

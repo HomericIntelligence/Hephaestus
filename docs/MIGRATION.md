@@ -23,9 +23,8 @@ separate options from automation commands:
 | `--reviewer-reasoning-effort EFFORT` | `--reviewer-model MODEL:EFFORT` |
 | `--implementer-reasoning-effort EFFORT` | `--implementer-model MODEL:EFFORT` |
 
-Programmatic `LoopConfig` and `PipelineConfig` callers must make the same
-change. Move each removed `*_reasoning_effort` field into the matching
-`*_model` value.
+Programmatic callers must use `PipelineConfig` and make the same change.
+Move each removed `*_reasoning_effort` field into the matching `*_model` value.
 
 The public `MODEL_REASONING_EFFORTS` export is removed. Use
 `parse_model_selection()` to separate the model and effort. The final nonempty

@@ -1,12 +1,9 @@
-"""Regression tests for centralized logging setup delegation."""
+"""Test logging delegation through retained command entry points."""
 
 from __future__ import annotations
 
 import logging
-from contextlib import ExitStack
 from importlib import import_module
-from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -15,7 +12,7 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 
 
 class _StopAfterLoggingError(RuntimeError):
-    """Stop a command after its logging setup boundary."""
+    """Stop a command after logging setup."""
 
 
 @pytest.mark.parametrize(
@@ -29,19 +26,7 @@ class _StopAfterLoggingError(RuntimeError):
             {"verbose": False, "log_format": "json"},
             logging.INFO,
         ),
-        (
-            "hephaestus.automation._review_utils",
-            "setup_review_logging",
-            {"verbose": False},
-            logging.INFO,
-        ),
-        (
-            "hephaestus.automation._review_utils",
-            "setup_review_logging",
-            {"verbose": True},
-            logging.DEBUG,
-        ),
-        ("hephaestus.automation.loop_runner", "_setup_logging", {"verbose": False}, logging.INFO),
+        ("hephaestus.automation.pipeline_cli", "_setup_logging", {"verbose": False}, logging.INFO),
     ],
 )
 def test_cli_logging_helpers_delegate_to_shared_helper(
@@ -50,13 +35,10 @@ def test_cli_logging_helpers_delegate_to_shared_helper(
     kwargs: dict[str, object],
     expected_level: int,
 ) -> None:
-    """Standard CLI logging helpers route through ``setup_logging``."""
-    module = import_module(module_name)
-    helper = getattr(module, callable_name)
-
+    """CLI logging helpers use the common logging configuration."""
+    helper = getattr(import_module(module_name), callable_name)
     with patch("hephaestus.cli.utils.setup_logging") as setup:
         helper(**kwargs)
-
     setup.assert_called_once_with(
         level=expected_level,
         log_file=None,
@@ -64,25 +46,6 @@ def test_cli_logging_helpers_delegate_to_shared_helper(
         datefmt=LOG_DATEFMT,
         primary_stream="stderr",
         json_format=kwargs.get("log_format") == "json",
-    )
-
-
-def test_implementer_setup_logging_routes_log_dir_to_shared_helper(tmp_path: Path) -> None:
-    """Implementer logging keeps the run.log file handler but delegates setup."""
-    module = import_module("hephaestus.automation.implementer")
-    log_dir = tmp_path / "state"
-
-    with patch.object(module, "setup_logging", Mock()) as setup:
-        module._setup_logging(verbose=True, log_dir=log_dir)
-
-    assert log_dir.is_dir()
-    setup.assert_called_once_with(
-        level=logging.DEBUG,
-        log_file=str(log_dir / "run.log"),
-        format_string=AUTOMATION_LOG_FORMAT,
-        datefmt=LOG_DATEFMT,
-        primary_stream="stderr",
-        json_format=False,
     )
 
 
@@ -113,50 +76,27 @@ def test_fleet_sync_main_delegates_logging_to_shared_helper() -> None:
     configure.assert_called_once_with(verbose=True, log_format="json")
 
 
-@pytest.mark.parametrize(
-    "module_name",
-    [
-        "hephaestus.automation.ci_driver",
-        "hephaestus.automation.planner",
-        "hephaestus.automation.pr_reviewer",
-        "hephaestus.automation.plan_reviewer",
-    ],
-)
-def test_affected_cli_mains_forward_logging_arguments(module_name: str) -> None:
-    """Affected commands send parsed logging options to the canonical helper."""
-    module = import_module(module_name)
-    args = SimpleNamespace(
-        verbose=True,
-        log_format="json",
-        agent=None,
-        disable_pi_automation=False,
-        auth_status_timeout=1,
-        pi_isolation_adapter=None,
-        pi_dir=None,
-        model=None,
-        planner_model=None,
-        reviewer_model=None,
-        fallback_model=None,
+@pytest.mark.parametrize("module_name", ["loop_runner", "planner", "implementer", "pr_reviewer"])
+def test_queue_commands_forward_logging_arguments(module_name: str) -> None:
+    """Each queue command sends logging options through the shared parser."""
+    from hephaestus.automation import pipeline_cli
+
+    entry = import_module(f"hephaestus.automation.{module_name}")
+    with (
+        patch.object(pipeline_cli, "resolve_agent", side_effect=_StopAfterLoggingError()),
+        patch.object(pipeline_cli, "configure_cli_logging") as configure,
+        patch.object(pipeline_cli, "configure_github_throttle_from_args"),
+        pytest.raises(_StopAfterLoggingError),
+    ):
+        entry.main(["--verbose", "--log-format", "json", "--log-file", "queue.log"])
+    configure.assert_called_once_with(
+        verbose=True, log_format="json", quiet=False, log_file="queue.log"
     )
-
-    with ExitStack() as stack:
-        stack.enter_context(patch.object(module, "_parse_args", return_value=args))
-        stack.enter_context(
-            patch.object(module, "resolve_agent", side_effect=_StopAfterLoggingError())
-        )
-        configure = stack.enter_context(patch.object(module, "configure_cli_logging", Mock()))
-        if hasattr(module, "configure_github_throttle_from_args"):
-            stack.enter_context(patch.object(module, "configure_github_throttle_from_args"))
-
-        with pytest.raises(_StopAfterLoggingError):
-            module.main()
-
-    configure.assert_called_once_with(verbose=True, log_format="json")
 
 
 def test_loop_logging_forwards_all_options() -> None:
-    """Forward the file, format, and level options to the CLI helper."""
-    module = import_module("hephaestus.automation.loop_runner")
+    """Forward file, format, and level options to the common CLI helper."""
+    module = import_module("hephaestus.automation.pipeline_cli")
     with patch.object(module, "configure_cli_logging") as configure:
         module._setup_logging(True, "json", quiet=True, log_file="loop.log")
     configure.assert_called_once_with(

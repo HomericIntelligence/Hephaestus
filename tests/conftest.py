@@ -230,7 +230,7 @@ def _agents_authenticated_by_default(
     # Patch at the runtime module and at every automation module that imported
     # ``resolve_agent`` by value (``from ...runtime import resolve_agent``).
     monkeypatch.setattr("hephaestus.agents.runtime.resolve_agent", _stub_resolve_agent)
-    for mod in ("implementer", "loop_runner", "planner", "pr_reviewer", "audit_reviewer"):
+    for mod in ("pipeline_cli",):
         target = f"hephaestus.automation.{mod}.resolve_agent"
         # A module that does not import resolve_agent by value has nothing to patch.
         with contextlib.suppress(AttributeError):

@@ -2039,21 +2039,29 @@ class TestProcessRepoRoutes:
         assert counts["failed"] == 1
         assert counts["skipped"] == 0
 
-    def test_process_repo_records_ready_merge_failure(self, tmp_path: Path) -> None:
-        """READY PR merge failures increment failed rather than merged."""
+    def test_process_repo_leaves_ready_prs_for_the_queue(self, tmp_path: Path) -> None:
+        """Skip READY PRs without GitHub calls or a local checkout."""
         prs = [_pr(7, PRStatus.READY)]
         args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
 
         with (
             patch.object(fleet_coordinator, "list_prs", return_value=prs),
-            patch.object(fleet_coordinator, "merge_pr", return_value=False) as merge,
+            patch.object(
+                fleet_pr_api,
+                "_gh",
+                return_value=MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
+                ),
+            ) as gh,
             patch.object(fleet_coordinator, "ensure_repo_clone") as ensure,
         ):
             counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
 
         assert counts["merged"] == 0
-        assert counts["failed"] == 1
-        merge.assert_called_once_with(prs[0], "HomericIntelligence", dry_run=False)
+        assert counts["skipped"] == 1
+        assert counts["failed"] == 0
+        gh.assert_not_called()
         ensure.assert_not_called()
 
     def test_process_repo_records_outdated_rebase_failure(self, tmp_path: Path) -> None:
@@ -2291,108 +2299,6 @@ class TestCloneReuseAndWorktrees:
 
         assert clone_count[0] == 1
         assert counts["rebased"] == 3
-
-    def test_process_repo_skips_clone_when_no_checkout_needed(self, tmp_path: Path) -> None:
-        """READY-only PRs merge via gh and never trigger a clone."""
-        prs = [_pr(1, PRStatus.READY, head="feat1")]
-        clone_count = [0]
-
-        def fake_ensure(repo, org, clone_dir, dry_run=False, **kwargs):
-            del kwargs
-            clone_count[0] += 1
-            return clone_dir / repo
-
-        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="claude")
-
-        with (
-            patch.object(fleet_coordinator, "list_prs", return_value=prs),
-            patch.object(fleet_coordinator, "ensure_repo_clone", side_effect=fake_ensure),
-            patch.object(fleet_coordinator, "merge_pr", return_value=True),
-        ):
-            counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
-
-        assert clone_count[0] == 0
-        assert counts["merged"] == 1
-
-
-class TestMergePr:
-    """Merge-path error handling."""
-
-    def test_merge_pr_is_fail_closed_after_verifying_auto_merge_is_disabled(self) -> None:
-        """Fleet sync checks an unarmed PR before refusing the unavailable gate."""
-        pr = _pr(42, PRStatus.READY)
-
-        with patch.object(
-            fleet_pr_api,
-            "_gh",
-            return_value=MagicMock(
-                returncode=0,
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
-            ),
-        ) as gh:
-            assert fleet_pr_api.merge_pr(pr, "HomericIntelligence") is False
-        gh.assert_called_once_with(
-            ["pr", "view", "42", "--json", "state,autoMergeRequest"],
-            repo=pr.repo,
-            org="HomericIntelligence",
-            check=False,
-        )
-
-    def test_merge_pr_disables_prearmed_auto_merge_and_reads_back(self) -> None:
-        """Fleet sync contains an existing arm before it refuses to merge."""
-        pr = _pr(42, PRStatus.READY)
-        calls: list[list[str]] = []
-        responses = iter(
-            [
-                MagicMock(
-                    returncode=0,
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
-                ),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(
-                    returncode=0,
-                    stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}),
-                ),
-            ]
-        )
-
-        def gh(args: list[str], **_kwargs: object) -> MagicMock:
-            calls.append(args)
-            return next(responses)
-
-        with patch.object(fleet_pr_api, "_gh", side_effect=gh):
-            assert fleet_pr_api.merge_pr(pr, "HomericIntelligence") is False
-
-        assert calls == [
-            ["pr", "view", "42", "--json", "state,autoMergeRequest"],
-            ["pr", "merge", "42", "--disable-auto"],
-            ["pr", "view", "42", "--json", "state,autoMergeRequest"],
-        ]
-
-    def test_merge_pr_fails_closed_on_malformed_auto_merge_state(self) -> None:
-        """Fleet sync must not treat a valid-but-wrong JSON shape as unarmed."""
-        pr = _pr(42, PRStatus.READY)
-
-        with patch.object(
-            fleet_pr_api,
-            "_gh",
-            return_value=MagicMock(returncode=0, stdout="[]"),
-        ) as gh:
-            assert fleet_pr_api.merge_pr(pr, "HomericIntelligence") is False
-
-        gh.assert_called_once()
-
-    def test_fleet_deferral_rejects_an_incomplete_open_pr_state(self) -> None:
-        """Fleet sync cannot interpret an omitted arm field as an unarmed PR."""
-        pr = _pr(42, PRStatus.READY)
-
-        with patch.object(
-            fleet_pr_api,
-            "_gh",
-            return_value=MagicMock(returncode=0, stdout=json.dumps({"state": "OPEN"})),
-        ) as gh:
-            assert fleet_pr_api._defer_auto_merge(pr, "HomericIntelligence") is False
-        gh.assert_called_once()
 
 
 class TestListPrs:

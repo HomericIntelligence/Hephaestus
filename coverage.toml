@@ -10,16 +10,10 @@ minimum = 80
 "validation/schema.py" = { minimum = 80 }
 "automation/models.py" = { minimum = 90 }
 "automation/dependency_resolver.py" = { minimum = 74 }
-"automation/arming_state.py" = { minimum = 98 }
 
 "automation/implementer.py" = { minimum = 70, metric = "line" }
 "automation/planner.py" = { minimum = 70, metric = "line" }
-"automation/ci_driver.py" = { minimum = 70, metric = "line" }
-"automation/pr_discovery.py" = { minimum = 70, metric = "line" }
-"automation/ci_check_inspector.py" = { minimum = 70, metric = "line" }
-"automation/post_merge_processor.py" = { minimum = 70, metric = "line" }
 "automation/loop_runner.py" = { minimum = 70, metric = "line" }
 "automation/loop_repo_manager.py" = { minimum = 70, metric = "line" }
-"automation/curses_ui.py" = { minimum = 70, metric = "line" }
-"automation/audit_reviewer.py" = { minimum = 70, metric = "line" }
 "automation/address_review_core.py" = { minimum = 70, metric = "line" }
+"automation/pipeline_cli.py" = { minimum = 70, metric = "line" }

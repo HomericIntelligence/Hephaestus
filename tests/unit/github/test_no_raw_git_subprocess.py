@@ -11,7 +11,6 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TARGETS = (
     *_REPO_ROOT.joinpath("hephaestus", "github", "fleet_sync").glob("*.py"),
-    _REPO_ROOT / "hephaestus" / "github" / "pr_merge.py",
     _REPO_ROOT / "hephaestus" / "github" / "tidy.py",
 )
 _RUNNERS = {"run", "Popen", "check_output", "check_call"}

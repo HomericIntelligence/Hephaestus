@@ -9,7 +9,7 @@ import pytest
 
 from hephaestus.agents.runtime import is_agent_authenticated
 from hephaestus.automation.claude_invoke import invoke_claude_with_session
-from hephaestus.automation.session_naming import AGENT_ADVISE
+from hephaestus.automation.session_naming import AGENT_PLANNER
 
 pytestmark = [pytest.mark.integration, pytest.mark.contract]
 
@@ -25,7 +25,7 @@ def test_invoke_and_resume_session(
     stdout1, session1 = invoke_claude_with_session(
         repo="hephaestus-contract",
         issue=issue,
-        agent=AGENT_ADVISE,
+        agent=AGENT_PLANNER,
         prompt="Reply with exactly the word OK and nothing else.",
         model=contract_model,
         cwd=tmp_path,
@@ -38,7 +38,7 @@ def test_invoke_and_resume_session(
     stdout2, session2 = invoke_claude_with_session(
         repo="hephaestus-contract",
         issue=issue,
-        agent=AGENT_ADVISE,
+        agent=AGENT_PLANNER,
         prompt="Reply with exactly the word RESUMED and nothing else.",
         model=contract_model,
         cwd=tmp_path,

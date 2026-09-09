@@ -11,13 +11,7 @@ CONSOLE_SCRIPTS = [
     ("hephaestus-plan-issues", "hephaestus.automation.planner"),
     ("hephaestus-automation-loop", "hephaestus.automation.loop_runner"),
     ("hephaestus-review-prs", "hephaestus.automation.pr_reviewer"),
-    ("hephaestus-audit-prs", "hephaestus.automation.audit_reviewer"),
 ]
-
-# Modules with main() but no console script of their own.
-# ``implementer.main()`` backs the ``hephaestus-implement-issues`` script and is
-# covered by CONSOLE_SCRIPTS.
-MAIN_ONLY_MODULES = ["hephaestus.automation.ci_driver"]
 
 
 @pytest.mark.integration
@@ -57,15 +51,3 @@ class TestConsoleScriptsWork:
             f"Script {script_name} did not print usage text\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-
-
-@pytest.mark.integration
-class TestMainCallable:
-    """Modules with main() must have a callable main function."""
-
-    @pytest.mark.parametrize("module_name", MAIN_ONLY_MODULES)
-    def test_main_is_callable(self, module_name: str) -> None:
-        """Verify module has a callable main() function."""
-        module = __import__(module_name, fromlist=["main"])
-        assert hasattr(module, "main"), f"Module {module_name} does not have main()"
-        assert callable(module.main), f"Module {module_name}.main is not callable"

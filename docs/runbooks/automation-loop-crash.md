@@ -132,13 +132,13 @@ when the file is malformed or the repository checkout was restored.
 is operator-applied or applied after independent planner/reviewer agreement that
 an issue is a non-code tracker or obsolete request. A crash alone does **not**
 apply `state:skip`; re-running the loop is the correct first response to a crash.
-Apply `state:skip` yourself only when an issue is genuinely
-stuck after repeated attempts (for a stuck-but-green PR, see the
-[drive-green stall runbook](ci-driver-stall.md)).
+Apply `state:skip` yourself only when an issue remains blocked after repeated
+attempts. For a PR that cannot merge after its required checks pass, see the
+[queue merge stall runbook](ci-driver-stall.md).
 
 ## See also
 
 - [Corrupted worktree state](corrupted-worktree.md)
-- [Drive-green stall](ci-driver-stall.md)
+- [Queue merge stall](ci-driver-stall.md)
 - [Claude quota exhausted (429)](claude-quota-exhausted.md)
 - Stage → module → console-script mapping: [`../../AGENTS.md`](../../AGENTS.md)

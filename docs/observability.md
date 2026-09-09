@@ -61,7 +61,7 @@ are constructed only when a metrics port is configured.
 The alert queue-depth threshold is configurable via
 `PipelineConfig.alert_queue_depth_threshold` (default `100`); the stall
 threshold defaults to `3`, matching the coordinator's own
-`_STALL_TICKS_BEFORE_FORCE`.
+`_STALL_TICKS_BEFORE_RETRY`.
 
 ### `/health` compatibility and rollout
 

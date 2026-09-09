@@ -98,7 +98,7 @@ class TestFormatPreservedWorktrees:
         (space-joined ``--issues`` + a nonexistent ``--resume``). Assert the
         real argparser accepts the emitted flags and recovers the numbers.
         """
-        from hephaestus.automation import loop_runner
+        from hephaestus.automation.pipeline_cli import parse_args
 
         preserved = [("repo-a", 101, "/wt/issue-101"), ("repo-b", 202, "/wt/issue-202")]
         rerun_line = next(
@@ -106,7 +106,7 @@ class TestFormatPreservedWorktrees:
         )
         # Everything after the script token is the argv the operator would run.
         argv = rerun_line.split()[1:]
-        parsed = loop_runner._parse_args(argv)
+        parsed = parse_args(argv)
         assert parsed.issues == [101, 202]
 
 

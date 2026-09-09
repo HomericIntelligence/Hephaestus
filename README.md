@@ -85,8 +85,9 @@ Hephaestus ships two layers from one distribution:
   `import hephaestus`.
 - **Product** — `hephaestus.automation`. Opt-in via
   `pip install HomericIntelligence-Hephaestus[automation]`. Implements
-  the Claude/Codex automation pipeline (Planner, Implementer, CIDriver,
-  reviewers, loop runner, curses TUI).
+  the queue pipeline for planning, implementation, review, merge, learning,
+  and cleanup. Claude Code, Codex, OpenCode, and admitted Pi providers run
+  agent jobs through the shared runtime.
 
 `import hephaestus` does **not** load `hephaestus.automation`, `curses`,
 `fcntl`, or `pydantic`, and a base `pip install` no longer pulls `pydantic`
@@ -314,7 +315,8 @@ remaining narrowly approved runtime variables and the deny-by-default policy.
 
 Run any command with `--help` to see full usage.
 
-The package currently installs 58 console scripts from `[project.scripts]`.
+The installed console scripts are declared in `[project.scripts]` in
+[`pyproject.toml`](pyproject.toml).
 
 ### Automation
 
@@ -327,23 +329,32 @@ evidence and never falls back after failure. See
 
 | Command | Description |
 |---|---|
-| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code, Codex, or an explicitly admitted Pi host adapter (repo → planning → plan_review → implementation → pr_review → merge_wait → finished; restarted implementation-GO inputs re-enter `merge_wait` with their loop-owned approval label) |
-| `hephaestus-install-pi-plugins` | Install and preflight the catalog-pinned Pi CLI package set; passing this gate does not bypass #2518 |
-| `hephaestus-plan-issues` | Bulk issue planning using Claude Code, Codex, or an explicitly admitted Pi host adapter |
-| `hephaestus-implement-issues` | Bulk issue implementation using Claude Code, Codex, or an explicitly admitted Pi host adapter in parallel worktrees |
-| `hephaestus-review-prs` | PR review/remediation automation using Claude Code, Codex, or an explicitly admitted Pi host adapter in parallel worktrees; reviewer agents are read-only, while the coordinator may apply implementation fixes and reconcile threads |
-| `hephaestus-agent-stage` | Run one Claude, Codex, or explicitly admitted Pi automation stage with prompt and skill context |
-| `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) and the documented repository labels (`tech-debt`, `wontfix`) on one or more repos |
-| `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
-| `hephaestus-drive-prs-green` | Review directly scoped PRs or PRs linked from discovered issues through the pr_review/merge_wait pipeline slice; it does not sweep unrelated open PRs |
+| `hephaestus-automation-loop` | Run all six main queues and the auxiliary learning and cleanup queues |
+| `hephaestus-plan-issues` | Run `planning → plan_review` through the same coordinator |
+| `hephaestus-implement-issues` | Run `implementation → pr_review → merge_wait` through the same coordinator |
+| `hephaestus-review-prs` | Run the `pr_review` scope through the same coordinator |
+| `hephaestus-install-pi-plugins` | Install and check the pinned Pi packages; provider admission remains required |
+| `hephaestus-ensure-state-labels` | Create the required planning and repository labels |
 
-`hephaestus-plan-issues` exits `75` when open-issue discovery is deferred by
-a GitHub rate limit. This is a retryable temporary failure, not success. With
-`--json`, `reset_epoch` is the known reset epoch or `null`, `affected_issues`
-is `null` when discovery could not enumerate them, and
-`incomplete_issue_scope` identifies the affected repository selection. Retry
-without `--force`; issues already at or past `state:plan-go` remain completed
-and are not planned again.
+The four queue commands use one parser in `pipeline_cli.py`. The full loop
+accepts `--stages` with contiguous main stage names in queue order. Learning
+and cleanup are implicit. Use `--merge-attempts` for the merge request budget
+and `--max-workers` for main worker capacity. Use `--learning-workers` and
+`--learning-queue-capacity` for the separate auxiliary lane.
+
+The implementation stage owns all branch changes, tests, commits, pushes, and
+implementation replies. PR review owns a detached source checkout and review
+evidence. Before merge, the pipeline requires review proof from the current
+process, passing required checks for that exact head, complete thread state,
+and the server merge route required by repository policy. A recovered label
+or publication receipt cannot replace fresh review proof.
+
+This queue migration removes old command names, option aliases, and legacy
+record readers. Stop old coordinators before the upgrade. Preserve unresolved
+publication effects, local commits, worktrees, and current journals. Do not
+run old and new owners against the same state directory. See the
+[queue cutover decision](docs/adr/0048-queue-owned-automation-cutover.md) and
+[queue recovery runbook](docs/runbooks/ci-driver-stall.md).
 
 #### Private Pi provider setup
 
@@ -413,7 +424,6 @@ sync (#993).
 | `hephaestus-gh` | Run `gh` through Hephaestus retry, circuit-breaker, and throttle handling |
 | `hephaestus-github-stats` | GitHub contribution statistics via the `gh` CLI |
 | `hephaestus-label-severity` | Reconcile the `severity:*` label for a GitHub issue from its issue-form Severity answer |
-| `hephaestus-merge-prs` | Merge open PRs with successful CI/CD through the shared `gh` adapter |
 | `hephaestus-tidy` | Single-repo gh-tidy wrapper with Myrmidon swarm for conflict resolution |
 | `hephaestus-prepare-worktree` | Safely create an isolated worktree at an attested start point |
 | `hephaestus-audit-worktrees` | Emit a read-only inventory of registered worktrees |
@@ -422,14 +432,6 @@ sync (#993).
 | `hephaestus-collect-pr-evidence` | Collect pull-request metadata, changed paths, and check evidence |
 | `hephaestus-pr-diff-context` | Compute author-intent and current-base pull-request diff ranges |
 | `hephaestus-repository-evidence` | Collect bounded Git history and source-pattern evidence |
-
-`hephaestus-merge-prs` exits `0` only when every discovered PR was merged,
-successfully queued, or intentionally skipped by `--dry-run`. It exits `1`
-when any requested PR is blocked, fails, or is unexpectedly left unprocessed,
-and exits `130` when interrupted. With `--json`, every outcome—including
-failure or interruption before PR discovery—contains `results`, `totals`,
-`requested`, and `processed`; pre-discovery outcomes use an empty result list,
-zero totals, and zero requested/processed counts.
 
 ### System & Data
 
@@ -521,8 +523,8 @@ hephaestus-system-info --no-tools
 # Download a dataset
 hephaestus-download-dataset --help
 
-# Merge open PRs
-hephaestus-merge-prs --help
+# Inspect the queue command options
+hephaestus-automation-loop --help
 
 # Run all validation checks
 hephaestus-check-coverage --help

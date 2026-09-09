@@ -64,6 +64,18 @@ def test_run_git_routes_through_standard_subprocess_helper() -> None:
     )
 
 
+def test_run_git_forwards_cancellation_to_the_tracked_child() -> None:
+    """The Git helper must retain the caller's cancellation event."""
+    import threading
+
+    shutdown = threading.Event()
+    completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+    with patch("hephaestus.utils.git.run_subprocess", return_value=completed) as run:
+        shared_git.run_git(["status"], shutdown=shutdown)
+    assert run.call_args.kwargs["shutdown"] is shutdown
+    assert run.call_args.kwargs["track_process_group"] is True
+
+
 def test_run_git_retries_network_commands() -> None:
     """Network git operations retry transient subprocess failures."""
     failure = subprocess.CalledProcessError(128, ["git", "push"], stderr="network timeout")

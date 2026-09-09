@@ -14,8 +14,8 @@ from hephaestus.github.fleet_sync.models import (
     PRInfo,
     Symbols,
 )
-from hephaestus.github.git_ops import run_git
 from hephaestus.logging.utils import get_logger
+from hephaestus.utils.git import run_git
 
 logger = get_logger(__name__)
 

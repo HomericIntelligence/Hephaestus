@@ -53,13 +53,19 @@ Optimization"), file paths are repo-relative.
 
 ### Goals
 
+[ADR-0048](adr/0048-queue-owned-automation-cutover.md) defines the current
+queue-only cutover. Historical ADRs retain their original text. Current
+runtime ownership and recovery follow this document and the live source.
+
+
 - **Durable journals.** GitHub labels, comments, and PR state are the normal
  crash-resistant truth. `LearningJournalStore` records auxiliary intent
- claims and terminal results. The repository-scoped issue-wave checkpoint
+ claims and terminal results. Source ownership and publication records retain
+ exact workspaces and uncertain external effects. The repository-scoped issue-wave checkpoint
  records only immutable selected issue identifiers, pending or retired
  reviewed non-code intents, terminal outcomes, merge receipts, and verified
- main revisions. Stages may not persist any other state. Restart =
-re-run: queue reconstruction reads the journal
+ main revisions. Restart reconstruction reads only the current supported
+ records; it does not convert historical formats. Queue reconstruction reads the journal
 ([`coordinator._seed_pass`](../hephaestus/automation/pipeline/coordinator.py),
 [`seed_from_cli`](../hephaestus/automation/pipeline/seeding.py)) — distinct from
 the per-repo seed-side [`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py)
@@ -105,8 +111,9 @@ neither writes `state:skip` during seeding.
 - **Globally bounded live work.** The coordinator admits at most
  `C = max(1, parallel_repos × max_workers)` nonterminal work items at once.
  A work permit remains with an item while it is queued, leased, running,
- timer-parked, or waiting for a full destination queue; it is released only
- after the finished sink records the terminal result
+ waiting on a retry timer, or waiting for destination capacity. Terminal or
+ resumable parking records the result before it releases the in-memory permit.
+ Durable recovery records remain intact
  ([`_work_window`](../hephaestus/automation/pipeline/coordinator.py),
  [`Coordinator._push_item`](../hephaestus/automation/pipeline/coordinator.py),
  [`Coordinator._release_work_permit`](../hephaestus/automation/pipeline/coordinator.py)).
@@ -117,10 +124,10 @@ neither writes `state:skip` during seeding.
  reads GitHub via [`seeding.py`](../hephaestus/automation/pipeline/seeding.py)
  ([`_all_idle`](../hephaestus/automation/pipeline/coordinator.py) +
  [`_reseed_if_converged`](../hephaestus/automation/pipeline/coordinator.py)).
-- **No OS-level agent sandbox.** Each agent call site declares its explicit
- `--allowedTools` scope and runs in a scoped worktree
- ([`_run_agent`](../hephaestus/automation/pipeline/worker_pool.py),
- [`agent_config.py`](../hephaestus/automation/agent_config.py)).
+- **Provider-specific isolation.** Each agent call declares its tool scope
+ and workspace binding. Provider admission and host verification apply their
+ own process and filesystem boundaries. A tool allowlist alone does not
+ provide an OS sandbox. See [agent policy](../AGENTS.md#agent-runtime).
 - **No MCP runtime dependency.** `.mcp.json` is intentionally empty. Plugin
  marketplaces, NATS JetStream and HTTP REST remain the maintained
  integration contracts ([ADR-0011](adr/0011-mcp-integration-posture.md)).
@@ -307,14 +314,12 @@ back to them.
 
 ### Journal-order invariant: durable write BEFORE the queue push
 
-Every durable GitHub mutation (label add / remove / edit, comment upsert,
-PR create) happens IMMEDIATELY BEFORE the
-`StageOutcome` that causes the queue push. Restart then re-runs the stage
-and the stage's idempotency checks (at-or-past label comparison, plan
-comment presence, PR existence) fast-forward through already-completed
-work. Interrupts therefore leave items RESUMABLE, never FAILED — a restart's
-seeding classifies them back into the same entry queue and `on_enter`
-restarts from the same state.
+A stage confirms each required durable write before it advances the queue.
+Current labels, plan pointers, comments, source records, and publication
+receipts let a restart reconcile prior effects. A missing response does not
+prove that a write failed. Recovery checks the exact request and live outcome
+before it can retry. Recovered evidence supplies a workflow candidate; it
+cannot restore process-local review authority.
 Implementation: coordinator-local writes use the single-owner
 [`ctx.github`](../hephaestus/automation/pipeline/stages/base.py) accessor. Reply
 journal recovery/append and delivery, PR-review reconciliation, and merge-wait
@@ -333,11 +338,12 @@ Let `C = max(1, parallel_repos × max_workers)`. `C` is a global live-work
 window, not a per-stage concurrency target. Every stage queue and the
 completion queue have capacity `C`, while the coordinator holds one global
 permit for every nonterminal main-lane `WorkItem`. The auxiliary lane has its
-own permit bound. Consequently, eight stage queues do not permit a multiple of
-`C` simultaneous work items. An item keeps its lane permit while it moves
+own permit bound. Main and auxiliary permits have separate capacity limits.
+Eight stage queues do not create eight independent main work windows. An item keeps its lane permit while it moves
 within that lane. A cross-lane handoff transfers permit ownership only after
 the destination accepts the item. The auxiliary permit is released after
-`finished` records the outcome.
+`finished` records the outcome or resumable parking records its result. A
+repeated park does not release a second permit. Durable claims remain intact.
 
 The auxiliary lane carries only semantic learning intent. The Mnemosyne host
 rebinds that intent to immutable GitHub facts, prepares one bounded validated
@@ -416,7 +422,7 @@ key and parks the item on the heap
 ([`_timer_park`](../hephaestus/automation/pipeline/coordinator.py)).
 A missing key means "retry on the next drain tick" (no delay).
 [`BACKOFF_CAP_S = 60`](../hephaestus/automation/pipeline/stages/base.py) is
-shared by every stage that uses the legacy exponential poll delay.
+shared by stages that use exponential poll delays.
 Timer parking releases the source-stage lease but retains the item's global
 work permit. On expiry, the timer heap remains the item's owner until its
 stage queue accepts it; an occupied stage queue leaves the expired entry at
@@ -468,14 +474,13 @@ terminalized before summary collapse so stale attempts cannot re-enter the queue
 
 ### Rate-budget gate
 
-The legacy `_maybe_sleep_for_rate_budget` SLEEPS its loop thread — fatal
-for a single coordinator thread. The new gate lives at the submit
-chokepoint ([`_submit`](../hephaestus/automation/pipeline/coordinator.py)):
-[`_rate_budget_ok`](../hephaestus/automation/pipeline/coordinator.py) calls
-[`hephaestus.automation.pipeline_github.rate_budget_ok`](../hephaestus/automation/pipeline_github.py)
-and timer-parks an `AgentJob` until the upstream reset when the GraphQL
-budget is low. Git/build jobs are unaffected. No `time.sleep` lives in any
-stage module.
+Before an agent job, the coordinator submits a typed `ReadRateBudgetRequest`
+through the main worker pool. The request has an absolute monotonic deadline.
+Its `RateBudgetRead` result returns through the completion queue. Sufficient
+or unknown quota admits the saved agent request once. Low quota places the
+item on a coordinator timer until the reset time plus five seconds. Timer
+re-entry can request fresh quota. The coordinator does not perform a blocking
+quota read or sleep for the reset. Git and build jobs retain their own bounds.
 
 ### Dry-run
 
@@ -516,15 +521,13 @@ no stage event can carry reviewer text, GitHub bodies, or authorization facts.
 
 ### Scope trimming
 
-[`PipelineScope`](../hephaestus/automation/pipeline/routing.py) lets the
-coordinator route items through a contiguous subset of stages
-(`hephaestus-plan-issues` runs `planning → plan_review`;
-`hephaestus-implement-issues` runs `implementation → pr_review`).
-`hephaestus-merge-prs` is the manual merge-driving command outside the queue
-coordinator (see [`hephaestus.github.pr_merge`](../hephaestus/github/pr_merge.py)). `trimmed_routes()` rewrites every out-of-scope next/fail
-target to `FINISHED`, so the partial route table is closed under
-`scope ∪ {FINISHED}`. The coordinator always re-adds the universal sink:
-see [`_routes = config.scope.trimmed_routes()`](../hephaestus/automation/pipeline/coordinator.py).
+[`PipelineScope`](../hephaestus/automation/pipeline/routing.py) selects a
+contiguous subset of main stages. Planning uses `planning → plan_review`;
+implementation uses `implementation → pr_review → merge_wait`; review uses
+`pr_review`. Learning and finished remain implicit auxiliary stages.
+`trimmed_routes()` sends out-of-scope next and failure targets to `FINISHED`,
+so the route table remains closed. Every retained automation command uses the
+same coordinator and scope contract.
 `--force` on the planner CLI re-routes any at-or-past-scope stage back to
 the scope's first stage so the scoped work is redone
 ([`_scope_seed_decision`](../hephaestus/automation/pipeline/coordinator.py)).
@@ -737,9 +740,10 @@ flowchart LR
     M -. "approval invalidated" .-> Q
 ```
 
-GitHub facts reconstruct the main workflow after a restart. The learning
-journal, arming store, and issue-wave checkpoints reconstruct their owned
-auxiliary, merge, and issue-wave obligations.
+GitHub facts reconstruct main workflow candidates after restart. Current
+learning records and issue-wave checkpoints retain their own obligations.
+Source and publication records preserve exact workspace and write identities.
+Recovered labels or audit receipts cannot restore current-process review proof.
 
 ### 5.1 Repo intake
 
@@ -949,7 +953,6 @@ flowchart LR
 stateDiagram-v2
     [*] --> ReconcileJournal
     ReconcileJournal --> LoadHistory: canonical comments complete
-    ReconcileJournal --> ReconcileJournal: legacy archive recovered
     ReconcileJournal --> Failed: conflicting actor-owned immutable artifact
     LoadHistory --> Review: context available
     LoadHistory --> Failed: context unavailable
@@ -958,11 +961,11 @@ stateDiagram-v2
     RetryReview --> Failed: reviewer failures exhausted
     Review --> PublishAudit: plan-go or plan-no-go proposal
     Review --> ApplyBlocked: plan-blocked proposal
-    ApplyBlocked --> RetryReview: blocked label write or confirmation failed
+    ApplyBlocked --> ApplyBlocked: bounded publication retry
     ApplyBlocked --> PublishBlockedAudit: state:plan-blocked confirmed
     PublishBlockedAudit --> Blocked: explanation stored; latch remains on audit failure
     PublishAudit --> ApplyLabel: review comment stored
-    ApplyLabel --> RetryReview: label write or confirmation failed
+    ApplyLabel --> ApplyLabel: bounded publication retry; accepted round retained
     ApplyLabel --> Approved: state:plan-go confirmed
     ApplyLabel --> AssessRevision: state:plan-no-go confirmed
     AssessRevision --> Amend: improvement remains possible
@@ -986,7 +989,7 @@ Architectural contract:
   canonical artifacts, establish replay identity, or stop an owned write.
 - Canonical comments are replaced in place. On restart, a stale or missing
   canonical review is repaired to the current revision before another agent
-  runs. Retired archive comments are read only for migration recovery.
+  runs. Retired archive comments are inert; there is no migration reader.
 - Review receives the current plan and direct prior critique. An amendment
   receives the bounded current canonical plan and direct critique. Superseded
   revisions are summarized only as cumulative high-level bullets in the
@@ -1002,7 +1005,18 @@ Architectural contract:
   the blocked label; a comment by itself has no routing effect.
 - No-improvement detection exits early as blocked instead of spending further
   planning iterations.
-- Invalid reviewer output retries review without consuming a plan revision.
+- Planning advances only after a fresh current-plan lookup returns `FOUND`.
+  Read failures use the bounded lookup retry budget.
+- Plan review binds an accepted verdict to its plan revision, fingerprint,
+  and charged round. Publication retries reuse that verdict and do not charge
+  the logical round again. The stage checks current plan identity before
+  publication, after the audit write, and after the label transition.
+- A changed plan returns to planning. If this review wrote a proposed label,
+  the stage restores exclusive `state:needs-plan` with readback. An operator
+  `state:plan-blocked` label has priority.
+- Invalid output and reviewer-session replacement share a bounded error
+  sequence. Two consecutive retries are allowed; the third failure stops the
+  item. Session replacement preserves logical review rounds.
 
 ### 5.4 Implementation
 
@@ -1172,9 +1186,11 @@ Architectural contract:
   Cross-repo same-number items are interleaved with normal items by that age
   through one repo-scoped claim selector; this never lets a normal dependent
   overtake its prerequisite. The selected plan-file snapshot is retained for
-  the full implementation-stage lifetime, across worktree, agent, test, and
-  push jobs; serial and overlap-opt-out modes perform no claim lookup or
-  tracking.
+  full implementation, PR review, and merge-wait lifecycle. The accepted
+  `WorkItem` owns one frozen `_implementation_file_claims` reservation. Verified
+  `review_changed_paths` extend that reservation. The coordinator derives
+  repository-qualified conflicts from accepted nonterminal items. It does not
+  keep a second job-handle claim map. Terminal items release the reservation.
 
 ### 5.5 PR review
 
@@ -1218,16 +1234,10 @@ failed receipt. It cannot become a passing skip. Other platforms remain
 fail-closed until a separately reviewed isolation backend exists. There is no
 unsandboxed fallback.
 
-A narrow source-review exception for PR #3006 is specified in
-[ADR-0046](adr/0046-review-host-verification-bootstrap.md). An authenticated
-operator comment must bind the exact head, checkout branch point, and complete
-30-record operation map. The CLI comment ID only selects that grant. The
-Linux skip remains failed host evidence; a separate process-local proof
-permits source review. Fresh grant checks precede source-review submission,
-the GO-label write, and every protected merge request. The exception cannot
-review its own #3007 implementation, which requires the existing macOS path.
-The current 32-record PR #3006 head is ineligible until its owner removes the
-two #3035 coverage deltas and obtains a fresh exact-head grant.
+Every PR uses the normal host-verification boundary. The completed PR #3006
+bootstrap is retired. There is no target-specific grant, comment selector, or
+skip-to-pass path. Generic host receipts remain in
+[`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
 
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is
@@ -1329,8 +1339,8 @@ Architectural contract:
   the same host checks prove the writer is clean and no prior record exists.
   Its process-local clean marker permits normal tests and the existing
   no-change reply path. It cannot restore dirty work or authorize publication.
-  The stage clears that marker before a new mutation. A later legacy test-fix
-  job does not gain durable recovery authority from the clean result.
+  The stage clears that marker before a new mutation. A later test-fix job
+  needs its own validated source and predecessor record.
 - A remediation provider failure stores only a redacted diagnostic of at most
   500 characters. The recovery prompt fences the retained thread snapshots,
   inspection status, diff, and diagnostic. The recovery agent uses a fresh
@@ -1358,9 +1368,8 @@ Architectural contract:
   on a transient host failure. A pushed remediation uses the remediation-only
   format-three record. This record contains the compressed canonical 16-field
   review input, its digest, the exhaustive reply result and digest, and reply
-  progress. Normal handoffs keep their version-one and version-two formats.
-  Remediation recovery rejects those legacy formats and incomplete
-  format-three records. A restarted loop can recover only the exact record for
+  progress. Normal handoffs use armed format 2. Format 1 is retired.
+  Remediation recovery accepts only complete format 3 records. A restarted loop can recover only the exact record for
   the current repository, issue, PR, branch, head, and thread snapshot. An old
   record for another head is not a recovery candidate. The journal is a machine
   recovery artifact, not an implementation response, so the only human-facing
@@ -1413,9 +1422,19 @@ Architectural contract:
   is never accepted as evidence. The receipts are evidence only: they are
   cleared on a new head and cannot grant `state:implementation-go` without the
   relevant fresh audit or comment-validation and GitHub checks.
-- Pending and public audit recovery receipts include the typed `GO` verdict.
-  Recovery rejects a receipt that does not include this verdict. Thus, a stale
-  receipt cannot bypass the reviewer decision.
+- Pending and public audit receipts support publication recovery only.
+  A recovered receipt cannot create current-process review proof, even when
+  its head and `GO` verdict match. A fresh audit must be the active in-memory
+  audit and must bind the reviewed head before publication can resume.
+  Same-process publication retries reuse that audit. Restart obtains fresh
+  source, verification, and review evidence.
+- PR review owns reviewer compaction only. Implementation owns writer
+  compaction, commit, push, and reply delivery. The removed writer wait states
+  have no dispatch path in PR review.
+- Implementation must settle or classify each actionable reply handoff before
+  review. Completed, stale, and blocked settlements clear actionable retry
+  state. Exhausted visibility retries retain the durable journal and stop the
+  handoff; they do not reset the retry counter indefinitely.
 - No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait
@@ -1514,7 +1533,9 @@ Architectural contract:
 ### 5.7 `learning`
 
 Learning is an implicit auxiliary stage for every main-stage scope. Plan review
-emits an approved-plan intent after the plan label is confirmed. Merge wait
+stores an approved-plan intent before the label transition. The learning
+consumer requires the current plan identity and confirmed label before it
+executes the intent. Merge wait
 emits a post-merge intent only after merge confirmation. The stage writes the
 intent journal before dispatch, claims one deterministic key, and submits only
 a host-owned `AthenaSkillJob`. The job contains a closed `learning_intent`, not
@@ -1525,7 +1546,9 @@ offline validator, and hands the resulting `LearnDeliveryRequest` to the
 signed PR-delivery service. Known failures retry within the `learn` budget.
 An ambiguous crash-left claim becomes terminal `failed` with
 `outcome_unknown`; it is not submitted twice. Learning failure is ancillary
-and cannot change a confirmed main result.
+and cannot change a confirmed main result. Restart restores only incomplete
+current `LearningJournalStore` records. Historical merges and retired arming
+records cannot create missing learning intents.
 
 Dependency preparation runs frozen synchronization and package checks in a
 private source export. The final sandbox command runs the prepared
@@ -1620,8 +1643,8 @@ another route list.
 
 `budget_keys()` derives the counter vocabulary from `ROUTES`, and new
 `WorkItem` instances initialize those counters through `_default_attempts()`.
-The `merge` default uses `DEFAULT_DRIVE_GREEN_LOOPS`; callers may override
-declared budgets through `PipelineConfig.budget_overrides`. Counters remain
+The `merge` default is five; `--merge-attempts` sets this budget. Programmatic
+callers may override declared budgets through `PipelineConfig.budget_overrides`. Counters remain
 per-item-lifetime and are never reset when an item re-enters a stage, so
 cross-stage regression cycles (e.g. pr_review → implementation) remain
 globally bounded. All counters live in
@@ -1733,11 +1756,9 @@ closed typed runner; generic worker code does not import the GitHub
 implementation.
 
 The neutral `commit_runtime` module owns commit staging, message validation,
-signing, and commit creation. The product-facing `pr_manager.commit_changes`
-compatibility adapter reads issue data before it calls this module. Pipeline
-stages put immutable issue title and body values in the job. The Git worker
-calls only the neutral commit seam and cannot import the GitHub client through
-the commit route.
+signing, and commit creation. Pipeline stages put immutable issue title and
+body values in each job. The Git worker calls this neutral commit interface;
+it does not fetch issue data through an old commit adapter.
 
 ### Job kinds
 
@@ -1745,10 +1766,13 @@ Every job that can read repository source carries a provider-neutral
 `WorkspaceBinding`. The binding distinguishes `source`, `session-only`, and
 `external` directories. A source binding records repository-qualified
 ownership, item number, lane, exact revision, generation, canonical path, and
-detached state. The worker validates it immediately before provider execution
-and holds the lane's cross-process lock for the whole invocation. A legacy
-source-capable job whose raw `cwd` is the reusable primary checkout is rejected
-before provider resolution.
+detached state. The worker validates the frozen request first. It then checks
+live ownership, head, branch, and any pretest reservation under one source
+lease. That lease remains held through execution. One deadline covers lock
+waits, Git inspection, hashing, and provider execution. A raw `cwd` cannot
+replace the required source or session-only binding. Dirty inspect, rebase,
+and test-fix operations require closed source-operation pins tied to the
+existing receipt.
 
 The reusable default-branch checkout is only the Git synchronization and
 worktree-management control plane. For each issue or linked PR, planning and
@@ -1792,8 +1816,9 @@ The exhaustive classification is maintained in the
  session instead of creating a fresh one; its returned id is carried in the
  `JobResult` and persisted by the coordinator under the job's logical role.
  `sandbox = "workspace-write"` (default) or `"read-only"` (including PR
- review). The agent job has no head-SHA field; the checkout barrier runs before
- it as a `verify_pr_review_checkout` Git job.
+ review). Its workspace binding carries source identity. The checkout barrier
+ runs first as a `verify_pr_review_checkout` Git job, and the worker rechecks
+ the bound source under its lease before agent execution.
  `sandbox = "read-only"` activates `allowed_tools = "Read,Glob,Grep"`
  and `permission_mode = "dontAsk"` on the Claude call site.
 - [`BuildTestJob`](../hephaestus/automation/pipeline/jobs.py) — subprocess
@@ -1828,12 +1853,11 @@ The exhaustive classification is maintained in the
  dependencies. Nested service data uses canonical JSON snapshots;
  each receipt contains its request and fresh decodes, so stage and worker never
  share mutable GitHub responses. These jobs and their wait-state names are
- process-local. Normal version-one and version-two reply records are unchanged.
- Format three is only for remediation recovery and has a separate marker and
- parser.
-- [`CompactJob`](../hephaestus/automation/pipeline/jobs.py) — a best-effort
- `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
- the retry lifecycle.
+ process-local. Normal reply records use armed format 2. Remediation recovery
+ uses format 3 with its separate marker and parser. Format 1 is rejected.
+- [`CompactJob`](../hephaestus/automation/pipeline/jobs.py) — a bounded
+ compaction turn for a persisted session. The requesting stage owns that
+ session. PR review does not compact the implementation writer.
 - [`AthenaSkillJob(kind="learn")`](../hephaestus/automation/pipeline/athena_skill_jobs.py)
  is the only learning job accepted by the auxiliary pool. That pool also
  accepts only `remove_worktree` and `release_branch_reservation` Git cleanup.
@@ -1846,31 +1870,26 @@ and other stage-local payloads before the auxiliary queue accepts the item.
 
 ### Result semantics
 
-[`JobResult.ok = False, value = None, error`](../hephaestus/automation/pipeline/jobs.py)
-on any failure (return code != 0, `subprocess.TimeoutExpired`,
-exception). Stdout/stderr tails are trimmed to 4 KiB in the `JobResult`;
-the error message is truncated to 500 chars.
+[`JobResult`](../hephaestus/automation/pipeline/jobs.py) reports success or
+failure with bounded output and error text. A failure can retain a typed
+recovery value. Consumers must inspect that value before they select a retry.
+An unsuccessful result does not prove that no external effect occurred.
 
 ### Completion contract
 
-Every non-cancelled `submit()` produces EXACTLY ONE
-`(JobHandle, JobResult)` tuple on the completion queue
-([`_on_future_done`](../hephaestus/automation/pipeline/worker_pool.py)).
-Normal job failures are converted to error results in `_run`; anything
-that escapes `future.result()` (exception + process-control escapes
-`KeyboardInterrupt`/`SystemExit`/`GeneratorExit`) is converted to a
-`worker_crash` result so a non-cancelled submit never silently loses
-its completion. Only futures cancelled before starting emit no
-completion (the coordinator synthesizes those).
+Each submitted operation has one coordinator result, including cancellation.
+The shared `worker_completion` resolver converts escaped failures to bounded
+results. A main-pool future cancelled before execution is completed by the
+coordinator's interruption path. The auxiliary pool returns an explicit
+interrupted-before-start result. Neither path runs the cancelled operation.
+Shutdown also cancels the main pool's host skill executor.
 
-The completion queue is bounded to `C`, and the worker callback uses
-`put_nowait`. Under the global permit invariant, every in-flight job has a
-reserved completion slot. If that invariant is ever violated, the callback
-sets a saturation latch and wakes the coordinator; it neither blocks nor keeps
-an overflow buffer. The coordinator treats that latch as a fatal internal
-fault and preserves remaining in-flight items as resumable work. Signal
-handlers use the same wake mechanism but only a real OS signal sets shutdown
-and selects exit code 130.
+Completion queues are bounded. Workers use a nonblocking completion write.
+A separate event wakes the coordinator. If the channel is unexpectedly full,
+the worker sets a fatal saturation latch. It does not block or create an
+overflow buffer. The coordinator preserves remaining work as resumable. This
+internal failure is distinct from an OS signal and does not select exit code
+130 by itself.
 
 ### Per-repo lock layering
 
@@ -1904,14 +1923,16 @@ from a reusable checkout.
 
 ### Resilience wiring
 
-[`hephaestus.resilience.resilient_call`](../hephaestus/resilience/__init__.py)
-wraps agent invocation. The retry predicate is
-`retry_predicate=lambda _exc: not self._shutdown.is_set()` — we accept
-the cost of re-running the whole agent session on a transient blip
-(network reset, gh flake) because agent invocations are
-workflow-idsempotent (plan/review comments upsert; implementer re-runs
-converge on the same branch). Non-transient errors (`rc != 0`, timeouts)
-are NOT retried.
+Workers make one provider attempt. They do not replay a whole agent session
+after possible source or publication effects. An ordinary implementation
+failure returns to the implementation worktree state for host reconciliation.
+The coordinator and stage budgets decide whether another attempt is valid.
+
+Provider circuit breakers count availability failures only. Local workspace
+ownership, malformed source, and other local policy failures do not count as
+provider outages. Queue GitHub operations use one transport attempt within
+one deadline. Coordinator timers own later retries. Standalone library utility
+defaults remain independent.
 
 ### Rate budget + timeout mapping
 
@@ -1921,31 +1942,40 @@ are NOT retried.
 - `agent_default_timeout()` / `planner_claude_timeout()` /
  `implementer_claude_timeout()` / `pr_reviewer_claude_timeout()` /
  [`...`](../hephaestus/automation/agent_config.py) remain fixed library defaults.
- The automation loop resolves its active agent, GitHub, Git, metadata, network,
- readiness, diff-collection, and pre-PR-test budgets once from typed CLI
- options. Standalone stage commands expose only the budgets used by their
- stage slice. Modern advise and learn jobs are host-owned Mnemosyne operations,
- not agent-provider subprocesses, so the queue does not expose model or agent
- timeout knobs for them. Disconnected legacy follow-up and outer plan helpers
- retain fixed, injectable function defaults. No environment fallback is
- consulted.
+ The common parser resolves active agent, GitHub, Git, metadata, network,
+ readiness, diff-collection, and pre-PR-test budgets into one configuration.
+ Advice and learning are host-owned Mnemosyne operations. The queue does not
+ expose model or agent timeout options for them.
 
 ---
 
 ## 9. Thin CLI scope wrappers and rollout controls
 
-Five console scripts are thin queue-pipeline scoped entry points
-(preserve their historical CLI surfaces). Manual merge-driving is
-out-of-band.
+Four console scripts share
+[`pipeline_cli.py`](../hephaestus/automation/pipeline_cli.py), which owns the
+parser and configuration builder.
 
-| Console script | Stage slice | Entry module |
-|--------------------------------------|-----------------------------------|---------------------------------------------------|
+| Console script | Main stage scope | Entry module |
+| --- | --- | --- |
+| `hephaestus-automation-loop` | All six main stages | [`loop_runner`](../hephaestus/automation/loop_runner.py) |
 | `hephaestus-plan-issues` | `planning → plan_review` | [`planner`](../hephaestus/automation/planner.py) |
-| `hephaestus-implement-issues` | `implementation → pr_review` | [`implementer`](../hephaestus/automation/implementer.py) |
-| `hephaestus-review-prs` | `pr_review` (internal slice) | [`pr_reviewer`](../hephaestus/automation/pr_reviewer.py) |
-| `hephaestus-drive-prs-green` | `pr_review → merge_wait` | [`ci_driver`](../hephaestus/automation/ci_driver.py) |
-| `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](../hephaestus/github/pr_merge.py) |
-| `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](../hephaestus/automation/agent_stage.py) |
+| `hephaestus-implement-issues` | `implementation → pr_review → merge_wait` | [`implementer`](../hephaestus/automation/implementer.py) |
+| `hephaestus-review-prs` | `pr_review` with explicit operator broad review | [`pr_reviewer`](../hephaestus/automation/pr_reviewer.py) |
+
+Only the full profile accepts `--stages`. Values must name a contiguous,
+unique, ordered main-stage slice. `learning` and `finished` are implicit for
+every scope. Removed command names, option aliases, and abbreviated options
+fail parsing; there is no legacy dispatch path.
+
+Use `--merge-attempts` for the merge request budget, `--max-workers` for main
+worker capacity, and `--loops` for discovery passes. The full command defaults
+to six workers and five passes. Scoped commands default to three workers and
+one pass. The merge budget defaults to five for every profile. `--issues` and
+`--prs` accept comma-separated positive identifiers for one repository.
+
+The lazy package surface exposes `PipelineConfig`, `PipelineScope`,
+`StageName`, and `run_pipeline`. The base library import does not load the
+product runtime.
 
 Hephaestus implementation work always runs
 `bash scripts/run_ci_local.sh all --rebuild` through the
@@ -2022,7 +2052,7 @@ native fallback behavior. See [IFM Model Configuration](ifm-models.md) and
 The parser is [`parse_model_selection()`](../hephaestus/agents/model_selection.py).
 Provider argument construction and the bounded Codex retry are in
 [`runtime.py`](../hephaestus/agents/runtime.py). The loop option definitions
-are in [`loop_runner.py`](../hephaestus/automation/loop_runner.py).
+are in [`pipeline_cli.py`](../hephaestus/automation/pipeline_cli.py).
 
 Tool selection and model selection are independent. `--planner-agent`,
 `--implementer-agent`, and `--reviewer-agent` override `--agent` for each role.
@@ -2047,7 +2077,30 @@ describes.
 
 - `--learning-workers N` controls host-learning concurrency (default `1`).
 - `--learning-queue-capacity N` bounds auxiliary backlog (default `1`).
-- `--no-learn` creates no new learning intent.
+- `--no-learn` prevents new learning intents and their execution.
+
+---
+
+### Queue cutover and rollback
+
+Stop old coordinators before deployment. Drain active work or park it with
+its recovery records. Preserve unresolved effects, local commits, worktrees,
+current learning claims, reply journals, and source ownership. The new runtime
+does not translate retired commands, options, or record formats. A historical
+merge cannot create a missing learning intent.
+
+Restart one retained queue command with an explicit scope. Inspect current
+recovery results before you expand the scope. Do not run old and new owners
+against the same state directory. Before rollback, stop the current owner and
+review all possible effects produced after cutover. Restoring code alone does
+not establish that replay is safe. See the
+[queue recovery runbook](runbooks/ci-driver-stall.md).
+
+Developer validation uses the relevant new and changed tests on a supported
+native host. Container reproduction is optional for this local development
+workflow. This does not alter the product's fixed `BuildTestJob` commands,
+source verification, or macOS and Linux isolation requirements. Required CI
+runs the full suites and coverage gate.
 
 ---
 
@@ -2077,9 +2130,9 @@ When `event_log_path` is configured, the coordinator also appends diagnostic
 records to JSONL. That file is best-effort: an I/O failure logs a
 warning and disables further JSONL writes without changing pipeline routing.
 It is not a queue snapshot or recovery journal. GitHub labels, comments, and
-PR state are normal restart authorities. `LearningJournalStore`,
-`ArmingStateStore`, and issue-wave checkpoints supply the other durable state
-listed in the journal contract above.
+PR state supply restart candidates. Current learning records, issue-wave
+checkpoints, source ownership, and publication records supply the other durable
+state listed above. They do not restore current-process review authority.
 
 The loop runner owns event-log lifecycle outside the pure coordinator: it holds
 the current file's activity lock and prunes only recognized inactive siblings
@@ -2195,8 +2248,8 @@ Dry-run also overrides two retry semantics that would otherwise stall:
 
 ## 11. Automation ownership and architecture budgets
 
-The large automation entry points are compatibility façades. Their
-collaborators have one-way dependencies and own explicit responsibilities:
+Automation entry modules assemble collaborators with one-way dependencies.
+Each collaborator owns an explicit responsibility:
 
 | Facade | Collaborators | Ownership boundary |
 |---|---|---|
@@ -2207,9 +2260,9 @@ collaborators have one-way dependencies and own explicit responsibilities:
 The source budgets are executable in
 [`test_automation_hotspot_architecture.py`](../tests/unit/automation/test_automation_hotspot_architecture.py)
 and are strictly below the pre-decomposition hotspot sizes.
-Collaborators must not import their façades; the façade is the only place
-that assembles them. This keeps compatibility seams patchable while making
-responsibility growth visible in review.
+Collaborators must not import their assembly module. Tests inject the
+transport command runner or patch the actual external boundary. Facade symbol
+copies and runtime monkeypatch translators are removed.
 
 ## 12. Interrupt semantics and exit codes
 
@@ -2246,7 +2299,7 @@ Exit-code priority is:
  wake and saturation signals without queue payloads.
  [`queues.py`](../hephaestus/automation/pipeline/queues.py).
 - **Durable journal** — GitHub labels, comments, PR state,
- `LearningJournalStore` records, `ArmingStateStore` records, and issue-wave
+ current `LearningJournalStore` records, source and publication records, and issue-wave
  checkpoints. Restart reconstruction reads these stores.
 - **Timer-park** — non-blocking retry/backoff by pushing an item onto
  the coordinator timer heap
@@ -2263,10 +2316,14 @@ Exit-code priority is:
   compares the proof with the confirmed-unarmed live PR, reads complete passing
   required status evidence for that SHA, and issues the server route that the
   effective policy requires. It does not arm or poll native auto-merge.
-- **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New tracker reasons are recorded in run logs; a confirmed obsolete disposition uses its distinct bounded actor-owned explanation role under ADR-0031.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
-- **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
-- **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
+- **Host advice and learning** — typed `AthenaSkillJob` operations executed
+  by the Mnemosyne host boundary. Advice and learning do not invoke an agent
+  provider. Current learning records retain intent and delivery ownership.
+- **Tool scope** — the explicit tool and permission-mode pair in
+  [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py).
+  Unmapped roles receive the read-only default. A role may request a narrower
+  scope through its frozen job.
 - **Reasoning effort** — the free-form final segment in `MODEL[:EFFORT]`, parsed
   by [`parse_model_selection()`](../hephaestus/agents/model_selection.py). The
   runtime passes it through with

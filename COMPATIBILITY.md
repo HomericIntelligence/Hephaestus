@@ -15,6 +15,29 @@ Hephaestus supports **Python 3.13** (`requires-python = ">=3.13,<3.14"` in
 support for a Python minor version is treated as a backwards-incompatible change and
 follows the deprecation policy below.
 
+## Queue automation cutover
+
+Queue automation has four supported entry points: `hephaestus-automation-loop`,
+`hephaestus-plan-issues`, `hephaestus-implement-issues`, and
+`hephaestus-review-prs`. They share the parser in
+`hephaestus.automation.pipeline_cli`. The full command accepts `--stages`.
+Use `--merge-attempts` and `--max-workers`; old option aliases fail parsing.
+
+The product import surface exposes `PipelineConfig`, `PipelineScope`,
+`StageName`, and `run_pipeline` through lazy imports. Old standalone automation
+owners and their persistence readers are removed. There is no automatic
+conversion for retired record formats. Current plan pointers, publication
+repair, issue waves, learning intents, source ownership, and reply journals
+remain supported. Reply handoffs retain armed format 2 and remediation
+format 3. Format 1 is not supported.
+
+Before cutover, stop old coordinators and preserve unresolved external effects
+and their local evidence. Do not run old and new owners against the same state
+directory. Before rollback, stop the current coordinator and inspect all
+possible effects produced after cutover. Restoring code does not prove that
+replay is safe. See
+[ADR-0048](docs/adr/0048-queue-owned-automation-cutover.md).
+
 ## Agent Provider Compatibility
 
 | Provider | Selection | CI-covered platforms | Disablement |
@@ -54,16 +77,16 @@ may change incompatibly in a minor release.
 | Subpackage | Why provisional |
 |------------|-----------------|
 | `hephaestus.agents` | Agent metadata schema still evolving |
-| `hephaestus.automation` | Actively-evolving 3-stage issue/PR pipeline (collapsed from the prior 6-phase design in #677/#679); internals still evolving |
+| `hephaestus.automation` | Queue product with six main stages and two auxiliary stages; current-record cutover is a breaking change |
 | `hephaestus.benchmarks` | Comparison API is exploratory |
 | `hephaestus.ci` | CI helpers are project-specific glue, not a general API |
 | `hephaestus.datasets` | Downloader URLs and on-disk layout are not contracted |
 | `hephaestus.discovery` | Discovery rules for agents/skills still evolving |
 | `hephaestus.forensics` | Coredump/gdb helpers depend on host platform conventions |
-| `hephaestus.github` | Only `detect_repo_from_remote`/`local_branch_exists` and the `stats` / `rate_limit` helpers are intended as library API; the CLI `main()`s are not |
+| `hephaestus.github` | GitHub utilities have provisional APIs; queue merge ownership remains in the automation product |
 | `hephaestus.markdown` | Linting/fixing rules track evolving markdown conventions |
 | `hephaestus.nats` | NATS subscriber surface is provisional pending real-world use |
-| `hephaestus.resilience` | Implemented but not yet wired into production paths (#469) |
+| `hephaestus.resilience` | Retry and circuit-breaker interfaces remain provisional; queue operation budgets are separate |
 | `hephaestus.validation` | Validation rules track CI policy and evolve with it |
 
 ## Console-Script Stability Tiers
@@ -71,8 +94,7 @@ may change incompatibly in a minor release.
 The console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
-Hephaestus installs 58 console scripts via `[project.scripts]` in
-`pyproject.toml`.
+The installed script inventory is `[project.scripts]` in `pyproject.toml`.
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
   name, flags, exit codes, and JSON output schema (when `--json` is passed)
@@ -91,24 +113,18 @@ own external-consumer contract, not the underlying library code.
 
 The mapping below is the source of truth; the
 `hephaestus-check-cli-tier-docs` validator (run in pre-commit and as a unit
-test) fails the build if `[project.scripts]` and this table drift apart. To
-bypass a misfiring hook locally use
-`SKIP=hephaestus-check-cli-tier-docs git commit -S ...` — never
-`--no-verify` (it skips signing too).
+test) fails the build if `[project.scripts]` and this table differ. Repair the
+inventory or table before commit.
 
 | CLI | Tier | Notes |
 |-----|------|-------|
 | `hephaestus-automation-loop` | Provisional | Dispatches to `hephaestus.automation` (provisional subpackage) |
 | `hephaestus-install-pi-plugins` | Provisional | Installs and verifies the pinned Pi package/capability contract |
-| `hephaestus-plan-issues` | Provisional | Issue-planning stage of the automation pipeline |
-| `hephaestus-implement-issues` | Provisional | Issue-implementation stage |
-| `hephaestus-review-prs` | Provisional | PR-review stage |
-| `hephaestus-audit-prs` | Provisional | PR-audit stage; validates prior review comments were addressed |
-| `hephaestus-drive-prs-green` | Provisional | PR-review and merge-wait stage slice; CI remains independent branch protection |
-| `hephaestus-agent-stage` | Provisional | Single-stage agent runner |
+| `hephaestus-plan-issues` | Provisional | Queue scope: planning and plan review |
+| `hephaestus-implement-issues` | Provisional | Queue scope: implementation, PR review, and merge wait |
+| `hephaestus-review-prs` | Provisional | Queue scope: PR review |
 | `hephaestus-ensure-state-labels` | Internal | Used by this repo's CI label bootstrap |
 | `hephaestus-gh` | Provisional | Shell-facing wrapper around the shared `gh_call` adapter |
-| `hephaestus-merge-prs` | Provisional | Merge helper using the shared `gh_call` adapter |
 | `hephaestus-fleet-sync` | Provisional | Fleet-wide repo sync helper |
 | `hephaestus-tidy` | Provisional | Local-branch rebase + cleanup helper |
 | `hephaestus-label-severity` | Provisional | Reconciles `severity:*` label from issue-form Severity answer |

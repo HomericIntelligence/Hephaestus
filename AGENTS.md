@@ -130,12 +130,13 @@ to orchestration facades.
 
 `tests/unit/validation/test_omit_allowlist.py` requires the Coverage.py omit
 list to equal the two generic exclusions for tests and package
-`__init__.py` files. It also freezes issue #2371's twelve-module migration:
-eleven surviving orchestration sources are measured directly, and retired
-`address_review.py` maps to pipeline-owned `address_review_core.py`. A future
-live-external omission requires a narrowly documented boundary and an explicit
-change to this exact allowlist contract; import/test-name presence is not
-coverage evidence.
+`__init__.py` files. The retained migration sources and the shared
+`pipeline_cli.py` must each meet a 70% line-coverage floor. These sources are
+`implementer.py`, `planner.py`, `loop_runner.py`, `loop_repo_manager.py`,
+`address_review_core.py`, and `pipeline_cli.py`. Remove a module floor only when
+its source is deleted. Keep all other module floors. A future omission for
+external execution requires a documented boundary and an explicit change to
+this allowlist contract. Imports and test names do not prove coverage.
 
 ## Python Development Guidelines
 
@@ -616,10 +617,7 @@ host-only pool runs learning and terminal cleanup. Each agent job runs
 **Claude Code**, **Codex**, **Pi** (admission-gated), or **OpenCode**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
-**Claude Code**, **Codex**, or an explicitly admitted
-**Pi** host integration, chosen via the optional `--agent` CLI flag or
-auto-detected with a Claude preference when omitted (see
-`hephaestus.agents.runtime.add_agent_argument`). Pi is never auto-selected.
+Pi is never auto-selected.
 
 **Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
 its normal default behavior when available, otherwise uses its inline-review
@@ -658,19 +656,41 @@ before the source PR parks.
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
 
 `--learning-workers` and `--learning-queue-capacity` bound the auxiliary lane
-independently. Both default to `1`. `--no-learn` bypasses new learning work.
+independently. Both default to `1`. `--no-learn` prevents new learning work and
+execution of learning intents.
 
-Console scripts preserve their historical names. Stage-scoped wrappers are
-thin queue-pipeline scoped entry points over the coordinator; manual commands
-that do not map to a pipeline stage remain out-of-band tools:
+Four console scripts use one parser and configuration builder in
+`hephaestus.automation.pipeline_cli`:
 
-| Console script | Current module | Purpose |
-|----------------|----------------|---------|
-| `hephaestus-plan-issues` | `hephaestus.automation.planner` | Thin queue-pipeline planning/plan_review wrapper |
-| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | Thin queue-pipeline implementation/pr_review/merge_wait wrapper |
-| `hephaestus-merge-prs` | `hephaestus.github.pr_merge` | Manual merge-driving command outside the queue coordinator |
-| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | Thin queue-pipeline pr_review wrapper |
-| `hephaestus-agent-stage` | `hephaestus.automation.agent_stage` | One-off stage invocation |
+| Console script | Entry module | Main stage scope |
+|----------------|--------------|------------------|
+| `hephaestus-automation-loop` | `hephaestus.automation.loop_runner` | All six main stages |
+| `hephaestus-plan-issues` | `hephaestus.automation.planner` | `planning → plan_review` |
+| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | `implementation → pr_review → merge_wait` |
+| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | `pr_review` |
+
+Learning and finished are implicit auxiliary stages for every scope. The full
+command accepts `--stages` with contiguous main stage names in queue order.
+Use `--merge-attempts` and `--max-workers`. Removed commands and option aliases
+have no compatibility path.
+
+The coordinator owns admission, routes, timers, permits, and completion.
+Workers receive frozen requests and return one result for coordinator routing.
+The accepted work item retains its repository-qualified file reservation
+through implementation, review, and merge. Source jobs use an explicit
+workspace binding. The worker checks source ownership under the workspace
+lease before execution. One deadline covers lock waits, checks, and execution.
+
+Current journals preserve plan pointers, publication repair, learning claims,
+issue-wave checkpoints, source ownership, and reply recovery. A recovered GO
+publication receipt cannot grant current-process review proof. On restart,
+review must obtain fresh source and review evidence before merge. Reply
+handoffs support armed format 2 and remediation format 3.
+
+Stop old coordinators before cutover or rollback. Preserve uncertain effects,
+local commits, worktrees, and current journals. Do not run old and new owners
+against the same state directory. See
+[ADR-0048](docs/adr/0048-queue-owned-automation-cutover.md).
 
 ## Agent runtime
 
@@ -705,11 +725,10 @@ approved-plan or merged-PR source, prepares one bounded validated skill change,
 then delegates the closed request to the signed PR-delivery service. See
 ADR-0025 and ADR-0032.
 
-Per-agent model/session/timeout configuration is centralised in
-`hephaestus.automation.agent_config`, all operator-tunable via explicit CLI flags
-on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,
-`--git-message-timeout`, etc.). Legacy `claude_models`, `claude_timeouts`, and
-`session_naming` modules remain compatibility shims over `agent_config`.
+`hephaestus.automation.agent_config` supplies model, session, and timeout
+defaults. The common parser exposes role timeout options, `--poll-max-wait`,
+and `--git-message-timeout`. Host-owned advice and learning do not use agent
+provider timeout options.
 
 The automation loop selects tools and model strings independently. Use
 `--planner-agent`, `--implementer-agent`, and `--reviewer-agent` to override
@@ -777,13 +796,10 @@ restriction, not an OS-level sandbox.
 
 | Call site | Tools | Scope / controls |
 | --- | --- | --- |
-| `agents/runtime.py:run_claude_text` | `Read,Glob,Grep` | One-shot `agent_stage` read-only execution uses `--bare`, a fixed `--tools`/`--allowedTools` scope, `dontAsk`, and strict MCP mode without a supplied config; incompatible CLIs fail the invocation instead of falling back. |
-| `audit_reviewer.py:run_audit_coordinator` | `Read,Glob,Grep` | Repo-root audit analysis; no write tools; direct-runner parity uses `sandbox="read-only"`. |
-| `comment_difficulty.py:_run_classifier_session` | `Read,Glob,Grep` | Worktree comment classification; no write tools; result is parsed JSON only. |
-| `pr_review_core.py:_invoke_and_parse_review_session` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | Worktree PR analysis invokes the normal read-only `$athena:pr-review` workflow when available (or its inline fallback); the agent does not post reviews or mutate CI/CD. |
-| `pipeline/stages/pr_review.py:PrReviewStage._review_wait` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The sole pipeline GO/NOGO review uses the read-only AgentJob policy and may invoke the normal read-only `$athena:pr-review` workflow; validation and difficulty jobs keep `Read,Glob,Grep`. |
-| `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review and branch protection. |
-| `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `none` | Claude-only conflict planner receives only nonce-fenced conflict text and returns JSON edits; direct runtimes are rejected because their tool surfaces cannot provide the zero-tool contract, no agent invocation occurs in `--dry-run`, and the host validates/writes only known paths, owns all Git continuation/signing/push, snapshots remote URLs, and pins the final lease to the discovered branch SHA. |
+| `agents/runtime.py:run_claude_text` | `Read,Glob,Grep` | Read-only calls use `--bare`, a fixed tool scope, `dontAsk`, and strict MCP mode. A policy rejection stops the call. |
+| `pipeline/stages/pr_review_jobs.py:PrReviewJobs._review_wait` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The queue submits a read-only review job for the exact source head. The host owns review publication, labels, and merge admission. |
+| `pipeline/stages/implementation.py` | `Read,Write,Edit,Glob,Grep,Bash` | The implementation job uses an isolated writer workspace. Host operations own Git publication and its policy checks. |
+| `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `none` | The conflict planner returns JSON edits from fenced input. The host validates paths and owns Git continuation, signing, and push. |
 
 Fleet-sync `--dry-run` is a preview contract: GitHub reads and writes, Git subprocesses, pushes,
 merges, and agent calls are suppressed or logged. The CLI may still allocate an ephemeral

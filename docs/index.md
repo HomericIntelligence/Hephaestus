@@ -42,7 +42,7 @@ annotations for documented first-level subpackages, excluding the
 `hephaestus.automation` product layer and the package's CLI entry points,
 regenerated from the released package via [pdoc](https://pdoc.dev/).
 
-Full CLI usage and option details for all 58 CLI entry points remain available
+CLI usage and option details are available
 through each command's `--help` output.
 
 To build the same reference locally (output to the git-ignored `docs/api/`):
@@ -55,11 +55,12 @@ just docs        # outputs to docs/api/
 
 See the [README](../README.md) for installation and development setup instructions.
 
-- [Audit Reviewer](audit-reviewer.md) — `hephaestus-audit-prs`: coordinator-pattern auditor for ALL open PRs (issue #994)
+- [Queue Architecture](architecture.md) — Stage ownership, source proof, journals, and bounded recovery
+- [Queue Cutover](adr/0048-queue-owned-automation-cutover.md) — Current commands and stopped-owner migration
 - [MCP Integration Posture](mcp.md) — Capability boundary, alternative integration contracts, and project-scoped `.mcp.json` change control
 - [NATS JetStream Configuration](nats.md) — TLS defaults, certificate file paths, local plaintext exceptions, and the at-most-once failed-message retention policy for `hephaestus.nats`
 - [Observability: metrics, alerts, and SLOs](observability.md) — Automation pipeline metric catalog, alert ownership, and SLOs
-- [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, drive-green stall, quota exhaustion)
+- [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, queue merge stall, quota exhaustion)
 - [Performance Testing](performance-testing.md) — Bounded worker-pool load, capacity, latency, and sustained-concurrency testing
 - [Contract Testing](contract-testing.md) — Opt-in authenticated GitHub and agent end-to-end contract coverage
 - [Environment Variables](environment-variables.md) — Exact runtime registry,

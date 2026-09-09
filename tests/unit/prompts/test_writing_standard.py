@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import audit_reviewer, commit_runtime, learn, pr_manager
+from hephaestus.automation import commit_runtime
 from hephaestus.automation.pipeline.stages.planning import build_plan_prompt
 from hephaestus.automation.prompts import (
     get_address_review_prompt,
@@ -56,11 +56,7 @@ COMPLETE_AGENT_PROMPTS = (
     "advise/direct.j2",
     "advise/json_retry.j2",
     "agent_stage/skill_prefix.j2",
-    "audit/coordinator.j2",
-    "ci/fix.j2",
-    "ci/force_engagement.j2",
     "fleet_sync/conflict_resolution.j2",
-    "follow_up/follow_up.j2",
     "implementation/dirty_worktree.j2",
     "implementation/dirty_direct_continuation.j2",
     "implementation/implementation.j2",
@@ -76,7 +72,6 @@ COMPLETE_AGENT_PROMPTS = (
     "pr_management/commit_message.j2",
     "pr_management/pr_message.j2",
     "pr_review/analysis.j2",
-    "pr_review/comment_difficulty.j2",
     "pr_review/validation.j2",
     "tidy/rebase_fix.j2",
 )
@@ -84,15 +79,11 @@ COMPLETE_AGENT_PROMPTS = (
 NON_AGENT_DIRECTION_TEMPLATES = (
     "address_review/context_block.j2",
     "address_review/unaddressed_directive.j2",
-    "ci/dirty_worktree_block.j2",
-    "ci/remote_checks_failing.j2",
-    "ci/remote_repair_needed.j2",
     "fleet_sync/untrusted_notice.j2",
     "implementation/advise_append.j2",
     "implementation/advise_prepend.j2",
     "implementation/rebase_conflict_append.j2",
     "implementation/test_failure_review.j2",
-    "learn/drive_green_context.j2",
     "planning/amend_feedback.j2",
     "pr_review/description.j2",
     "pr_review/nitpick_include.j2",
@@ -119,33 +110,6 @@ DIRECT_PROMPTS: tuple[tuple[str, dict[str, Any]], ...] = (
     (
         "agent_stage/skill_prefix.j2",
         {"stage": "review", "skill_text": "Review the change.", "prompt": "Start."},
-    ),
-    ("audit/coordinator.j2", {"prs_text": "- PR #1"}),
-    (
-        "ci/fix.j2",
-        {
-            "advise_block": "",
-            "review_threads_block": "",
-            "pr_ref": "#1",
-            "issue_ref": "#2",
-            "worktree_path": "/workspace",
-            "pr_head_branch": "2-fix",
-            "failing_checks_block": "",
-            "ci_logs": "failed",
-        },
-    ),
-    (
-        "ci/force_engagement.j2",
-        {
-            "review_threads_block": "",
-            "pr_ref": "#1",
-            "issue_ref": "#2",
-            "pr_head_branch": "2-fix",
-            "remote_block": "Remote checks failed",
-            "failing_block": "check: failed",
-            "dirty_block": "",
-            "worktree_path": "/workspace",
-        },
     ),
     (
         "fleet_sync/conflict_resolution.j2",
@@ -302,9 +266,7 @@ def test_shared_directive_overlay_cannot_replace_packaged_policy(tmp_path: Path)
     override.parent.mkdir(parents=True)
     override.write_text("HARNESS WRITING POLICY\n", encoding="utf-8")
 
-    rendered = PromptCatalog(override_root=tmp_path).render(
-        "audit/coordinator.j2", prs_text="- PR #1: Review"
-    )
+    rendered = PromptCatalog(override_root=tmp_path).render("planning/plan.j2", issue_number=1)
 
     assert WRITING_STANDARD_SENTINEL in rendered
     assert "HARNESS WRITING POLICY" not in rendered
@@ -323,9 +285,6 @@ def test_composed_prompts_include_one_immutable_wrapper() -> None:
 def test_production_prompt_builders_keep_the_writing_standard(tmp_path: Path) -> None:
     """Direct production builders cannot bypass the catalog policy."""
     prompts = (
-        audit_reviewer._build_coordinator_prompt(
-            [{"number": 1, "title": "Review", "url": "https://example.test/pr/1"}]
-        ),
         commit_runtime._commit_message_prompt(
             issue_number=2,
             issue_title="Title",
@@ -333,15 +292,7 @@ def test_production_prompt_builders_keep_the_writing_standard(tmp_path: Path) ->
             changed_files="M file.py",
             diff_stat="1 file changed",
         ),
-        pr_manager._pr_message_prompt(
-            issue_number=2,
-            issue_title="Title",
-            issue_body="Body",
-            changed_files="M file.py",
-            diff_stat="1 file changed",
-            commits="abc feat: change",
-        ),
-        learn.build_learn_prompt("Capture the result."),
+        PromptCatalog().render("learn/learn.j2", suffix=" Capture the result."),
         tidy._make_agent_prompt("2-change", "main", tmp_path, "owner/repo"),
         build_recovery_prompt(
             issue_number=2,

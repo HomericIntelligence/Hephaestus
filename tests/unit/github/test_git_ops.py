@@ -9,21 +9,21 @@ from unittest.mock import ANY, patch
 
 import pytest
 
-import hephaestus.github.git_ops as github_git_ops
-import hephaestus.utils.git as shared_git
+from hephaestus.utils.git import (
+    git_branch_exists,
+    git_config_get,
+    git_ls_remote_contains,
+    git_ls_remote_sha,
+    git_push,
+    git_remote_url,
+    git_rev_list_count,
+    git_unmerged_files,
+    in_git_repo,
+    repo_root,
+    run_git,
+    working_tree_clean,
+)
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
-
-git_branch_exists = github_git_ops.git_branch_exists
-git_config_get = github_git_ops.git_config_get
-git_ls_remote_contains = github_git_ops.git_ls_remote_contains
-git_push = github_git_ops.git_push
-git_remote_url = github_git_ops.git_remote_url
-git_rev_list_count = github_git_ops.git_rev_list_count
-git_unmerged_files = github_git_ops.git_unmerged_files
-in_git_repo = github_git_ops.in_git_repo
-repo_root = github_git_ops.repo_root
-run_git = github_git_ops.run_git
-working_tree_clean = github_git_ops.working_tree_clean
 
 
 def test_run_git_uses_shared_subprocess_helper() -> None:
@@ -503,7 +503,7 @@ def test_git_ls_remote_sha_returns_exact_matching_ref_sha() -> None:
         ["git"], 0, stdout="rebased-sha\trefs/heads/feature\n", stderr=""
     )
     with patch("hephaestus.utils.git.run_git", return_value=found) as mock_run:
-        assert shared_git.git_ls_remote_sha(Path("/repo"), "origin", "feature") == "rebased-sha"
+        assert git_ls_remote_sha(Path("/repo"), "origin", "feature") == "rebased-sha"
 
     mock_run.assert_called_once_with(
         ["ls-remote", "origin", "feature"],
@@ -595,10 +595,3 @@ def test_git_ls_remote_contains_accepts_full_exact_refs() -> None:
     found = subprocess.CompletedProcess(["git"], 0, stdout="abc\trefs/tags/v1.0.0\n", stderr="")
     with patch("hephaestus.utils.git.run_git", return_value=found):
         assert git_ls_remote_contains(Path("/repo"), "origin", "refs/tags/v1.0.0") is True
-
-
-def test_github_git_ops_reexports_shared_helpers() -> None:
-    """GitHub callers keep their old import path while using the utils implementation."""
-    assert github_git_ops.run_git is shared_git.run_git
-    assert github_git_ops.git_ls_remote_contains is shared_git.git_ls_remote_contains
-    assert github_git_ops.git_ls_remote_sha is shared_git.git_ls_remote_sha

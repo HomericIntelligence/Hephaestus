@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -179,6 +180,7 @@ def run_git(
     log_on_error: bool = True,
     env: dict[str, str] | None = None,
     retries: int | None = None,
+    shutdown: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run git through the repository's standard subprocess helper."""
     if not capture_output or not text:
@@ -196,6 +198,9 @@ def run_git(
             "dry_run": dry_run,
             "log_on_error": log_errors,
         }
+        if shutdown is not None:
+            kwargs["shutdown"] = shutdown
+            kwargs["track_process_group"] = True
         return run_subprocess(
             ["git", *normalized_args],
             env=env if env is not None else build_git_signing_env(),

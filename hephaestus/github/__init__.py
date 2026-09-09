@@ -27,11 +27,8 @@ requires direct stdin/stdout access, and ``rate_limit``'s reset probe calls
 ``gh_call``) to avoid recursing back into ``gh_call`` while ``gh_call`` is
 classifying a rate-limit error.
 
-CLI entry points (``hephaestus-merge-prs``, ``hephaestus-fleet-sync``,
-``hephaestus-tidy``) are intentionally NOT exported here: they are
-``argparse``-driven ``main()`` functions that call ``sys.exit()`` and are
-not safe for programmatic use. Run them as console scripts, or import them
-directly from their submodules (e.g. ``hephaestus.github.pr_merge:main``).
+Run ``hephaestus-fleet-sync`` and ``hephaestus-tidy`` as console scripts.
+Their CLI entry points are not exported here.
 """
 
 from hephaestus.github.client import (
@@ -48,7 +45,6 @@ from hephaestus.github.mnemosyne_repo import (
     remote_repo_exists,
     resolve_mnemosyne_target,
 )
-from hephaestus.github.pr_merge import detect_repo_from_remote, local_branch_exists
 from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
     detect_claude_usage_limit,
@@ -78,7 +74,6 @@ __all__ = [
     "detect_claude_usage_cap",
     "detect_claude_usage_limit",
     "detect_rate_limit",
-    "detect_repo_from_remote",
     "detect_session_limit",
     "fork_upstream",
     "format_stats_table",
@@ -88,7 +83,6 @@ __all__ = [
     "get_prs_stats",
     "gh_authenticated_login",
     "gh_call",
-    "local_branch_exists",
     "parse_reset_epoch",
     "remote_repo_exists",
     "resolve_mnemosyne_target",
