@@ -22,10 +22,13 @@ from hephaestus.automation.host_verification_bootstrap import (
 from hephaestus.automation.pipeline.scope_retraction import (
     scope_retraction_paths_from_body,
 )
+from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.scope_expansion_domain import (
     ScopeExpansion,
     normalize_scope_expansion,
 )
+
+from .rebase_review import RebaseReviewProof
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _JOURNAL_MARKER_RE = re.compile(
@@ -366,9 +369,40 @@ class RunMergeWaitCycleRequest:
     issue_number: int | None = None
     queue_admitted: bool = False
     bootstrap_proof: BootstrapProof | None = None
+    rebase_proof: RebaseReviewProof | None = None
+    rebase_record: RebaseReviewRecord | None = None
+
+    @property
+    def merge_head_sha(self) -> str:
+        """Return the head that requires fresh checks and conditional merge."""
+        return self.rebase_proof.resulting_head_sha if self.rebase_proof else self.reviewed_head_sha
+
+    def _validate_rebase_evidence(self) -> None:
+        """Keep the initial audit and complete record with the host proof."""
+        if (self.rebase_proof is None) != (self.rebase_record is None):
+            raise ValueError("rebase proof and initial record must both be present")
+        if self.rebase_record is not None and (
+            not isinstance(self.rebase_record, RebaseReviewRecord)
+            or not isinstance(self.rebase_proof, RebaseReviewProof)
+            or self.rebase_record.state != "active"
+            or any(
+                getattr(self.rebase_record, name) != getattr(self.rebase_proof, name)
+                for name in RebaseReviewProof.__dataclass_fields__
+            )
+        ):
+            raise ValueError("rebase record must match the host proof")
+        if self.rebase_proof is not None and (
+            not isinstance(self.rebase_proof, RebaseReviewProof)
+            or self.rebase_proof.pr_number != self.pr_number
+            or self.rebase_proof.issue_number != self.issue_number
+            or self.rebase_proof.reviewed_head_sha != self.reviewed_head_sha
+            or self.bootstrap_proof is not None
+        ):
+            raise ValueError("rebase proof must match the original review and merge target")
 
     def __post_init__(self) -> None:
         """Validate the exact-head merge proof and readiness fingerprint."""
+        self._validate_rebase_evidence()
         if self.bootstrap_proof is not None and (
             not is_process_bootstrap_proof(self.bootstrap_proof)
             or self.bootstrap_proof.pr != self.pr_number
@@ -642,10 +676,96 @@ class RebaseConflictInspected:
             raise ValueError("rebase admission result is invalid")
 
 
+@dataclass(frozen=True)
+class InspectRebaseReviewRequest:
+    """Read retained review facts after a rebase push."""
+
+    record: RebaseReviewRecord
+
+    def __post_init__(self) -> None:
+        """Require typed active review facts."""
+        if not isinstance(self.record, RebaseReviewRecord) or self.record.state != "active":
+            raise ValueError("rebase inspection record is invalid")
+
+    @property
+    def repository(self) -> str:
+        """Return the repository bound to the record."""
+        return self.record.repository
+
+    @property
+    def issue_number(self) -> int:
+        """Return the issue bound to the record."""
+        return self.record.issue_number
+
+    @property
+    def pr_number(self) -> int:
+        """Return the PR bound to the record."""
+        return self.record.pr_number
+
+
+@dataclass(frozen=True)
+class RebaseReviewInspected:
+    """Report fresh authenticated facts for one exact request."""
+
+    request: InspectRebaseReviewRequest
+    verified: bool
+
+    def __post_init__(self) -> None:
+        """Reject untyped inspection results."""
+        if not isinstance(self.request, InspectRebaseReviewRequest):
+            raise TypeError("rebase inspection request is invalid")
+        if type(self.verified) is not bool:
+            raise ValueError("rebase inspection result is invalid")
+
+
+@dataclass(frozen=True)
+class PublishRebaseReviewRequest:
+    """Publish retained review facts before a rebase push."""
+
+    record: RebaseReviewRecord
+
+    def __post_init__(self) -> None:
+        """Require typed active review facts."""
+        if not isinstance(self.record, RebaseReviewRecord) or self.record.state != "active":
+            raise ValueError("rebase publication record is invalid")
+
+    @property
+    def repository(self) -> str:
+        """Return the repository bound to the record."""
+        return self.record.repository
+
+    @property
+    def issue_number(self) -> int:
+        """Return the issue bound to the record."""
+        return self.record.issue_number
+
+    @property
+    def pr_number(self) -> int:
+        """Return the PR bound to the record."""
+        return self.record.pr_number
+
+
+@dataclass(frozen=True)
+class RebaseReviewPublished:
+    """Report authenticated publication for one exact request."""
+
+    request: PublishRebaseReviewRequest
+    published: bool
+
+    def __post_init__(self) -> None:
+        """Reject untyped publication results."""
+        if not isinstance(self.request, PublishRebaseReviewRequest):
+            raise TypeError("rebase publication request is invalid")
+        if type(self.published) is not bool:
+            raise ValueError("rebase publication result is invalid")
+
+
 type GitHubRequest = (
     InspectAdoptedRemediationPrStateRequest
     | InspectDirtyDirectPrStateRequest
     | InspectRebaseConflictRequest
+    | PublishRebaseReviewRequest
+    | InspectRebaseReviewRequest
     | RecoverReplyJournalRequest
     | RecoverRemediationReplyJournalRequest
     | AppendReplyJournalRequest
@@ -678,6 +798,8 @@ class GitHubJob:
                 InspectAdoptedRemediationPrStateRequest,
                 InspectDirtyDirectPrStateRequest,
                 InspectRebaseConflictRequest,
+                PublishRebaseReviewRequest,
+                InspectRebaseReviewRequest,
                 RecoverReplyJournalRequest,
                 RecoverRemediationReplyJournalRequest,
                 AppendReplyJournalRequest,
@@ -695,6 +817,8 @@ class GitHubJob:
                 InspectDirtyDirectPrStateRequest,
                 InspectAdoptedRemediationPrStateRequest,
                 InspectRebaseConflictRequest,
+                PublishRebaseReviewRequest,
+                InspectRebaseReviewRequest,
             ),
         ) and (self.request.repository.rsplit("/", 1)[-1].casefold() != self.repo.casefold()):
             raise ValueError("dirty direct request repository does not match the job")
@@ -918,6 +1042,8 @@ type GitHubReceipt = (
     AdoptedRemediationPrStateRead
     | DirtyDirectPrStateRead
     | RebaseConflictInspected
+    | RebaseReviewPublished
+    | RebaseReviewInspected
     | ReplyJournalRecovered
     | RemediationReplyJournalRecovered
     | ReplyJournalAppended

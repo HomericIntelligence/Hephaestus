@@ -288,3 +288,112 @@ def test_initial_reservation_moves_before_implementation(
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition is Disposition.FINISH_FAIL
         assert item.payload["_direct_scope_reservation"] == reservation
+
+
+def test_reviewed_conflict_that_clears_retains_review(make_ctx: Any, make_work_item: Any) -> None:
+    """A PR that has no conflict keeps its completed review."""
+    item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+    item.payload.update(
+        rebase_reason="review_conflict",
+        reviewed_pr_head_sha="a" * 40,
+        reviewed_pr_node_id="PR_node",
+        review_verdict="GO",
+    )
+    github = FakeStageGitHub(
+        pr_impl_state=(True, False),
+        pr_state={
+            "state": "OPEN",
+            "autoMergeRequest": None,
+            "headRefOid": "a" * 40,
+            "baseRefName": "main",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+        },
+    )
+    result = ImplementationStage().step(item, make_ctx(github=github))
+    assert result == StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
+    assert item.payload["reviewed_pr_head_sha"] == "a" * 40
+    assert item.payload["reviewed_pr_node_id"] == "PR_node"
+    assert item.payload["review_verdict"] == "GO"
+
+
+def test_host_rebase_receipt_retains_the_original_review(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The resulting head goes to merge checks with the initial review."""
+    from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
+    from hephaestus.automation.review_audit import ReviewAudit
+
+    audit = ReviewAudit("A", "Checks passed.", (), "", True, "GO")
+    proof = RebaseReviewProof(
+        repository="test-org/test-repo",
+        issue_number=1,
+        pr_number=1001,
+        reviewed_head_sha="a" * 40,
+        reviewed_base_sha="b" * 40,
+        source_head_sha="a" * 40,
+        target_base_sha="c" * 40,
+        resulting_head_sha="d" * 40,
+        resulting_tree_sha="e" * 40,
+        original_audit_id=f"<!-- hephaestus-implementation-go-audit:pr=1001:head={'a' * 40} -->",
+    )
+    item = make_work_item(repo="test-repo", issue=1, pr=1001, state="REBASE_WAIT")
+    item.payload.update(
+        rebase_reason="review_conflict",
+        reviewed_pr_head_sha="a" * 40,
+        reviewed_pr_base_sha="b" * 40,
+        review_audit=audit,
+    )
+    github = FakeStageGitHub(pr_impl_state=(True, False))
+    ctx = make_ctx(github=github, org="test-org")
+    stage = ImplementationStage()
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=True,
+            value={
+                "published": True,
+                "head_sha": "d" * 40,
+                "retained_rebase_review_proof": proof,
+            },
+        ),
+        ctx,
+    )
+    result = stage.step(item, ctx)
+    assert result == StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
+    assert item.payload["reviewed_pr_head_sha"] == "a" * 40
+    assert item.payload["review_audit"] is audit
+    assert item.payload["retained_rebase_review_proof"] is proof
+    saved = github.review_rebase_records[1001]
+    assert saved.reviewed_head_sha == proof.reviewed_head_sha
+    assert saved.resulting_head_sha == proof.resulting_head_sha
+    assert saved.audit is audit
+
+
+def test_host_noop_rebase_keeps_the_review(make_ctx: Any, make_work_item: Any) -> None:
+    """An unchanged published head does not need another review."""
+    from hephaestus.automation.review_audit import ReviewAudit
+
+    item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+    item.payload.update(
+        rebase_reason="review_conflict",
+        reviewed_pr_head_sha="a" * 40,
+        review_audit=ReviewAudit("A", "Checks passed.", (), "", True, "GO"),
+    )
+    stage = ImplementationStage()
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=True,
+            value={
+                "rebased": False,
+                "published": False,
+                "head_sha": "a" * 40,
+            },
+        ),
+        make_ctx(),
+    )
+    assert stage.step(item, make_ctx()) == StageOutcome(
+        Disposition.FAIL_BACK, "review_retained_after_rebase"
+    )
+    assert item.payload["reviewed_pr_head_sha"] == "a" * 40

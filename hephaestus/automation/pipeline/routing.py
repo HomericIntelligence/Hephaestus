@@ -109,6 +109,7 @@ ROUTES: dict[StageName, Route] = {
         fail_routes={
             "plan_not_go": StageName.PLAN_REVIEW,
             "already_implementation_go_pr": StageName.MERGE_WAIT,
+            "review_retained_after_rebase": StageName.MERGE_WAIT,
             "manual_rebase_complete_planning": StageName.PLANNING,
             "manual_rebase_complete_plan_review": StageName.PLAN_REVIEW,
             "*": StageName.FINISHED,

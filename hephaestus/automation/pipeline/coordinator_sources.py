@@ -749,10 +749,11 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
-            if pending_audit is not None or has_go:
-                stage_name = (
-                    ct.StageName.PR_REVIEW if pending_audit is not None else ct.StageName.MERGE_WAIT
-                )
+            rebase_record = _seeding.read_review_rebase_record(github, pr)
+            if rebase_record is not None and rebase_record.issue_number != issue_number:
+                raise _seeding.IssueClassificationError("rebase review issue does not match")
+            if pending_audit is not None or has_go or rebase_record is not None:
+                stage_name = _seeding.pending_review_entry_stage(pending_audit, rebase_record)
                 reason = (
                     f"PR #{pr} has a pending implementation-go audit"
                     if pending_audit is not None
@@ -771,6 +772,7 @@ class SourceCoordinator(_CoordinatorHost):
                         issue_number=issue_number,
                         passed=passed,
                         pending_implementation_go_audit=pending_audit,
+                        pending_review_rebase_record=rebase_record,
                         pending_implementation_go_label_confirmed=has_go,
                     )
                 )
@@ -885,6 +887,8 @@ class SourceCoordinator(_CoordinatorHost):
                 item.payload["pending_implementation_go_label_confirmed"] = (
                     entry.pending_implementation_go_label_confirmed
                 )
+        if entry.pending_review_rebase_record is not None:
+            item.payload["pending_review_rebase_record"] = entry.pending_review_rebase_record
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
         return item
