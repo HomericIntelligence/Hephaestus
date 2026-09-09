@@ -204,7 +204,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
 - Comprehensive error handling
-- Comprehensive test coverage (unit tests) — 80%+ test coverage enforced by the CI gate (`fail_under = 80`); target 90%
+- Comprehensive test coverage (unit tests) — 85%+ test coverage enforced by the CI gate (`fail_under = 85`); target 90%
 - Follow PEP 8 style guidelines
 
 ## Key Development Principles

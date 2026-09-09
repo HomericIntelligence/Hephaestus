@@ -8,7 +8,9 @@ cross-phase dispatch contract that the pipeline stages rely on.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,12 @@ from unittest import mock
 
 import pytest
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advise
 from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
@@ -222,6 +230,389 @@ def test_implement_phase_run_claude_code_dispatches_claude(tmp_path: Path) -> No
     phase = ImplementPhase(ctx)
     assert phase._run_claude_code(7, tmp_path, "prompt") == "sess-1"
     ctx.impl._run_claude_impl_session.assert_called_once()
+
+
+def test_implement_phase_run_advise_uses_direct_implementer(tmp_path: Path) -> None:
+    """The advise pass uses the selected direct implementer and read-only sandbox."""
+    phase = ImplementPhase(
+        _make_ctx(
+            tmp_path,
+            implementer_agent="codex",
+            implementer_model="model-a",
+            advise_timeout=17,
+            git_timeout=3,
+            clone_timeout=5,
+        )
+    )
+
+    def invoke_advise(**kwargs: Any) -> str:
+        return cast(str, kwargs["invoke"]("advice prompt"))
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.run_advise",
+            side_effect=invoke_advise,
+        ) as run_advise,
+        mock.patch(
+            "hephaestus.automation._implement_phase.uses_direct_agent_runner",
+            return_value=True,
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.direct_agent_model",
+            return_value="resolved-model",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.run_agent_text",
+            return_value=SimpleNamespace(stdout="  use a seam  "),
+        ) as run_agent,
+    ):
+        result = phase._run_advise(7, "Title", "Body")
+
+    assert result == "use a seam"
+    assert run_agent.call_args.kwargs == {
+        "agent": "codex",
+        "prompt": "advice prompt",
+        "cwd": tmp_path,
+        "timeout": 17,
+        "execution_request": ExecutionRequest(
+            AgentRole.ADVISOR,
+            AgentOperation.ADVISE,
+            SessionLifecycle.ONE_SHOT,
+        ),
+        "model": "resolved-model",
+        "sandbox": "read-only",
+    }
+    assert run_advise.call_args.kwargs["git_timeout_s"] == 3
+    assert run_advise.call_args.kwargs["clone_timeout_s"] == 5
+
+
+def test_implement_phase_run_advise_uses_claude_session(tmp_path: Path) -> None:
+    """The Claude advise pass binds the repository and selected model."""
+    phase = ImplementPhase(
+        _make_ctx(tmp_path, model="fallback", advise_timeout=19, git_timeout=None)
+    )
+
+    def invoke_advise(**kwargs: Any) -> str:
+        return cast(str, kwargs["invoke"]("advice prompt"))
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.run_advise",
+            side_effect=invoke_advise,
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.uses_direct_agent_runner",
+            return_value=False,
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.get_repo_slug",
+            return_value="org/repo",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.invoke_claude_with_session",
+            return_value=("  finding  ", None),
+        ) as invoke,
+    ):
+        result = phase._run_advise(8, "Title", "Body")
+
+    assert result == "finding"
+    assert invoke.call_args.kwargs == {
+        "repo": "org/repo",
+        "issue": 8,
+        "agent": "advise",
+        "prompt": "advice prompt",
+        "model": "fallback",
+        "cwd": tmp_path,
+        "timeout": 19,
+        "output_format": "text",
+    }
+
+
+def test_implement_phase_advise_wrapper_and_compaction(tmp_path: Path) -> None:
+    """Compatibility helpers delegate advise and compaction with stable arguments."""
+    phase = ImplementPhase(_make_ctx(tmp_path, model="fallback"))
+    phase._run_advise = mock.MagicMock(return_value="finding")  # type: ignore[method-assign]
+
+    assert phase._run_advise_as_implementer_turn(9, "Title", "Body", tmp_path / "wt") == "finding"
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.get_repo_slug",
+            return_value="org/repo",
+        ),
+        mock.patch("hephaestus.automation._implement_phase.compact_session") as compact,
+    ):
+        phase._compact_implementer_session(9, tmp_path / "wt")
+
+    phase._run_advise.assert_called_once_with(9, "Title", "Body")
+    compact.assert_called_once_with(
+        repo="org/repo",
+        issue=9,
+        agent="implementer",
+        cwd=tmp_path / "wt",
+        model="fallback",
+    )
+
+
+def test_implement_phase_run_claude_code_dispatches_direct_agent(tmp_path: Path) -> None:
+    """A direct provider uses the direct session path after state setup."""
+    state_dir = tmp_path / "state"
+    ctx = _make_ctx(tmp_path, implementer_agent="codex")
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+
+    with mock.patch(
+        "hephaestus.automation._implement_phase.uses_direct_agent_runner",
+        return_value=True,
+    ):
+        phase._run_direct_agent_code = mock.MagicMock(return_value="session")  # type: ignore[method-assign]
+        result = phase._run_claude_code(7, tmp_path, "prompt")
+
+    assert result == "session"
+    assert state_dir.is_dir()
+    phase._run_direct_agent_code.assert_called_once_with(7, tmp_path, "prompt")
+
+
+def test_claude_impl_session_writes_log_and_removes_prompt(tmp_path: Path) -> None:
+    """A successful Claude result persists its receipt and removes the prompt file."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(tmp_path, agent_timeout=23, implementer_model="model-b")
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+    payload = json.dumps({"session_id": "session-7"})
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.get_repo_slug",
+            return_value="org/repo",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.invoke_claude_with_session",
+            return_value=(payload, None),
+        ) as invoke,
+    ):
+        assert phase._run_claude_impl_session(7, tmp_path, "prompt") == "session-7"
+
+    assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
+    assert invoke.call_args.kwargs["allowed_tools"] == "Read,Write,Edit,Glob,Grep,Bash"
+    assert not (tmp_path / ".claude-prompt-7.md").exists()
+    assert (state_dir / "claude-7.log").read_text(encoding="utf-8") == payload
+
+
+@pytest.mark.parametrize("payload", ["not-json", "[]"])
+def test_claude_impl_session_keeps_unparseable_output(tmp_path: Path, payload: str) -> None:
+    """Malformed or non-object output returns no session and remains available for diagnosis."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(tmp_path, agent_timeout=23, model="")
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.get_repo_slug",
+            return_value="org/repo",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.invoke_claude_with_session",
+            return_value=(payload, None),
+        ),
+    ):
+        assert phase._run_claude_impl_session(7, tmp_path, "prompt") is None
+
+    assert (state_dir / "claude-7.log").read_text(encoding="utf-8") == payload
+    assert not (tmp_path / ".claude-prompt-7.md").exists()
+
+
+@pytest.mark.parametrize("reset_epoch", [None, 123])
+def test_claude_impl_session_rejects_error_payload(tmp_path: Path, reset_epoch: int | None) -> None:
+    """An error-shaped zero exit is a failure and waits only for a valid reset."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(tmp_path, agent_timeout=23)
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+    payload = json.dumps({"is_error": True, "result": "limit reached"})
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.get_repo_slug",
+            return_value="org/repo",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.invoke_claude_with_session",
+            return_value=(payload, None),
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase._claude_quota_reset_epoch",
+            return_value=reset_epoch,
+        ),
+        mock.patch("hephaestus.automation._implement_phase.wait_until") as wait,
+    ):
+        with pytest.raises(RuntimeError, match="limit reached"):
+            phase._run_claude_impl_session(7, tmp_path, "prompt")
+
+    if reset_epoch is None:
+        wait.assert_not_called()
+    else:
+        wait.assert_called_once_with(reset_epoch)
+    assert (state_dir / "claude-7.log").read_text(encoding="utf-8") == payload
+
+
+@pytest.mark.parametrize("reset_epoch", [None, 456])
+def test_claude_impl_session_translates_process_failure(
+    tmp_path: Path, reset_epoch: int | None
+) -> None:
+    """A Claude process failure is logged, optionally delayed, and translated."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(tmp_path, agent_timeout=23)
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+    failure = subprocess.CalledProcessError(9, ["claude"], output="out", stderr="err")
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.get_repo_slug",
+            return_value="org/repo",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.invoke_claude_with_session",
+            side_effect=failure,
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase._claude_quota_reset_epoch",
+            return_value=reset_epoch,
+        ),
+        mock.patch("hephaestus.automation._implement_phase.wait_until") as wait,
+    ):
+        with pytest.raises(RuntimeError, match="Claude Code failed: err"):
+            phase._run_claude_impl_session(7, tmp_path, "prompt")
+
+    if reset_epoch is None:
+        wait.assert_not_called()
+    else:
+        wait.assert_called_once_with(reset_epoch)
+    log = (state_dir / "claude-7.log").read_text(encoding="utf-8")
+    assert "EXIT CODE: 9" in log and "STDOUT:\nout" in log and "STDERR:\nerr" in log
+
+
+def test_claude_impl_session_translates_timeout(tmp_path: Path) -> None:
+    """A Claude timeout persists partial output and keeps its causal exception."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(tmp_path, agent_timeout=23)
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+    timeout = subprocess.TimeoutExpired(["claude"], 23, output="partial")
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.get_repo_slug",
+            return_value="org/repo",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.invoke_claude_with_session",
+            side_effect=timeout,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="Claude Code timed out") as raised:
+            phase._run_claude_impl_session(7, tmp_path, "prompt")
+
+    assert raised.value.__cause__ is timeout
+    assert "TIMEOUT after 23s" in (state_dir / "claude-7.log").read_text()
+    assert not (tmp_path / ".claude-prompt-7.md").exists()
+
+
+def test_direct_agent_session_persists_output_and_session(tmp_path: Path) -> None:
+    """A direct implementer result persists output and returns the session identity."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(
+        tmp_path,
+        implementer_agent="codex",
+        implementer_model="model-c",
+        agent_timeout=29,
+    )
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.direct_agent_model",
+            return_value="resolved-model",
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase.run_agent_session",
+            return_value=SimpleNamespace(stdout="receipt", session_id="session-9"),
+        ) as run_agent,
+    ):
+        assert phase._run_codex_code(9, tmp_path, "prompt") == "session-9"
+
+    assert run_agent.call_args.kwargs["agent"] == "codex"
+    assert run_agent.call_args.kwargs["model"] == "resolved-model"
+    assert run_agent.call_args.kwargs["sandbox"] == "workspace-write"
+    assert run_agent.call_args.kwargs["execution_request"] == ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
+    assert (state_dir / "codex-9.log").read_text(encoding="utf-8") == "receipt"
+
+
+@pytest.mark.parametrize("reset_epoch", [None, 789])
+def test_direct_agent_session_translates_process_failure(
+    tmp_path: Path, reset_epoch: int | None
+) -> None:
+    """A direct provider failure is logged and waits only when a reset exists."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(tmp_path, agent="codex", agent_timeout=29)
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+    failure = subprocess.CalledProcessError(4, ["codex"], output="out", stderr="err")
+
+    with (
+        mock.patch(
+            "hephaestus.automation._implement_phase.run_agent_session",
+            side_effect=failure,
+        ),
+        mock.patch(
+            "hephaestus.automation._implement_phase._claude_quota_reset_epoch",
+            return_value=reset_epoch,
+        ),
+        mock.patch("hephaestus.automation._implement_phase.wait_until") as wait,
+    ):
+        with pytest.raises(RuntimeError, match="codex failed: err") as raised:
+            phase._run_direct_agent_code(9, tmp_path, "prompt")
+
+    assert raised.value.__cause__ is failure
+    if reset_epoch is None:
+        wait.assert_not_called()
+    else:
+        wait.assert_called_once_with(reset_epoch)
+    assert "EXIT CODE: 4" in (state_dir / "codex-9.log").read_text()
+
+
+def test_direct_agent_session_translates_timeout(tmp_path: Path) -> None:
+    """A direct provider timeout persists partial output and preserves its cause."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ctx = _make_ctx(tmp_path, agent="codex", agent_timeout=29)
+    ctx.impl.state_dir = state_dir
+    phase = ImplementPhase(ctx)
+    timeout = subprocess.TimeoutExpired(["codex"], 29, output="partial")
+
+    with mock.patch(
+        "hephaestus.automation._implement_phase.run_agent_session",
+        side_effect=timeout,
+    ):
+        with pytest.raises(RuntimeError, match="codex timed out") as raised:
+            phase._run_direct_agent_code(9, tmp_path, "prompt")
+
+    assert raised.value.__cause__ is timeout
+    assert "TIMEOUT after 29s" in (state_dir / "codex-9.log").read_text()
 
 
 # ---------------------------------------------------------------------------

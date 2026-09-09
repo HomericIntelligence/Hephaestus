@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.validation import tier_labels
 from hephaestus.validation.tier_labels import (
     BAD_PATTERNS,
     CANONICAL_TIERS,
@@ -457,3 +458,106 @@ class TestTierLabelFindingFormat:
         assert "T5" in formatted
         assert "Hierarchy" in formatted
         assert "Hybrid" in formatted
+
+
+class TestMain:
+    """Tests for the repository-scanning command entry point."""
+
+    def test_reports_repository_resolution_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Repository resolution failures return the documented I/O exit status."""
+        monkeypatch.setattr("hephaestus.validation.tier_labels.sys.argv", ["check-tier-labels"])
+        monkeypatch.setattr(
+            tier_labels,
+            "resolve_repo_root",
+            lambda args: (_ for _ in ()).throw(RuntimeError("not a repository")),
+        )
+        assert tier_labels.main() == 2
+        assert "Could not determine repository root" in capsys.readouterr().err
+
+    def test_reports_scan_io_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Scan failures return the documented I/O exit status."""
+        monkeypatch.setattr("hephaestus.validation.tier_labels.sys.argv", ["check-tier-labels"])
+        monkeypatch.setattr(tier_labels, "resolve_repo_root", lambda args: tmp_path)
+        monkeypatch.setattr(
+            tier_labels,
+            "scan_repository",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unreadable")),
+        )
+        assert tier_labels.main() == 2
+        assert "I/O error during scan" in capsys.readouterr().err
+
+    def test_json_mode_uses_directory_glob_and_custom_excludes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """JSON mode forwards scan options and returns a mismatch status."""
+        scan_root = tmp_path / "docs"
+        finding = TierLabelFinding("a.md", 1, "T3", "Tooling", "Delegation", "T3/Tooling")
+        monkeypatch.setattr(
+            "hephaestus.validation.tier_labels.sys.argv",
+            [
+                "check-tier-labels",
+                "--json",
+                "--directory",
+                str(scan_root),
+                "--glob",
+                "*.md",
+                "--exclude",
+                "vendor",
+            ],
+        )
+        monkeypatch.setattr(tier_labels, "resolve_repo_root", lambda args: tmp_path)
+        calls: list[tuple[Path, str, set[str]]] = []
+
+        def fake_scan(root: Path, *, glob: str, excludes: set[str]) -> list[TierLabelFinding]:
+            calls.append((root, glob, excludes))
+            return [finding]
+
+        monkeypatch.setattr(tier_labels, "scan_repository", fake_scan)
+        assert tier_labels.main() == 1
+        assert json.loads(capsys.readouterr().out)[0]["expected_name"] == "Delegation"
+        assert calls[0][0:2] == (scan_root, "*.md")
+        assert "vendor" in calls[0][2]
+
+    @pytest.mark.parametrize("verbose", [False, True])
+    def test_clean_scan_reports_success(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        verbose: bool,
+    ) -> None:
+        """A clean normal or verbose scan reports success."""
+        argv = ["check-tier-labels"]
+        if verbose:
+            argv.append("--verbose")
+        monkeypatch.setattr("hephaestus.validation.tier_labels.sys.argv", argv)
+        monkeypatch.setattr(tier_labels, "resolve_repo_root", lambda args: tmp_path)
+        monkeypatch.setattr(tier_labels, "scan_repository", lambda *args, **kwargs: [])
+        assert tier_labels.main() == 0
+        assert "No tier label mismatches found" in capsys.readouterr().out
+
+    def test_verbose_mismatch_formats_report(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A verbose mismatch prints the report and returns failure."""
+        finding = TierLabelFinding("a.md", 1, "T3", "Tooling", "Delegation", "T3/Tooling")
+        monkeypatch.setattr(
+            "hephaestus.validation.tier_labels.sys.argv", ["check-tier-labels", "--verbose"]
+        )
+        monkeypatch.setattr(tier_labels, "resolve_repo_root", lambda args: tmp_path)
+        monkeypatch.setattr(tier_labels, "scan_repository", lambda *args, **kwargs: [finding])
+        assert tier_labels.main() == 1
+        assert "Found 1 tier label mismatch" in capsys.readouterr().out
