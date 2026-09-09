@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.pipeline_github_audit import PipelineGitHubAuditReceipts
+from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.rebase_review_receipt import (
     RebaseReviewRecord,
     original_audit_identity,
@@ -71,7 +71,7 @@ def test_parser_rejects_duplicate_fields() -> None:
         parse_review_rebase_record(marker + "\n" + raw)
 
 
-class MemoryHost(PipelineGitHubAuditReceipts):
+class MemoryHost(PipelineGitHub):
     """Use an in-memory comment transport."""
 
     org = "LLM360"
