@@ -174,6 +174,8 @@ def test_pr_review_post_dispatches_without_inline_github_calls(
             "review_audit": _valid_audit(),
             "review_threads": [],
             "pr_diff": "diff --git a/a.py b/a.py",
+            "host_verification_repository_profile": "hephaestus",
+            "host_verification_receipts": [{"head_sha": "a" * 40, "status": "skipped"}],
         }
     )
     stage = PrReviewStage()
@@ -189,6 +191,10 @@ def test_pr_review_post_dispatches_without_inline_github_calls(
     assert result.job.request.deadline_s > time.monotonic()
     assert result.job.request.reviewed_head_sha == "a" * 40
     assert result.job.request.findings.thaw() == []
+    assert result.job.request.host_verification_profile == "hephaestus"
+    assert result.job.request.host_verification_receipts.thaw() == [
+        {"head_sha": "a" * 40, "status": "skipped"}
+    ]
     assert elapsed < 0.25
 
     stage.on_job_done(

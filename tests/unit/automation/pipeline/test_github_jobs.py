@@ -45,6 +45,9 @@ from hephaestus.automation.pipeline.scope_expansion_records import (
     render_scope_expansion_child_body,
     render_scope_expansion_lifecycle_comment,
 )
+from hephaestus.automation.pipeline.stages.pr_review_verification import (
+    _host_verification_specs,
+)
 from hephaestus.automation.remediation_recovery import (
     RemediationReplyResult,
     RemediationReviewInput,
@@ -1362,6 +1365,145 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         "late-thread",
     ]
     assert len(remediation) == 2
+
+
+@pytest.mark.parametrize(
+    "receipt_case, receipt_updates, first_only, profile",
+    [
+        ("valid_skip", {}, False, "hephaestus"),
+        ("wrong_head", {"head_sha": "b" * 40}, False, "hephaestus"),
+        ("wrong_platform", {"platform": "darwin"}, False, "hephaestus"),
+        ("wrong_reason", {"error": "different_failure"}, False, "hephaestus"),
+        ("wrong_command", {"argv": ["different", "command"]}, True, "hephaestus"),
+        ("missing", None, False, "hephaestus"),
+        (
+            "actual_failure",
+            {
+                "error": "command_failed",
+                "immutable_source": True,
+                "ok": False,
+                "platform": "darwin",
+                "status": "failed",
+            },
+            True,
+            "hephaestus",
+        ),
+        ("profileless", {}, False, None),
+    ],
+)
+def test_pr_reconciliation_reconciles_host_skip_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    receipt_case: str,
+    receipt_updates: dict[str, object] | None,
+    first_only: bool,
+    profile: str | None,
+) -> None:
+    """Only a complete exact-head unsupported skip removes its finding."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    review_diff = "diff --git a/example.py b/example.py\n+++ b/example.py\n"
+    specs = _host_verification_specs(review_diff, profile="hephaestus")
+    reviewed_head = "a" * 40
+    host_receipts = [
+        {
+            "argv": list(spec.argv),
+            "bootstrap_unsupported_result": True,
+            "error": "unsupported_host_verification_boundary",
+            "failure_kind": "runner",
+            "head_sha": reviewed_head,
+            "immutable_source": False,
+            "ok": False,
+            "platform": "linux",
+            "status": "skipped",
+            "stderr_tail": "",
+            "stdout_tail": "",
+        }
+        for spec in specs[:1]
+    ]
+    if receipt_updates is None:
+        host_receipts = []
+    else:
+        target_receipts = host_receipts[:1] if first_only else host_receipts
+        for host_receipt in target_receipts:
+            host_receipt.update(receipt_updates)
+    finding = {
+        "path": "example.py",
+        "line": 1,
+        "side": "RIGHT",
+        "severity": "major",
+        "body": (
+            "Host verification failed: unsupported_host_verification_boundary; "
+            "this is failed evidence."
+        ),
+    }
+    post_calls: list[list[dict[str, object]]] = []
+
+    class FakePipelineGitHub:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def operation_deadline(self, _deadline_s: float) -> object:
+            return nullcontext()
+
+        def list_unresolved_review_threads(self, _pr: int) -> list[dict[str, object]]:
+            return []
+
+        def reviewer_validation_receipts(self, *_args: object, **_kwargs: object) -> list[object]:
+            return []
+
+        def pr_review_context(self, _pr: int) -> dict[str, str]:
+            return {
+                "pr_head_sha": reviewed_head,
+                "pr_title": "fix: example",
+                "pr_description": "body",
+            }
+
+        def post_review_threads(
+            self,
+            _pr: int,
+            findings: list[dict[str, object]],
+            **_kwargs: object,
+        ) -> list[dict[str, object]]:
+            post_calls.append(findings)
+            return [
+                {
+                    **finding,
+                    "id": f"posted-{index}",
+                    "comments": [{"id": f"comment-{index}", "body": finding["body"]}],
+                }
+                for index, finding in enumerate(findings)
+            ]
+
+    monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
+    request = ReconcilePrReviewRequest(
+        pr_number=7,
+        reviewed_head_sha=reviewed_head,
+        validated_receipt_fingerprints=None,
+        validated_metadata_fingerprint=None,
+        resolved_thread_ids=(),
+        feedback=FrozenJson.snapshot({}),
+        findings=FrozenJson.snapshot([finding]),
+        review_diff=review_diff,
+        deadline_s=time.monotonic() + 60,
+        host_verification_profile=profile,
+        host_verification_receipts=FrozenJson.snapshot(host_receipts),
+    )
+
+    receipt = module.PipelineGitHubJobRunner("org", False).run(
+        GitHubJob(
+            repo="example",
+            repo_root=tmp_path.resolve(),
+            request=request,
+            descr="reconcile review",
+        )
+    )
+
+    assert isinstance(receipt, PrReviewReconciled)
+    assert receipt.action == "apply"
+    if receipt_case == "valid_skip":
+        assert post_calls == []
+    else:
+        assert post_calls == [[finding]]
 
 
 def test_runner_dispatches_merge_cycle_as_a_typed_receipt(

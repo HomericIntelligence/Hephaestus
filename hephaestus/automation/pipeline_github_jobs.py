@@ -928,6 +928,10 @@ class PipelineGitHubJobRunner:
         github: Any,
     ) -> PrReviewReconciled:
         """Run fresh receipt reconciliation, publication, and late-thread readback."""
+        from hephaestus.automation.pipeline.stages.pr_review_receipts import (
+            UNSUPPORTED_HOST_VERIFICATION_ERROR,
+            _unsupported_host_verification_skip_matches,
+        )
         from hephaestus.automation.pipeline.stages.pr_review_threads import (
             _durable_thread_id,
             _is_postable_finding,
@@ -935,6 +939,9 @@ class PipelineGitHubJobRunner:
             _validation_pr_metadata_fingerprint,
             _validation_receipt_fingerprints,
             _without_duplicate_live_findings,
+        )
+        from hephaestus.automation.pipeline.stages.pr_review_verification import (
+            _host_verification_specs,
         )
         from hephaestus.automation.prompts.pr_review import BLOCKING_SEVERITIES
 
@@ -952,6 +959,31 @@ class PipelineGitHubJobRunner:
                 unresolved_threads=FrozenJson.snapshot(list(unresolved)),
                 remediation_threads=FrozenJson.snapshot(list(remediation)),
             )
+
+        raw_findings = request.findings.thaw()
+        if not isinstance(raw_findings, list) or not all(
+            isinstance(finding, dict) for finding in raw_findings
+        ):
+            return receipt("audit_failure")
+        host_receipts = request.host_verification_receipts.thaw()
+        host_specs = _host_verification_specs(
+            request.review_diff,
+            profile=request.host_verification_profile,
+        )
+        skip_is_valid = _unsupported_host_verification_skip_matches(
+            host_receipts,
+            host_specs,
+            request.reviewed_head_sha,
+        )
+        findings_after_host_reconciliation = [
+            finding
+            for finding in raw_findings
+            if not (
+                skip_is_valid
+                and isinstance(finding.get("body"), str)
+                and UNSUPPORTED_HOST_VERIFICATION_ERROR in finding["body"]
+            )
+        ]
 
         live_for_reconciliation = github.list_unresolved_review_threads(request.pr_number)
         validation_receipts = github.reviewer_validation_receipts(
@@ -1016,12 +1048,10 @@ class PipelineGitHubJobRunner:
             for thread in live_before_post
             if (thread_id := _durable_thread_id(thread)) is not None
         }
-        raw_findings = request.findings.thaw()
-        if not isinstance(raw_findings, list) or not all(
-            isinstance(finding, dict) for finding in raw_findings
-        ):
-            return receipt("audit_failure")
-        findings = _without_duplicate_live_findings(raw_findings, live_by_id)
+        findings = _without_duplicate_live_findings(
+            findings_after_host_reconciliation,
+            live_by_id,
+        )
         findings = [
             finding
             for finding in findings

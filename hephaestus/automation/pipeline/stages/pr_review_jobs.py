@@ -1291,6 +1291,10 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             findings=FrozenJson.snapshot(findings),
             review_diff=str(item.payload.get("pr_diff") or ""),
             deadline_s=deadline_s,
+            host_verification_profile=item.payload.get("host_verification_repository_profile"),
+            host_verification_receipts=FrozenJson.snapshot(
+                item.payload.get("host_verification_receipts", [])
+            ),
         )
         if pending is None:
             item.payload[_PENDING_GITHUB_REQUEST] = request
