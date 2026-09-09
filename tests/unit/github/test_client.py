@@ -36,6 +36,70 @@ def _gh_error(stderr: str) -> subprocess.CalledProcessError:
     return subprocess.CalledProcessError(1, ["gh"], output="", stderr=stderr)
 
 
+class TestUncheckedGhResultAccounting:
+    """Count failed process results before returning them to unchecked callers."""
+
+    @pytest.mark.parametrize("include_target_error", [False, True])
+    def test_failed_results_open_breaker_without_changing_results(
+        self, monkeypatch: pytest.MonkeyPatch, include_target_error: bool
+    ) -> None:
+        failure = subprocess.CompletedProcess(["gh"], 1, "", "HTTP 503 Service Unavailable")
+        target_error = subprocess.CompletedProcess(["gh"], 1, "", "gh: Not Found (HTTP 404)")
+        results = [failure] * 4 + ([target_error] if include_target_error else []) + [failure]
+        run = Mock(side_effect=results)
+        monkeypatch.setattr(client_module, "run_subprocess", run)
+
+        for expected in results:
+            assert (
+                gh_call(
+                    ["api", "graphql"],
+                    check=False,
+                    max_retries=1,
+                    retry_on_rate_limit=False,
+                    throttle=False,
+                )
+                is expected
+            )
+
+        assert _GH_BREAKER.state.value == "open"
+        with pytest.raises(GitHubUnavailableError):
+            gh_call(["api", "graphql"], check=False, throttle=False)
+        assert run.call_count == len(results)
+
+    @pytest.mark.parametrize(
+        "probe_error", ["HTTP 503 Service Unavailable", "gh: Not Found (HTTP 404)"]
+    )
+    def test_failed_probe_does_not_clear_outage(
+        self, monkeypatch: pytest.MonkeyPatch, probe_error: str
+    ) -> None:
+        from hephaestus.resilience.circuit_breaker import CircuitBreakerState
+
+        now = [100.0]
+        monkeypatch.setattr("hephaestus.resilience.circuit_breaker.time.monotonic", lambda: now[0])
+        failure = subprocess.CompletedProcess(["gh"], 1, "", "HTTP 503 Service Unavailable")
+        probe = subprocess.CompletedProcess(["gh"], 1, "", probe_error)
+        run = Mock(return_value=failure)
+        monkeypatch.setattr(client_module, "run_subprocess", run)
+        for _ in range(5):
+            gh_call(["api", "graphql"], check=False, throttle=False)
+        assert _GH_BREAKER.state is CircuitBreakerState.OPEN
+
+        now[0] += 61.0
+        run.return_value = probe
+        assert gh_call(["api", "graphql"], check=False, throttle=False) is probe
+        expected = (
+            CircuitBreakerState.HALF_OPEN if "404" in probe_error else CircuitBreakerState.OPEN
+        )
+        assert _GH_BREAKER.state is expected
+
+        if "404" in probe_error:
+            for _ in range(4):
+                assert gh_call(["api", "graphql"], check=False, throttle=False) is probe
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, "{}", "")
+            assert gh_call(["api", "graphql"], check=False, throttle=False).returncode == 0
+            assert _GH_BREAKER.state is CircuitBreakerState.CLOSED
+
+
 class TestBreakerPredicateWiring:
     """The ``ignore`` predicate must be defined before ``_GH_BREAKER`` uses it."""
 

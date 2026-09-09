@@ -29,6 +29,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
+from typing import Any
 
 from hephaestus.github.environment import gh_child_environment
 from hephaestus.github.rate_limit import (
@@ -551,8 +552,17 @@ def _gh_call(
         RuntimeError: For other non-transient or exhausted-retry failures.
 
     """
+    result: subprocess.CompletedProcess[str] | None = None
+
+    def invoke() -> subprocess.CompletedProcess[str]:
+        """Report the process outcome to the breaker before returning it."""
+        nonlocal result
+        result = _gh_call_impl(args, **kwargs)
+        result.check_returncode()
+        return result
+
     try:
-        kwargs: dict[str, object] = {
+        kwargs: dict[str, Any] = {
             "check": check,
             "retry_on_rate_limit": retry_on_rate_limit,
             "max_retries": max_retries,
@@ -564,7 +574,11 @@ def _gh_call(
             kwargs["env"] = env
         if track_process_group:
             kwargs["track_process_group"] = True
-        return _GH_BREAKER.call(_gh_call_impl, args, **kwargs)
+        return _GH_BREAKER.call(invoke)
+    except subprocess.CalledProcessError:
+        if not check and result is not None:
+            return result
+        raise
     except CircuitBreakerOpenError as exc:
         # Translate to a domain exception (RuntimeError subclass) so existing
         # exception handlers that catch RuntimeError/Exception continue to work.
