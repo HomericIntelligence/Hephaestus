@@ -75,6 +75,29 @@ def _body_file(body: str) -> Iterator[str]:
             os.unlink(path)
 
 
+def issue_read_failure_category(error: BaseException) -> str:
+    """Return a fixed failure category without subprocess data."""
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "subprocess-timeout"
+    if isinstance(error, subprocess.CalledProcessError):
+        stderr = error.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr[:8192].decode("utf-8", errors="replace")
+        text = stderr[:8192].lower() if isinstance(stderr, str) else ""
+        if "tls handshake timeout" in text:
+            return "tls-timeout"
+        if "tcp" in text and ("timeout" in text or "timed out" in text):
+            return "tcp-timeout"
+        return "subprocess-failed"
+    if isinstance(error, subprocess.SubprocessError):
+        return "subprocess-failed"
+    if isinstance(error, OSError):
+        return "os-error"
+    if isinstance(error, (ValueError, TypeError)):
+        return "invalid-response"
+    return "read-failed"
+
+
 def gh_issue_json(
     issue_number: int,
     repo: tuple[str, str] | None = None,
@@ -131,7 +154,9 @@ def gh_issue_json(
         if isinstance(raw_body, str):
             data["bodyDigest"] = issue_body_digest(raw_body)
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError, TypeError, ValueError) as e:
-        raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
+        raise RuntimeError(
+            f"Failed to fetch issue #{issue_number}: {issue_read_failure_category(e)}"
+        ) from e
     return data
 
 
