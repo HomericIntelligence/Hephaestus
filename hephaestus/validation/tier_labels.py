@@ -210,8 +210,8 @@ def scan_repository(
     all_findings: list[TierLabelFinding] = []
 
     for md_file in sorted(repo_root.glob(glob)):
-        # Skip any file whose path contains an excluded directory segment.
-        if any(part in excludes for part in md_file.parts):
+        # Apply directory exclusions only below the selected scan root.
+        if any(part in excludes for part in md_file.relative_to(repo_root).parent.parts):
             continue
         findings = _collect_mismatches(md_file, canonical_tiers=canonical_tiers)
         for f in findings:
