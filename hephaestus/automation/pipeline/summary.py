@@ -278,7 +278,39 @@ def _item_row(item: WorkItem) -> str:
     )
 
 
-def print_summary(
+def _review_publication_targets(item: WorkItem) -> dict[str, list[str]]:
+    """Return safe target labels for the review publication summary."""
+    raw_summary = item.payload.get("review_publication_summary")
+    if not isinstance(raw_summary, dict):
+        return {}
+    targets: dict[str, list[str]] = {}
+    for bucket in ("published", "corrected", "could_not_publish"):
+        raw_entries = raw_summary.get(bucket)
+        if not isinstance(raw_entries, list):
+            continue
+        labels: list[str] = []
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            finding = entry.get("finding") if bucket == "corrected" else entry
+            if not isinstance(finding, dict):
+                finding = entry.get("finding")
+            path = finding.get("path") if isinstance(finding, dict) else None
+            line = finding.get("line") if isinstance(finding, dict) else None
+            side = finding.get("side") if isinstance(finding, dict) else None
+            if not isinstance(path, str) or not path:
+                continue
+            target = f"{path}:{line if line is not None else '?'}:{side or '?'}"
+            reason = entry.get("reason")
+            if isinstance(reason, str) and reason:
+                target = f"{target} [{reason}]"
+            labels.append(target)
+        if labels:
+            targets[bucket] = labels
+    return targets
+
+
+def print_summary(  # noqa: C901
     items: list[WorkItem],
     stats: RunStats,
     preserved: list[PreservedWorktree],
@@ -320,6 +352,14 @@ def print_summary(
                 "    review-run reason=%s head=%s",
                 review_run[0],
                 review_run[1],
+            )
+        publication_targets = _review_publication_targets(item)
+        if publication_targets:
+            logger.info(
+                "    review-publication: published=%s corrected=%s could-not-publish=%s",
+                publication_targets.get("published", []),
+                publication_targets.get("corrected", []),
+                publication_targets.get("could_not_publish", []),
             )
         cycle_id = item.payload.get("plan_review_cycle_id")
         if cycle_id:
@@ -401,6 +441,16 @@ def print_summary(
             for item in items
             if item.result is not None and item.result.reason.startswith("resumable")
         ]
+        review_publication = [
+            {
+                "repo": item.repo,
+                "issue": item.issue,
+                "pr": item.pr,
+                **_review_publication_targets(item),
+            }
+            for item in items
+            if _review_publication_targets(item)
+        ]
         emit_json_status(
             stats.exit_code,
             message=_json_message(stats.exit_code),
@@ -419,4 +469,5 @@ def print_summary(
             preserved_worktrees=[[number, path] for _, number, path in preserved],
             recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
             plan_review_sessions=review_sessions,
+            review_publication=review_publication,
         )

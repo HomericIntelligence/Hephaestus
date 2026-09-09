@@ -11,7 +11,7 @@ import json
 import math
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
@@ -182,6 +182,11 @@ class ImplementationReplyProgress:
             active_thread_id=active_thread_id,
             active_comment_id=active_comment_id,
         )
+
+
+def _empty_frozen_list() -> FrozenJson:
+    """Create an empty immutable JSON list for optional receipt data."""
+    return FrozenJson.snapshot([])
 
 
 @dataclass(frozen=True)
@@ -919,6 +924,8 @@ class PrReviewReconciled:
     posted_receipts: FrozenJson
     unresolved_threads: FrozenJson
     remediation_threads: FrozenJson
+    anchor_corrections: FrozenJson = field(default_factory=_empty_frozen_list)
+    unpublishable_findings: FrozenJson = field(default_factory=_empty_frozen_list)
 
     def __post_init__(self) -> None:
         """Validate immutable review response snapshots."""
@@ -927,6 +934,13 @@ class PrReviewReconciled:
         _json_root(self.posted_receipts, list, "posted_receipts")
         _json_root(self.unresolved_threads, list, "unresolved_threads")
         _json_root(self.remediation_threads, list, "remediation_threads")
+        _json_root(self.anchor_corrections, list, "anchor_corrections")
+        _json_root(self.unpublishable_findings, list, "unpublishable_findings")
+
+    @property
+    def corrections(self) -> FrozenJson:
+        """Return the typed-correction data under its shorter compatibility name."""
+        return self.anchor_corrections
 
 
 @dataclass(frozen=True)

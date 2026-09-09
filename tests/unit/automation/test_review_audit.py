@@ -125,6 +125,20 @@ def test_parse_review_audit_rejects_unpostable_finding() -> None:
     assert audit.valid is False
 
 
+def test_parse_review_audit_preserves_finding_evidence() -> None:
+    """Structured evidence remains available when a finding needs re-anchoring."""
+    audit = parse_review_audit(
+        '{"grade":"F","verdict":"NOGO","summary":"Needs work",'
+        '"comments":[{"path":"a.py","line":1,"side":"RIGHT",'
+        '"severity":"major","body":"Fix the worker state",'
+        '"evidence":"The child process receives no descriptor state."}]}'
+    )
+
+    assert audit.valid is True
+    assert audit.findings[0]["body"] == "Fix the worker state"
+    assert audit.findings[0]["evidence"] == "The child process receives no descriptor state."
+
+
 def test_parse_review_audit_rejects_reserved_control_text_in_finding() -> None:
     """Agent findings cannot supply durable severity or verdict controls."""
     audit = parse_review_audit(

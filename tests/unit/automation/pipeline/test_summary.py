@@ -302,6 +302,27 @@ class TestPrintSummaryRows:
 
         assert "PENDING" in caplog.text
 
+    def test_review_publication_summary_identifies_each_outcome(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review publication rows identify published and unavailable anchors."""
+        item = _item(10, StageName.PR_REVIEW)
+        item.payload["review_publication_summary"] = {
+            "published": [{"path": "a.py", "line": 11, "side": "RIGHT"}],
+            "corrected": [{"finding": {"path": "b.py", "line": 22, "side": "RIGHT"}}],
+            "could_not_publish": [
+                {"path": "c.py", "line": 33, "side": "RIGHT", "reason": "stale_diff"}
+            ],
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "review-publication" in caplog.text
+        assert "a.py:11:RIGHT" in caplog.text
+        assert "b.py:22:RIGHT" in caplog.text
+        assert "c.py:33:RIGHT [stale_diff]" in caplog.text
+
     def test_preserved_footer_present(self, caplog: pytest.LogCaptureFixture) -> None:
         """The preserved-worktree footer prints via the shared helper."""
         with caplog.at_level(logging.INFO):
@@ -368,6 +389,31 @@ class TestJsonEnvelope:
 
         envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert envelope["planning_actions"] == {"tracker-skipped": 1}
+
+    def test_json_envelope_includes_review_publication_outcomes(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        item = _item(10, StageName.PR_REVIEW, pr=1010)
+        item.payload["review_publication_summary"] = {
+            "published": [{"path": "a.py", "line": 11, "side": "RIGHT"}],
+            "corrected": [],
+            "could_not_publish": [
+                {"path": "b.py", "line": 22, "side": "RIGHT", "reason": "stale_diff"}
+            ],
+        }
+
+        print_summary([item], _stats(), [], json_out=True)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["review_publication"] == [
+            {
+                "repo": "repo-a",
+                "issue": 10,
+                "pr": 1010,
+                "published": ["a.py:11:RIGHT"],
+                "could_not_publish": ["b.py:22:RIGHT [stale_diff]"],
+            }
+        ]
 
     @pytest.mark.parametrize(
         ("exit_code", "expected_message"),

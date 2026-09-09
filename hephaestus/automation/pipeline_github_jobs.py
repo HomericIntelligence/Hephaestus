@@ -944,6 +944,8 @@ class PipelineGitHubJobRunner:
             posted: Any = (),
             unresolved: Any = (),
             remediation: Any = (),
+            corrections: Any = (),
+            unpublishable: Any = (),
         ) -> PrReviewReconciled:
             return PrReviewReconciled(
                 request=request,
@@ -951,7 +953,43 @@ class PipelineGitHubJobRunner:
                 posted_receipts=FrozenJson.snapshot(list(posted)),
                 unresolved_threads=FrozenJson.snapshot(list(unresolved)),
                 remediation_threads=FrozenJson.snapshot(list(remediation)),
+                anchor_corrections=FrozenJson.snapshot(list(corrections)),
+                unpublishable_findings=FrozenJson.snapshot(list(unpublishable)),
             )
+
+        def correction_data(value: object) -> dict[str, object] | None:
+            """Convert one typed correction into a bounded JSON record."""
+            finding = getattr(value, "finding", None)
+            path = getattr(value, "path", None)
+            line = getattr(value, "line", None)
+            side = getattr(value, "side", None)
+            reason = getattr(value, "reason", None)
+            if (
+                not isinstance(finding, dict)
+                or not isinstance(path, str)
+                or not path
+                or (line is not None and (not isinstance(line, int) or isinstance(line, bool)))
+                or not isinstance(side, str)
+                or not isinstance(reason, str)
+                or reason not in ("anchor_not_in_reviewed_diff", "reviewed_diff_unavailable")
+            ):
+                return None
+            return {
+                "finding": dict(finding),
+                "path": path,
+                "line": line,
+                "side": side,
+                "reason": reason,
+            }
+
+        def correction_records(value: object) -> list[dict[str, object]] | None:
+            """Validate one complete collection of typed corrections."""
+            if not isinstance(value, (list, tuple)):
+                return None
+            records = [correction_data(entry) for entry in value]
+            if any(record is None for record in records):
+                return None
+            return [record for record in records if record is not None]
 
         live_for_reconciliation = github.list_unresolved_review_threads(request.pr_number)
         validation_receipts = github.reviewer_validation_receipts(
@@ -1029,20 +1067,32 @@ class PipelineGitHubJobRunner:
         ]
         if any(not _is_postable_finding(finding) for finding in findings):
             return receipt("audit_failure")
-        posted_receipts = (
-            list(
-                github.post_review_threads(
-                    request.pr_number,
-                    findings,
-                    expected_head_sha=request.reviewed_head_sha,
-                    review_diff=request.review_diff,
-                )
+        publication = (
+            github.post_review_threads(
+                request.pr_number,
+                findings,
+                expected_head_sha=request.reviewed_head_sha,
+                review_diff=request.review_diff,
             )
             if findings
             else []
         )
-        if len(posted_receipts) != len(findings):
+        posted_receipts = list(publication)
+        raw_corrections = getattr(publication, "corrections", ())
+        raw_unpublishable = getattr(publication, "unpublishable", raw_corrections)
+        corrections = correction_records(raw_corrections)
+        unpublishable = correction_records(raw_unpublishable)
+        if corrections is None or unpublishable is None:
             return receipt("audit_failure")
+        validated_findings = getattr(publication, "validated_findings", findings)
+        if not isinstance(validated_findings, (list, tuple)) or len(posted_receipts) != len(
+            validated_findings
+        ):
+            return receipt(
+                "audit_failure",
+                corrections=corrections,
+                unpublishable=unpublishable,
+            )
         live_threads = github.list_unresolved_review_threads(request.pr_number)
         remediation_threads = _normalize_remediation_threads(live_threads)
         if len(remediation_threads) != len(live_threads):
@@ -1052,6 +1102,8 @@ class PipelineGitHubJobRunner:
             posted=posted_receipts,
             unresolved=live_threads,
             remediation=remediation_threads,
+            corrections=corrections,
+            unpublishable=unpublishable,
         )
 
     @staticmethod

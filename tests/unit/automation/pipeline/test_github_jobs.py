@@ -13,6 +13,7 @@ from typing import Any, ClassVar, cast
 
 import pytest
 
+from hephaestus.automation.github_api import ReviewAnchorCorrection
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -45,6 +46,7 @@ from hephaestus.automation.pipeline.scope_expansion_records import (
     render_scope_expansion_child_body,
     render_scope_expansion_lifecycle_comment,
 )
+from hephaestus.automation.pipeline_github_reviews import ReviewPublicationResult
 from hephaestus.automation.remediation_recovery import (
     RemediationReplyResult,
     RemediationReviewInput,
@@ -1329,8 +1331,28 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
                 "pr_description": "body",
             }
 
-        def post_review_threads(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
-            return [posted]
+        def post_review_threads(self, *_args: object, **_kwargs: object) -> object:
+            invalid = {
+                "path": "b.py",
+                "line": 99,
+                "side": "RIGHT",
+                "severity": "major",
+                "body": "descriptor state is not retained",
+                "evidence": "worker state is rebuilt without the descriptor",
+            }
+            correction = ReviewAnchorCorrection(
+                finding=invalid,
+                path="b.py",
+                line=99,
+                side="RIGHT",
+                reason="anchor_not_in_reviewed_diff",
+            )
+            return ReviewPublicationResult(
+                [posted],
+                validated_findings=[finding],
+                corrections=[correction],
+                unpublishable=[correction],
+            )
 
     monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
     request = ReconcilePrReviewRequest(
@@ -1362,6 +1384,12 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         "late-thread",
     ]
     assert len(remediation) == 2
+    corrections = cast(list[dict[str, object]], receipt.anchor_corrections.thaw())
+    assert corrections[0]["path"] == "b.py"
+    assert corrections[0]["line"] == 99
+    assert corrections[0]["finding"]["evidence"] == (
+        "worker state is rebuilt without the descriptor"
+    )
 
 
 def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
