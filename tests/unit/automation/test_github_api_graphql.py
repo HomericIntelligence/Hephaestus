@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -17,9 +18,14 @@ from hephaestus.automation.github_api.graphql import (
     GraphQLRetryableError,
     MergeQueueAlreadyEnqueuedError,
     ReviewCommentNotEditableError,
+    add_implementation_thread_reply_mutation,
+    create_pending_review_mutation,
     enqueue_pull_request_mutation,
+    pipeline_thread_snapshot_page_query,
     pull_request_queue_entry_query,
+    resolve_thread_mutation,
     run_graphql,
+    submit_review_mutation,
     update_review_comment_mutation,
 )
 from hephaestus.github.client import (
@@ -549,3 +555,345 @@ def test_body_not_editable_is_the_special_mutation_rejection() -> None:
     ):
         with pytest.raises(ReviewCommentNotEditableError):
             run_graphql(update_review_comment_mutation("COMMENT", "new body"))
+
+
+def _thread_snapshot_data() -> dict[str, Any]:
+    """Return a thread page with an owned reply and an external comment."""
+    repository = {"name": "repo", "owner": {"login": "org"}}
+    return {
+        "repository": {
+            **repository,
+            "pullRequest": {
+                "id": "PR_node",
+                "number": 7,
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+                "autoMergeRequest": None,
+            },
+        },
+        "node": {
+            "id": "THREAD",
+            "isResolved": False,
+            "path": "src/app.py",
+            "line": 12,
+            "side": "RIGHT",
+            "pullRequest": {"id": "PR_node", "number": 7, "repository": repository},
+            "comments": {
+                "pageInfo": {"hasNextPage": True, "endCursor": "next-page"},
+                "nodes": [
+                    {
+                        "id": "REPLY",
+                        "body": "Change complete.",
+                        "viewerDidAuthor": True,
+                        "author": {"login": "worker", "__typename": "User"},
+                        "pullRequestReview": {
+                            "id": "REVIEW",
+                            "state": "PENDING",
+                            "body": "Implementation replies.",
+                            "commit": {"oid": "a" * 40},
+                        },
+                    },
+                    {
+                        "id": "FINDING",
+                        "body": "Check this change.",
+                        "viewerDidAuthor": False,
+                        "author": None,
+                        "pullRequestReview": None,
+                    },
+                ],
+            },
+        },
+    }
+
+
+def _assert_one_attempt(call: Mock) -> None:
+    """Require one transport attempt with transport retries disabled."""
+    call.assert_called_once()
+    assert call.call_args.kwargs["max_retries"] == 1
+    assert call.call_args.kwargs["retry_on_rate_limit"] is False
+    assert call.call_args.kwargs["throttle"] is False
+
+
+@pytest.mark.parametrize(
+    ("state", "auto_merge"),
+    [("OPEN", None), ("CLOSED", {"enabledAt": "2026-09-09T00:00:00Z"})],
+    ids=("open-unarmed", "closed-armed"),
+)
+def test_thread_snapshot_preserves_identity_state_ownership_and_pagination(
+    state: str, auto_merge: dict[str, str] | None
+) -> None:
+    """The query returns live facts for the caller's publication decision."""
+    data = _thread_snapshot_data()
+    data["repository"]["pullRequest"].update(state=state, autoMergeRequest=auto_merge)
+    call = Mock(return_value=completed(stdout=json.dumps({"data": data})))
+
+    result = run_graphql(
+        pipeline_thread_snapshot_page_query("org", "repo", 7, "THREAD"),
+        {"owner": "org", "name": "repo", "number": 7, "threadId": "THREAD", "after": "prior"},
+        call=call,
+    )
+
+    assert result["pr_node_id"] == "PR_node"
+    assert result["pr_state"] == {
+        "state": state,
+        "headRefOid": "a" * 40,
+        "autoMergeRequest": auto_merge,
+    }
+    assert result["thread"]["id"] == "THREAD"
+    assert result["thread"]["isResolved"] is False
+    assert result["comments"]["pageInfo"] == {"hasNextPage": True, "endCursor": "next-page"}
+    owned, external = result["comments"]["nodes"]
+    assert owned["viewerDidAuthor"] is True
+    assert owned["author"]["login"] == "worker"
+    assert owned["pullRequestReview"]["id"] == "REVIEW"
+    assert owned["pullRequestReview"]["commit"]["oid"] == "a" * 40
+    assert external["viewerDidAuthor"] is False
+    assert external["author"] is None
+    assert external["pullRequestReview"] is None
+    assert "after=prior" in call.call_args.args[0]
+    assert "threadId=THREAD" in call.call_args.args[0]
+    _assert_one_attempt(call)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("repository", "owner", "login"), "another-owner"),
+        (("repository", "pullRequest"), None),
+        (("repository", "pullRequest", "number"), 8),
+        (("repository", "pullRequest", "headRefOid"), None),
+        (("repository", "pullRequest", "autoMergeRequest"), False),
+        (("node", "id"), "OTHER_THREAD"),
+        (("node", "pullRequest", "id"), "OTHER_PR"),
+        (("node", "isResolved"), "false"),
+        (("node", "comments", "pageInfo", "hasNextPage"), None),
+        (("node", "comments", "nodes", 0, "viewerDidAuthor"), "true"),
+        (("node", "comments", "nodes", 0, "author"), {"login": None}),
+        (("node", "comments", "nodes", 0, "pullRequestReview"), "REVIEW"),
+        (("node", "comments", "nodes", 0, "pullRequestReview", "commit"), None),
+    ],
+    ids=(
+        "wrong-repository",
+        "missing-pr",
+        "wrong-pr-number",
+        "missing-head",
+        "invalid-auto-merge-state",
+        "wrong-thread",
+        "thread-on-another-pr",
+        "invalid-resolution-state",
+        "unknown-page-completeness",
+        "invalid-comment-ownership",
+        "invalid-author",
+        "invalid-review",
+        "missing-review-commit",
+    ),
+)
+def test_thread_snapshot_rejects_incomplete_or_mismatched_evidence(
+    path: tuple[str | int, ...], value: object
+) -> None:
+    """Invalid readback evidence raises a read error after one attempt."""
+    data = _thread_snapshot_data()
+    parent: Any = data
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = value
+    call = Mock(return_value=completed(stdout=json.dumps({"data": data})))
+
+    with pytest.raises(GraphQLDeterministicError):
+        run_graphql(
+            pipeline_thread_snapshot_page_query("org", "repo", 7, "THREAD"),
+            {"owner": "org", "name": "repo", "number": 7, "threadId": "THREAD"},
+            call=call,
+        )
+
+    _assert_one_attempt(call)
+
+
+@pytest.fixture
+def receipt_call(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    """Use a fixed request ID with an explicit transport seam."""
+    monkeypatch.setattr(
+        "hephaestus.automation.github_api.graphql.uuid.uuid4", lambda: Mock(hex="receipt-id")
+    )
+    return Mock()
+
+
+def _set_receipt(call: Mock, operation: str, field: str, receipt: object) -> None:
+    """Return a correlated mutation receipt through the transport seam."""
+    call.return_value = completed(
+        stdout=json.dumps({"data": {operation: {"clientMutationId": "receipt-id", field: receipt}}})
+    )
+
+
+def _review_receipt(state: str) -> dict[str, Any]:
+    """Return the review identity for the requested PR and head."""
+    return {
+        "id": "REVIEW",
+        "state": state,
+        "pullRequest": {"id": "PR_node"},
+        "commit": {"oid": "a" * 40},
+    }
+
+
+@pytest.mark.parametrize("submit", [False, True], ids=("create", "submit"))
+def test_review_write_receipt_matches_pr_head_and_expected_state(
+    receipt_call: Mock, submit: bool
+) -> None:
+    """Create and submit preserve the exact PR, head, and review state."""
+    operation = "submitPullRequestReview" if submit else "addPullRequestReview"
+    review = _review_receipt("COMMENTED" if submit else "PENDING")
+    _set_receipt(receipt_call, operation, "pullRequestReview", review)
+    spec = (
+        submit_review_mutation("REVIEW", "PR_node", "a" * 40)
+        if submit
+        else create_pending_review_mutation("PR_node", "a" * 40, "Implementation replies.")
+    )
+
+    result = run_graphql(spec, call=receipt_call)
+
+    assert result == {"clientMutationId": "receipt-id", **review}
+    argv = receipt_call.call_args.args[0]
+    assert "clientMutationId=receipt-id" in argv
+    if submit:
+        assert "reviewId=REVIEW" in argv
+    else:
+        assert "pullRequestId=PR_node" in argv
+        assert "headSha=" + "a" * 40 in argv
+        assert "body=Implementation replies." in argv
+    _assert_one_attempt(receipt_call)
+
+
+@pytest.mark.parametrize("submit", [False, True], ids=("create", "submit"))
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", None),
+        ("state", "APPROVED"),
+        ("pullRequest", {"id": "OTHER_PR"}),
+        ("commit", {"oid": "b" * 40}),
+    ],
+    ids=("invalid-review-id", "wrong-state", "another-pr", "stale-head"),
+)
+def test_review_write_mismatched_receipt_keeps_unknown_outcome(
+    receipt_call: Mock, submit: bool, field: str, value: object
+) -> None:
+    """A mismatched review receipt cannot permit another mutation attempt."""
+    operation = "submitPullRequestReview" if submit else "addPullRequestReview"
+    review = _review_receipt("COMMENTED" if submit else "PENDING")
+    review[field] = "OTHER_REVIEW" if submit and field == "id" else value
+    _set_receipt(receipt_call, operation, "pullRequestReview", review)
+    spec = (
+        submit_review_mutation("REVIEW", "PR_node", "a" * 40)
+        if submit
+        else create_pending_review_mutation("PR_node", "a" * 40, "Implementation replies.")
+    )
+
+    with pytest.raises(GraphQLMutationOutcomeUnknownError) as error:
+        run_graphql(spec, call=receipt_call)
+
+    assert error.value.intent.operation == operation
+    assert error.value.intent.targets == (
+        (("reviewId", "REVIEW"),) if submit else (("pullRequestId", "PR_node"),)
+    )
+    assert error.value.intent.client_mutation_id == "receipt-id"
+    _assert_one_attempt(receipt_call)
+
+
+def _reply_receipt() -> dict[str, Any]:
+    """Return an owned reply in the expected pending review."""
+    return {
+        "id": "REPLY",
+        "body": "Change complete.",
+        "viewerDidAuthor": True,
+        "pullRequestReview": {
+            "id": "REVIEW",
+            "state": "PENDING",
+            "commit": {"oid": "a" * 40},
+        },
+    }
+
+
+def test_reply_receipt_proves_body_ownership_and_pending_review(receipt_call: Mock) -> None:
+    """An owned reply receipt identifies the pending review for later readback."""
+    reply = _reply_receipt()
+    _set_receipt(receipt_call, "addPullRequestReviewThreadReply", "comment", reply)
+
+    result = run_graphql(
+        add_implementation_thread_reply_mutation(
+            "THREAD", "Change complete.", pending_review_id="REVIEW", expected_head_sha="a" * 40
+        ),
+        call=receipt_call,
+    )
+
+    assert result == {"clientMutationId": "receipt-id", **reply}
+    assert "threadId=THREAD" in receipt_call.call_args.args[0]
+    assert "body=Change complete." in receipt_call.call_args.args[0]
+    _assert_one_attempt(receipt_call)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("body", "Another reply."),
+        ("viewerDidAuthor", False),
+        ("pullRequestReview", None),
+        ("pullRequestReview", {"id": "OTHER_REVIEW", "state": "PENDING"}),
+        ("pullRequestReview", {"id": "REVIEW", "state": "COMMENTED"}),
+    ],
+    ids=("changed-body", "not-owned", "missing-review", "another-review", "already-submitted"),
+)
+def test_reply_receipt_mismatch_retains_intent_without_replay(
+    receipt_call: Mock, field: str, value: object
+) -> None:
+    """An incomplete reply receipt requires reconciliation of the saved intent."""
+    reply = _reply_receipt()
+    reply[field] = value
+    _set_receipt(receipt_call, "addPullRequestReviewThreadReply", "comment", reply)
+
+    with pytest.raises(GraphQLMutationOutcomeUnknownError) as error:
+        run_graphql(
+            add_implementation_thread_reply_mutation(
+                "THREAD", "Change complete.", pending_review_id="REVIEW", expected_head_sha="a" * 40
+            ),
+            call=receipt_call,
+        )
+
+    assert error.value.intent.operation == "addPullRequestReviewThreadReply"
+    assert error.value.intent.targets == (("threadId", "THREAD"),)
+    assert error.value.intent.content_hashes
+    assert "Change complete." not in error.value.intent.safe_summary()
+    _assert_one_attempt(receipt_call)
+
+
+def test_resolve_receipt_identifies_the_resolved_thread(receipt_call: Mock) -> None:
+    """Resolution succeeds only with a receipt for the requested thread."""
+    _set_receipt(
+        receipt_call, "resolveReviewThread", "thread", {"id": "THREAD", "isResolved": True}
+    )
+
+    assert run_graphql(resolve_thread_mutation("THREAD"), call=receipt_call) == {
+        "clientMutationId": "receipt-id",
+        "id": "THREAD",
+        "isResolved": True,
+    }
+    assert "threadId=THREAD" in receipt_call.call_args.args[0]
+    _assert_one_attempt(receipt_call)
+
+
+@pytest.mark.parametrize(
+    "thread",
+    [None, {"id": "OTHER_THREAD", "isResolved": True}, {"id": "THREAD", "isResolved": False}],
+    ids=("missing-thread", "another-thread", "still-unresolved"),
+)
+def test_resolve_receipt_mismatch_is_unknown_without_replay(
+    receipt_call: Mock, thread: object
+) -> None:
+    """An invalid resolution receipt preserves the uncertain thread write."""
+    _set_receipt(receipt_call, "resolveReviewThread", "thread", thread)
+
+    with pytest.raises(GraphQLMutationOutcomeUnknownError) as error:
+        run_graphql(resolve_thread_mutation("THREAD"), call=receipt_call)
+
+    assert error.value.intent.operation == "resolveReviewThread"
+    assert error.value.intent.targets == (("threadId", "THREAD"),)
+    _assert_one_attempt(receipt_call)

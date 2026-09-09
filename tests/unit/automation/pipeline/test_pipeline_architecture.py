@@ -260,10 +260,11 @@ def test_public_mutators_from_all() -> None:
         "gh_issue_add_labels",
         "gh_issue_remove_labels",
         "gh_issue_comment",
-        "gh_pr_create",
+        "gh_pr_review_post",
         "gh_create_label",
     }
     assert expected <= _PUBLIC_MUTATORS, f"expected mutators missing: {expected - _PUBLIC_MUTATORS}"
+    assert "gh_pr_create" not in github_api.__all__
 
 
 def test_guard_scope_excludes_coordinator_neutral_stage_github_calls(

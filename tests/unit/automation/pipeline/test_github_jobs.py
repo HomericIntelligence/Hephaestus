@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Literal, cast
 
 import pytest
 
@@ -188,6 +188,33 @@ class _ScopeExpansionFakeGitHub(_DeadlineAccessor):
         if not self.dry_run:
             type(self).implementation_no_go = True
             self.events.append(("mark_pr_implementation_no_go", (pr_number,)))
+
+
+class _ScopeDependencyRecoveryGitHub(_ScopeExpansionFakeGitHub):
+    """Retain the remote transaction across separate worker requests."""
+
+    _repo_slug = "example-org/example"
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, object]:
+        """Read the current source head before recovery can write."""
+        state = super().gh_pr_state(pr_number)
+        state["baseRefName"] = "main"
+        self.events.append(("read_source_head", (pr_number, state["headRefOid"])))
+        return state
+
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
+        """Return no retraction work for this pending child."""
+        self.events.append(("read_unresolved_threads", (pr_number,)))
+        return []
+
+    @staticmethod
+    def reviewer_validation_receipts(
+        _pr: int, *, reviewed_head_sha: str, threads: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        """Return an empty complete validation set for the exact source head."""
+        assert reviewed_head_sha == "a" * 40
+        assert threads == []
+        return []
 
 
 def _dependency_fake(  # noqa: C901
@@ -1101,6 +1128,166 @@ def test_blocking_review_post_restart_finishes_one_transaction(
 
     assert receipt.status == "blocked"
     assert [name for name, _ in events].count("post_scope_expansion_blocking_review") == 1
+
+
+@pytest.mark.parametrize("interruption", ["child-post", "before-review", "after-review"])
+def test_scope_dependency_restart_completes_the_pending_transaction_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interruption: Literal["child-post", "before-review", "after-review"],
+) -> None:
+    """A dependency read completes an interrupted child transaction without duplicates."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    events: list[tuple[str, tuple[object, ...]]] = []
+
+    class InterruptedTransaction(_ScopeDependencyRecoveryGitHub):
+        fail_once: ClassVar[bool] = True
+
+        def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> int:
+            number = super().create_issue(title, body, labels)
+            if interruption == "child-post" and type(self).fail_once:
+                type(self).fail_once = False
+                raise RuntimeError("scope transaction interrupted")
+            return number
+
+        def post_scope_expansion_blocking_review(
+            self, pr_number: int, *, body: str, marker: str
+        ) -> str:
+            if type(self).fail_once:
+                type(self).fail_once = False
+                if interruption == "after-review":
+                    super().post_scope_expansion_blocking_review(
+                        pr_number, body=body, marker=marker
+                    )
+                raise RuntimeError("scope transaction interrupted")
+            return super().post_scope_expansion_blocking_review(pr_number, body=body, marker=marker)
+
+    InterruptedTransaction.reset(events)
+    monkeypatch.setattr(module, "PipelineGitHub", InterruptedTransaction)
+    request = _child_request()
+    first_runner = module.PipelineGitHubJobRunner(org="example-org", dry_run=False)
+
+    with pytest.raises(RuntimeError, match="scope transaction interrupted"):
+        first_runner.run(_scope_job(request, tmp_path))
+
+    pending = parse_scope_expansion_lifecycle_comment(
+        InterruptedTransaction.comments[request.pr_number][0].body
+    )
+    assert pending is not None
+    assert pending.state == ("pending-child" if interruption == "child-post" else "pending-review")
+    assert pending.reviewed_head_sha == request.reviewed_head_sha
+    assert len(InterruptedTransaction.issues) == 1
+    resume_at = len(events)
+    recovery_request = ReconcileScopeExpansionDependenciesRequest(
+        issue_number=request.issue_number,
+        pr_number=request.pr_number,
+        source_head_sha=request.reviewed_head_sha,
+    )
+    recovery_job = GitHubJob(
+        repo="example",
+        repo_root=tmp_path.resolve(),
+        request=recovery_request,
+        descr="recover the pending scope transaction",
+    )
+
+    second_runner = module.PipelineGitHubJobRunner(org="example-org", dry_run=False)
+    recovered = second_runner.run(recovery_job)
+    settled = tuple(InterruptedTransaction.comments[request.pr_number])
+    replayed = second_runner.run(recovery_job)
+
+    assert (
+        recovered
+        == replayed
+        == ScopeExpansionDependenciesReconciled(
+            request=recovery_request,
+            status="parked",
+            child_issue_numbers=(901,),
+        )
+    )
+    assert events[resume_at] == (
+        "read_source_head",
+        (request.pr_number, request.reviewed_head_sha),
+    )
+    lifecycle = parse_scope_expansion_lifecycle_comment(settled[0].body)
+    assert lifecycle is not None
+    assert lifecycle.state == "blocked"
+    assert lifecycle.child_issue_number == 901
+    assert lifecycle.digest == pending.digest
+    assert lifecycle.reviewed_head_sha == request.reviewed_head_sha
+    assert tuple(InterruptedTransaction.comments[request.pr_number]) == settled
+    assert InterruptedTransaction.implementation_no_go is True
+    assert len(InterruptedTransaction.blocking_reviews) == 1
+    assert [name for name, _ in events].count("create_issue") == 1
+    assert [name for name, _ in events].count("post_scope_expansion_blocking_review") == 1
+
+
+@pytest.mark.parametrize("readback", ["missing", "duplicate"])
+def test_scope_dependency_recovery_requires_a_unique_completed_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    readback: Literal["missing", "duplicate"],
+) -> None:
+    """An uncertain final read cannot authorize dependency or retraction work."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    events: list[tuple[str, tuple[object, ...]]] = []
+
+    class UncertainReadback(_ScopeDependencyRecoveryGitHub):
+        fail_once: ClassVar[bool] = True
+
+        def post_scope_expansion_blocking_review(
+            self, pr_number: int, *, body: str, marker: str
+        ) -> str:
+            if type(self).fail_once:
+                type(self).fail_once = False
+                raise RuntimeError("scope transaction interrupted")
+            return super().post_scope_expansion_blocking_review(pr_number, body=body, marker=marker)
+
+        def issue_comments(self, issue_number: int) -> list[IssueComment]:
+            comments = super().issue_comments(issue_number)
+            if comments:
+                record = parse_scope_expansion_lifecycle_comment(comments[0].body)
+                if record is not None and record.state == "blocked":
+                    return [] if readback == "missing" else [*comments, *comments]
+            return comments
+
+    UncertainReadback.reset(events)
+    monkeypatch.setattr(module, "PipelineGitHub", UncertainReadback)
+    request = _child_request()
+    runner = module.PipelineGitHubJobRunner(org="example-org", dry_run=False)
+
+    with pytest.raises(RuntimeError, match="scope transaction interrupted"):
+        runner.run(_scope_job(request, tmp_path))
+
+    recovery_request = ReconcileScopeExpansionDependenciesRequest(
+        issue_number=request.issue_number,
+        pr_number=request.pr_number,
+        source_head_sha=request.reviewed_head_sha,
+    )
+    recovery_job = GitHubJob(
+        repo="example",
+        repo_root=tmp_path.resolve(),
+        request=recovery_request,
+        descr="recover the pending scope transaction",
+    )
+
+    receipt = runner.run(recovery_job)
+
+    assert receipt == ScopeExpansionDependenciesReconciled(
+        request=recovery_request,
+        status="operator_required",
+        child_issue_numbers=(901,),
+    )
+    retained = parse_scope_expansion_lifecycle_comment(
+        UncertainReadback.comments[request.pr_number][0].body
+    )
+    assert retained is not None
+    assert retained.state == "blocked"
+    assert retained.child_issue_number == 901
+    assert UncertainReadback.implementation_no_go is True
+    assert len(UncertainReadback.issues) == len(UncertainReadback.blocking_reviews) == 1
+    assert [name for name, _ in events].count("create_issue") == 1
+    assert [name for name, _ in events].count("post_scope_expansion_blocking_review") == 1
+    assert not any(name == "read_unresolved_threads" for name, _ in events)
 
 
 def test_existing_blocked_child_replaces_projection_before_thread_publication(

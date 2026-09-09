@@ -794,17 +794,16 @@ allowlists, cwd/worktree scoping, subprocess timeouts, prompt fencing for
 untrusted GitHub content, secure logs, and GitHub branch protection plus the
 required CI/CD checks.
 
-`--allowedTools` pre-approves tools but is not by itself a tool-availability
-boundary. `run_claude_text(..., sandbox="read-only")` additionally fixes the
-built-in surface with `--tools Read,Glob,Grep`, disables ambient discovery with
-`--bare` and strict MCP mode without a supplied config, and fails when the
-installed CLI rejects the required policy. This remains a model-tool
-restriction, not an OS-level sandbox.
+`--allowedTools` supplies tool approvals. It does not restrict tool availability
+by itself. The queue worker uses the explicit job scope when one is supplied.
+Without an explicit scope, a read-only job uses `Read,Glob,Grep`. Other jobs use
+the scope for their agent role. The worker forwards this scope and `dontAsk`
+through the shared Claude invocation path.
 
 | Call site | Tools | Scope / controls |
 | --- | --- | --- |
-| `agents/runtime.py:run_claude_text` | `Read,Glob,Grep` | Read-only calls use `--bare`, a fixed tool scope, `dontAsk`, and strict MCP mode. A policy rejection stops the call. |
-| `pipeline/stages/pr_review_jobs.py:PrReviewJobs._review_wait` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The queue submits a read-only review job for the exact source head. The host owns review publication, labels, and merge admission. |
+| `pipeline/worker_pool.py:WorkerPool._invoke_agent` | Job scope, role scope, or `Read,Glob,Grep` | The worker applies the selected tool scope, `dontAsk`, the source lease, and the operation deadline. |
+| `pipeline/stages/pr_review_jobs.py:PrReviewJobs._submit_review_job` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The queue submits a read-only review job for the exact source head. The host owns review publication, labels, and merge admission. |
 | `pipeline/stages/implementation.py` | `Read,Write,Edit,Glob,Grep,Bash` | The implementation job uses an isolated writer workspace. Host operations own Git publication and its policy checks. |
 | `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `none` | The conflict planner returns JSON edits from fenced input. The host validates paths and owns Git continuation, signing, and push. |
 

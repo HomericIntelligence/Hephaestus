@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from concurrent.futures import CancelledError
+from subprocess import SubprocessError
 from typing import TYPE_CHECKING
 
 from hephaestus.automation.comment_identity import CommentAliasConflictError
@@ -137,7 +137,7 @@ def _fetch_planned_files(
             discovered = github.discover_plan(issue)
     except CommentAliasConflictError:
         raise
-    except (CancelledError, subprocess.SubprocessError, OSError, RuntimeError) as error:
+    except (CancelledError, SubprocessError, OSError, RuntimeError) as error:
         raise CommentJournalReadError(str(error)) from error
     if discovered.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
         raise CommentAliasConflictError(f"plan marker identity conflict: {discovered.error}")

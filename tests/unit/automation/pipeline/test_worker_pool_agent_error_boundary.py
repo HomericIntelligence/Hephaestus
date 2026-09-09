@@ -12,9 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hephaestus.agents.runtime import AgentExecutionError
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from tests.unit.automation.test_source_worktree import _repository
 
 _WORKER_POOL_MODULE = "hephaestus.automation.pipeline.worker_pool"
 
@@ -24,6 +27,9 @@ def test_codex_agent_execution_error_is_explicit_at_worker_boundary(
     tmp_path: Path,
 ) -> None:
     """Provider-declared Codex failures remain explicit agent errors."""
+    root, _, revision = _repository(tmp_path)
+    manager = SourceWorkspaceManager(root, repository="test/repo")
+    binding = manager.prepare(2634, SourceLane.IMPLEMENTATION, revision, branch="writer")
     pool = WorkerPool(
         size=1,
         shutdown=threading.Event(),
@@ -36,7 +42,8 @@ def test_codex_agent_execution_error_is_explicit_at_worker_boundary(
         agent="codex",
         model="sol",
         prompt_builder=lambda: "test prompt",
-        cwd=tmp_path,
+        cwd=binding.cwd,
+        workspace=binding,
         timeout_s=60,
         descr="codex agent execution failure",
     )
@@ -50,7 +57,7 @@ def test_codex_agent_execution_error_is_explicit_at_worker_boundary(
                     "codex_nested_sandbox_unsupported: run the outer loop "
                     "outside the enclosing API sandbox"
                 ),
-            ),
+            ) as invoke,
         ):
             result = pool._run_agent(job)
     finally:
@@ -60,3 +67,5 @@ def test_codex_agent_execution_error_is_explicit_at_worker_boundary(
     assert result.error is not None
     assert result.error.startswith("agent_error: codex_nested_sandbox_unsupported")
     assert "outside the enclosing API sandbox" in result.error
+    invoke.assert_called_once()
+    assert invoke.call_args.kwargs["cwd"] == binding.cwd

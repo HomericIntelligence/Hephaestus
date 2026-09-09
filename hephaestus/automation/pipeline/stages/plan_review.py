@@ -50,10 +50,10 @@ re-pointed at the pipeline (#1820):
 from __future__ import annotations
 
 import logging
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from subprocess import SubprocessError
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -955,7 +955,7 @@ class PlanReviewStage(Stage):
             outcome = self._eval(item, ctx)
         except CommentAliasConflictError:
             raise
-        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        except (RuntimeError, OSError, SubprocessError) as exc:
             if not isinstance(item.payload.get("accepted_plan_review"), _AcceptedPlanReview):
                 raise
             logger.warning("plan_review:%s: publication failed: %s", item.issue, exc)

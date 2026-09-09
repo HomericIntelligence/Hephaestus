@@ -1,54 +1,22 @@
-"""#1482: documented policy for Claude permission_mode='dontAsk' call sites."""
+"""Document the retained queue's Claude tool grants and permission policy."""
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
+from hephaestus.automation.agent_config import AGENT_IMPLEMENTER
+from hephaestus.automation.pipeline.tool_scopes import tool_scope_for
+
 ROOT = Path(__file__).parents[3]
 AUTOMATION = ROOT / "hephaestus" / "automation"
 
-EXPECTED_DONTASK_CALLS = {
-    "audit_reviewer.py:run_audit_coordinator": "Read,Glob,Grep",
-    "comment_difficulty.py:_run_classifier_session": "Read,Glob,Grep",
-    "pr_review_core.py:_invoke_and_parse_review_session": (
-        "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
-    ),
-    "_implement_phase.py:ImplementPhase._run_claude_impl_session": (
-        "Read,Write,Edit,Glob,Grep,Bash"
-    ),
-}
+REVIEW_JOB_SITE = "pipeline/stages/pr_review_jobs.py:PrReviewJobs._submit_review_job"
+REVIEW_TOOLS = "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
 
 
 def _literal(node: ast.AST | None) -> str | None:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
-
-
-class _DontAskVisitor(ast.NodeVisitor):
-    def __init__(self, filename: str) -> None:
-        self.filename = filename
-        self.scope: list[str] = []
-        self.calls: dict[str, str] = {}
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.scope.append(node.name)
-        self.generic_visit(node)
-        self.scope.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.scope.append(node.name)
-        self.generic_visit(node)
-        self.scope.pop()
-
-    def visit_Call(self, node: ast.Call) -> None:
-        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
-        if name == "invoke_claude_with_session":
-            kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
-            if _literal(kwargs.get("permission_mode")) == "dontAsk":
-                self.calls[f"{self.filename}:{'.'.join(self.scope)}"] = (
-                    _literal(kwargs.get("allowed_tools")) or ""
-                )
-        self.generic_visit(node)
 
 
 def _documented_rows() -> dict[str, str]:
@@ -61,22 +29,35 @@ def _documented_rows() -> dict[str, str]:
     return rows
 
 
-def test_issue_1482_dontask_sites_are_documented_in_agents_md() -> None:
-    """Verify every issue-named dontAsk site has paired policy documentation."""
-    actual: dict[str, str] = {}
-    for key in EXPECTED_DONTASK_CALLS:
-        filename = key.split(":", 1)[0]
-        visitor = _DontAskVisitor(filename)
-        visitor.visit(ast.parse((AUTOMATION / filename).read_text(encoding="utf-8")))
-        actual.update(visitor.calls)
-
-    assert actual == EXPECTED_DONTASK_CALLS
-
+def test_queue_claude_tool_grants_are_documented_in_agents_md() -> None:
+    """The current review and implementation grants must match their policy rows."""
+    tree = ast.parse((AUTOMATION / "pipeline/stages/pr_review_jobs.py").read_text(encoding="utf-8"))
+    reviewer = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PrReviewJobs"
+    )
+    submit = next(
+        node
+        for node in reviewer.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_submit_review_job"
+    )
+    jobs = [
+        node
+        for node in ast.walk(submit)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "AgentJob"
+    ]
+    assert len(jobs) == 1
+    kwargs = {kw.arg: kw.value for kw in jobs[0].keywords if kw.arg}
+    assert _literal(kwargs.get("allowed_tools")) == REVIEW_TOOLS
+    assert _literal(kwargs.get("sandbox")) == "read-only"
     agents_md = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert "There is no OS-level seccomp, namespace, or chroot sandbox" in agents_md
     documented = _documented_rows()
-    for call_key, tools in EXPECTED_DONTASK_CALLS.items():
-        assert documented.get(call_key) == tools
+    assert documented.get(REVIEW_JOB_SITE) == REVIEW_TOOLS
+    implementation_scope = tool_scope_for(AGENT_IMPLEMENTER)
+    assert implementation_scope.permission_mode == "dontAsk"
+    assert documented.get("pipeline/stages/implementation.py") == implementation_scope.allowed_tools
 
 
 def test_agents_md_has_design_philosophy_section() -> None:

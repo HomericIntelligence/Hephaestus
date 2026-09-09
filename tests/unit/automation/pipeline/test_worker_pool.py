@@ -10641,42 +10641,58 @@ class TestGitOps:
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
         """The host captures the complete index before agent file editing."""
-        (tmp_path / "x.py").write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> topic\n")
-        index_state = (
-            "100644 host-blob 0\thost-staged.py\0"
-            "100644 ours-blob 1\tx.py\0"
-            "100644 theirs-blob 2\tx.py\0"
-        )
-        with patch(f"{_WP}.git_utils.run") as run:
-            run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout=index_state),
-                MagicMock(returncode=0, stdout="c" * 40),
-                MagicMock(returncode=0, stdout="b" * 40),
-            ]
+        root, predecessor, base = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(root, repository="test/repo")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor, branch="7-auto-impl")
+        with manager.implementation_local_commit(
+            7, branch="7-auto-impl", path=binding.cwd, expected_binding=binding
+        ) as record:
+            (binding.cwd / "tracked.txt").write_text("writer change\n")
+            _git(binding.cwd, "commit", "-am", "writer change")
+            writer_head = _git(binding.cwd, "rev-parse", "HEAD")
+            binding = record(writer_head)
+        _git(binding.cwd, "push", "origin", "7-auto-impl")
 
-            receipt = pool._conflict_receipt(
-                tmp_path,
-                remote="origin",
-                base_branch="main",
-                expected_remote_sha="a" * 40,
-                timeout=60,
+        with manager.implementation_local_commit(
+            7, branch="7-auto-impl", path=binding.cwd, expected_binding=binding
+        ):
+            rebase = subprocess.run(
+                ["git", "rebase", "origin/main"],
+                cwd=binding.cwd,
+                env=build_git_child_env(),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
             )
+            assert rebase.returncode == 1, rebase.stderr
+            try:
+                (binding.cwd / "host-staged.py").write_text("host change\n")
+                _git(binding.cwd, "add", "host-staged.py")
+                index_state = _git(binding.cwd, "ls-files", "--stage", "-z")
+                receipt = pool._conflict_receipt(
+                    binding.cwd,
+                    remote="origin",
+                    base_branch="main",
+                    expected_remote_sha=writer_head,
+                    timeout=60,
+                )
+            finally:
+                _git(binding.cwd, "rebase", "--abort")
 
         assert isinstance(receipt, dict)
-        assert receipt["conflict_paths"] == ("x.py",)
+        assert receipt["conflict_paths"] == ("tracked.txt",)
+        assert " 0\thost-staged.py\0" in index_state
+        assert all(f" {stage}\ttracked.txt\0" in index_state for stage in (1, 2, 3))
         assert (
             receipt["conflict_index_snapshot"] == hashlib.sha256(index_state.encode()).hexdigest()
         )
-        assert receipt["paused_head_sha"] == "c" * 40
-        assert receipt["base_sha"] == "b" * 40
-        assert receipt["expected_remote_sha"] == "a" * 40
-        assert run.call_args_list[1].args[0] == [
-            "git",
-            "ls-files",
-            "--stage",
-            "-z",
-        ]
+        content_snapshot = receipt["content_snapshot"]
+        assert isinstance(content_snapshot, dict)
+        assert content_snapshot["index_sha256"] == receipt["conflict_index_snapshot"]
+        assert receipt["paused_head_sha"] == base
+        assert receipt["base_sha"] == base
+        assert receipt["expected_remote_sha"] == writer_head
 
     @staticmethod
     def _continue_rebase_job(tmp_path: Path, *, repo: str = "Hephaestus") -> GitJob:

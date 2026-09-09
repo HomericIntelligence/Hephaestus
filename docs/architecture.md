@@ -57,7 +57,6 @@ Optimization"), file paths are repo-relative.
 queue-only cutover. Historical ADRs retain their original text. Current
 runtime ownership and recovery follow this document and the live source.
 
-
 - **Durable journals.** GitHub labels, comments, and PR state are the normal
  crash-resistant truth. `LearningJournalStore` records auxiliary intent
  claims and terminal results. Source ownership and publication records retain
