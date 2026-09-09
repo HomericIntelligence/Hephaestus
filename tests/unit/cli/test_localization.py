@@ -136,17 +136,15 @@ def test_catalog_is_defensively_copied_and_localizer_is_immutable() -> None:
 
 def test_context_nesting_and_exception_restoration() -> None:
     """Scoped catalogs restore the prior localizer in all exit paths."""
-    original = get_localizer()
+    previous_localizer = get_localizer()
     with using_localizer({"Hello": "Bonjour"}) as outer:
         assert get_localizer() is outer
-        try:
+        with pytest.raises(RuntimeError):
             with using_localizer({"Hello": "Hola"}):
                 assert text("Hello") == "Hola"
                 raise RuntimeError("stop")
-        except RuntimeError:
-            pass
         assert text("Hello") == "Bonjour"
-    assert get_localizer() is original
+    assert get_localizer() is previous_localizer
 
 
 def _ordinary_parser_help(barrier: Barrier) -> str:
