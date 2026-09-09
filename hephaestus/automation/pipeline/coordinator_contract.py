@@ -92,6 +92,8 @@ if TYPE_CHECKING:
         _agent_job_time_s: float
         _auxiliary_job_count: int
         _auxiliary_job_time_s: float
+        _auxiliary_job_failure_count: int
+        _auxiliary_job_deferred_count: int
 
         @property
         def live_work_count(self) -> int:

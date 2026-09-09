@@ -167,8 +167,7 @@ flowchart LR
     plan_review --> implementation["4. Implementation"]
     implementation --> pr_review["5. PR review"]
     pr_review --> merge_wait["6. Merge wait"]
-    plan_review -. "approved-plan intent" .-> learning["7. Learning"]
-    merge_wait -. "post-merge intent" .-> learning
+    merge_wait -. "post-merge intent" .-> learning["7. Learning"]
     learning --> implementation
     learning --> finished["8. Finished"]
 
@@ -177,6 +176,9 @@ flowchart LR
     pr_review -. "agent_error / empty_pr_diff / implementation_remediation" .-> implementation
     implementation -. "already_implementation_go_pr" .-> merge_wait
 ```
+
+Learning requires [implementation evidence and a reviewed candidate](learning-evidence.md).
+Plan approval does not publish a skill.
 
 Every back-edge in the diagram is **named** in
 [`ROUTES`](../hephaestus/automation/pipeline/routing.py) and is the "fail-route

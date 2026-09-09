@@ -208,3 +208,34 @@ def test_learning_journal_validates_required_identity(tmp_path: Path) -> None:
 
     with pytest.raises(arming_state.LearningJournalError, match="missing fields"):
         store.load("key")
+
+
+def test_deferred_intent_resumes_only_with_new_candidate_evidence(tmp_path: Path) -> None:
+    """A deferred record retains its identity and needs a new evidence digest."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+    store.ensure_pending("post_merge:key", kind="post_merge")
+    assert store.claim("post_merge:key")
+    store.defer("post_merge:key", error="learning_deferred:candidate_required")
+    resume = getattr(store, "resume_deferred", None)
+    assert callable(resume)
+    resumed = resume("post_merge:key", evidence_fingerprint="a" * 64)
+    assert resumed["status"] == "pending"
+    assert resumed["key"] == "post_merge:key"
+    assert store.claim("post_merge:key")
+    store.defer("post_merge:key", error="learning_deferred:corpus_match_requires_review")
+    unchanged = resume("post_merge:key", evidence_fingerprint="a" * 64)
+    assert unchanged["status"] == "deferred"
+    changed = resume("post_merge:key", evidence_fingerprint="b" * 64)
+    assert changed["status"] == "pending"
+
+
+def test_retry_retains_first_learning_failure(tmp_path: Path) -> None:
+    """Later recovery errors cannot replace the first failure cause."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+    store.ensure_pending("post_merge:key", kind="post_merge")
+    assert store.claim("post_merge:key")
+    store.retry("post_merge:key", error="learning markdownlint failed")
+    assert store.claim("post_merge:key")
+    result = store.finish("post_merge:key", succeeded=False, error="candidate requires recovery")
+    assert result.get("first_error") == "learning markdownlint failed"
+    assert result["error"] == "candidate requires recovery"

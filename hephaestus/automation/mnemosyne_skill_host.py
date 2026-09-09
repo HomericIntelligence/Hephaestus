@@ -266,7 +266,7 @@ class DefaultLearnDeliveryBackend:
             existing_pr_number=existing_pr,
         )
         self._validate_binding(delivery, binding)
-        return self._service.deliver(delivery)
+        raise LearnDeliveryError("learning_deferred:source_evidence_required")
 
     @staticmethod
     def _validate_binding(

@@ -23,8 +23,6 @@ _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 class ExecutionCoordinator(_CoordinatorHost):
     """Own job dispatch and independent main/learning permit budgets."""
 
-    _auxiliary_job_failure_count: int
-
     @property
     def live_work_count(self) -> int:
         """Return the number of nonterminal main-lane permits."""
@@ -231,7 +229,9 @@ class ExecutionCoordinator(_CoordinatorHost):
         if auxiliary:
             self._auxiliary_job_count += 1
             self._auxiliary_job_time_s += result.duration_s
-            if not result.ok:
+            if not result.ok and (result.error or "").startswith("learning_deferred:"):
+                self._auxiliary_job_deferred_count += 1
+            elif not result.ok:
                 self._auxiliary_job_failure_count += 1
         self._record_completion_metrics(item, handle, result, auxiliary=auxiliary)
 

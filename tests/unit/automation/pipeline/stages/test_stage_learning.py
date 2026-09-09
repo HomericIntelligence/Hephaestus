@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
@@ -50,14 +52,7 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
         github=_approved_github(),
     )
     item = make_work_item(issue=2705, state="ENTER")
-    item.learning_intents.append(
-        LearningIntent.approved_plan(
-            repo=item.repo,
-            issue=2705,
-            plan_revision=8,
-            plan_fingerprint=_APPROVED_FINGERPRINT,
-        )
-    )
+    item.learning_intents.append(LearningIntent.post_merge(repo=item.repo, issue=2705, pr=99))
     item.learning_resume_stage = StageName.IMPLEMENTATION
 
     stage = LearningStage()
@@ -162,10 +157,10 @@ def test_mismatched_historical_identity_fails_before_host_dispatch(
     assert record["error"] == "learning_repository_identity_rejected"
 
 
-def test_learning_stage_accepts_superseded_owned_plan_history(
+def test_learning_stage_rejects_superseded_owned_plan_history(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A valid legacy plan sequence remains eligible for host learning."""
+    """A legacy plan sequence cannot authorize host learning."""
     github = _approved_github()
     github.comments[2705] = [
         render_current_plan("Use the superseded plan.", revision=7),
@@ -188,10 +183,9 @@ def test_learning_stage_accepts_superseded_owned_plan_history(
 
     request = stage.step(item, ctx)
 
-    assert isinstance(request, JobRequest)
-    assert isinstance(request.job, AthenaSkillJob)
+    assert isinstance(request, Continue)
     record = journal.load(intent.key)
-    assert record is not None and record["status"] == "claimed"
+    assert record is not None and record["status"] == "failed"
 
 
 def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
@@ -228,12 +222,7 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
     original = make_work_item(issue=2705, state="ENTER")
     original.branch = "2705-auto-impl"
     original.payload["_direct_scope_base_sha"] = revision
-    intent = LearningIntent.approved_plan(
-        repo=original.repo,
-        issue=2705,
-        plan_revision=8,
-        plan_fingerprint=_APPROVED_FINGERPRINT,
-    )
+    intent = LearningIntent.post_merge(repo=original.repo, issue=2705, pr=99)
     original.learning_intents.append(intent)
     original.learning_resume_stage = StageName.IMPLEMENTATION
     original.compact_for_post_processing(
@@ -269,14 +258,7 @@ def _claimed_learning(
         github=_approved_github(),
     )
     item = make_work_item(issue=2705, state="ENTER")
-    item.learning_intents.append(
-        LearningIntent.approved_plan(
-            repo=item.repo,
-            issue=2705,
-            plan_revision=8,
-            plan_fingerprint=_APPROVED_FINGERPRINT,
-        )
-    )
+    item.learning_intents.append(LearningIntent.post_merge(repo=item.repo, issue=2705, pr=99))
     item.learning_resume_stage = StageName.IMPLEMENTATION
     stage = LearningStage()
     stage.on_enter(item, ctx)
@@ -478,8 +460,7 @@ def test_cleanup_barrier_waits_for_every_intent(
     stage.on_enter(item, ctx)
     item.state = "CLAIM"
     first = stage.step(item, ctx)
-    assert isinstance(first, JobRequest)
-    stage.on_job_done(item, JobResult(ok=False, error="first failed"), ctx)
+    assert isinstance(first, Continue)
 
     item.state = "CLAIM"
     second = stage.step(item, ctx)
@@ -492,10 +473,10 @@ def test_cleanup_barrier_waits_for_every_intent(
     assert stage.step(item, ctx) == StageOutcome(Disposition.ADVANCE, "learning terminal")
 
 
-def test_stale_plan_authority_skips_host_and_returns_to_review(
+def test_legacy_plan_rejection_retains_implementation_route(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A removed plan-GO label prevents stale learning and implementation."""
+    """Legacy plan rejection leaves the main implementation route unchanged."""
     journal = LearningJournalStore(lambda: tmp_path)
     ctx = make_ctx(learning_journal=journal, github=FakeStageGitHub())
     item = make_work_item(issue=2705, state="ENTER")
@@ -512,9 +493,9 @@ def test_stale_plan_authority_skips_host_and_returns_to_review(
     record = journal.load(intent.key)
     assert record is not None
     assert record["status"] == "failed"
-    assert record["error"] == "plan_state_changed"
+    assert record["error"] == "plan_only_learning_rejected"
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "resume_plan_review")
+    assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "resume_implementation")
 
 
 def test_changed_plan_revision_invalidates_old_learning_intent(
@@ -541,14 +522,14 @@ def test_changed_plan_revision_invalidates_old_learning_intent(
 
     assert stage.step(item, ctx) == Continue(next_state="CLAIM")
     record = journal.load(intent.key)
-    assert record is not None and record["error"] == "plan_state_changed"
-    assert item.learning_resume_stage is StageName.PLAN_REVIEW
+    assert record is not None and record["error"] == "plan_only_learning_rejected"
+    assert item.learning_resume_stage is StageName.IMPLEMENTATION
 
 
 def test_unavailable_plan_read_is_ancillary_and_does_not_block_implementation(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A failed authority read skips host delivery but keeps the primary route."""
+    """Legacy plan rejection does not require a GitHub read."""
 
     class UnavailableGitHub(FakeStageGitHub):
         def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
@@ -570,5 +551,70 @@ def test_unavailable_plan_read_is_ancillary_and_does_not_block_implementation(
     record = journal.load(intent.key)
     assert record is not None
     assert record["status"] == "failed"
-    assert record["error"] == "plan_state_unverified"
+    assert record["error"] == "plan_only_learning_rejected"
     assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "resume_implementation")
+
+
+def test_legacy_plan_intent_is_rejected_without_delivery(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Reject old pending plans and retain their identity."""
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(learning_journal=journal, github=_approved_github())
+    item = make_work_item(issue=2705, state="CLAIM")
+    intent = LearningIntent.approved_plan(
+        repo=item.repo,
+        issue=2705,
+        plan_revision=8,
+        plan_fingerprint=_APPROVED_FINGERPRINT,
+    )
+    item.learning_intents.append(intent)
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    result = stage.step(item, ctx)
+    assert isinstance(result, Continue)
+    record = journal.load(intent.key)
+    assert record is not None
+    assert record["key"] == intent.key
+    assert record["status"] == "failed"
+    assert record["error"] == "plan_only_learning_rejected"
+
+
+def test_missing_learning_candidate_is_durably_deferred(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Missing candidate evidence does not consume repeated delivery attempts."""
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(learning_journal=journal)
+    item = make_work_item(issue=1, state="CLAIM")
+    intent = LearningIntent.post_merge(repo=item.repo, issue=1, pr=2)
+    item.learning_intents.append(intent)
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    assert isinstance(stage.step(item, ctx), JobRequest)
+    stage.on_job_done(item, JobResult(ok=False, error="learning_deferred:candidate_required"), ctx)
+    record = journal.load(intent.key)
+    assert record is not None and record["status"] == "deferred"
+    assert record["error"] == "learning_deferred:candidate_required"
+    assert record["key"] == intent.key
+    item.state = "CLAIM"
+    assert isinstance(stage.step(item, ctx), StageOutcome)
+
+
+@pytest.mark.parametrize("succeeded", [True, False])
+def test_completed_legacy_record_is_not_rewritten(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, succeeded: bool
+) -> None:
+    """Old completed records retain their exact bytes when the stage starts."""
+    journal = LearningJournalStore(lambda: tmp_path)
+    intent = LearningIntent.approved_plan(
+        repo="test-repo", issue=1, plan_revision=1, plan_fingerprint="a" * 64
+    )
+    journal.ensure_pending(intent.key, kind=intent.kind.value)
+    assert journal.claim(intent.key)
+    journal.finish(intent.key, succeeded=succeeded)
+    before = journal.path(intent.key).read_bytes()
+    item = make_work_item(issue=1)
+    item.learning_intents.append(intent)
+    LearningStage().on_enter(item, make_ctx(learning_journal=journal))
+    assert journal.path(intent.key).read_bytes() == before

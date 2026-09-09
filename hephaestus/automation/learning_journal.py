@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
@@ -17,10 +18,18 @@ from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 logger = logging.getLogger(__name__)
 
-_STATUSES = frozenset({"pending", "claimed", "succeeded", "failed"})
+_STATUSES = frozenset({"pending", "claimed", "succeeded", "failed", "deferred"})
 _REQUIRED_FIELDS = frozenset({"key", "kind", "status", "attempts", "created_at", "updated_at"})
 _RESERVED_FIELDS = _REQUIRED_FIELDS | frozenset(
-    {"error", "receipt_summary", "claim_owner", "cleanup_status", "cleanup_error"}
+    {
+        "error",
+        "first_error",
+        "candidate_evidence",
+        "receipt_summary",
+        "claim_owner",
+        "cleanup_status",
+        "cleanup_error",
+    }
 )
 
 
@@ -286,6 +295,7 @@ class LearningJournalStore:
             record["status"] = "succeeded" if succeeded else "failed"
             record["updated_at"] = datetime.now(UTC).isoformat()
             if error:
+                record.setdefault("first_error", error[:1000])
                 record["error"] = error[:1000]
             if receipt_summary:
                 record["receipt_summary"] = dict(receipt_summary)
@@ -293,12 +303,48 @@ class LearningJournalStore:
         self._release_claim_lock(key)
         return record
 
+    def defer(self, key: str, *, error: str) -> dict[str, Any]:
+        """Retain an intent that needs new evidence before another attempt."""
+        self._require_claimed(key)
+        self._require_local_claim(key)
+        with file_lock(self.lock_path(key), require_exclusive=True):
+            record = self._require_claimed(key)
+            record.setdefault("first_error", error[:1000])
+            record.update(
+                status="deferred", updated_at=datetime.now(UTC).isoformat(), error=error[:1000]
+            )
+            self._write(key, record)
+        self._release_claim_lock(key)
+        return record
+
+    def resume_deferred(self, key: str, *, evidence_fingerprint: str) -> dict[str, Any]:
+        """Resume a deferred intent only after its candidate evidence changes."""
+        if re.fullmatch(r"[0-9a-f]{64}", evidence_fingerprint) is None:
+            raise ValueError("candidate evidence fingerprint must be SHA-256")
+        with file_lock(self.lock_path(key), require_exclusive=True):
+            record = self.load(key)
+            if record is None:
+                raise KeyError(key)
+            if (
+                record["status"] != "deferred"
+                or record.get("candidate_evidence") == evidence_fingerprint
+            ):
+                return record
+            record.update(
+                status="pending",
+                candidate_evidence=evidence_fingerprint,
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+            self._write(key, record)
+            return record
+
     def retry(self, key: str, *, error: str) -> dict[str, Any]:
         """Return a known failed claim to pending for a bounded retry."""
         self._require_claimed(key)
         self._require_local_claim(key)
         with file_lock(self.lock_path(key), require_exclusive=True):
             record = self._require_claimed(key)
+            record.setdefault("first_error", error[:1000])
             record.update(
                 status="pending",
                 updated_at=datetime.now(UTC).isoformat(),
@@ -316,7 +362,7 @@ class LearningJournalStore:
                 raise KeyError(key)
             if not isinstance(record.get("post_processing"), dict):
                 return record
-            if record["status"] not in {"succeeded", "failed"}:
+            if record["status"] not in {"succeeded", "failed", "deferred"}:
                 raise ValueError("learning must be terminal before cleanup")
             record["cleanup_status"] = "succeeded" if succeeded else "failed"
             record["updated_at"] = datetime.now(UTC).isoformat()

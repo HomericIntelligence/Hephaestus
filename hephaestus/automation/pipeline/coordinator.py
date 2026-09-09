@@ -358,6 +358,7 @@ class Coordinator(
         self._auxiliary_job_count = 0
         self._auxiliary_job_time_s = 0.0
         self._auxiliary_job_failure_count = 0
+        self._auxiliary_job_deferred_count = 0
         self._loops_run = 0
         self._pass_work_count = 0
         self._progress = False

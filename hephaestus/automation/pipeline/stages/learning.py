@@ -9,9 +9,6 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
-from hephaestus.automation.mnemosyne_learning_preparation import approved_plan_learning_snapshot
-from hephaestus.automation.review_journal import plan_fingerprint
-from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..job_results import JobResult
@@ -37,6 +34,9 @@ class LearningStage:
         """Persist all in-memory intents before any host call."""
         journal = self._journal(ctx)
         for intent in item.learning_intents:
+            record = journal.load(intent.key)
+            if record is not None and record["status"] in {"succeeded", "failed", "deferred"}:
+                continue
             journal.ensure_pending(
                 intent.key,
                 kind=intent.kind.value,
@@ -144,6 +144,13 @@ class LearningStage:
         error = "" if succeeded else (result.error or "invalid Athena learn result")
         receipt = result.value.delivery_receipt if succeeded else None
         journal = self._journal(ctx)
+        if not succeeded and error.startswith("learning_deferred:"):
+            journal.defer(intent.key, error=error)
+            item.payload.setdefault("learning_deferred", []).append(
+                {"key": intent.key, "reason": error}
+            )
+            record_summary_action(item, error)
+            return
         record = journal.load(intent.key)
         attempts = int(record.get("attempts", 0)) if record is not None else 0
         if not succeeded and attempts < ctx.budget("learn"):
@@ -184,7 +191,7 @@ class LearningStage:
             if intent.key in external_claims:
                 continue
             record = journal.load(intent.key)
-            if record is None or record["status"] not in {"succeeded", "failed"}:
+            if record is None or record["status"] not in {"succeeded", "failed", "deferred"}:
                 return intent
         return None
 
@@ -203,7 +210,7 @@ class LearningStage:
         journal: LearningJournalStore,
         ctx: Any,
     ) -> Continue | StageOutcome | None:
-        """Handle terminal, ambiguous, and stale-plan records before claim."""
+        """Handle terminal records, active claims, and rejected plan intents."""
         if record["status"] == "claimed":
             if journal.claim_is_active(intent.key):
                 return StageOutcome(
@@ -221,41 +228,13 @@ class LearningStage:
                     {"key": intent.key, "error": "outcome_unknown"}
                 )
             return Continue(next_state=CLAIM)
-        if record["status"] in {"succeeded", "failed"}:
+        if record["status"] in {"succeeded", "failed", "deferred"}:
             return Continue(next_state=CLAIM)
         if intent.kind.value != "approved_plan":
             return None
-        plan_state = self._approved_plan_state(intent, ctx)
-        if plan_state is True:
-            return None
-        error = "plan_state_changed" if plan_state is False else "plan_state_unverified"
+        error = "plan_only_learning_rejected"
         if journal.claim(intent.key):
             journal.finish(intent.key, succeeded=False, error=error)
-        if plan_state is False:
-            item.learning_resume_stage = StageName.PLAN_REVIEW
         item.payload.setdefault("learning_failures", []).append({"key": intent.key, "error": error})
+        record_summary_action(item, error)
         return Continue(next_state=CLAIM)
-
-    @staticmethod
-    def _approved_plan_state(intent: LearningIntent, ctx: Any) -> bool | None:
-        """Return live approval, confirmed change, or an unavailable read."""
-        try:
-            issue = ctx.github.gh_issue_json(intent.issue)
-        except Exception:
-            return None
-        labels = [
-            str(label.get("name", ""))
-            for label in issue.get("labels", [])
-            if isinstance(label, dict)
-        ]
-        if not is_exclusive_plan_state(labels, STATE_PLAN_GO):
-            return False
-        try:
-            snapshot = approved_plan_learning_snapshot(ctx.github.issue_comments(intent.issue))
-        except Exception:
-            return None
-        return bool(
-            snapshot.current_plan
-            and snapshot.revision == intent.plan_revision
-            and plan_fingerprint(snapshot.current_plan) == intent.plan_fingerprint
-        )

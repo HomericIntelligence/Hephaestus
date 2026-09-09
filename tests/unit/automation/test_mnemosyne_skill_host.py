@@ -310,10 +310,10 @@ def test_learn_rejects_incomplete_explicit_delivery_with_exact_diagnostic(
     assert result.error == "learn delivery payload lacks non-empty worktree_path"
 
 
-def test_default_host_constructs_and_uses_concrete_delivery_backend(
+def test_default_host_defers_raw_delivery_without_source_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default host wiring delivers through the host-owned concrete backend."""
+    """A raw delivery payload cannot supply verified source evidence."""
 
     class Service:
         def __init__(self, *, github: object, gh_extra_path_root: Path | None = None) -> None:
@@ -357,9 +357,9 @@ def test_default_host_constructs_and_uses_concrete_delivery_backend(
 
     result = host.execute(request)
 
-    assert result.ok is True
-    assert result.delivery_receipt is not None
-    assert result.delivery_receipt["pr_number"] == 8
+    assert result.ok is False
+    assert result.delivery_receipt is None
+    assert result.error == "learning_deferred:source_evidence_required"
 
 
 def test_github_delivery_adapter_creates_pr_and_returns_server_number() -> None:
