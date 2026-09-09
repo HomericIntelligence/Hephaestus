@@ -77,8 +77,8 @@ class TestTodoLine:
 
     def test_missing_path_and_empty_body_use_safe_placeholders(self) -> None:
         """Absent optional fields cannot produce an empty target or description."""
-        assert cd.format_todo_line({"line": True, "body": ""}, "medium") == (
-            "@ __general__ Line True - medium - (no description)"
+        assert cd.format_todo_line({"line": None, "body": ""}, "medium") == (
+            "@ __general__ Line ? - medium - (no description)"
         )
 
     def test_control_only_description_uses_placeholder(self) -> None:

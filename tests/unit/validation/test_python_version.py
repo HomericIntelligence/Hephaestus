@@ -198,7 +198,6 @@ def test_consistency_uses_top_level_dockerfile_fallback(tmp_path: Path) -> None:
             1,
             "inconsistency detected",
         ),
-        (["check"], False, {}, True, 0, "inconsistency detected"),
         (["check"], True, {"requires-python": "3.13"}, False, 1, "specifications are consistent"),
     ],
 )

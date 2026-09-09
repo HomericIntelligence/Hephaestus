@@ -19,6 +19,12 @@ from unittest import mock
 
 import pytest
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advise
 from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
@@ -268,7 +274,11 @@ def test_implement_phase_run_advise_uses_direct_implementer(tmp_path: Path) -> N
         "prompt": "advice prompt",
         "cwd": tmp_path,
         "timeout": 17,
-        "execution_request": mock.ANY,
+        "execution_request": ExecutionRequest(
+            AgentRole.ADVISOR,
+            AgentOperation.ADVISE,
+            SessionLifecycle.ONE_SHOT,
+        ),
         "model": "resolved-model",
         "sandbox": "read-only",
     }
@@ -543,6 +553,11 @@ def test_direct_agent_session_persists_output_and_session(tmp_path: Path) -> Non
     assert run_agent.call_args.kwargs["agent"] == "codex"
     assert run_agent.call_args.kwargs["model"] == "resolved-model"
     assert run_agent.call_args.kwargs["sandbox"] == "workspace-write"
+    assert run_agent.call_args.kwargs["execution_request"] == ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
     assert (state_dir / "codex-9.log").read_text(encoding="utf-8") == "receipt"
 
 

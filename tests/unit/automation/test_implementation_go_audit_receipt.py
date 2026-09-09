@@ -93,10 +93,60 @@ def test_pending_parser_marks_legacy_receipt_for_fresh_review() -> None:
     assert raised.value.head_sha == "a" * 40
 
 
-def _pending_body_with_payload(payload: object) -> str:
+def _pending_body_with_payload(payload: object, head_sha: str = "a" * 40) -> str:
     """Return a pending receipt body with caller-selected JSON payload."""
-    marker = f"<!-- hephaestus-implementation-go-audit-pending:pr=7:head={'a' * 40} -->"
+    marker = f"<!-- hephaestus-implementation-go-audit-pending:pr=7:head={head_sha} -->"
     return f"{marker}\n<!-- {json.dumps(payload)} -->"
+
+
+@pytest.mark.parametrize(
+    ("head_sha", "summary", "raw_feedback"),
+    [("a" * 64, "s" * 200, "f" * 4000)],
+    ids=("exact-maximums",),
+)
+def test_pending_parser_accepts_exact_boundary_values(
+    head_sha: str, summary: str, raw_feedback: str
+) -> None:
+    """The parser accepts the maximum supported identity and text sizes."""
+    payload = {
+        "format": 2,
+        "pr_number": 7,
+        "head_sha": head_sha,
+        "grade": "A",
+        "verdict": "GO",
+        "summary": summary,
+        "raw_feedback": raw_feedback,
+    }
+
+    receipt = parse_pending_implementation_go_audit(
+        _pending_body_with_payload(payload, head_sha=head_sha)
+    )
+
+    assert receipt is not None
+    assert receipt.head_sha == head_sha
+    assert receipt.audit.summary == summary
+    assert receipt.audit.raw_feedback == raw_feedback
+
+
+@pytest.mark.parametrize("head_sha", ["a" * 65], ids=("identity-too-long",))
+def test_pending_parser_rejects_adjacent_overlong_identity(head_sha: str) -> None:
+    """The parser does not own a marker with an overlong identity."""
+    payload = {
+        "format": 2,
+        "pr_number": 7,
+        "head_sha": head_sha,
+        "grade": "A",
+        "verdict": "GO",
+        "summary": "clean",
+        "raw_feedback": "",
+    }
+
+    assert (
+        parse_pending_implementation_go_audit(
+            _pending_body_with_payload(payload, head_sha=head_sha)
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(

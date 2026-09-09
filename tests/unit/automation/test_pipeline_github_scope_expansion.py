@@ -4,13 +4,36 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Generator
+from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 import hephaestus.automation.github_api as github_api
 import hephaestus.automation.pipeline_github_scope_expansion as scope_expansion_adapter
 from hephaestus.automation.pipeline_github import PipelineGitHub
+
+
+@pytest.fixture(autouse=True)
+def _deny_github_calls(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Reject GitHub calls unless a test supplies its own mock."""
+    mocks: list[Mock] = []
+    for target, name in (
+        (PipelineGitHub, "_gh"),
+        (PipelineGitHub, "_graphql"),
+        (PipelineGitHub, "pull_request_reviews"),
+        (scope_expansion_adapter, "direct_gh_call"),
+    ):
+        boundary = Mock(name=name, side_effect=AssertionError(f"Unexpected GitHub call: {name}"))
+        monkeypatch.setattr(target, name, boundary)
+        mocks.append(boundary)
+
+    yield
+
+    for boundary in mocks:
+        boundary.assert_not_called()
 
 
 def _cross_reference(
@@ -529,18 +552,37 @@ def test_create_issue_creates_missing_labels_and_parses_url(
     """Issue creation ensures missing labels and accepts a normal issue URL."""
     github = PipelineGitHub("org", repo="repo")
     created: list[str] = []
+    captured_argv: list[str] = []
+    captured_bodies: list[str] = []
+
+    def fake_gh(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        captured_argv.extend(argv)
+        body_path = argv[argv.index("--body-file") + 1]
+        captured_bodies.append(Path(body_path).read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="https://github.com/org/repo/issues/42\n", stderr=""
+        )
+
     monkeypatch.setattr(github, "_label_names", lambda: {"existing"})
     monkeypatch.setattr(github, "_create_label", created.append)
-    monkeypatch.setattr(
-        github,
-        "_gh",
-        lambda argv: subprocess.CompletedProcess(
-            argv, 0, stdout="https://github.com/org/repo/issues/42\n", stderr=""
-        ),
-    )
+    monkeypatch.setattr(github, "_gh", fake_gh)
 
     assert github.create_issue("Title\x00", "Body", ["existing", "new"]) == 42
     assert created == ["new"]
+    body_path = captured_argv[5]
+    assert captured_argv == [
+        "issue",
+        "create",
+        "--title",
+        "Title",
+        "--body-file",
+        body_path,
+        "--label",
+        "existing",
+        "--label",
+        "new",
+    ]
+    assert captured_bodies == ["Body"]
 
 
 @pytest.mark.parametrize("output", ["43", "https://github.test/issue/43"])
