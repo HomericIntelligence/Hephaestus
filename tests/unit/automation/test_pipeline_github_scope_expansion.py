@@ -17,9 +17,9 @@ from hephaestus.automation.pipeline_github import PipelineGitHub
 
 
 @pytest.fixture(autouse=True)
-def _deny_github_calls(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+def _deny_github_calls(monkeypatch: pytest.MonkeyPatch) -> Generator[dict[str, Mock]]:
     """Reject GitHub calls unless a test supplies its own mock."""
-    mocks: list[Mock] = []
+    mocks: dict[str, Mock] = {}
     for target, name in (
         (PipelineGitHub, "_gh"),
         (PipelineGitHub, "_graphql"),
@@ -28,11 +28,11 @@ def _deny_github_calls(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     ):
         boundary = Mock(name=name, side_effect=AssertionError(f"Unexpected GitHub call: {name}"))
         monkeypatch.setattr(target, name, boundary)
-        mocks.append(boundary)
+        mocks[name] = boundary
 
-    yield
+    yield mocks
 
-    for boundary in mocks:
+    for boundary in mocks.values():
         boundary.assert_not_called()
 
 
@@ -541,9 +541,10 @@ def test_issue_with_marker_handles_absent_and_duplicate_matches(
         github.issue_with_marker("marker")
 
 
-def test_create_issue_dry_run_returns_sentinel() -> None:
+def test_create_issue_dry_run_returns_sentinel(_deny_github_calls: dict[str, Mock]) -> None:
     """Dry-run issue creation does not make a GitHub request."""
     assert PipelineGitHub("org", repo="repo", dry_run=True).create_issue("Title", "Body") == 0
+    _deny_github_calls["_gh"].assert_not_called()
 
 
 def test_create_issue_creates_missing_labels_and_parses_url(
@@ -552,11 +553,11 @@ def test_create_issue_creates_missing_labels_and_parses_url(
     """Issue creation ensures missing labels and accepts a normal issue URL."""
     github = PipelineGitHub("org", repo="repo")
     created: list[str] = []
-    captured_argv: list[str] = []
+    captured_commands: list[list[str]] = []
     captured_bodies: list[str] = []
 
     def fake_gh(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        captured_argv.extend(argv)
+        captured_commands.append(argv.copy())
         body_path = argv[argv.index("--body-file") + 1]
         captured_bodies.append(Path(body_path).read_text(encoding="utf-8"))
         return subprocess.CompletedProcess(
@@ -569,8 +570,10 @@ def test_create_issue_creates_missing_labels_and_parses_url(
 
     assert github.create_issue("Title\x00", "Body", ["existing", "new"]) == 42
     assert created == ["new"]
-    body_path = captured_argv[5]
-    assert captured_argv == [
+    assert len(captured_commands) == 1
+    command = captured_commands[0]
+    body_path = command[command.index("--body-file") + 1]
+    assert command == [
         "issue",
         "create",
         "--title",
@@ -873,15 +876,18 @@ def test_commit_is_ancestor_rejects_malformed_response(
         PipelineGitHub("org", repo="repo").commit_is_ancestor("a" * 40, "main")
 
 
-def test_blocking_review_rejects_body_without_marker() -> None:
+def test_blocking_review_rejects_body_without_marker(_deny_github_calls: dict[str, Mock]) -> None:
     """A blocking review body must keep its durable marker as the first line."""
     with pytest.raises(ValueError, match="must start with marker"):
         PipelineGitHub("org", repo="repo").post_scope_expansion_blocking_review(
             7, body="text", marker="<!-- marker -->"
         )
+    _deny_github_calls["_gh"].assert_not_called()
+    _deny_github_calls["pull_request_reviews"].assert_not_called()
+    _deny_github_calls["direct_gh_call"].assert_not_called()
 
 
-def test_blocking_review_dry_run_returns_sentinel() -> None:
+def test_blocking_review_dry_run_returns_sentinel(_deny_github_calls: dict[str, Mock]) -> None:
     """Dry-run blocking review publication does not call GitHub."""
     marker = "<!-- marker -->"
     assert (
@@ -890,11 +896,16 @@ def test_blocking_review_dry_run_returns_sentinel() -> None:
         )
         == ""
     )
+    _deny_github_calls["_gh"].assert_not_called()
+    _deny_github_calls["pull_request_reviews"].assert_not_called()
+    _deny_github_calls["direct_gh_call"].assert_not_called()
 
 
 @pytest.mark.parametrize("review_id", [None, ""])
 def test_existing_blocking_review_requires_identity(
-    monkeypatch: pytest.MonkeyPatch, review_id: object
+    monkeypatch: pytest.MonkeyPatch,
+    review_id: object,
+    _deny_github_calls: dict[str, Mock],
 ) -> None:
     """An existing matching review needs a nonempty GraphQL node identity."""
     marker = "<!-- marker -->"
@@ -909,9 +920,14 @@ def test_existing_blocking_review_requires_identity(
     )
     with pytest.raises(RuntimeError, match="review id is unavailable"):
         github.post_scope_expansion_blocking_review(7, body=body, marker=marker)
+    _deny_github_calls["_gh"].assert_not_called()
+    _deny_github_calls["direct_gh_call"].assert_not_called()
 
 
-def test_existing_blocking_review_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_existing_blocking_review_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    _deny_github_calls: dict[str, Mock],
+) -> None:
     """A matching actor-owned review is returned without another publication."""
     marker = "<!-- marker -->"
     body = f"{marker}\ntext"
@@ -922,6 +938,8 @@ def test_existing_blocking_review_is_idempotent(monkeypatch: pytest.MonkeyPatch)
         lambda number: ({"state": "COMMENTED", "viewerDidAuthor": True, "body": body, "id": "R1"},),
     )
     assert github.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R1"
+    _deny_github_calls["_gh"].assert_not_called()
+    _deny_github_calls["direct_gh_call"].assert_not_called()
 
 
 @pytest.mark.parametrize(
