@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -21,6 +22,7 @@ LOG = logging.getLogger(__name__)
 
 CommandRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 _MACHINE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_SERIAL_TAIL_BYTES = 16 * 1024
 _EMPTY_LAST_UP = {"", "0001-01-01T00:00:00Z", "0001-01-01T00:00:00+00:00"}
 
 
@@ -103,8 +105,22 @@ def _serial_log_path(document: dict[str, Any], name: str) -> Path | None:
 
 def _start_lock_path(data_home: Path | None = None) -> Path:
     """Return Podman's global machine-start lock path."""
-    root = data_home if data_home is not None else Path.home() / ".local" / "share"
-    return root / "containers" / "podman" / "machine" / "machine-start.lock"
+    if data_home is None:
+        environment = read_approved_parent_env()
+        home = Path(environment["HOME"]) if environment.get("HOME") else Path.home()
+        data_home = Path(environment.get("XDG_DATA_HOME") or home / ".local" / "share")
+    return data_home / "containers" / "podman" / "machine" / "machine-start.lock"
+
+
+def _read_serial_tail(path: Path) -> str:
+    """Read at most 16 KiB and retain at most 200 recent log lines."""
+    with path.open("rb") as stream:
+        size = stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, size - _SERIAL_TAIL_BYTES))
+        raw = stream.read(_SERIAL_TAIL_BYTES)
+    text = "\n".join(raw.decode("utf-8", errors="replace").splitlines()[-200:])
+    # Replacement characters can expand invalid bytes. Bound the encoded result too.
+    return text.encode("utf-8")[-_SERIAL_TAIL_BYTES:].decode("utf-8", errors="ignore")
 
 
 def _failure_evidence(
@@ -128,11 +144,12 @@ def _failure_evidence(
     serial_path = _serial_log_path(document, name)
     if serial_path is not None:
         try:
-            lines = serial_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            detail = "\n".join(lines[-200:])
+            detail = _read_serial_tail(serial_path)
         except OSError as exc:
             detail = f"could not read serial log: {exc}"
-        evidence.append(f"serial log ({serial_path}, last 200 lines):\n{detail or 'empty'}")
+        evidence.append(
+            f"serial log ({serial_path}, last 200 lines, at most 16 KiB):\n{detail or 'empty'}"
+        )
     return "\n\n".join(evidence)
 
 

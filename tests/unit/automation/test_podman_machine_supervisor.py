@@ -278,3 +278,63 @@ def test_full_queue_parser_accepts_bounded_podman_machine_options() -> None:
     assert args.podman_machine == "hephaestus-ci"
     assert args.podman_start_timeout == 30
     assert args.podman_health_timeout == 10
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"old data\n" * 20000 + b"LATEST", b"x" * 200000 + b"LATEST", b"\xff" * 200000 + b"LATEST"],
+)
+def test_failure_bounds_serial_log_bytes_and_keeps_recent_output(
+    tmp_path: Path, content: bytes
+) -> None:
+    """Large lines and invalid text cannot produce an unbounded diagnostic."""
+    serial_path = tmp_path / "hephaestus-ci.log"
+    serial_path.write_bytes(content)
+    inspect = json.loads(_inspect(state="running"))
+    inspect[0]["ConnectionInfo"]["PodmanSocket"]["Path"] = str(tmp_path / "hephaestus-ci.sock")
+    inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
+    health_command = ("podman", "--connection", "hephaestus-ci", "info")
+    runner = CommandHarness(
+        {
+            inspect_command: [_result(inspect_command, stdout=json.dumps(inspect))],
+            health_command: [_result(health_command, returncode=125)],
+        }
+    )
+    with pytest.raises(PodmanMachineError) as caught:
+        prepare_podman_machine("hephaestus-ci", command_runner=runner, data_home=tmp_path / "data")
+    diagnostic = str(caught.value)
+    assert diagnostic.endswith("LATEST")
+    assert len(diagnostic.encode("utf-8")) < 17000
+    assert len(diagnostic.splitlines()) <= 203
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_lock_diagnostics_use_approved_data_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: bool
+) -> None:
+    """Lock inspection follows the child data directory or the explicit override."""
+    xdg_home = tmp_path / "xdg"
+    explicit_home = tmp_path / "explicit"
+    selected_home = explicit_home if override else xdg_home
+    lock = selected_home / "containers" / "podman" / "machine" / "machine-start.lock"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    monkeypatch.setattr(
+        "hephaestus.automation.podman_machine_supervisor.read_approved_parent_env",
+        lambda: {"HOME": str(tmp_path / "home"), "XDG_DATA_HOME": str(xdg_home)},
+    )
+    inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
+    health_command = ("podman", "--connection", "hephaestus-ci", "info")
+    lock_command = ("lsof", str(lock))
+    runner = CommandHarness(
+        {
+            inspect_command: [_result(inspect_command, stdout=_inspect(state="running"))],
+            health_command: [_result(health_command, returncode=125)],
+            lock_command: [_result(lock_command, stdout="EXPECTED LOCK OWNER")],
+        }
+    )
+    with pytest.raises(PodmanMachineError, match="EXPECTED LOCK OWNER"):
+        prepare_podman_machine(
+            "hephaestus-ci", command_runner=runner, data_home=explicit_home if override else None
+        )
+    assert runner.calls[-1][0] == lock_command
