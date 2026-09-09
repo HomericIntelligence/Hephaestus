@@ -20,26 +20,22 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts, SeedEntry, classify_issue
 from hephaestus.automation.pipeline.stages.base import (
     Continue,
     JobRequest,
+    Stage,
     StageContext,
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
-from hephaestus.automation.pipeline.work_item import (
-    ItemKind,
-    ItemResult,
-    LearningIntent,
-    WorkItem,
-)
+from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, LearningIntent, WorkItem
 from hephaestus.automation.review_journal import render_current_plan, render_pending_review
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
@@ -50,8 +46,15 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
-from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    fake_worker_factories,
+    script_source_passes,
+)
+from tests.unit.automation.pipeline.stages.conftest import (
+    FakeSourceWorkspaceManager,
+    FakeStageGitHub,
+)
 
 
 def _agent_job(issue: int = 1) -> AgentJob:
@@ -72,7 +75,7 @@ def _verdict(kind: str) -> ReviewVerdict:
     return ReviewVerdict(grade=None, verdict=kind, raw=f"review text ({kind})")
 
 
-class JobRequestingStage:
+class JobRequestingStage(Stage):
     """Stage whose first step always requests an agent job."""
 
     def __init__(self) -> None:
@@ -182,17 +185,17 @@ def _coordinator(
         loops=1,
         projects_dir=tmp_path,
         grace_s=grace_s,
+        rate_guard_enabled=False,
     )
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
     coordinator_kwargs = coordinator_kwargs or {}
     coordinator = Coordinator(
         config,
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=install_signals,
         **coordinator_kwargs,
     )
-    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+    script_source_passes(coordinator, monkeypatch, [seed or []])
     return coordinator
 
 
@@ -389,10 +392,9 @@ class TestInterruptSemantics:
         _capture_signal_handlers(monkeypatch)
         auxiliary_pool = GracefulAuxiliarySignalPool()
         coordinator = Coordinator(
-            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path, rate_guard_enabled=False),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            auxiliary_pool=auxiliary_pool,
+            **fake_worker_factories(FakeWorkerPool(), auxiliary_pool),
             install_signals=False,
         )
         intent = LearningIntent.post_merge(repo="repo-a", issue=81, pr=181)
@@ -407,7 +409,10 @@ class TestInterruptSemantics:
         item.compact_for_post_processing(
             ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
         )
-        journal = coordinator._ctx_for_repo("repo-a").learning_journal
+        item.payload["_synced_default_branch_sha"] = "a" * 40
+        ctx = coordinator._ctx_for_repo("repo-a")
+        ctx.paths.source_workspaces = FakeSourceWorkspaceManager(tmp_path / "repo-a", "repo-a")
+        journal = ctx.learning_journal
         journal.ensure_pending(
             intent.key,
             kind=intent.kind.value,
@@ -425,10 +430,9 @@ class TestInterruptSemantics:
         assert record["cleanup_status"] == "pending"
 
         restarted = Coordinator(
-            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path, rate_guard_enabled=False),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            auxiliary_pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
             install_signals=False,
         )
         recovered = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=81, pr=181)
@@ -446,10 +450,9 @@ class TestInterruptSemantics:
         _capture_signal_handlers(monkeypatch)
         auxiliary_pool = ForcedAuxiliarySignalPool()
         coordinator = Coordinator(
-            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path, rate_guard_enabled=False),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            auxiliary_pool=auxiliary_pool,
+            **fake_worker_factories(FakeWorkerPool(), auxiliary_pool),
             install_signals=False,
         )
         intent = LearningIntent.post_merge(repo="repo-a", issue=82, pr=182)
@@ -464,7 +467,10 @@ class TestInterruptSemantics:
         item.compact_for_post_processing(
             ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
         )
-        journal = coordinator._ctx_for_repo("repo-a").learning_journal
+        item.payload["_synced_default_branch_sha"] = "a" * 40
+        ctx = coordinator._ctx_for_repo("repo-a")
+        ctx.paths.source_workspaces = FakeSourceWorkspaceManager(tmp_path / "repo-a", "repo-a")
+        journal = ctx.learning_journal
         journal.ensure_pending(
             intent.key,
             kind=intent.kind.value,
@@ -484,10 +490,9 @@ class TestInterruptSemantics:
         # a new coordinator reconstructs the durable item.
         journal._release_claim_lock(intent.key)
         restarted = Coordinator(
-            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path, rate_guard_enabled=False),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            auxiliary_pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
             install_signals=False,
         )
         recovered = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=82, pr=182)
@@ -513,9 +518,10 @@ class TestNormalTeardownExitSemantics:
 
     @staticmethod
     def _default_pool_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Coordinator:
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         return Coordinator(
-            PipelineConfig(org="org", repos=[], loops=1, projects_dir=tmp_path),
+            PipelineConfig(
+                org="org", repos=[], loops=1, projects_dir=tmp_path, rate_guard_enabled=False
+            ),
             github=FakeStageGitHub(),
             install_signals=False,
         )
@@ -654,9 +660,7 @@ class TestCrashMatrixJournal:
 
         return StageContext(
             config=PipelineConfig(
-                org="org",
-                repos=["repo-a"],
-                enable_learn=False,
+                org="org", repos=["repo-a"], enable_learn=False, rate_guard_enabled=False
             ),
             org="org",
             dry_run=False,
@@ -676,6 +680,7 @@ class TestCrashMatrixJournal:
             stage=StageName.PLAN_REVIEW,
             state="ENTER",
         )
+        item.payload["_synced_default_branch_sha"] = "a" * 40
         item.payload["issue_title"] = "A task"
         item.payload["issue_body"] = "Body"
         item.payload["plan_text"] = "# Implementation Plan\n\nDo the work."

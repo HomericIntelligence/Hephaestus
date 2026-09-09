@@ -38,7 +38,6 @@ from typing import Any, TypeGuard
 
 import hephaestus.automation.loop_repo_manager as _repo_manager
 import hephaestus.automation.pipeline.seeding as _seeding
-from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     IssueWaveError,
@@ -47,13 +46,13 @@ from hephaestus.automation.issue_waves import (
     WaveLease,
     is_full_commit_sha as is_wave_commit_sha,
 )
+from hephaestus.automation.learning_journal import LearningJournalStore
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
     Continue,
     Disposition,
     GitJob,
-    ItemKind,
     JobRequest,
     JobResult,
     Stage,
@@ -382,7 +381,12 @@ class RepoStage(Stage):
     ) -> tuple[int, ...]:
         """Select the first eligible open issues in the repository's source order."""
         selected: list[int] = []
-        for metadata in _repo_manager._iter_open_issue_meta(ctx.org, item.repo):
+        for metadata in _repo_manager._iter_open_issue_meta(
+            ctx.org,
+            item.repo,
+            network_timeout=ctx.config.network_timeout,
+            shutdown=ctx.cancellation,
+        ):
             number = int(metadata["number"])
             facts = _seeding.seed_issue_from_github(number, ctx.github)
             entry = _seeding.seed_entry_from_facts(facts)
@@ -454,7 +458,12 @@ class RepoStage(Stage):
     def _discover(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """[M] Initialize a bounded metadata source; do not classify eagerly."""
         try:
-            open_issues = _repo_manager._iter_open_issue_meta(ctx.org, item.repo)
+            open_issues = _repo_manager._iter_open_issue_meta(
+                ctx.org,
+                item.repo,
+                network_timeout=ctx.config.network_timeout,
+                shutdown=ctx.cancellation,
+            )
             recovered = self._iter_closed_learning_meta(item.repo, ctx)
             main_sha = item.payload.get(SYNCED_MAIN_SHA_KEY)
             source = RepoIssueSource(
@@ -553,49 +562,3 @@ class RepoStage(Stage):
         item.attempts["clone"] = item.attempts.get("clone", 0) + 1
         item.payload["clone_failed"] = True
         logger.warning("repo:%s: checkout preparation failed: %s", item.repo, result.error)
-
-
-def product_to_work_item(repo: str, product: dict[str, Any]) -> WorkItem | None:
-    """Turn one repo-stage product into a queue-ready :class:`WorkItem`.
-
-    Coordinator-side helper (queue ownership stays with the coordinator):
-    excluded products (``stage is None``) return ``None`` and are only
-    logged by the caller.
-
-    Args:
-        repo: Repository name the product belongs to.
-        product: One entry of ``item.payload["products"]``.
-
-    Returns:
-        A WorkItem parked at the product's entry stage, or ``None`` when the
-        product is excluded from the pipeline.
-
-    """
-    stage = product.get("stage")
-    if stage is None:
-        return None
-    kind = ItemKind.PR if product.get("kind") == "pr" else ItemKind.ISSUE
-    number = int(product["number"])
-    item = WorkItem(
-        repo=repo,
-        kind=kind,
-        # A PR number never supplies issue requirements. Linked issue context
-        # is required before a PR can enter the review stage.
-        issue=(
-            number
-            if kind is ItemKind.ISSUE
-            else (int(product["issue"]) if product.get("issue") is not None else None)
-        ),
-        pr=int(product["pr"]) if product.get("pr") else (number if kind is ItemKind.PR else None),
-        stage=stage,
-        state="ENTER",
-    )
-    labels = product.get("labels") or []
-    if labels:
-        item.labels_cache = dict.fromkeys(labels, True)
-    if kind is ItemKind.ISSUE:
-        item.payload["issue_title"] = str(product.get("title") or "")
-        item.payload["issue_body"] = str(product.get("body") or "")
-    item.payload["entry_stage"] = stage.value
-    item.payload["entry_reason"] = product.get("reason", "")
-    return item

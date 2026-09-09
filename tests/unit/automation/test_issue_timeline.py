@@ -22,8 +22,6 @@ from hephaestus.automation.review_journal import (
     FORCED_PLANNING_EPOCH_MARKER,
     HISTORY_MARKER,
     IssueComment,
-    archive_plan_body,
-    archive_review_body,
     render_current_plan,
     render_current_review,
 )
@@ -51,8 +49,17 @@ def test_compaction_rejects_multiple_owned_plan_or_review_pointers() -> None:
         _comment(1, "Human clarification", owned=False),
         _comment(2, render_current_plan("Plan v1", revision=1)),
         _comment(3, render_current_review("NOGO", revision=1)),
-        _comment(4, archive_plan_body(1, "Plan v1", "Plan v2")),
-        _comment(5, archive_review_body(1, "NOGO")),
+        _comment(
+            4,
+            (
+                "<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+                "<!-- hephaestus-plan-history:old-plan -->\n"
+                "Plan v1\n"
+                "<!-- hephaestus-plan-history:new-plan -->\n"
+                "Plan v2"
+            ),
+        ),
+        _comment(5, "<!-- hephaestus-plan-history:revision=1:kind=review -->\nNOGO"),
         _comment(6, render_current_plan("Plan v2", revision=2)),
         _comment(7, render_current_review("GO", revision=2)),
         _comment(8, f"{SKIP_REASON_MARKER}\nold reason"),
@@ -150,7 +157,13 @@ def test_compaction_rejects_plan_alias_embedded_in_owned_history() -> None:
 
 def test_compaction_keeps_same_line_history_marker_lookalikes() -> None:
     """A valid marker with a same-line suffix is actor-owned prose, not history."""
-    lookalike = archive_plan_body(1, "old", "new").replace(" -->\n", " -->suffix\n", 1)
+    lookalike = (
+        "<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+        "<!-- hephaestus-plan-history:old-plan -->\n"
+        "old\n"
+        "<!-- hephaestus-plan-history:new-plan -->\n"
+        "new"
+    ).replace(" -->\n", " -->suffix\n", 1)
     comments = [
         _comment(1, render_current_plan("Plan", revision=1)),
         _comment(2, lookalike),
@@ -255,7 +268,16 @@ def test_compaction_rejects_a_repeated_plan_alias_in_one_owned_comment() -> None
 def test_compaction_retains_history_without_a_canonical_pointer() -> None:
     """A sole recoverable archive is never deleted before a pointer exists."""
     comments = [
-        _comment(1, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(
+            1,
+            (
+                "<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+                "<!-- hephaestus-plan-history:old-plan -->\n"
+                "Plan v1\n"
+                "<!-- hephaestus-plan-history:new-plan -->\n"
+                "Plan v2"
+            ),
+        ),
         _comment(2, f"{PLAN_COMMENT_MARKER}\n\nHeading-only text"),
         _comment(3, "Unrelated operator note"),
     ]
@@ -265,69 +287,6 @@ def test_compaction_retains_history_without_a_canonical_pointer() -> None:
     assert result.plan_body is None
     assert result.review_body is None
     assert result.delete_comment_ids == ()
-
-
-def test_compaction_retains_plan_archive_until_its_exact_successor_is_canonical() -> None:
-    """A rev-1 pointer cannot replace recovery data for its missing rev-2 successor."""
-    comments = [
-        _comment(1, render_current_plan("Plan v1", revision=1)),
-        _comment(2, render_current_review("Review v1", revision=1)),
-        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
-    ]
-
-    result = plan_issue_timeline_compaction(comments)
-
-    assert result.delete_comment_ids == ()
-
-
-def test_compaction_retains_archive_pair_until_both_revision_successors_exist() -> None:
-    """A first pass cannot strand review history by deleting its plan evidence."""
-    comments = [
-        _comment(1, render_current_plan("Plan v2", revision=2)),
-        _comment(2, render_current_review("Review v1", revision=1)),
-        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
-        _comment(4, archive_review_body(1, "Review v1")),
-    ]
-
-    result = plan_issue_timeline_compaction(comments)
-
-    assert result.delete_comment_ids == ()
-
-    comments[1] = _comment(2, render_current_review("Review v2", revision=2))
-
-    recovered = plan_issue_timeline_compaction(comments)
-
-    assert recovered.delete_comment_ids == (3, 4)
-
-
-def test_compaction_deletes_verified_plan_and_review_history_together() -> None:
-    """Both archives compact only after the matching successor pair is durable."""
-    comments = [
-        _comment(1, render_current_plan("Plan v2", revision=2)),
-        _comment(2, render_current_review("Review v2", revision=2)),
-        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
-        _comment(4, archive_review_body(1, "Review v1")),
-    ]
-
-    result = plan_issue_timeline_compaction(comments)
-
-    assert result.delete_comment_ids == (3, 4)
-
-
-def test_compaction_deletes_complete_three_revision_history_chain() -> None:
-    """A fully proven chain compacts atomically instead of stranding rev 1."""
-    comments = [
-        _comment(1, render_current_plan("Plan v3", revision=3)),
-        _comment(2, render_current_review("Review v3", revision=3)),
-        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
-        _comment(4, archive_review_body(1, "Review v1")),
-        _comment(5, archive_plan_body(2, "Plan v2", "Plan v3")),
-        _comment(6, archive_review_body(2, "Review v2")),
-    ]
-
-    result = plan_issue_timeline_compaction(comments)
-
-    assert result.delete_comment_ids == (3, 4, 5, 6)
 
 
 def test_compaction_keeps_one_recovery_and_obsolete_role_per_issue() -> None:

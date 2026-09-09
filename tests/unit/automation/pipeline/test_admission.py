@@ -10,21 +10,23 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from typing import ClassVar
+import threading
+import time
+from collections.abc import Mapping
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation import github_api
-from hephaestus.automation.models import IssueInfo, IssueState
-from hephaestus.automation.pipeline import admission
+from hephaestus.automation.comment_identity import CommentAliasConflictError
+from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline.admission import (
     _filter_open_issues,
     _parse_planned_files,
-    _select_non_overlapping,
     order_for_implementation,
     parse_publication_scope_files,
 )
+from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.review_journal import render_current_plan
 
 
@@ -148,235 +150,66 @@ class TestPublicationScopeFiles:
         assert parse_publication_scope_files(body) == set()
 
 
-class TestCoordinatorCapOwnership:
-    """Traceability guard for the deferred per-repo cap."""
+class TestFetchPlannedFiles:
+    """Read the complete actor-owned plan through the repository accessor."""
 
-    def test_admission_docstring_cross_references_coordinator_admit(self) -> None:
-        """The deferred cap is intentionally owned by Coordinator._admit."""
-        assert ":meth:`~hephaestus.automation.pipeline.coordinator.Coordinator._admit`" in (
-            admission.__doc__ or ""
+    @staticmethod
+    def read_files(
+        issue: int, comments: list[dict[str, Any]], *, repo: tuple[str, str] = ("owner", "repo")
+    ) -> set[str] | None:
+        """Serve a paged journal to the real bounded accessor."""
+        from hephaestus.automation.pipeline.admission import _fetch_planned_files
+
+        def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv == ["api", "user", "--jq", ".login"]:
+                body = "bot"
+            else:
+                assert f"/repos/{repo[0]}/{repo[1]}/issues/{issue}/comments" in argv[1]
+                page = int(argv[1].rsplit("page=", 1)[1])
+                body = json.dumps(comments[(page - 1) * 100 : page * 100])
+            return subprocess.CompletedProcess(argv, 0, stdout=body)
+
+        github = PipelineGitHub(repo[0], repo=repo[1], command_runner=run)
+        return _fetch_planned_files(
+            issue, github=github, deadline_s=time.monotonic() + 10, shutdown=threading.Event()
         )
 
-
-class TestFetchPlannedFiles:
-    """Fetch plan file set from issue comments: fail-open on missing/unparseable."""
-
-    def test_fetch_planned_files_no_plan_comment_returns_none(self) -> None:
-        """Comments present but none is a plan comment → None (fail-open)."""
-        comments = [{"body": "just a chat comment"}, {"body": "## 🔍 Plan Review"}]
-        with patch(
-            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-            return_value=comments,
-        ):
-            from hephaestus.automation.pipeline.admission import _fetch_planned_files
-
-            assert _fetch_planned_files(101) is None
-
-    def test_fetch_planned_files_empty_comment_list_returns_none(self) -> None:
-        """An empty fetch (the swallowed-error signal) → None; no try/except needed."""
-        with patch(
-            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-            return_value=[],
-        ):
-            from hephaestus.automation.pipeline.admission import _fetch_planned_files
-
-            assert _fetch_planned_files(102) is None
-
-    def test_fetch_planned_files_returns_plan_file_set(self) -> None:
-        """A real plan comment yields its parsed file set."""
+    def test_no_plan_comment_returns_none(self) -> None:
         comments = [
-            {"body": "chatter", "user": {"login": "someone-else"}},
+            {"body": "A normal comment.", "user": {"login": "other"}},
+            {"body": "## Plan Review", "user": {"login": "bot"}},
+        ]
+        assert self.read_files(101, comments) is None
+
+    def test_empty_comment_list_returns_none(self) -> None:
+        assert self.read_files(102, []) is None
+
+    def test_owned_plan_returns_file_set(self) -> None:
+        comments = [
             {
-                "body": render_current_plan(
-                    "## Files to Modify\n\n- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
-                ),
+                "body": render_current_plan("## Files to Modify\n- `src/worker.py`"),
                 "user": {"login": "bot"},
-            },
-        ]
-        with (
-            patch(
-                "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-                return_value=comments,
-            ),
-            patch("hephaestus.automation.pipeline.admission.gh_current_login", return_value="bot"),
-        ):
-            from hephaestus.automation.pipeline.admission import _fetch_planned_files
-
-            assert _fetch_planned_files(103) == {
-                "hephaestus/automation/pipeline/stages/pr_review.py"
-            }
-
-    def test_fetch_planned_files_rejects_foreign_marker_identity(self) -> None:
-        """A foreign plan marker cannot control implementation admission."""
-        comments = [
-            {
-                "body": render_current_plan(
-                    "## Files to Modify\n\n- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
-                ),
-                "user": {"login": "other"},
             }
         ]
-        with (
-            patch(
-                "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-                return_value=comments,
-            ),
-            patch("hephaestus.automation.pipeline.admission.gh_current_login", return_value="bot"),
-        ):
-            from hephaestus.automation.pipeline.admission import _fetch_planned_files
+        assert self.read_files(103, comments) == {"src/worker.py"}
 
-            with pytest.raises(RuntimeError, match="plan marker identity conflict"):
-                _fetch_planned_files(103)
-
-    def test_fetch_planned_files_sees_foreign_marker_after_one_hundred_comments(self) -> None:
-        """Complete REST metadata prevents a hidden foreign plan from becoming absent."""
+    @pytest.mark.parametrize("preceding_count", [0, 100])
+    def test_foreign_marker_is_a_typed_conflict(self, preceding_count: int) -> None:
         comments = [
-            {"body": f"ordinary comment {index}", "user": {"login": "someone-else"}}
-            for index in range(100)
+            {"body": f"Comment {index}.", "user": {"login": "other"}}
+            for index in range(preceding_count)
         ]
         comments.append(
             {
-                "body": render_current_plan("## Files to Modify\n\n- `hephaestus/automation/x.py`"),
+                "body": render_current_plan("## Files to Modify\n- `src/worker.py`"),
                 "user": {"login": "other"},
             }
         )
-        with (
-            patch(
-                "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-                return_value=comments,
-            ),
-            patch("hephaestus.automation.pipeline.admission.gh_current_login", return_value="bot"),
-        ):
-            from hephaestus.automation.pipeline.admission import _fetch_planned_files
+        with pytest.raises(CommentAliasConflictError, match="plan marker identity conflict"):
+            self.read_files(104, comments)
 
-            with pytest.raises(RuntimeError, match="plan marker identity conflict"):
-                _fetch_planned_files(104)
-
-
-class TestAdmissionRepoScoping:
-    """Admission must look up plans in the OWNING repo, not the ambient CWD (#1795)."""
-
-    def test_fetch_planned_files_forwards_repo(self) -> None:
-        """``_fetch_planned_files`` threads ``repo`` down to the comment fetch."""
-        with patch(
-            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-            return_value=[],
-        ) as mock_fetch:
-            from hephaestus.automation.pipeline.admission import _fetch_planned_files
-
-            _fetch_planned_files(188, repo=("HomericIntelligence", "Myrmidons"))
-
-        mock_fetch.assert_called_once_with(188, repo=("HomericIntelligence", "Myrmidons"))
-
-    def test_select_non_overlapping_resolves_repo_per_issue(self) -> None:
-        """Each issue is looked up in ITS OWN repo.
-
-        The implementation queue is global (keyed by stage, not repo), so a
-        single round can hold issues from different repositories. A batch-wide
-        repo would send some lookups to the wrong repo — the very bug in #1795.
-        """
-        repo_of = {
-            188: ("HomericIntelligence", "Myrmidons"),
-            121: ("HomericIntelligence", "Nestor"),
-        }
-        with patch(
-            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-            return_value=[],
-        ) as mock_fetch:
-            dispatch, defer = _select_non_overlapping([188, 121], repo_of=repo_of)
-
-        assert dispatch == [188, 121]
-        assert defer == []
-        seen = {call.args[0]: call.kwargs["repo"] for call in mock_fetch.call_args_list}
-        assert seen == repo_of
-
-    def test_select_non_overlapping_missing_repo_entry_is_ambient(self) -> None:
-        """Back-compat: an issue absent from ``repo_of`` forwards None (ambient)."""
-        with patch(
-            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
-            return_value=[],
-        ) as mock_fetch:
-            _select_non_overlapping([7])
-
-        assert mock_fetch.call_args.kwargs["repo"] is None
-
-
-class TestSelectNonOverlapping:
-    """Greedy first-fit partitioning: defer issues with overlapping file sets."""
-
-    def test_select_non_overlapping_defers_second_of_overlapping_pair(self) -> None:
-        """AC1/AC2: overlapping planned files defer the second issue."""
-        plans = {
-            1: {"hephaestus/automation/pipeline/stages/pr_review.py", "hephaestus/automation/a.py"},
-            2: {"hephaestus/automation/pipeline/stages/pr_review.py", "hephaestus/automation/b.py"},
-        }
-        with patch(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i, repo=None: plans[i],
-        ):
-            dispatch, defer = _select_non_overlapping([1, 2])
-        assert dispatch == [1]
-        assert defer == [2]
-
-    def test_select_non_overlapping_disjoint_both_dispatched(self) -> None:
-        """Non-intersecting file sets → both dispatched, none deferred."""
-        plans = {
-            1: {"hephaestus/automation/a.py"},
-            2: {"hephaestus/automation/b.py"},
-        }
-        with patch(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i, repo=None: plans[i],
-        ):
-            dispatch, defer = _select_non_overlapping([1, 2])
-        assert dispatch == [1, 2]
-        assert defer == []
-
-    def test_select_non_overlapping_unknown_plan_fails_open(self) -> None:
-        """An issue whose plan file set is None claims no files → always dispatched."""
-        plans: dict[int, set[str] | None] = {
-            1: {"hephaestus/automation/pipeline/stages/pr_review.py"},
-            2: None,  # no plan yet — fail open
-            3: {"hephaestus/automation/pipeline/stages/pr_review.py"},
-        }
-        with patch(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i, repo=None: plans[i],
-        ):
-            dispatch, defer = _select_non_overlapping([1, 2, 3])
-        # #1 claims the shared path; #2 unknown → dispatched; #3 overlaps #1 → deferred.
-        assert dispatch == [1, 2]
-        assert defer == [3]
-
-    def test_select_non_overlapping_first_issue_always_dispatched(self) -> None:
-        """Liveness: the first issue always dispatches, so a batch is never wholly deferred."""
-        plans = {
-            1: {"hephaestus/automation/pipeline/stages/pr_review.py"},
-            2: {"hephaestus/automation/pipeline/stages/pr_review.py"},
-        }
-        with patch(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i, repo=None: plans[i],
-        ):
-            dispatch, defer = _select_non_overlapping([1, 2])
-        assert dispatch[0] == 1
-        assert defer == [2]
-
-    def test_select_non_overlapping_three_way_chain(self) -> None:
-        """Three issues: first claimed, second overlaps, third overlaps second but not first."""
-        plans = {
-            1: {"hephaestus/automation/file1.py"},
-            2: {"hephaestus/automation/file1.py"},  # overlaps #1
-            3: {"hephaestus/automation/file2.py"},  # overlaps #2 (both claim distinct files)
-        }
-        with patch(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i, repo=None: plans[i],
-        ):
-            dispatch, defer = _select_non_overlapping([1, 2, 3])
-        # #1 claims file1.py; #2 overlaps file1.py → defer; #3 claims file2.py → dispatch.
-        assert dispatch == [1, 3]
-        assert defer == [2]
+    def test_selected_repository_owns_the_comment_read(self) -> None:
+        assert self.read_files(188, [], repo=("HomericIntelligence", "Myrmidons")) is None
 
 
 class TestOrderForImplementation:
@@ -463,83 +296,52 @@ class TestOrderForImplementation:
 
 
 class TestFilterOpenIssues:
-    """Filter closed issues from explicit --issues list (#1576)."""
+    """Exclude confirmed closed rows and retain unknown repository state."""
 
-    @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
-    @patch("hephaestus.automation.pipeline.admission.is_issue_closed")
-    def test_filter_open_issues_keeps_open(self, mock_is_closed, mock_prefetch) -> None:
-        """Open issues are kept."""
-        mock_prefetch.return_value = {}
-        mock_is_closed.return_value = False
-        result = _filter_open_issues(("owner", "repo"), [1, 2, 3])
-        assert result == [1, 2, 3]
-        mock_prefetch.assert_called_once_with([1, 2, 3], repo=("owner", "repo"))
+    @staticmethod
+    def select(
+        issues: list[int],
+        states: Mapping[int, str | Exception],
+        *,
+        repo: tuple[str, str] = ("owner", "repo"),
+    ) -> list[int]:
+        """Serve explicit issue state through the real repository accessor."""
 
-    @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
-    @patch("hephaestus.automation.pipeline.admission.is_issue_closed")
-    def test_filter_open_issues_excludes_closed(self, mock_is_closed, mock_prefetch) -> None:
-        """Closed issues are excluded."""
-        mock_prefetch.return_value = {}
-        mock_is_closed.side_effect = lambda num, _, **kwargs: num == 2
-        result = _filter_open_issues(("owner", "repo"), [1, 2, 3])
-        assert result == [1, 3]
-
-    @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
-    def test_filter_open_issues_fails_open_on_api_error(self, mock_prefetch) -> None:
-        """Transient API failure → keep all, don't drop work (fail-open)."""
-        mock_prefetch.side_effect = RuntimeError("API error")
-        result = _filter_open_issues(("owner", "repo"), [1, 2, 3])
-        assert result == [1, 2, 3]
-
-    @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
-    @patch("hephaestus.automation.pipeline.admission.is_issue_closed")
-    def test_filter_open_issues_preserves_order(self, mock_is_closed, mock_prefetch) -> None:
-        """Excluded issues maintain the original order."""
-        mock_prefetch.return_value = {}
-        mock_is_closed.side_effect = lambda num, _, **kwargs: num in {2, 4}
-        result = _filter_open_issues(("owner", "repo"), [1, 2, 3, 4, 5])
-        assert result == [1, 3, 5]
-
-    def test_selected_repository_ignores_checkout_state(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Select issues from the specified repository."""
-        monkeypatch.setattr(github_api, "_issue_state_cache", {})
-        monkeypatch.setattr(github_api, "get_repo_info", lambda: ("ambient", "checkout"))
-
-        def response(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            owner = next(
-                value.removeprefix("owner=") for value in argv if value.startswith("owner=")
-            )
-            name = next(value.removeprefix("name=") for value in argv if value.startswith("name="))
-            states = (
-                ["OPEN", "CLOSED"] if (owner, name) == ("target", "project") else ["CLOSED", "OPEN"]
-            )
-            repository = {
-                "owner": {"login": owner},
-                "name": name,
-                "issue0": {"number": 1, "state": states[0]},
-                "issue1": {"number": 2, "state": states[1]},
-            }
+        def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            assert argv[-2:] == ["--repo", f"{repo[0]}/{repo[1]}"]
+            number = int(argv[2])
+            state = states[number]
+            if isinstance(state, Exception):
+                raise state
             return subprocess.CompletedProcess(
-                argv, 0, json.dumps({"data": {"repository": repository}}), ""
+                argv, 0, stdout=json.dumps({"number": number, "state": state})
             )
 
-        monkeypatch.setattr(github_api, "_gh_call", response)
-        assert _filter_open_issues(("target", "project"), [1, 2]) == [1]
-
-    @patch("hephaestus.automation.github_api.gh_issue_json")
-    @patch("hephaestus.automation.pipeline.admission.prefetch_issue_states")
-    def test_partial_graphql_and_not_found_keep_unverified_issue(
-        self, mock_prefetch, mock_issue_json, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Keep an unknown issue when the remaining repository read fails."""
-        mock_prefetch.return_value = {1: IssueState.CLOSED}
-        mock_issue_json.side_effect = RuntimeError("NOT_FOUND")
-
-        with caplog.at_level(logging.INFO):
-            assert _filter_open_issues(("target", "project"), [1, 2]) == [2]
-        mock_issue_json.assert_called_once_with(2, repo=("target", "project"))
-        assert not any(
-            "issue #2 is closed — excluding" in record.message for record in caplog.records
+        github = PipelineGitHub(repo[0], repo=repo[1], command_runner=run)
+        return _filter_open_issues(
+            repo,
+            issues,
+            github=github,
+            deadline_s=time.monotonic() + 10,
+            shutdown=threading.Event(),
         )
+
+    def test_keeps_open_issues(self) -> None:
+        assert self.select([1, 2, 3], dict.fromkeys([1, 2, 3], "OPEN")) == [1, 2, 3]
+
+    def test_excludes_confirmed_closed_issues(self) -> None:
+        assert self.select([1, 2, 3], {1: "OPEN", 2: "CLOSED", 3: "OPEN"}) == [1, 3]
+
+    def test_keeps_rows_on_transport_error(self) -> None:
+        states = dict.fromkeys([1, 2, 3], RuntimeError("API unavailable"))
+        assert self.select([1, 2, 3], states) == [1, 2, 3]
+
+    def test_preserves_source_order(self) -> None:
+        states = {1: "OPEN", 2: "CLOSED", 3: "OPEN", 4: "CLOSED", 5: "OPEN"}
+        assert self.select([1, 2, 3, 4, 5], states) == [1, 3, 5]
+
+    def test_reads_the_selected_repository(self) -> None:
+        assert self.select([1, 2], {1: "OPEN", 2: "CLOSED"}, repo=("target", "project")) == [1]
+
+    def test_keeps_unverified_rows_after_a_closed_row(self) -> None:
+        assert self.select([1, 2], {1: "CLOSED", 2: RuntimeError("NOT_FOUND")}) == [2]

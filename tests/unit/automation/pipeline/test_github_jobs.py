@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import math
 import threading
 import time
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
@@ -53,7 +55,21 @@ from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.scope_expansion_domain import ScopeExpansion
 
 
-class _ScopeExpansionFakeGitHub:
+class _DeadlineAccessor:
+    """Keep service fixtures inside an explicit operation deadline."""
+
+    @contextmanager
+    def operation_deadline(
+        self, deadline_s: float, *, shutdown: threading.Event | None = None
+    ) -> Iterator[_DeadlineAccessor]:
+        """Require a finite positive deadline and the current cancellation signal."""
+        assert math.isfinite(deadline_s) and deadline_s > 0
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("test GitHub operation cancelled")
+        yield self
+
+
+class _ScopeExpansionFakeGitHub(_DeadlineAccessor):
     """Small mutable GitHub double for child-issue idempotency tests."""
 
     issues: ClassVar[dict[int, dict[str, object]]] = {}
@@ -558,7 +574,7 @@ def test_runner_dispatches_append_with_a_fresh_accessor_per_job(
     clients: list[object] = []
     appends: list[tuple[int, str, str]] = []
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             clients.append(self)
 
@@ -600,12 +616,9 @@ def test_verified_remediation_journal_append_removes_prepublication_receipt(
     module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
     events: list[object] = []
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
-
-        def operation_deadline(self, _deadline_s: float) -> object:
-            return nullcontext()
 
         def append_issue_comment(self, issue: int, marker: str, body: str) -> None:
             events.append(("append", issue, marker, body))
@@ -656,7 +669,7 @@ def test_dry_run_journal_append_keeps_prepublication_receipt(
     module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
     events: list[str] = []
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
@@ -706,16 +719,13 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
     _marker, journal_body = journal
     delivery_calls: list[tuple[object, ...]] = []
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def issue_comments(self, issue: int) -> list[IssueComment]:
             assert issue == 7
             return [IssueComment(body=journal_body, viewer_did_author=True)]
-
-        def operation_deadline(self, _deadline_s: float) -> object:
-            return nullcontext()
 
         def gh_pr_state(self, pr: int) -> dict[str, object]:
             assert pr == 7
@@ -823,12 +833,9 @@ def test_runner_recovers_only_the_bound_format_three_remediation_journal(
     assert journal is not None
     journal_body = journal[1]
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
-
-        def operation_deadline(self, _deadline_s: float) -> object:
-            return nullcontext()
 
         def issue_comments(self, issue: int) -> list[IssueComment]:
             assert issue == 7
@@ -1199,7 +1206,7 @@ def test_runner_dry_run_reports_scope_expansion_split_without_mutation(  # noqa:
     )
     events: list[tuple[str, tuple[object, ...]]] = []
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(
             self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object
         ) -> None:
@@ -1308,12 +1315,9 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         "comments": [{"id": "late-comment", "body": "late race"}],
     }
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             self.reads = 0
-
-        def operation_deadline(self, _deadline_s: float) -> object:
-            return nullcontext()
 
         def list_unresolved_review_threads(self, _pr: int) -> list[dict[str, object]]:
             self.reads += 1
@@ -1372,7 +1376,7 @@ def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
     module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
     state_reads: list[int] = []
 
-    class FakePipelineGitHub:
+    class FakePipelineGitHub(_DeadlineAccessor):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
@@ -1408,46 +1412,13 @@ def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
 
 
 @pytest.mark.parametrize("revoke_at", [1, 2, 0])
-def test_bootstrap_merge_rechecks_grant_and_preserves_required_gates(revoke_at: int) -> None:
-    """A grant revoked before either admission read cannot send a merge request."""
-    import json
+def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) -> None:
+    """Revoked implementation approval stops either merge admission read."""
     from unittest.mock import MagicMock
 
-    from hephaestus.automation.host_verification_bootstrap import (
-        BOOTSTRAP_MANIFEST,
-        BOOTSTRAP_MARKER,
-        authenticate_bootstrap_grant,
-    )
     from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
-    body = {
-        "repository": "HomericIntelligence/Hephaestus",
-        "issue": 2701,
-        "pr": 3006,
-        "head_sha": "a" * 40,
-        "base_sha": "b" * 40,
-        "boundary": "linux-pyxis-enroot",
-        "state": "approved",
-        "manifest": [{"status": s, "path": p} for s, p in BOOTSTRAP_MANIFEST],
-    }
-    comment = IssueComment(
-        BOOTSTRAP_MARKER + "\n" + json.dumps(body),
-        author_login="operator",
-        author_association="MEMBER",
-        viewer_did_author=True,
-        database_id=123,
-    )
-    proof = authenticate_bootstrap_grant(
-        [comment],
-        comment_id=123,
-        repository="HomericIntelligence/Hephaestus",
-        issue=2701,
-        pr=3006,
-        head_sha="a" * 40,
-        base_sha="b" * 40,
-        manifest=BOOTSTRAP_MANIFEST,
-    )
     request = RunMergeWaitCycleRequest(
         pr_number=3006,
         issue_number=2701,
@@ -1456,7 +1427,6 @@ def test_bootstrap_merge_rechecks_grant_and_preserves_required_gates(revoke_at: 
         declined_readiness_fingerprint=None,
         deadline_s=time.monotonic() + 30,
         cancellation=threading.Event(),
-        bootstrap_proof=proof,
     )
     github = MagicMock()
     github._repo_slug = "HomericIntelligence/Hephaestus"
@@ -1468,18 +1438,14 @@ def test_bootstrap_merge_rechecks_grant_and_preserves_required_gates(revoke_at: 
         "baseRefName": "main",
     }
     github.gh_pr_state.return_value = state
-    github.pr_has_implementation_state_label.return_value = (True, False)
-    github.mark_pr_implementation_no_go.side_effect = lambda _: setattr(
-        github.pr_has_implementation_state_label, "return_value", (False, True)
-    )
     reads = 0
 
-    def comments(_: int) -> list[IssueComment]:
+    def implementation_state(_: int) -> tuple[bool, bool]:
         nonlocal reads
         reads += 1
-        return [] if revoke_at and reads >= revoke_at else [comment]
+        return (False, True) if revoke_at and reads >= revoke_at else (True, False)
 
-    github.issue_comments.side_effect = comments
+    github.pr_has_implementation_state_label.side_effect = implementation_state
     github.list_unresolved_review_threads.return_value = []
     github.effective_merge_policy.return_value = EffectiveMergePolicy(
         base_branch="main",
@@ -1498,14 +1464,14 @@ def test_bootstrap_merge_rechecks_grant_and_preserves_required_gates(revoke_at: 
     github.merge_pr_if_head.return_value = SimpleNamespace(dry_run=True)
     result = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
     if revoke_at:
-        assert result.outcome == "host_verification_bootstrap_revoked"
+        assert result.outcome == "not_implementation_go"
         github.merge_pr_if_head.assert_not_called()
-        github.mark_pr_implementation_no_go.assert_called_once_with(3006)
     else:
         assert result.outcome == "conditional_merge_dry_run"
         github.required_checks_pass_for_head.assert_called_once()
         github.merge_pr_if_head.assert_called_once()
     assert reads == (revoke_at or 2)
+    github.mark_pr_implementation_no_go.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -1557,7 +1523,7 @@ def test_dirty_direct_pr_runner_uses_fresh_repo_bound_accessors(
     accessors: list[object] = []
     calls: list[object] = []
 
-    class Accessor:
+    class Accessor(_DeadlineAccessor):
         def __init__(self, org: str, *, repo: str, **kwargs: object) -> None:
             accessors.append(self)
             calls.append((org, repo))
@@ -1648,7 +1614,7 @@ def _adopted_read_job(tmp_path: Path) -> GitHubJob:
     )
 
 
-class _AdoptedReadAccessor:
+class _AdoptedReadAccessor(_DeadlineAccessor):
     def __init__(
         self, org: str, *, repo: str, calls: list[list[str]], fault: str | None, **kwargs: object
     ) -> None:

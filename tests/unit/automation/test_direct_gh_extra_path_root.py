@@ -6,7 +6,7 @@ import queue
 import subprocess
 import sys
 import threading
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -14,7 +14,7 @@ from unittest.mock import ANY, call, patch
 
 import pytest
 
-from hephaestus.automation import implementer, planner, pr_reviewer
+from hephaestus.automation import implementer, pipeline_cli, planner, pr_reviewer
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
@@ -49,16 +49,26 @@ def _capture_pipeline_config(
 
     with ExitStack() as stack:
         stack.enter_context(patch.object(sys, "argv", [program, *argv]))
-        stack.enter_context(patch.object(module, "_resolve_repo", return_value=("acme", "widget")))
-        stack.enter_context(patch.object(module, "resolve_agent", return_value="claude"))
+        stack.enter_context(
+            patch.object(
+                pipeline_cli, "_resolve_org_and_repos", return_value=("acme", ["widget"], None)
+            )
+        )
+        stack.enter_context(patch.object(pipeline_cli, "resolve_agent", return_value="claude"))
         stack.enter_context(
             patch(
                 "hephaestus.automation.pipeline.coordinator.run_pipeline",
                 side_effect=_fake_run_pipeline,
             )
         )
-        if module is implementer:
-            stack.enter_context(patch.object(implementer, "get_repo_root", return_value=repo_root))
+        stack.enter_context(
+            patch.object(
+                pipeline_cli, "_current_checkout_repo_roots", return_value={"widget": repo_root}
+            )
+        )
+        stack.enter_context(
+            patch.object(pipeline_cli, "event_log_lifecycle", return_value=nullcontext())
+        )
         assert module.main() == 0
 
     return captured["config"]
@@ -147,9 +157,15 @@ def test_direct_issue_sync_uses_explicit_gh_root_when_fixed_candidates_unavailab
                 str(trusted_root),
             ],
         ),
-        patch.object(implementer, "_resolve_repo", return_value=("acme", "widget")),
-        patch.object(implementer, "resolve_agent", return_value="claude"),
-        patch.object(implementer, "get_repo_root", return_value=tmp_path),
+        patch.object(
+            pipeline_cli, "_resolve_org_and_repos", return_value=("acme", ["widget"], None)
+        ),
+        patch.object(pipeline_cli, "resolve_agent", return_value="claude"),
+        patch.object(
+            pipeline_cli, "_current_checkout_repo_roots", return_value={"widget": tmp_path}
+        ),
+        patch.object(pipeline_cli, "event_log_lifecycle", return_value=nullcontext()),
+        patch.object(pipeline_cli, "_preflight_token_scopes"),
         patch(
             "hephaestus.automation.pipeline.coordinator.run_pipeline",
             side_effect=_run_direct_pipeline,
@@ -206,6 +222,6 @@ def test_direct_cli_rejects_untrusted_gh_root_during_parsing(
 ) -> None:
     """Direct wrappers reject the same root classes as the full loop."""
     with pytest.raises(SystemExit) as excinfo:
-        module._parse_args(["--issues", "17", "--gh-extra-path-root", invalid_root(tmp_path)])
+        module.main(["--issues", "17", "--gh-extra-path-root", invalid_root(tmp_path)])
 
     assert excinfo.value.code == 2

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import queue
+import subprocess
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 
-from .athena_skill_jobs import AthenaSkillExecutor, AthenaSkillJob
+from hephaestus.automation.source_worktree import _PreparationDeadline
+
+from .athena_skill_jobs import AthenaSkillExecutor, AthenaSkillJob, athena_workspace_lease
 from .git_jobs import GitJob
 from .job_results import JobHandle, JobResult
 from .worker_completion import resolve_worker_future
@@ -82,7 +85,16 @@ class AuxiliaryWorkerPool:
             if isinstance(job, AthenaSkillJob):
                 if self._athena_skill_executor is None:
                     raise RuntimeError("auxiliary learning is disabled")
-                value = self._athena_skill_executor.execute(job.request)
+                deadline = _PreparationDeadline(
+                    start + job.timeout_s, time.monotonic, self._shutdown
+                )
+                with athena_workspace_lease(job, deadline=deadline):
+                    remaining = int(deadline.remaining())
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired("Athena operation deadline", 0)
+                    value = self._athena_skill_executor.execute(
+                        replace(job.request, timeout_s=remaining)
+                    )
                 result = JobResult(ok=value.ok, value=value, error=value.error)
             else:
                 if self._cleanup_runner is None:
@@ -128,9 +140,8 @@ class AuxiliaryWorkerPool:
         """Stop pending work and optionally mark active work interrupted."""
         if mark_interrupted:
             self._shutdown.set()
-        cancel = getattr(self._athena_skill_executor, "cancel", None)
-        if callable(cancel):
-            cancel()
+        if self._athena_skill_executor is not None:
+            self._athena_skill_executor.cancel()
         with self._futures_guard:
             futures = tuple(self._futures)
         for future in futures:

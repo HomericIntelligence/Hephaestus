@@ -12,18 +12,17 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 import hephaestus.automation.loop_repo_manager as loop_repo_manager_mod
-from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
-from hephaestus.automation.pipeline.stages.repo import RepoStage, product_to_work_item
+from hephaestus.automation.pipeline.stages.repo import RepoStage
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
 
 from .conftest import FakeStageGitHub
@@ -256,9 +255,8 @@ class TestDiscover:
         """Patch the repo-stage read seams; returns the classify-call order."""
         classified: list[int] = []
         monkeypatch.setattr(
-            loop_repo_manager_mod, "_iter_open_issue_meta", lambda org, repo: iter(meta)
+            loop_repo_manager_mod, "_iter_open_issue_meta", lambda org, repo, **_kwargs: iter(meta)
         )
-        monkeypatch.setattr(seeding_mod, "seed_issue", lambda num: facts[num])
         monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda num, github: facts[num])
 
         def fake_classify(f: IssueFacts) -> tuple[StageName | None, str]:
@@ -300,14 +298,9 @@ class TestDiscover:
         monkeypatch.setattr(
             loop_repo_manager_mod,
             "_iter_open_issue_meta",
-            lambda org, repo: iter(
+            lambda org, repo, **_kwargs: iter(
                 [{"number": 8, "labels": ["state:implementation-go"], "title": "x"}]
             ),
-        )
-        monkeypatch.setattr(
-            seeding_mod,
-            "seed_issue",
-            lambda num: (_ for _ in ()).throw(AssertionError("used current-repo seed_issue")),
         )
         repo_item.state = "DISCOVER"
 
@@ -329,7 +322,7 @@ class TestDiscover:
         monkeypatch.setattr(
             loop_repo_manager_mod,
             "_iter_open_issue_meta",
-            lambda org, repo: (_ for _ in ()).throw(RuntimeError("gh failed")),
+            lambda org, repo, **_kwargs: (_ for _ in ()).throw(RuntimeError("gh failed")),
         )
         repo_item.state = "DISCOVER"
 
@@ -380,7 +373,7 @@ class TestDiscover:
         monkeypatch.setattr(
             loop_repo_manager_mod,
             "_iter_open_issue_meta",
-            lambda _org, _repo: iter(()),
+            lambda _org, _repo, **_kwargs: iter(()),
         )
         journal = LearningJournalStore(lambda: tmp_path)
         intent = LearningIntent.post_merge(repo="repo-a", issue=2705, pr=99)
@@ -461,37 +454,6 @@ class TestDiscover:
         assert classified == []
         assert 5 not in gh.labels
 
-    def test_drive_green_all_does_not_query_or_exhaust_orphan_pr_pages(
-        self,
-        repo_item: WorkItem,
-        tmp_path: Path,
-        make_ctx: Callable[..., Any],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Unlinked PR pages are no-op work and must not delay source setup."""
-        ctx = make_ctx(
-            config_overrides={"drive_green_all": True},
-            paths=_RepoPaths(tmp_path),
-        )
-        self._patch_discovery(
-            monkeypatch,
-            meta=[{"number": 1, "labels": [], "title": "covered"}],
-            facts={1: _facts(1)},
-            classifications={1: (StageName.PLANNING, "needs plan")},
-        )
-        pr_pages = MagicMock(
-            side_effect=AssertionError("orphan PR cursor must not be queried or exhausted")
-        )
-        monkeypatch.setattr(loop_repo_manager_mod, "_iter_open_pr_meta", pr_pages)
-        repo_item.state = "DISCOVER"
-
-        result = RepoStage().step(repo_item, ctx)
-
-        assert isinstance(result, Continue)
-        assert "products" not in repo_item.payload
-        assert "_repo_issue_source" in repo_item.payload
-        pr_pages.assert_not_called()
-
     def test_source_state_yields_to_the_coordinator(
         self, repo_item: WorkItem, repo_ctx: Any
     ) -> None:
@@ -510,63 +472,3 @@ class TestDiscover:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition is Disposition.FINISH_FAIL
-
-
-class TestProductToWorkItem:
-    """Coordinator-side product materialization."""
-
-    def test_issue_product(self) -> None:
-        item = product_to_work_item(
-            "repo-a",
-            {
-                "kind": "issue",
-                "number": 9,
-                "stage": StageName.PLANNING,
-                "reason": "r",
-                "labels": ["state:needs-plan"],
-            },
-        )
-
-        assert item is not None
-        assert item.kind is ItemKind.ISSUE and item.issue == 9 and item.pr is None
-        assert item.stage is StageName.PLANNING and item.state == "ENTER"
-        assert item.labels_cache == {"state:needs-plan": True}
-        assert item.payload["entry_stage"] == "planning"
-
-    def test_issue_product_hydrates_issue_context_payload(self) -> None:
-        item = product_to_work_item(
-            "repo-a",
-            {
-                "kind": "issue",
-                "number": 9,
-                "stage": StageName.PLANNING,
-                "reason": "r",
-                "labels": ["state:needs-plan"],
-                "title": "Repo-discovered task",
-                "body": "Repo-discovered body.",
-            },
-        )
-
-        assert item is not None
-        assert item.payload["issue_title"] == "Repo-discovered task"
-        assert item.payload["issue_body"] == "Repo-discovered body."
-
-    def test_issue_product_with_open_pr(self) -> None:
-        item = product_to_work_item(
-            "repo-a",
-            {"kind": "issue", "number": 9, "pr": 77, "stage": StageName.PR_REVIEW, "reason": "r"},
-        )
-
-        assert item is not None
-        assert item.issue == 9 and item.pr == 77
-
-    def test_pr_product(self) -> None:
-        item = product_to_work_item(
-            "repo-a", {"kind": "pr", "number": 66, "stage": StageName.PR_REVIEW, "reason": "orphan"}
-        )
-
-        assert item is not None
-        assert item.kind is ItemKind.PR and item.pr == 66 and item.issue is None
-
-    def test_excluded_product_returns_none(self) -> None:
-        assert product_to_work_item("repo-a", {"kind": "issue", "number": 5, "stage": None}) is None

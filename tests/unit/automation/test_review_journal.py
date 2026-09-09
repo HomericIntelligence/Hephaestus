@@ -12,8 +12,6 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     PlanDiscoveryResult,
     PlanDiscoveryStatus,
-    archive_plan_body,
-    archive_review_body,
     blocked_audit_recovery_body,
     current_plan_context,
     current_revision_context,
@@ -309,32 +307,48 @@ def test_snapshot_rejects_whitespace_prefixed_markers_but_accepts_blank_lines() 
         [
             _owned(f" \t{render_current_plan('spoofed', revision=8)}"),
             _owned(f"\n{render_current_review('spoofed', revision=8)}"),
-            _owned(f" {archive_plan_body(7, 'old', 'new')}"),
+            _owned(
+                " <!-- hephaestus-plan-history:revision=7:kind=plan -->\n"
+                "<!-- hephaestus-plan-history:old-plan -->\n"
+                "old\n"
+                "<!-- hephaestus-plan-history:new-plan -->\n"
+                "new"
+            ),
         ]
     )
 
     assert snapshot.revision == 1
     assert snapshot.current_plan == ""
     assert snapshot.current_review == "spoofed"
-    assert snapshot.history == ()
 
 
 def test_history_marker_requires_an_exact_first_line_boundary() -> None:
     """A same-line suffix cannot turn actor-owned prose into legacy state."""
-    lookalike = archive_plan_body(7, "old", "new").replace(" -->\n", " -->suffix\n", 1)
+    lookalike = (
+        "<!-- hephaestus-plan-history:revision=7:kind=plan -->\n"
+        "<!-- hephaestus-plan-history:old-plan -->\n"
+        "old\n"
+        "<!-- hephaestus-plan-history:new-plan -->\n"
+        "new"
+    ).replace(" -->\n", " -->suffix\n", 1)
 
     snapshot = journal_snapshot([_owned(lookalike)])
 
     assert is_journal_comment(lookalike) is False
     assert snapshot.revision == 1
-    assert snapshot.history == ()
 
 
 def test_crlf_canonical_and_history_markers_are_recognized() -> None:
     """Windows line endings preserve canonical and recovery identities."""
     plan = render_current_plan("Plan v2", revision=2).replace("\n", "\r\n")
     review = render_current_review("Review v2", revision=2).replace("\n", "\r\n")
-    history = archive_plan_body(1, "Plan v1", "Plan v2").replace("\n", "\r\n")
+    history = (
+        "<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+        "<!-- hephaestus-plan-history:old-plan -->\n"
+        "Plan v1\n"
+        "<!-- hephaestus-plan-history:new-plan -->\n"
+        "Plan v2"
+    ).replace("\n", "\r\n")
 
     discovered = discover_plan_from_comments([_owned(plan)])
     snapshot = journal_snapshot([_owned(history), _owned(plan), _owned(review)])
@@ -342,7 +356,6 @@ def test_crlf_canonical_and_history_markers_are_recognized() -> None:
     assert discovered.status is PlanDiscoveryStatus.FOUND
     assert snapshot.current_plan == "Plan v2"
     assert snapshot.current_review == "Review v2"
-    assert len(snapshot.history) == 1
 
 
 @pytest.mark.parametrize(
@@ -350,7 +363,16 @@ def test_crlf_canonical_and_history_markers_are_recognized() -> None:
     [
         (f" {render_current_plan('spoofed')}", False),
         (f"\n{render_current_review('spoofed', revision=1)}", True),
-        (f"\t{archive_plan_body(1, 'old', 'new')}", False),
+        (
+            (
+                "\t<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+                "<!-- hephaestus-plan-history:old-plan -->\n"
+                "old\n"
+                "<!-- hephaestus-plan-history:new-plan -->\n"
+                "new"
+            ),
+            False,
+        ),
     ],
 )
 def test_journal_comment_respects_markdown_marker_placement(body: str, expected: bool) -> None:
@@ -361,8 +383,16 @@ def test_journal_comment_respects_markdown_marker_placement(body: str, expected:
 def test_current_revision_context_excludes_superseded_plan_and_review_artifacts() -> None:
     """Restart context keeps only the current rejected revision's instructions."""
     comments = [
-        _owned(archive_plan_body(1, "Plan v1", "Plan v2")),
-        _owned(archive_review_body(1, "Review v1\n\nstate:plan-no-go")),
+        _owned(
+            "<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+            "<!-- hephaestus-plan-history:old-plan -->\n"
+            "Plan v1\n"
+            "<!-- hephaestus-plan-history:new-plan -->\n"
+            "Plan v2"
+        ),
+        _owned(
+            "<!-- hephaestus-plan-history:revision=1:kind=review -->\nReview v1\n\nstate:plan-no-go"
+        ),
         _owned(render_current_plan("Plan v2", revision=2)),
         _owned(render_current_review("Review v2\n\nstate:plan-no-go", revision=2)),
     ]
@@ -392,8 +422,16 @@ def test_current_revision_context_preserves_latest_review_when_plan_is_oversized
 def test_current_plan_context_excludes_current_review_and_superseded_revisions() -> None:
     """Amendments receive the last plan separately from the direct critique."""
     comments = [
-        _owned(archive_plan_body(1, "Plan v1", "Plan v2")),
-        _owned(archive_review_body(1, "Review v1\n\nstate:plan-no-go")),
+        _owned(
+            "<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+            "<!-- hephaestus-plan-history:old-plan -->\n"
+            "Plan v1\n"
+            "<!-- hephaestus-plan-history:new-plan -->\n"
+            "Plan v2"
+        ),
+        _owned(
+            "<!-- hephaestus-plan-history:revision=1:kind=review -->\nReview v1\n\nstate:plan-no-go"
+        ),
         _owned(render_current_plan("Plan v2", revision=2)),
         _owned(render_current_review("Review v2\n\nstate:plan-no-go", revision=2)),
     ]

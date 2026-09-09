@@ -439,35 +439,6 @@ class TestArgvAssembly:
         assert passed_env["CLAUDECODE"] == ""
 
 
-class TestRecreateOnResumeFailureToggle:
-    """recreate_on_resume_failure is a back-compat no-op now (#1166).
-
-    The always-resume model never recreates, so the toggle's value no longer
-    changes behavior — a --resume failure always propagates as a single call.
-    The kwarg is retained only so existing callers keep working.
-    """
-
-    def test_toggle_is_accepted_and_call_propagates(self, fake_home: Path) -> None:
-        cwd = fake_home / "work"
-        cwd.mkdir()
-        boom = subprocess.CalledProcessError(
-            returncode=1, cmd=["claude"], output="", stderr="session not found"
-        )
-        for toggle in (True, False):
-            with patch("hephaestus.automation.claude_invoke._run_tracked", side_effect=boom) as m:
-                with pytest.raises(subprocess.CalledProcessError):
-                    invoke_claude_with_session(
-                        repo="R",
-                        issue=1,
-                        agent=AGENT_PLANNER,
-                        prompt="hi",
-                        model="sonnet",
-                        cwd=cwd,
-                        recreate_on_resume_failure=toggle,
-                    )
-            assert m.call_count == 1  # single attempt regardless of toggle
-
-
 class TestEndToEndSessionResume:
     """Two sequential invocations for the same key: create then resume (#1168).
 

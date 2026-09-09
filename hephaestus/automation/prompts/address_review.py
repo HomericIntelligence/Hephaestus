@@ -119,7 +119,6 @@ def get_address_review_prompt(
     worktree_path: str,
     threads_json: str,
     *,
-    todo_block: str = "",
     task_block: str = "",
     task_review_block: str = "",
     diff_text: str = "",
@@ -137,13 +136,6 @@ def get_address_review_prompt(
         issue_number: Linked GitHub issue number
         worktree_path: Path to the git worktree containing the PR branch
         threads_json: JSON string of unresolved review threads (array of thread dicts)
-        todo_block: Pre-rendered, difficulty-classified todo list — one line per
-            comment in the form ``@ <file> Line <#> - <difficulty> - <desc>``
-            (built by :mod:`hephaestus.automation.comment_difficulty`, #1083).
-            Assigns one sub-agent to each comment. The model is inherited from
-            the implementation session. The ``<desc>``
-            excerpt is verbatim untrusted comment text, so the whole block is
-            fenced as untrusted (#1085 C4).
         task_block: Optional task (issue title + body) text, rendered as an
             untrusted context section. Supply when the address session may run
             without a prior implementer transcript (existing-PR review path).
@@ -169,7 +161,6 @@ def get_address_review_prompt(
         issue_number=issue_number,
         worktree_path=worktree_path,
         threads_json_block=fenced.fence("THREADS_JSON", threads_json),
-        todo_block=fenced.fence("TODO_LIST", todo_block or "_(no todo lines)_"),
         untrusted_notice=fenced.untrusted_notice,
         context_block=_build_context_block(
             task_block,

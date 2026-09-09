@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import deque
-from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
 
@@ -11,11 +10,14 @@ import hephaestus.automation.issue_waves as issue_waves_mod
 import hephaestus.automation.pipeline.admission as _admission
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.github_api.issues import parse_issue_dependencies
+from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 from .coordinator_contract import _CoordinatorHost
+from .coordinator_issue_classification import _PERMANENT_ROW_CLASSIFICATION_ERRORS
 from .stages import StageGitHub
-from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY, product_to_work_item
+from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY
 from .work_item import ItemKind
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
@@ -176,27 +178,6 @@ class SourceCoordinator(_CoordinatorHost):
         self.items.append(item)
         self._record_terminal_result(item)
 
-    def _seed_products(self, item: ct.WorkItem) -> None:
-        """Push a terminal repo item's discovered products into entry queues."""
-        if item.kind is not ItemKind.REPO:
-            return
-        for product in item.payload.pop("products", []):
-            if product.get("stage") is None:
-                logger.info("[%s] excluded: %s", item.repo, product.get("reason", ""))
-                continue
-            new_item = product_to_work_item(item.repo, product)
-            if new_item is None:  # pragma: no cover - guarded by stage check above
-                continue
-            if new_item.stage is ct.StageName.FINISHED:
-                new_item.result = ct.ItemResult(
-                    passed=True,
-                    reason=product.get("reason", "already finished"),
-                    final_stage=ct.StageName.FINISHED,
-                )
-            elif new_item.stage is not ct.StageName.REPO:
-                self._pass_work_count += 1
-            self._push_item(new_item, new_item.stage, enter=True)
-
     def _live_issue_keys(self) -> set[tuple[str, int]]:
         """Return ``(repo, issue)`` keys currently queued (any stage) or in-flight.
 
@@ -311,27 +292,9 @@ class SourceCoordinator(_CoordinatorHost):
         self._pass_work_count = 0
         has_direct_scope = bool(self.config.issues or self.config.prs)
         discovery_repos = [] if has_direct_scope else self.config.repos
-        # Repository discovery is a source, not a list of pre-built
-        # ``SeedEntry``/``ct.WorkItem`` values.  Keep the legacy empty call so
-        # direct test seams and any non-repository synthetic entries retain
-        # their established contract; production returns no entries here.
-        entries = _seeding.seed_from_cli([], [], [])
-        self._begin_repo_entry_source(discovery_repos if not entries else [])
+        self._begin_repo_entry_source(discovery_repos)
         default_repo = self.config.repos[0] if self.config.repos else ""
         pushed = 0
-        for entry in entries:
-            if entry.stage is None:
-                logger.info("seed excluded: %s", entry.reason)
-                continue
-            item = self._entry_to_item(entry, self.config.repos[0] if self.config.repos else "")
-            if item.stage not in (ct.StageName.REPO, ct.StageName.FINISHED):
-                self._pass_work_count += 1
-            if item.stage is ct.StageName.FINISHED and item.result is None:
-                item.result = ct.ItemResult(
-                    passed=entry.passed, reason=entry.reason, final_stage=ct.StageName.FINISHED
-                )
-            if self._push_item(item, item.stage, enter=True):
-                pushed += 1
         if has_direct_scope:
             pushed += self._begin_direct_scope_bootstrap(default_repo)
         else:
@@ -373,7 +336,9 @@ class SourceCoordinator(_CoordinatorHost):
         repeatedly retrying a later repository ahead of an earlier one.
         """
         if self.config.repo_source_factory is not None:
-            self._repo_entry_source = ct._RepoEntrySource(repos=self.config.repo_source_factory())
+            self._repo_entry_source = ct._RepoEntrySource(
+                repos=self.config.repo_source_factory(self.shutdown)
+            )
         elif repos:
             self._repo_entry_source = ct._RepoEntrySource(repos=iter(repos))
         else:
@@ -416,7 +381,13 @@ class SourceCoordinator(_CoordinatorHost):
         self._direct_issue_source = None
         if not self.config.issues:
             return
-        open_issues = _admission._filter_open_issues((self.config.org, repo), self.config.issues)
+        open_issues = _admission._filter_open_issues(
+            (self.config.org, repo),
+            self.config.issues,
+            github=self._ctx_for_repo(repo).github,
+            deadline_s=self._monotonic() + self.config.gh_timeout,
+            shutdown=self.shutdown,
+        )
         unique_open_issues = list(dict.fromkeys(open_issues))
         self._direct_issue_source = ct._DirectIssueSource(
             repo=repo,
@@ -447,11 +418,8 @@ class SourceCoordinator(_CoordinatorHost):
         self,
         source: ct._DirectIssueSource,
         issue: int,
-        active_claims: frozenset[_admission.PlanFileClaim],
-        *,
-        overlap_enabled: bool,
-    ) -> tuple[ct.WorkItem | None, bool]:
-        """Classify one source issue and snapshot its overlap reservation."""
+    ) -> ct.WorkItem | None:
+        """Classify one source issue before queue admission."""
         existing_pr, branch = self._direct_issue_identity(source.repo, issue, source.run_nonce)
         github = self._ctx_for_repo(source.repo).github
         if source.wave_lease is None:
@@ -468,7 +436,7 @@ class SourceCoordinator(_CoordinatorHost):
             )
         if entry.stage is None:
             logger.info("seed excluded: %s", entry.reason)
-            return None, False
+            return None
         item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
         self._restore_learning_intents(item, entry.stage, entry.reason)
         if existing_pr is not None:
@@ -487,14 +455,26 @@ class SourceCoordinator(_CoordinatorHost):
                         "explanation": entry.non_code_explanation,
                         "retired": entry.non_code_retired,
                     }
-        if overlap_enabled and item.stage is ct.StageName.IMPLEMENTATION:
-            repo = (self.config.org, item.repo)
-            planned = _admission._fetch_planned_files(issue, repo=repo)
-            item_claims = {(repo, path) for path in planned} if planned else set()
-            if item_claims and item_claims.intersection(active_claims):
-                return None, True
-            item.payload[ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
-        return item, False
+        return item
+
+    def _read_direct_issue_candidate(
+        self, source: ct._DirectIssueSource, issue: int, *, overlap_enabled: bool
+    ) -> tuple[ct.WorkItem | None, CommentJournalReadError | None]:
+        """Classify one row and retain temporary plan errors for queue retry."""
+        item = None
+        try:
+            item = self._prepare_direct_issue_item(source, issue)
+            if overlap_enabled and item is not None and item.stage is ct.StageName.IMPLEMENTATION:
+                self._read_implementation_file_claims(item)
+        except _PERMANENT_ROW_CLASSIFICATION_ERRORS as error:
+            self._record_issue_classification_failure(source.repo, issue, error)
+            self._progress = True
+            return None, None
+        except CommentJournalReadError as error:
+            if item is None:
+                raise
+            return item, error
+        return item, None
 
     def _drain_direct_issue_source(self) -> int:
         """Pull explicit issues directly into queues without a seed spill buffer.
@@ -521,20 +501,22 @@ class SourceCoordinator(_CoordinatorHost):
         while self._direct_issue_queues_can_accept() and source.issues and scanned < scan_limit:
             issue = source.issues.popleft()
             scanned += 1
-            item, overlaps = self._prepare_direct_issue_item(
-                source,
-                issue,
-                active_claims,
-                overlap_enabled=overlap_enabled,
+            item, plan_read_error = self._read_direct_issue_candidate(
+                source, issue, overlap_enabled=overlap_enabled
             )
-            if overlaps:
+            if item is None:
+                continue
+            item_claims = item.payload.get(ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, frozenset())
+            if overlap_enabled and item_claims.intersection(active_claims):
                 source.issues.append(issue)
                 blocked_by_overlap = True
                 continue
-            if item is None:
-                continue
             if self._push_item(item, item.stage, enter=True, defer_if_full=True):
                 pushed += 1
+                if plan_read_error is not None:
+                    if not self._claim_selected_implementation_item(item):
+                        raise RuntimeError("plan admission retry lost its queue item")
+                    self._defer_implementation_plan_read(item, plan_read_error)
                 # Let the implementation drain establish ownership before a
                 # later source item is considered, otherwise two overlapping
                 # plans can be queued in the same bootstrap tick.
@@ -578,7 +560,7 @@ class SourceCoordinator(_CoordinatorHost):
                     break
 
             raw_github = self._ctx_for_repo(source.repo).github
-            entry = self._seed_direct_pr_scope(source.repo, (pr,), github=raw_github)[0]
+            entry = self._seed_direct_pr_entry(source.repo, pr, github=raw_github)
             if entry.stage is None:
                 logger.info("seed excluded: %s", entry.reason)
                 continue
@@ -593,17 +575,6 @@ class SourceCoordinator(_CoordinatorHost):
                 source.pending_pr = pr
                 break
         return pushed
-
-    def _clamp_seed_stage_to_scope(
-        self,
-        issue: int,
-        stage: ct.StageName | None,
-        reason: str,
-        scope_stages: frozenset[ct.StageName] | None,
-    ) -> tuple[ct.StageName | None, str]:
-        """Compatibility wrapper returning only stage/reason for callers."""
-        stage, reason, _passed = self._scope_seed_decision(issue, stage, reason, scope_stages)
-        return stage, reason
 
     def _scope_seed_decision(
         self,
@@ -674,144 +645,109 @@ class SourceCoordinator(_CoordinatorHost):
             return ct.StageName.FINISHED, f"#{issue} already past selected scope ({reason})", True
         return stage, reason, True
 
-    def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
-        """Classify direct entries for legacy direct-classifier callers.
-
-        Runtime seeding never materializes the explicit issue scope here;
-        :meth:`_drain_direct_issue_source` owns its bounded cursor.  This
-        compatibility helper remains for direct classifier tests.
-        """
-        entries: list[_seeding.SeedEntry] = []
-        issue_numbers = _admission._filter_open_issues((self.config.org, repo), self.config.issues)
-        for issue in issue_numbers:
-            entries.append(self._seed_direct_issue_entry(repo, issue))
-        entries.extend(self._seed_direct_pr_scope(repo))
-        return entries
-
-    def _seed_direct_pr_scope(
-        self, repo: str, prs: Iterable[int] | None = None, *, github: StageGitHub | None = None
-    ) -> list[_seeding.SeedEntry]:
-        """Classify explicit PRs for compatibility callers or a one-PR source pull."""
-        github = github or (self._ctx_for_repo(repo).github if repo else self.github)
-        entries: list[_seeding.SeedEntry] = []
+    def _seed_direct_pr_entry(
+        self, repo: str, pr: int, *, github: StageGitHub
+    ) -> _seeding.SeedEntry:
+        """Classify one explicit PR through its repository accessor."""
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        for pr in self.config.prs if prs is None else prs:
-            issue_number = github.find_issue_for_pr(pr)
-            if issue_number is None:
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=ct.StageName.FINISHED,
-                        reason=(
-                            f"PR #{pr} has no linked issue; refusing review without "
-                            "requirements context"
-                        ),
-                        pr_number=pr,
-                        passed=False,
-                    )
+        issue_number = github.find_issue_for_pr(pr)
+        if issue_number is None:
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=ct.StageName.FINISHED,
+                reason=(
+                    f"PR #{pr} has no linked issue; refusing review without requirements context"
+                ),
+                pr_number=pr,
+                passed=False,
+            )
+        scope_identifier = issue_number if issue_number is not None else pr
+        pr_state = github.gh_pr_state(pr)
+        pr_state_name = ((pr_state or {}).get("state") or "").upper()
+        if pr_state_name == "MERGED":
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=ct.StageName.FINISHED,
+                reason=f"PR #{pr} already merged",
+                pr_number=pr,
+                issue_number=issue_number,
+                passed=True,
+            )
+        if pr_state_name == "CLOSED":
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=ct.StageName.FINISHED,
+                reason=f"PR #{pr} already closed without merging",
+                pr_number=pr,
+                issue_number=issue_number,
+                passed=False,
+            )
+        has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
+        pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
+        if pending_audit is not None or has_go:
+            stage_name = (
+                ct.StageName.PR_REVIEW if pending_audit is not None else ct.StageName.MERGE_WAIT
+            )
+            reason = (
+                f"PR #{pr} has a pending implementation-go audit"
+                if pending_audit is not None
+                else f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}"
+            )
+            stage, reason, passed = self._scope_seed_decision(
+                scope_identifier, stage_name, reason, scope_stages
+            )
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=stage,
+                reason=reason,
+                pr_number=pr,
+                issue_number=issue_number,
+                passed=passed,
+                pending_implementation_go_audit=pending_audit,
+                pending_implementation_go_label_confirmed=has_go,
+            )
+        else:
+            issue_facts: _seeding.IssueFacts | None
+            review_context: dict[str, str] | None
+            try:
+                issue_facts = _seeding.seed_issue_from_github(issue_number, github)
+                review_context = github.pr_review_context(pr)
+            except Exception as exc:
+                logger.warning("PR #%d: review context read failed: %s", pr, exc)
+                review_context = None
+                issue_facts = None
+            if issue_facts is None or review_context is None:
+                return _seeding.SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=ct.StageName.FINISHED,
+                    reason=f"PR #{pr} review context could not be read",
+                    pr_number=pr,
+                    issue_number=issue_number,
+                    passed=False,
                 )
-                continue
-            scope_identifier = issue_number if issue_number is not None else pr
-            pr_state = github.gh_pr_state(pr)
-            pr_state_name = ((pr_state or {}).get("state") or "").upper()
-            if pr_state_name == "MERGED":
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=ct.StageName.FINISHED,
-                        reason=f"PR #{pr} already merged",
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=True,
-                    )
-                )
-                continue
-            if pr_state_name == "CLOSED":
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=ct.StageName.FINISHED,
-                        reason=f"PR #{pr} already closed without merging",
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=False,
-                    )
-                )
-                continue
-            has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
-            pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
-            if pending_audit is not None or has_go:
-                stage_name = (
-                    ct.StageName.PR_REVIEW if pending_audit is not None else ct.StageName.MERGE_WAIT
-                )
-                reason = (
-                    f"PR #{pr} has a pending implementation-go audit"
-                    if pending_audit is not None
-                    else f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}"
-                )
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier, stage_name, reason, scope_stages
-                )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=passed,
-                        pending_implementation_go_audit=pending_audit,
-                        pending_implementation_go_label_confirmed=has_go,
-                    )
-                )
-            else:
-                issue_facts: _seeding.IssueFacts | None
-                review_context: dict[str, str] | None
-                try:
-                    issue_facts = _seeding.seed_issue_from_github(issue_number, github)
-                    review_context = github.pr_review_context(pr)
-                except Exception as exc:
-                    logger.warning("PR #%d: review context read failed: %s", pr, exc)
-                    review_context = None
-                    issue_facts = None
-                if issue_facts is None or review_context is None:
-                    entries.append(
-                        _seeding.SeedEntry(
-                            kind="pr",
-                            identifier=pr,
-                            stage=ct.StageName.FINISHED,
-                            reason=f"PR #{pr} review context could not be read",
-                            pr_number=pr,
-                            issue_number=issue_number,
-                            passed=False,
-                        )
-                    )
-                    continue
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    ct.StageName.PR_REVIEW,
-                    f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
-                    scope_stages,
-                )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        issue_title=issue_facts.title,
-                        issue_body=issue_facts.body,
-                        pr_description=review_context["pr_description"],
-                        passed=passed,
-                    )
-                )
-        return entries
+            stage, reason, passed = self._scope_seed_decision(
+                scope_identifier,
+                ct.StageName.PR_REVIEW,
+                f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
+                scope_stages,
+            )
+            return _seeding.SeedEntry(
+                kind="pr",
+                identifier=pr,
+                stage=stage,
+                reason=reason,
+                pr_number=pr,
+                issue_number=issue_number,
+                issue_title=issue_facts.title,
+                issue_body=issue_facts.body,
+                pr_description=review_context["pr_description"],
+                passed=passed,
+            )
 
     @staticmethod
     def _entry_to_item(entry: _seeding.SeedEntry, default_repo: str) -> ct.WorkItem:
@@ -879,6 +815,8 @@ class SourceCoordinator(_CoordinatorHost):
                     entry.pending_implementation_go_label_confirmed
                 )
         item.state = "ENTER"
+        if item.issue is not None:
+            item.payload["dependencies"] = parse_issue_dependencies(entry.issue_body)
         item.payload["entry_reason"] = entry.reason
         return item
 

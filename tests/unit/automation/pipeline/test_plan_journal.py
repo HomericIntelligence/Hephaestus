@@ -10,9 +10,7 @@ from hephaestus.automation.pipeline.plan_journal import (
 )
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
 from hephaestus.automation.review_journal import (
-    HISTORY_MARKER,
     IssueComment,
-    archive_plan_body,
     journal_snapshot,
     render_current_plan,
     render_current_review,
@@ -33,11 +31,6 @@ class _CrashOnceJournalGitHub(FakeStageGitHub):
         if not self.crashed and self.crash_on == target:
             self.crashed = True
             raise RuntimeError(f"injected {target} crash")
-
-    def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
-        if marker == HISTORY_MARKER.format(revision=1, kind="review"):
-            self._crash("review_archive")
-        super().append_issue_comment(issue_number, marker, body)
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
         if "<!-- revision: 2 -->" in body:
@@ -79,7 +72,6 @@ def test_restart_repairs_a_plan_written_before_pending_review() -> None:
     assert snapshot.revision == 2
     assert snapshot.current_plan == "Plan v2 with rollback"
     assert snapshot.current_review_revision == 2
-    assert snapshot.history == ()
     mutations_after_recovery = list(github.mutation_log)
 
     reconcile_plan_journal(7, github)
@@ -199,7 +191,7 @@ def test_epoch_marker_examples_in_plan_prose_are_not_metadata() -> None:
     )
 
     rendered = render_current_plan(payload, revision=3)
-    snapshot = journal_snapshot([rendered])
+    snapshot = journal_snapshot([IssueComment(body=rendered, viewer_did_author=True)])
 
     assert snapshot.current_plan == payload
     assert snapshot.forced_planning_epoch is False
@@ -279,51 +271,10 @@ def test_amendment_replaces_canonical_comments_without_public_history() -> None:
     assert snapshot.revision == 2
     assert snapshot.current_plan == "Plan v2 with rollback"
     assert snapshot.current_review_revision == 2
-    assert snapshot.history == ()
     public_text = "\n".join(str(comment) for comment in github.comments[8])
     assert "Previous Implementation Plan" not in public_text
     assert "Review of Previous Plan" not in public_text
     assert "```diff" not in public_text
-
-
-def test_legacy_interrupted_archive_recovers_without_appending_more_history() -> None:
-    """Legacy crash recovery converges canonical pointers without new archives."""
-    github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
-    legacy_archive = archive_plan_body(1, "Plan v1", "Plan v2")
-    github.comments[8] = [
-        render_current_plan("Plan v1", revision=1),
-        render_current_review("Needs rollback.\n\nstate:plan-no-go", revision=1),
-        legacy_archive,
-    ]
-
-    reconcile_plan_journal(8, github)
-
-    snapshot = journal_snapshot(github.issue_comments(8))
-    assert snapshot.revision == 2
-    assert snapshot.current_plan == "Plan v2"
-    assert snapshot.current_review_revision == 2
-    assert not any(name == "gh_issue_comment" for name, _args in github.mutation_log)
-    assert not any(name == "append_issue_comment" for name, _args in github.mutation_log)
-
-
-def test_restart_rejects_conflicting_bodies_for_one_history_identity() -> None:
-    """Divergent concurrent history creates require explicit manual recovery."""
-    marker = HISTORY_MARKER.format(revision=1, kind="plan")
-    comments = [
-        IssueComment(
-            body=archive_plan_body(1, "Plan v1", "Plan v2-A"),
-            viewer_did_author=True,
-        ),
-        IssueComment(
-            body=archive_plan_body(1, "Plan v1", "Plan v2-B"),
-            viewer_did_author=True,
-        ),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"conflicting immutable.*manual recovery"):
-        journal_snapshot(comments)
-
-    assert all(comment.body.startswith(marker) for comment in comments)
 
 
 def test_publication_rejects_concurrent_canonical_pointer_overwrite() -> None:

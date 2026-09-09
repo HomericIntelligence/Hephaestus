@@ -1,8 +1,7 @@
 """Transactional canonical comments for implementation-plan revisions.
 
-An issue has one mutable plan pointer and one mutable review pointer. Older
-revisions are represented only by bounded plan fingerprints in hidden metadata;
-legacy append-only artifacts are read solely to migrate interrupted runs.
+An issue has one current plan and one current review. Bounded fingerprints
+in the plan metadata identify earlier revisions.
 """
 
 from __future__ import annotations
@@ -14,8 +13,6 @@ from typing import Protocol
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
 from hephaestus.automation.review_journal import (
     IssueComment,
-    archived_new_plan,
-    archived_old_plan,
     contains_raw_patch,
     is_pending_review,
     journal_snapshot,
@@ -109,58 +106,21 @@ class PlanPublication:
 
 
 def reconcile_plan_journal(issue_number: int, github: PlanJournalGitHub) -> list[IssueComment]:
-    """Complete the newest interrupted plan-revision transaction, if possible."""
+    """Repair a pending review after its current plan became durable."""
     comments = github.issue_comments(issue_number)
     snapshot = journal_snapshot(comments)
-    plan_artifacts = [artifact for artifact in snapshot.history if artifact.kind == "plan"]
-    if not plan_artifacts:
-        if snapshot.current_plan and snapshot.current_review_revision != snapshot.revision:
-            _upsert_pending_review(issue_number, snapshot.revision, github)
-            return github.issue_comments(issue_number)
-        return comments
-
-    pending = plan_artifacts[-1]
-    next_plan = archived_new_plan(pending.body)
-    if not next_plan:
-        return comments
-
-    current_is_superseded = bool(snapshot.current_plan and snapshot.revision == pending.revision)
-    current_is_missing = not snapshot.current_plan and snapshot.revision == pending.revision + 1
-    current_is_next = bool(snapshot.current_plan and snapshot.revision == pending.revision + 1)
-    if current_is_next:
-        review_is_stale = snapshot.current_review_revision != snapshot.revision
-        if review_is_stale:
-            _upsert_pending_review(issue_number, snapshot.revision, github)
-            return github.issue_comments(issue_number)
-        return comments
-    if not (current_is_superseded or current_is_missing):
-        return comments
-
-    prior_fingerprints = tuple(sorted(known_plan_fingerprints(comments)))
-    github.upsert_plan_comment(
-        issue_number,
-        render_current_plan(
-            next_plan,
-            revision=pending.revision + 1,
-            prior_fingerprints=prior_fingerprints,
-            forced_planning_epoch=snapshot.forced_planning_epoch,
-            recovery_source_digest=snapshot.recovery_source_digest,
-        ),
-    )
-    _upsert_pending_review(issue_number, pending.revision + 1, github)
-    return github.issue_comments(issue_number)
+    if snapshot.current_plan and snapshot.current_review_revision != snapshot.revision:
+        _upsert_pending_review(issue_number, snapshot.revision, github)
+        return github.issue_comments(issue_number)
+    return comments
 
 
-def known_plan_fingerprints(comments: Sequence[IssueComment | str]) -> set[str]:
-    """Return fingerprints for every current or historical plan in the journal."""
+def known_plan_fingerprints(comments: Sequence[IssueComment]) -> set[str]:
+    """Return the current fingerprint and stored prior fingerprints."""
     snapshot = journal_snapshot(comments)
-    plans = [snapshot.current_plan]
-    for artifact in snapshot.history:
-        if artifact.kind == "plan":
-            plans.extend((archived_old_plan(artifact.body), archived_new_plan(artifact.body)))
     return {
         *snapshot.prior_plan_fingerprints,
-        *(plan_fingerprint(plan) for plan in plans if plan.strip()),
+        *([plan_fingerprint(snapshot.current_plan)] if snapshot.current_plan.strip() else []),
     }
 
 
@@ -173,7 +133,7 @@ def publish_plan_revision(
     forced_planning_epoch: bool = False,
     recovery_source_digest: str | None = None,
 ) -> PlanPublication:
-    """Publish a candidate using the append-pair-then-pointer transaction.
+    """Publish a current plan, then its pending review, and confirm both.
 
     Args:
         issue_number: Issue whose plan journal is updated.
@@ -187,8 +147,7 @@ def publish_plan_revision(
         The durable revision and whether the proposal made progress.
 
     Raises:
-        RuntimeError: If a current plan would be superseded without its paired
-            canonical review being available to archive.
+        RuntimeError: If the current journal has conflicting identities.
 
     """
     comments = reconcile_plan_journal(issue_number, github)

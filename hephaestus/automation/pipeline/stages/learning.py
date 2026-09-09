@@ -7,7 +7,7 @@ from typing import Any
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
-from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 from hephaestus.automation.mnemosyne_learning_preparation import approved_plan_learning_snapshot
 from hephaestus.automation.review_journal import plan_fingerprint

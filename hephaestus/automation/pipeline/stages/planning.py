@@ -140,6 +140,7 @@ from .base import (
     _require_issue_labels,
     agent_provider,
     athena_advise_failure_reason,
+    planning_source_revision,
     planning_source_workspace_binding,
     stage_model,
     stage_timeout,
@@ -225,7 +226,7 @@ def build_plan_prompt(
     )
 
 
-def _planning_history(comments: Sequence[IssueComment | str]) -> str:
+def _planning_history(comments: Sequence[IssueComment]) -> str:
     """Return only current rejected-revision context for a resumed planner."""
     return current_revision_context(comments)
 
@@ -268,7 +269,7 @@ def _refresh_requirements_recovery_context(
             issue_number=item.issue,
             issue_title=title,
             source_body=body,
-            repository_revision=_recovery_revision(item, None),
+            repository_revision=planning_source_revision(item),
         )
         if finalized is None and recovery_selection is not None
         else None
@@ -403,20 +404,6 @@ def _retry_incomplete_requirements_snapshot(
     return StageOutcome(
         Disposition.FINISH_FAIL,
         f"requirements snapshot exhausted with plan-no-go: {reason}",
-    )
-
-
-def _recovery_revision(item: WorkItem, workspace_revision: str | None) -> str:
-    """Return the captured source revision used to bind recovery evidence."""
-    candidates = (
-        workspace_revision,
-        item.payload.get("_impl_source_revision"),
-        item.payload.get("_synced_default_branch_sha"),
-        item.payload.get("_direct_scope_base_sha"),
-    )
-    return next(
-        (value for value in candidates if isinstance(value, str) and len(value) == 40),
-        "0" * 40,
     )
 
 
@@ -1119,30 +1106,27 @@ def _source_workspace_preparation_failure(
 def _prepare_planning_workspace(
     item: WorkItem,
     ctx: StageContext,
-) -> tuple[WorkspaceBinding | None, StageOutcome | None]:
+) -> WorkspaceBinding | StageOutcome:
     """Prepare a planning source lane and classify bounded preparation failures."""
     try:
-        workspace = planning_source_workspace_binding(
+        return planning_source_workspace_binding(
             item,
             ctx,
             preparation_timeout_s=SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S,
         )
     except SourceWorkspacePreparationError as exc:
-        return None, _source_workspace_preparation_failure(item, ctx, exc)
-    return workspace, None
+        return _source_workspace_preparation_failure(item, ctx, exc)
 
 
 def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
     """Build or apply one requirements-recovery substate action."""
     assert item.issue is not None  # noqa: S101 - PlanningStage.step validates this
     if item.state == "REQUIREMENTS_RECOVERY_WAIT":
-        workspace, preparation_outcome = _prepare_planning_workspace(
-            item,
-            ctx,
-        )
-        if preparation_outcome is not None:
-            return preparation_outcome
-        revision = _recovery_revision(item, workspace.revision if workspace is not None else None)
+        workspace = _prepare_planning_workspace(item, ctx)
+        if isinstance(workspace, StageOutcome):
+            return workspace
+        revision = workspace.revision
+        assert revision is not None  # noqa: S101 - the captured source has a full revision
         binding = evidence_digest(
             item.repo,
             item.issue,
@@ -1158,7 +1142,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             agent=agent_provider(ctx, "planner"),
             model=stage_model(ctx, "planner", planner_model),
             prompt_builder=build_recovery_prompt,
-            cwd=workspace.cwd if workspace else ctx.paths.worktree,
+            cwd=workspace.cwd,
             timeout_s=planner_claude_timeout(),
             workspace=workspace,
             sandbox="read-only",
@@ -1191,13 +1175,11 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 ctx,
                 "requirements planner returned no valid proposal",
             )
-        workspace, preparation_outcome = _prepare_planning_workspace(
-            item,
-            ctx,
-        )
-        if preparation_outcome is not None:
-            return preparation_outcome
-        revision = _recovery_revision(item, workspace.revision if workspace is not None else None)
+        workspace = _prepare_planning_workspace(item, ctx)
+        if isinstance(workspace, StageOutcome):
+            return workspace
+        revision = workspace.revision
+        assert revision is not None  # noqa: S101 - the captured source has a full revision
         binding = str(item.payload.get("requirements_evidence_digest") or "")
         if proposal.evidence != binding:
             return _retry_requirements_recovery(
@@ -1211,7 +1193,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             agent=agent_provider(ctx, "reviewer"),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_recovery_review_prompt,
-            cwd=workspace.cwd if workspace else ctx.paths.worktree,
+            cwd=workspace.cwd,
             timeout_s=plan_reviewer_claude_timeout(),
             workspace=workspace,
             sandbox="read-only",
@@ -1711,19 +1693,12 @@ def _plan_discovery_stop_outcome(
     item: WorkItem,
     ctx: StageContext,
     lookup: PlanDiscoveryResult,
-    *,
-    initial: bool,
 ) -> StageOutcome | None:
     """Convert a failed plan lookup into the stage outcome that preserves state."""
     if lookup.status is PlanDiscoveryStatus.READ_ERROR:
-        if initial:
-            return _retry_incomplete_requirements_snapshot(
-                item,
-                ctx,
-                f"plan discovery failed: {lookup.error}",
-            )
-        return StageOutcome(
-            Disposition.RETRY,
+        return _retry_incomplete_requirements_snapshot(
+            item,
+            ctx,
             f"plan discovery failed: {lookup.error}",
         )
     if lookup.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
@@ -1780,7 +1755,7 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
         return followup_outcome
 
     lookup = ctx.github.discover_plan(item.issue)
-    if stop_outcome := _plan_discovery_stop_outcome(item, ctx, lookup, initial=True):
+    if stop_outcome := _plan_discovery_stop_outcome(item, ctx, lookup):
         return stop_outcome
 
     initial_plan_found = lookup.status is PlanDiscoveryStatus.FOUND
@@ -1806,12 +1781,10 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     # not authorize the handoff from that stale snapshot: another actor can
     # create or delete the canonical comment while VERIFY is running.
     verified_lookup = ctx.github.discover_plan(item.issue)
-    if stop_outcome := _plan_discovery_stop_outcome(item, ctx, verified_lookup, initial=False):
+    if stop_outcome := _plan_discovery_stop_outcome(item, ctx, verified_lookup):
         return stop_outcome
 
-    if not awaiting_revision_candidate and (
-        posted_plan or verified_lookup.status is PlanDiscoveryStatus.FOUND
-    ):
+    if not awaiting_revision_candidate and verified_lookup.status is PlanDiscoveryStatus.FOUND:
         return _verify_published_plan_state(item, ctx)
 
     if posted_plan or (initial_plan_found and not awaiting_revision_candidate):
@@ -2146,12 +2119,9 @@ class PlanningStage(Stage):
             return recovery_step
 
         if item.state == "ADVISE_WAIT":
-            workspace, preparation_outcome = _prepare_planning_workspace(
-                item,
-                ctx,
-            )
-            if preparation_outcome is not None:
-                return preparation_outcome
+            workspace = _prepare_planning_workspace(item, ctx)
+            if isinstance(workspace, StageOutcome):
+                return workspace
             logger.info("planning:%d: requesting advise job", item.issue)
             advise_job = AthenaSkillJob(
                 request=AthenaSkillRequest(
@@ -2160,7 +2130,7 @@ class PlanningStage(Stage):
                     issue=item.issue,
                     agent=agent_provider(ctx),
                     model=stage_model(ctx, "advise", advise_model),
-                    cwd=workspace.cwd if workspace else ctx.paths.worktree,
+                    cwd=workspace.cwd,
                     timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
                     workspace=workspace,
                     payload={
@@ -2179,12 +2149,9 @@ class PlanningStage(Stage):
                     Disposition.FINISH_FAIL,
                     athena_advise_failure_reason(item),
                 )
-            workspace, preparation_outcome = _prepare_planning_workspace(
-                item,
-                ctx,
-            )
-            if preparation_outcome is not None:
-                return preparation_outcome
+            workspace = _prepare_planning_workspace(item, ctx)
+            if isinstance(workspace, StageOutcome):
+                return workspace
             logger.info("planning:%d: requesting plan job", item.issue)
             job = AgentJob(
                 repo=item.repo,
@@ -2192,7 +2159,7 @@ class PlanningStage(Stage):
                 agent=agent_provider(ctx, "planner"),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
-                cwd=workspace.cwd if workspace else ctx.paths.worktree,
+                cwd=workspace.cwd,
                 timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",

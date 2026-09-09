@@ -9,15 +9,14 @@ from __future__ import annotations
 
 from collections import deque
 from queue import Queue
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from .job_results import JobHandle, JobResult
 
 if TYPE_CHECKING:
     from .work_item import WorkItem
 
-# Payload is (JobHandle, JobResult) per docs/architecture.md §8;
-# both types land with the worker pool (epic #1809 worker-pool slice), so the
-# alias stays shape-only until then.
-CompletionQueue = Queue[tuple[Any, Any]]
+CompletionQueue = Queue[tuple[JobHandle, JobResult]]
 
 
 class StageQueueLease:

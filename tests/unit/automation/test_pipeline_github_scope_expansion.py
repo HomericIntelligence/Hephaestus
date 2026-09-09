@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 import hephaestus.automation.github_api as github_api
-import hephaestus.automation.pipeline_github_scope_expansion as scope_expansion_adapter
 from hephaestus.automation.pipeline_github import PipelineGitHub
 
 
@@ -80,9 +79,9 @@ def test_all_repo_issues_uses_rest_pages_and_excludes_pull_requests(
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(pages.pop(0)), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
-
-    issues = PipelineGitHub("org", repo="repo", gh_timeout=30).all_repo_issues()
+    issues = PipelineGitHub(
+        "org", repo="repo", gh_timeout=30, command_runner=fake_gh_call
+    ).all_repo_issues()
 
     assert [issue["number"] for issue in issues] == [*range(1, 100), 101]
     assert calls == [
@@ -129,10 +128,11 @@ def test_merged_scope_expansion_pr_uses_all_child_timeline_pages(
         payload = _merged_pr_payload(73)
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    evidence = PipelineGitHub("org", repo="repo", gh_timeout=30).merged_scope_expansion_pr(41)
+    evidence = PipelineGitHub(
+        "org", repo="repo", gh_timeout=30, command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(41)
 
     assert evidence == {"merge_sha": "a" * 40, "base_branch": "main"}
     assert api_calls == [
@@ -183,9 +183,9 @@ def test_merged_scope_expansion_pr_returns_none_without_associated_pr(
         ]
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
-
-    evidence = PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+    evidence = PipelineGitHub(
+        "org", repo="repo", command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(41)
 
     assert evidence is None
 
@@ -220,10 +220,10 @@ def test_merged_scope_expansion_pr_rejects_malformed_associations(
     def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([event]), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
-
     with pytest.raises(RuntimeError, match="association is malformed"):
-        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
 
 
 def test_merged_scope_expansion_pr_rejects_multiple_associations(
@@ -243,11 +243,12 @@ def test_merged_scope_expansion_pr_rejects_multiple_associations(
             argv, 0, stdout=json.dumps(_merged_pr_payload(pr_number)), stderr=""
         )
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
     with pytest.raises(RuntimeError, match="multiple implementation"):
-        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
 
 
 @pytest.mark.parametrize(
@@ -304,11 +305,12 @@ def test_merged_scope_expansion_pr_rejects_invalid_merge_evidence(
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
     with pytest.raises(RuntimeError, match=expected_error):
-        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
 
 
 def test_merged_scope_expansion_pr_returns_none_for_unmerged_association(
@@ -335,10 +337,14 @@ def test_merged_scope_expansion_pr_returns_none_for_unmerged_association(
         }
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    assert PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41) is None
+    assert (
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
+        is None
+    )
 
 
 def test_merged_scope_expansion_pr_accepts_canonical_branch_without_cross_reference(
@@ -357,10 +363,11 @@ def test_merged_scope_expansion_pr_accepts_canonical_branch_without_cross_refere
             argv, 0, stdout=json.dumps(_merged_pr_payload(73)), stderr=""
         )
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    assert PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41) == {
+    assert PipelineGitHub(
+        "org", repo="repo", command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(41) == {
         "merge_sha": "a" * 40,
         "base_branch": "main",
     }
@@ -387,10 +394,11 @@ def test_merged_scope_expansion_pr_excludes_blocked_source_pr(
             argv, 0, stdout=json.dumps(_merged_pr_payload(73)), stderr=""
         )
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    evidence = PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(
+    evidence = PipelineGitHub(
+        "org", repo="repo", command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(
         41,
         source_pr_number=2859,
     )

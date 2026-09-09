@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import re
 import subprocess
 import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import CancelledError
 from typing import Any
 
 from hephaestus.github.environment import gh_child_environment
@@ -137,7 +139,7 @@ def _is_service_failure(exc: BaseException) -> bool:
 
 def _breaker_should_ignore(exc: BaseException) -> bool:
     """Circuit-breaker predicate: exceptions that prove the service is UP (#2048)."""
-    return not _is_service_failure(exc)
+    return isinstance(exc, CancelledError) or not _is_service_failure(exc)
 
 
 _GH_THROTTLE = threading.local()
@@ -402,10 +404,11 @@ def _gh_call_impl(
     retry_on_rate_limit: bool = True,
     max_retries: int = 6,
     log_on_error: bool = True,
-    timeout: int | None = None,
+    timeout: int | float | None = None,
     env: Mapping[str, str] | None = None,
     track_process_group: bool = False,
     throttle: bool = True,
+    shutdown: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -437,6 +440,9 @@ def _gh_call_impl(
             if throttle:
                 gh_global_throttle_acquire()
                 _gh_throttle_wait()
+            process_options: dict[str, Any] = {}
+            if shutdown is not None:
+                process_options["shutdown"] = shutdown
             result = run_subprocess(
                 ["gh", *args],
                 check=check,
@@ -444,6 +450,7 @@ def _gh_call_impl(
                 log_on_error=log_on_error,
                 env=dict(env) if env is not None else gh_child_environment(),
                 track_process_group=track_process_group,
+                **process_options,
             )
             return result
         except subprocess.CalledProcessError as e:
@@ -510,16 +517,46 @@ def _gh_call_impl(
     raise RuntimeError("gh call failed after all retries")
 
 
+def _prepare_gh_operation(
+    *,
+    timeout: int | float | None,
+    throttle: bool,
+    deadline_s: float | None,
+    shutdown: threading.Event | None,
+) -> tuple[int | float | None, bool]:
+    """Deduct local waits before a bounded provider request starts."""
+    if shutdown is not None and shutdown.is_set():
+        raise CancelledError("GitHub operation was cancelled")
+    if deadline_s is None and shutdown is None:
+        return timeout, throttle
+    if deadline_s is not None and (
+        isinstance(deadline_s, bool) or not math.isfinite(deadline_s) or deadline_s <= 0
+    ):
+        raise ValueError("deadline_s must be a finite positive monotonic time")
+    if throttle:
+        gh_global_throttle_acquire(deadline_s=deadline_s, shutdown=shutdown)
+    if shutdown is not None and shutdown.is_set():
+        raise CancelledError("GitHub operation was cancelled")
+    if deadline_s is not None:
+        remaining_s = deadline_s - time.monotonic()
+        if remaining_s <= 0:
+            raise subprocess.TimeoutExpired("GitHub operation deadline", 0)
+        timeout = min(float(timeout if timeout is not None else gh_cli_timeout()), remaining_s)
+    return timeout, False
+
+
 def _gh_call(
     args: list[str],
     check: bool = True,
     retry_on_rate_limit: bool = True,
     max_retries: int = 6,
     log_on_error: bool = True,
-    timeout: int | None = None,
+    timeout: int | float | None = None,
     env: Mapping[str, str] | None = None,
     track_process_group: bool = False,
     throttle: bool = True,
+    deadline_s: float | None = None,
+    shutdown: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -552,6 +589,12 @@ def _gh_call(
         RuntimeError: For other non-transient or exhausted-retry failures.
 
     """
+    timeout, throttle = _prepare_gh_operation(
+        timeout=timeout, throttle=throttle, deadline_s=deadline_s, shutdown=shutdown
+    )
+    if deadline_s is not None:
+        max_retries = 1
+        retry_on_rate_limit = False
     result: subprocess.CompletedProcess[str] | None = None
 
     def invoke() -> subprocess.CompletedProcess[str]:
@@ -574,6 +617,8 @@ def _gh_call(
             kwargs["env"] = env
         if track_process_group:
             kwargs["track_process_group"] = True
+        if shutdown is not None:
+            kwargs["shutdown"] = shutdown
         return _GH_BREAKER.call(invoke)
     except subprocess.CalledProcessError:
         if not check and result is not None:

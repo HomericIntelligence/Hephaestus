@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+import hashlib
 from dataclasses import asdict, dataclass
-from typing import Any, Literal, assert_never, cast
+from threading import Event
+from typing import Any, Literal, assert_never
 
-from hephaestus.automation.host_verification_bootstrap import (
-    read_fresh_bootstrap_proof,
-    revoke_bootstrap_go,
-)
+from hephaestus.automation.comment_identity import CommentAliasConflictError
+from hephaestus.automation.operation_deadlines import operation_deadline_after
+from hephaestus.automation.pipeline.admission import parse_publication_scope_files
 from hephaestus.automation.pipeline.github_jobs import (
     AdoptedRemediationPrStateRead,
     AppendReplyJournalRequest,
+    CurrentPlanScopeRead,
     DeliverReplyHandoffRequest,
     DirtyDirectPrStateRead,
     EnsureScopeExpansionChildrenRequest,
@@ -23,6 +24,9 @@ from hephaestus.automation.pipeline.github_jobs import (
     InspectDirtyDirectPrStateRequest,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
+    RateBudgetRead,
+    ReadCurrentPlanScopeRequest,
+    ReadRateBudgetRequest,
     ReconcilePrReviewRequest,
     ReconcileScopeExpansionDependenciesRequest,
     RecoverRemediationReplyJournalRequest,
@@ -42,9 +46,11 @@ from hephaestus.automation.pipeline.reply_handoff import (
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
+from hephaestus.automation.pipeline_github_transport import rate_limit_remaining
 from hephaestus.automation.remediation_prepublication import (
     remove_prepublication_receipt,
 )
+from hephaestus.automation.review_journal import CommentJournalReadError, PlanDiscoveryStatus
 
 
 def _request_threads(value: FrozenJson, label: str) -> list[Any]:
@@ -63,20 +69,31 @@ class PipelineGitHubJobRunner:
     dry_run: bool
     gh_timeout: int = 120
 
-    def run(self, job: GitHubJob) -> GitHubReceipt:
+    def run(
+        self,
+        job: GitHubJob,
+        *,
+        shutdown: Event | None = None,
+        deadline_s: float | None = None,
+    ) -> GitHubReceipt:
         """Execute one request without sharing a coordinator/client instance."""
         if isinstance(
-            job.request, (InspectDirtyDirectPrStateRequest, InspectAdoptedRemediationPrStateRequest)
+            job.request,
+            (
+                InspectDirtyDirectPrStateRequest,
+                InspectAdoptedRemediationPrStateRequest,
+                ReadCurrentPlanScopeRequest,
+            ),
         ) and (job.request.repository.casefold() != f"{self.org}/{job.repo}".casefold()):
             raise ValueError("dirty direct request repository does not match the runner")
-        github: StageGitHub = PipelineGitHub(
+        github = PipelineGitHub(
             self.org,
             repo=job.repo,
             dry_run=self.dry_run,
             repo_root=job.repo_root,
             gh_timeout=self.gh_timeout,
         )
-        deadline_s = (
+        request_deadline_s = (
             job.request.deadline_s
             if isinstance(
                 job.request,
@@ -85,21 +102,34 @@ class PipelineGitHubJobRunner:
                     AppendReplyJournalRequest,
                     DeliverReplyHandoffRequest,
                     ReconcilePrReviewRequest,
+                    ReadRateBudgetRequest,
+                    ReadCurrentPlanScopeRequest,
+                    RunMergeWaitCycleRequest,
                 ),
             )
-            else None
+            else operation_deadline_after(self.gh_timeout)
         )
-        deadline_context = (
-            cast(Any, github).operation_deadline(deadline_s)
-            if deadline_s is not None
-            else nullcontext()
-        )
-        with deadline_context:
+        operation_deadline_s = operation_deadline_after(self.gh_timeout)
+        for bound in (deadline_s, request_deadline_s):
+            if bound is not None:
+                operation_deadline_s = min(operation_deadline_s, bound)
+        with github.operation_deadline(operation_deadline_s, shutdown=shutdown):
             return self._run_request(job, github)
 
-    def _run_request(self, job: GitHubJob, github: StageGitHub) -> GitHubReceipt:
+    def _run_request(  # noqa: C901 -- Keep the closed request set in one exhaustive dispatch.
+        self, job: GitHubJob, github: PipelineGitHub
+    ) -> GitHubReceipt:
         """Dispatch one closed request inside its operation deadline."""
         match job.request:
+            case ReadCurrentPlanScopeRequest():
+                return self._read_current_plan_scope(job.request, github)
+            case ReadRateBudgetRequest():
+                facts = rate_limit_remaining(call=github._deadline_gh_call)
+                return RateBudgetRead(
+                    request=job.request,
+                    remaining=facts[0] if facts is not None else None,
+                    reset_epoch=facts[1] if facts is not None else None,
+                )
             case InspectAdoptedRemediationPrStateRequest():
                 return _read_adopted_remediation_state(job.request, github)
             case InspectDirtyDirectPrStateRequest():
@@ -131,18 +161,7 @@ class PipelineGitHubJobRunner:
                     handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
                 )
             case AppendReplyJournalRequest():
-                github.append_issue_comment(
-                    job.request.issue_number,
-                    job.request.marker,
-                    job.request.body,
-                )
-                if job.request.prepublication_receipt_sha256 is not None and not self.dry_run:
-                    remove_prepublication_receipt(
-                        repo_root=job.repo_root,
-                        pr_number=job.request.issue_number,
-                        expected_review_input_sha256=(job.request.prepublication_receipt_sha256),
-                    )
-                return ReplyJournalAppended(request=job.request)
+                return self._append_reply_journal(job, job.request, github)
             case DeliverReplyHandoffRequest():
                 return attempt_reply_handoff(job.request, github)
             case ReconcilePrReviewRequest():
@@ -156,6 +175,37 @@ class PipelineGitHubJobRunner:
             case unknown:
                 return assert_never(unknown)
         raise AssertionError("unreachable closed GitHub request dispatch")
+
+    @staticmethod
+    def _read_current_plan_scope(
+        request: ReadCurrentPlanScopeRequest, github: PipelineGitHub
+    ) -> CurrentPlanScopeRead:
+        """Return scope only after a complete current-plan read."""
+        plan = github.discover_plan(request.issue_number)
+        if plan.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
+            raise CommentAliasConflictError(plan.error or "plan identity conflict")
+        if plan.status is PlanDiscoveryStatus.READ_ERROR:
+            raise CommentJournalReadError(plan.error or "plan scope read failed")
+        if plan.status is not PlanDiscoveryStatus.FOUND or plan.plan_text is None:
+            raise ValueError("current plan scope is unavailable")
+        return CurrentPlanScopeRead(
+            request=request,
+            paths=tuple(sorted(parse_publication_scope_files(plan.plan_text))),
+            plan_sha256=hashlib.sha256(plan.plan_text.encode("utf-8")).hexdigest(),
+        )
+
+    def _append_reply_journal(
+        self, job: GitHubJob, request: AppendReplyJournalRequest, github: PipelineGitHub
+    ) -> ReplyJournalAppended:
+        """Publish the current receipt before removing its local pending record."""
+        github.append_issue_comment(request.issue_number, request.marker, request.body)
+        if request.prepublication_receipt_sha256 is not None and not self.dry_run:
+            remove_prepublication_receipt(
+                repo_root=job.repo_root,
+                pr_number=request.issue_number,
+                expected_review_input_sha256=request.prepublication_receipt_sha256,
+            )
+        return ReplyJournalAppended(request=request)
 
     @staticmethod
     def _reconcile_scope_expansion_dependencies(  # noqa: C901
@@ -968,20 +1018,6 @@ class PipelineGitHubJobRunner:
                 return "merge_cycle_cancelled"
             return None
 
-        def bootstrap_outcome() -> str | None:
-            if request.bootstrap_proof is None or read_fresh_bootstrap_proof(
-                request.bootstrap_proof, github
-            ):
-                return None
-            cleared = revoke_bootstrap_go(
-                github, pr=request.pr_number, head_sha=request.reviewed_head_sha
-            )
-            return (
-                "host_verification_bootstrap_revoked"
-                if cleared
-                else "host_verification_bootstrap_revocation_unverified"
-            )
-
         def admit() -> tuple[dict[str, object], str] | str:
             nonlocal terminal_merge_sha
             try:
@@ -1086,9 +1122,6 @@ class PipelineGitHubJobRunner:
         admitted = admit()
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
-        bootstrap_status = bootstrap_outcome()
-        if bootstrap_status is not None:
-            return complete(bootstrap_status)
         state, _ = admitted
         if request.queue_admitted:
             return complete("merge_queue_wait")
@@ -1157,9 +1190,6 @@ class PipelineGitHubJobRunner:
         admitted = admit()
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
-        bootstrap_status = bootstrap_outcome()
-        if bootstrap_status is not None:
-            return complete(bootstrap_status)
         final_state, _ = admitted
 
         try:

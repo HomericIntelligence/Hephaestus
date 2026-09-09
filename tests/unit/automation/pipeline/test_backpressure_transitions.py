@@ -11,26 +11,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
-from hephaestus.automation.pipeline.github_jobs import GitHubJob
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
-    BuildTestJob,
-    CompactJob,
-    GitJob,
     JobHandle,
     JobResult,
 )
 from hephaestus.automation.pipeline.queues import StageQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.stages.base import JobRequest
+from hephaestus.automation.pipeline.stages.base import JobRequest, Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-class _AdvanceAfterJob:
+class _AdvanceAfterJob(Stage):
     """Run one durable side effect after a synthetic worker completion."""
 
     def __init__(self, cwd: Path) -> None:
@@ -64,7 +60,7 @@ class _AdvanceAfterJob:
         return StageOutcome(Disposition.ADVANCE, "durable side effect complete")
 
 
-class _FinishStage:
+class _FinishStage(Stage):
     """Make the destination runnable if it is drained after a retry."""
 
     def on_enter(self, item: WorkItem, ctx: Any) -> None:
@@ -78,7 +74,7 @@ class _FinishStage:
         return StageOutcome(Disposition.FINISH_PASS, "destination consumed")
 
 
-class _AlwaysJob:
+class _AlwaysJob(Stage):
     """Submit a worker job for every item without completing it inline."""
 
     def __init__(self, cwd: Path) -> None:
@@ -111,12 +107,14 @@ class _PendingPool(FakeWorkerPool):
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: object,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
         claim_stage: str = "",
+        remediation_owner_id: int | None = None,
     ) -> JobHandle:
+        del remediation_owner_id
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
         self.submitted_claims.append((claim_key, claim_stage))
@@ -143,16 +141,16 @@ def test_full_next_stage_retains_completed_transition_until_retry(tmp_path: Path
             # downstream capacity reduction.
             max_workers=2,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         stages={
             StageName.PLANNING: source_stage,
             StageName.PLAN_REVIEW: _FinishStage(),
         },
         install_signals=False,
     )
-    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     source = _issue(1, StageName.PLANNING)
     blocker = _issue(2, StageName.PLAN_REVIEW)
     coordinator.queues[StageName.PLAN_REVIEW] = StageQueue(capacity=1)
@@ -205,13 +203,13 @@ def test_stage_leases_allow_parallel_worker_submissions_up_to_capacity(tmp_path:
             parallel_repos=1,
             max_workers=2,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=pool,
+        **fake_worker_factories(pool, None),
         stages={StageName.PLANNING: _AlwaysJob(tmp_path)},
         install_signals=False,
     )
-    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     first = _issue(1, StageName.PLANNING)
     second = _issue(2, StageName.PLANNING)
     coordinator._push_item(first, StageName.PLANNING, enter=True)

@@ -266,7 +266,7 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
         with github_api._body_file(body) as path:
-            gh_call(
+            self._deadline_gh_call(
                 [
                     "api",
                     "--method",

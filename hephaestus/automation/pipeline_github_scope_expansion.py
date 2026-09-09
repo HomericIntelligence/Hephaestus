@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 
 from hephaestus.automation.github_api import (
     _body_file as github_body_file,
-    gh_call as direct_gh_call,
     scope_expansion_issue_owner_query,
     strip_null_bytes,
 )
@@ -33,7 +32,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         owner, name = self._owner_name()
         issues: list[dict[str, Any]] = []
         for page_number in range(1, 101):
-            result = direct_gh_call(
+            result = self._deadline_gh_call(
                 [
                     "api",
                     "--method",
@@ -140,7 +139,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         expected_repository_path = f"/repos/{owner}/{name}".casefold()
         associations: set[int] = set()
         for page_number in range(1, 101):
-            result = direct_gh_call(
+            result = self._deadline_gh_call(
                 [
                     "api",
                     "--method",
@@ -212,7 +211,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         branch = issue_auto_impl_branch_name(issue_number)
         associations: set[int] = set()
         for page_number in range(1, 101):
-            result = direct_gh_call(
+            result = self._deadline_gh_call(
                 [
                     "api",
                     "--method",
@@ -311,7 +310,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
         if descendant_sha != "main" and re.fullmatch(r"[0-9a-f]{40}", descendant_sha) is None:
             raise ValueError("commit comparison requires main or a full lowercase descendant SHA")
         owner, name = self._owner_name()
-        result = direct_gh_call(
+        result = self._deadline_gh_call(
             [
                 "api",
                 "--method",
@@ -355,7 +354,7 @@ class PipelineGitHubScopeExpansion(_PipelineGitHubHost):
             return review_id
         request_body = json.dumps({"event": "COMMENT", "body": body})
         with github_body_file(request_body) as input_path:
-            result = direct_gh_call(
+            result = self._deadline_gh_call(
                 [
                     "api",
                     "-X",

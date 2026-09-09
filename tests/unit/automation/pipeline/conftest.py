@@ -13,10 +13,11 @@ import queue
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 
+from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
 from hephaestus.automation.pipeline.jobs import (
@@ -29,6 +30,11 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.worker_protocol import (
+    AuxiliaryWorker,
+    MainWorker,
+    WorkerFactory,
+)
 
 
 class FakeWorkerPool:
@@ -76,6 +82,9 @@ class FakeWorkerPool:
         self.shutdown_calls = 0
         self._scripted: deque[JobResult | Exception] = deque()
         self.github_job_runner = github_job_runner
+        self._wakeup = threading.Event()
+        self._saturation = threading.Event()
+        self._auxiliary = False
 
     def script(self, *outcomes: JobResult | Exception) -> None:
         """FIFO-enqueue scripted outcomes for subsequent :meth:`submit` calls."""
@@ -91,11 +100,12 @@ class FakeWorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: object,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
         claim_stage: str = "",
+        remediation_owner_id: int | None = None,
     ) -> JobHandle:
         """Execute *job* inline and put its completion on the queue.
 
@@ -109,6 +119,18 @@ class FakeWorkerPool:
             The JobHandle also recorded in :attr:`submitted`.
 
         """
+        if not isinstance(
+            job, (AgentJob, BuildTestJob, GitJob, GitHubJob, CompactJob, AthenaSkillJob)
+        ):
+            raise TypeError("test worker received an unsupported job")
+        if self._auxiliary and not (
+            (isinstance(job, AthenaSkillJob) and job.request.kind == "learn")
+            or (
+                isinstance(job, GitJob)
+                and job.op in {"remove_worktree", "release_branch_reservation"}
+            )
+        ):
+            raise TypeError("test auxiliary lane received a main-lane job")
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
         self.submitted_claims.append((claim_key, claim_stage))
@@ -118,7 +140,14 @@ class FakeWorkerPool:
             if self.github_job_runner is None:
                 raise AssertionError("GitHubJob requires a scripted runner")
             try:
-                outcome = JobResult(ok=True, value=self.github_job_runner.run(job))
+                outcome = JobResult(
+                    ok=True,
+                    value=self.github_job_runner.run(
+                        job,
+                        shutdown=self.shutdown_event,
+                        deadline_s=operation_deadline_after(self.github_job_runner.gh_timeout),
+                    ),
+                )
             except Exception as error:
                 outcome = error
         else:
@@ -157,7 +186,13 @@ class FakeWorkerPool:
                         receipt={"fake": True},
                     ),
                 )
-        self.completion_q.put((handle, outcome))
+        if isinstance(job, GitJob) and job.op in {"clone", "sync_checkout"} and outcome.ok:
+            Path(job.kwargs["dest"]).mkdir(parents=True, exist_ok=True)
+        try:
+            self.completion_q.put_nowait((handle, outcome))
+        except queue.Full:
+            self._saturation.set()
+        self._wakeup.set()
         return handle
 
     @staticmethod
@@ -206,11 +241,55 @@ class FakeWorkerPool:
             return JobResult(ok=True, value={"ready": True, "diff": "checkout diff"})
         return JobResult(ok=True)
 
+    def set_completion_notifiers(
+        self, *, wakeup: threading.Event, saturation: threading.Event
+    ) -> None:
+        """Set the bounded channel's control signals."""
+        self._wakeup = wakeup
+        self._saturation = saturation
+
+    def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
+        """Release the test lane's item authority."""
+
+    def run_cleanup_git(self, job: GitJob) -> JobResult:
+        """Complete one test cleanup job."""
+        return self._default_result(job)
+
+    def factory(
+        self, *, size: int, shutdown: threading.Event, completion_q: CompletionQueue
+    ) -> FakeWorkerPool:
+        """Bind this test lane to its coordinator-owned channel."""
+        self.size = size
+        self.shutdown_event = shutdown
+        self.completion_q = completion_q
+        return self
+
     def shutdown(self, *, mark_interrupted: bool = True) -> None:
         """Match real-pool cancellation and ordinary-teardown semantics."""
         self.shutdown_calls += 1
         if mark_interrupted:
             self.shutdown_event.set()
+
+
+class WorkerFactories(TypedDict):
+    """Factory arguments for two separate coordinator lanes."""
+
+    pool_factory: WorkerFactory[MainWorker]
+    auxiliary_pool_factory: WorkerFactory[AuxiliaryWorker]
+
+
+def fake_worker_factories(
+    main: FakeWorkerPool | None = None, auxiliary: FakeWorkerPool | None = None
+) -> WorkerFactories:
+    """Use separate lanes that can share a test's ordered outcomes."""
+    main = main if main is not None else FakeWorkerPool()
+    if auxiliary is None:
+        auxiliary = FakeWorkerPool()
+        auxiliary._scripted = main._scripted
+        auxiliary.submitted = main.submitted
+        auxiliary.submitted_claims = main.submitted_claims
+    auxiliary._auxiliary = True
+    return {"pool_factory": main.factory, "auxiliary_pool_factory": auxiliary.factory}
 
 
 class FakeGitHub:
@@ -384,3 +463,43 @@ def completion_q() -> CompletionQueue:
 def fake_pool(completion_q: CompletionQueue) -> FakeWorkerPool:
     """Fresh FakeWorkerPool wired to the shared completion queue."""
     return FakeWorkerPool(completion_q=completion_q)
+
+
+def claim_test_item(coordinator: Any, item: Any) -> Any:
+    """Admit and claim an item before a direct coordinator operation."""
+    if id(item) in coordinator._leases:
+        return item
+    queued = coordinator.queues[item.stage].snapshot()
+    if item not in queued:
+        assert coordinator._push_item(item, item.stage, enter=False)
+        queued = coordinator.queues[item.stage].snapshot()
+    assert coordinator._claim_item(item.stage, index=queued.index(item)) is item
+    return item
+
+
+def script_source_passes(
+    coordinator: Any, monkeypatch: pytest.MonkeyPatch, passes: list[list[Any]]
+) -> None:
+    """Supply fixture rows through the coordinator's bounded repository cursor."""
+    from hephaestus.automation.pipeline.coordinator_types import _ActiveRepoIssueSource
+    from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
+
+    remaining = deque(passes)
+    entries: dict[int, Any] = {}
+
+    def begin(repos: list[str]) -> None:
+        coordinator._repo_entry_source = None
+        entries.clear()
+        entries.update(
+            (int(entry.identifier), entry) for entry in (remaining.popleft() if remaining else [])
+        )
+        if entries:
+            repo = repos[0] if repos else coordinator.config.repos[0]
+            source = RepoIssueSource(metadata=iter({"number": number} for number in entries))
+            coordinator._repo_issue_sources.append(_ActiveRepoIssueSource(repo, source))
+
+    def classify(repo: str, source: Any, number: int, github: Any) -> Any:
+        return entries[number]
+
+    monkeypatch.setattr(coordinator, "_begin_repo_entry_source", begin)
+    monkeypatch.setattr(coordinator, "_classify_repo_issue_entry", classify)

@@ -67,7 +67,6 @@ from .advise import (
     get_advise_prompt_builder,
     get_codex_advise_prompt,
 )
-from .follow_up import get_follow_up_prompt
 from .implementation import (
     get_dirty_reused_worktree_decision_prompt,
     get_dirty_reused_worktree_prompt,
@@ -85,7 +84,6 @@ from .pr_review import (
     PrReviewPromptSizeError,
     build_bounded_pr_review_analysis_prompt,
     build_bounded_review_validation_prompt,
-    get_comment_difficulty_prompt,
     get_pr_description,
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
@@ -97,7 +95,6 @@ _LEGACY_PROMPT_TEMPLATES = {
     "CODEX_ADVISE_PROMPT": "advise/direct.j2",
     "DIRTY_REUSED_WORKTREE_DECISION_PROMPT": "implementation/dirty_worktree.j2",
     "DIRTY_REUSED_WORKTREE_PROMPT": "implementation/dirty_worktree.j2",
-    "FOLLOW_UP_PROMPT": "follow_up/follow_up.j2",
     "IMPLEMENTATION_PROMPT": "implementation/implementation.j2",
     "IMPL_LOOP_REVIEW_PROMPT": "implementation/loop_review.j2",
     "IMPL_RESUME_FEEDBACK_PROMPT": "implementation/resume_feedback.j2",
@@ -144,7 +141,6 @@ __all__ = [
     "CODEX_ADVISE_PROMPT",
     "DIRTY_REUSED_WORKTREE_DECISION_PROMPT",
     "DIRTY_REUSED_WORKTREE_PROMPT",
-    "FOLLOW_UP_PROMPT",
     "IMPLEMENTATION_PROMPT",
     "IMPL_LOOP_REVIEW_PROMPT",
     "IMPL_RESUME_FEEDBACK_PROMPT",
@@ -164,10 +160,8 @@ __all__ = [
     "get_advise_prompt",
     "get_advise_prompt_builder",
     "get_codex_advise_prompt",
-    "get_comment_difficulty_prompt",
     "get_dirty_reused_worktree_decision_prompt",
     "get_dirty_reused_worktree_prompt",
-    "get_follow_up_prompt",
     "get_impl_loop_review_prompt",
     "get_impl_resume_feedback_prompt",
     "get_implementation_prompt",

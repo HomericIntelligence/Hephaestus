@@ -24,13 +24,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     IssueWaveError,
     IssueWaveStore,
     WaveLease,
 )
+from hephaestus.automation.learning_journal import LearningJournalStore
 
 from ..github_jobs import (
     GitHubJob,
@@ -135,7 +135,6 @@ class MergeWaitStage(Stage):
             request = RunMergeWaitCycleRequest(
                 issue_number=item.issue,
                 pr_number=item.pr,
-                bootstrap_proof=item.payload.get("host_verification_bootstrap_proof"),
                 reviewed_head_sha=reviewed_head,
                 proof_generation=proof_generation,
                 declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),
@@ -326,8 +325,6 @@ class MergeWaitStage(Stage):
         """Record post-merge learning without changing confirmed merge success."""
         if item.issue is None or not ctx.config.enable_learn:
             return StageOutcome(Disposition.FINISH_PASS, "merged")
-        if ctx.github.drive_green_learn_terminal(item.issue):
-            return StageOutcome(Disposition.FINISH_PASS, "merged")
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "missing_learn_scope")
         intent = LearningIntent.post_merge(repo=item.repo, issue=item.issue, pr=item.pr)
@@ -335,32 +332,17 @@ class MergeWaitStage(Stage):
             item.learning_intents.append(intent)
         if isinstance(ctx.learning_journal, LearningJournalStore):
             try:
-                record = ctx.learning_journal.ensure_pending(
+                ctx.learning_journal.ensure_pending(
                     intent.key,
                     kind=intent.kind.value,
                     identity=intent.journal_identity(),
                 )
-                if (
-                    ctx.github.drive_green_learn_inflight(item.issue)
-                    and record["status"] == "pending"
-                    and ctx.learning_journal.claim(intent.key)
-                ):
-                    ctx.learning_journal.finish(
-                        intent.key,
-                        succeeded=False,
-                        error="legacy_outcome_unknown",
-                    )
-                    item.payload.setdefault("learning_failures", []).append(
-                        {"key": intent.key, "error": "legacy_outcome_unknown"}
-                    )
             except (OSError, RuntimeError, TypeError, ValueError):
                 logger.exception("merge_wait:%s: could not persist learning intent", item.issue)
                 item.learning_intents.remove(intent)
                 item.payload.setdefault("learning_failures", []).append(
                     {"key": intent.key, "error": "learning_intent_persist_failed"}
                 )
-        elif ctx.github.drive_green_learn_inflight(item.issue):
-            item.learning_intents.remove(intent)
         item.learning_resume_stage = StageName.FINISHED
         return StageOutcome(Disposition.FINISH_PASS, "merged")
 

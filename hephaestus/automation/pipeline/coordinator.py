@@ -1,4 +1,5 @@
-# The façade deliberately re-exports the coordinator's historical symbols.
+"""Assemble the queue coordinator and its two worker lanes."""
+
 import logging
 import queue as queue_mod
 import threading
@@ -9,7 +10,6 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
-import hephaestus.automation.pipeline.admission as _admission
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.pipeline.athena_executor_scope import (
@@ -33,50 +33,16 @@ from hephaestus.automation.pipeline.work_item import (
 )
 from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
+from .athena_skill_jobs import AthenaSkillExecutor
 from .coordinator_dispatch import ImplementationDispatcher
 from .coordinator_execution import ExecutionCoordinator
 from .coordinator_issue_classification import IssueClassificationCoordinator
 from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
-from .coordinator_stage_config import _StageRunConfig
-
-Any = ct.Any
-PipelineConfig = ct.PipelineConfig
-StageStepResult = ct.StageStepResult
-WaveLease = ct.WaveLease
-_ActiveRepoIssueSource = ct._ActiveRepoIssueSource
-_DirectIssueSource = ct._DirectIssueSource
-_DirectPrSource = ct._DirectPrSource
-_FILE_OVERLAP_WARNING_THRESHOLD = ct._FILE_OVERLAP_WARNING_THRESHOLD
-_IDLE_POLL_S = ct._IDLE_POLL_S
-_PendingHandoff = ct._PendingHandoff
-_RepoEntrySource = ct._RepoEntrySource
-_STALL_TICKS_BEFORE_FORCE = ct._STALL_TICKS_BEFORE_FORCE
-_STEP_WATCHDOG_S = ct._STEP_WATCHDOG_S
-_effective_repo_root = ct._effective_repo_root
-_preflight_prompt_catalog = ct._preflight_prompt_catalog
-_work_window = ct._work_window
+from .worker_protocol import AuxiliaryWorker, MainWorker, WorkerFactory
 
 logger = logging.getLogger(__name__)
-
-# Keep the emitted metric catalogue visible on the public façade.  The runtime
-# collaborator owns emission; this compatibility catalogue keeps the existing
-# observability drift guard scoped to the public coordinator module.
-_COORDINATOR_METRIC_NAMES = (
-    "hephaestus_pipeline_queue_depth",
-    "hephaestus_pipeline_inflight_jobs",
-    "hephaestus_pipeline_lane_queue_depth",
-    "hephaestus_pipeline_lane_inflight_jobs",
-    "hephaestus_pipeline_inflight_per_repo",
-    "hephaestus_pipeline_loops_total",
-    "hephaestus_pipeline_stalled_ticks",
-    "hephaestus_circuit_breaker_state",
-    "hephaestus_pipeline_alert_active",
-    "hephaestus_pipeline_jobs_total",
-    "hephaestus_pipeline_agent_job_seconds_total",
-    "hephaestus_pipeline_auxiliary_job_seconds_total",
-)
 
 
 class Coordinator(
@@ -89,13 +55,13 @@ class Coordinator(
 ):
     """Assemble the coordinator's type, runtime, source, and dispatch seams."""
 
-    def __init__(  # noqa: C901 - assembles two closed worker lanes
+    def __init__(
         self,
-        config: PipelineConfig,
+        config: ct.PipelineConfig,
         *,
         github: StageGitHub,
-        pool: Any | None = None,
-        auxiliary_pool: Any | None = None,
+        pool_factory: WorkerFactory[MainWorker] | None = None,
+        auxiliary_pool_factory: WorkerFactory[AuxiliaryWorker] | None = None,
         stages: dict[StageName, Stage] | None = None,
         github_factory: Callable[[str, Path], StageGitHub] | None = None,
         install_signals: bool = True,
@@ -103,16 +69,16 @@ class Coordinator(
         wall_time: Callable[[], float] | None = None,
         shutdown_event: threading.Event | None = None,
         force_shutdown_event: threading.Event | None = None,
-        idle_poll_s: float = _IDLE_POLL_S,
-        stall_ticks_before_force: int = _STALL_TICKS_BEFORE_FORCE,
+        idle_poll_s: float = ct._IDLE_POLL_S,
+        stall_ticks_before_retry: int = ct._STALL_TICKS_BEFORE_RETRY,
     ) -> None:
         """Initialize coordinator state.
 
         Args:
             config: Pipeline configuration.
             github: The coordinator-owned StageGitHub accessor.
-            pool: Worker pool (a real ``WorkerPool`` is built when omitted;
-                tests inject ``FakeWorkerPool``).
+            pool_factory: Factory for an ordinary worker lane.
+            auxiliary_pool_factory: Factory for an independent auxiliary lane.
             stages: Stage-instance map override (tests inject stubs).
             github_factory: Optional per-repo accessor factory. Production uses
                 this so each repo context targets GitHub with an explicit repo.
@@ -138,22 +104,25 @@ class Coordinator(
         self._force_shutdown = force_shutdown_event or threading.Event()
         self.force_shutdown_event = self._force_shutdown
         self._idle_poll_s = idle_poll_s
-        self._stall_ticks_before_force = stall_ticks_before_force
-        self._step_watchdog_s = _STEP_WATCHDOG_S
-        self._file_overlap_warning_threshold = _FILE_OVERLAP_WARNING_THRESHOLD
+        self._stall_ticks_before_retry = stall_ticks_before_retry
+        self._step_watchdog_s = ct._STEP_WATCHDOG_S
+        self._file_overlap_warning_threshold = ct._FILE_OVERLAP_WARNING_THRESHOLD
         # These latches are the control plane for the bounded completion
         # queue.  They carry no WorkItem/JobResult payload and therefore
         # cannot become a second, unbounded completion buffer.
         self._completion_wakeup = threading.Event()
         self._completion_saturation = threading.Event()
-        work_window = _work_window(config)
+        work_window = ct._work_window(config)
         self.completion_q: CompletionQueue = queue_mod.Queue(maxsize=work_window)
         self.auxiliary_completion_q: CompletionQueue = queue_mod.Queue(
             maxsize=max(config.learning_queue_capacity, config.learning_workers)
         )
-        athena_executor: Any | None = None
-        production_pool = pool is None
-        if pool is None:
+        if (pool_factory is None) != (auxiliary_pool_factory is None):
+            raise ValueError("main and auxiliary worker factories must be supplied together")
+        athena_executor: AthenaSkillExecutor | None = None
+        pool: MainWorker
+        auxiliary_pool: AuxiliaryWorker
+        if pool_factory is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
             from hephaestus.automation.mnemosyne_skill_host import MnemosyneSkillHost
@@ -188,34 +157,6 @@ class Coordinator(
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
             )
-        else:
-            # The coordinator owns the cross-thread transport.  An injected
-            # unbounded fake queue is replaced; a differently bounded queue
-            # is rejected so it cannot silently weaken the global capacity.
-            injected_completion_q = getattr(pool, "completion_q", None)
-            injected_maxsize = getattr(injected_completion_q, "maxsize", 0)
-            if isinstance(injected_maxsize, int) and (
-                injected_maxsize > 0 and injected_maxsize != work_window
-            ):
-                raise ValueError(
-                    "injected completion queue capacity must match the coordinator work window"
-                )
-            # Test doubles conventionally expose ``completion_q`` while the
-            # production WorkerPool keeps the channel private. Rebind both
-            # shapes so an injected real pool cannot publish into the stale
-            # queue supplied to its constructor.
-            pool.completion_q = self.completion_q
-            if hasattr(pool, "_completion_q"):
-                pool._completion_q = self.completion_q
-        self.pool: Any = pool
-        set_completion_notifiers = getattr(pool, "set_completion_notifiers", None)
-        if callable(set_completion_notifiers):
-            set_completion_notifiers(
-                wakeup=self._completion_wakeup,
-                saturation=self._completion_saturation,
-            )
-
-        if auxiliary_pool is None and production_pool:
             from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 
             auxiliary_pool = AuxiliaryWorkerPool(
@@ -223,22 +164,24 @@ class Coordinator(
                 shutdown=self._force_shutdown,
                 completion_q=self.auxiliary_completion_q,
                 athena_skill_executor=athena_executor,
-                cleanup_runner=getattr(pool, "_run_cleanup_git", None),
+                cleanup_runner=pool.run_cleanup_git,
             )
-        elif auxiliary_pool is None:
-            # Injected test pools keep their historical single-channel shape
-            # unless a test exercises the independent auxiliary lane.
-            auxiliary_pool = pool
-            self.auxiliary_completion_q = self.completion_q
         else:
-            auxiliary_pool.completion_q = self.auxiliary_completion_q
-            if hasattr(auxiliary_pool, "_completion_q"):
-                auxiliary_pool._completion_q = self.auxiliary_completion_q
-        self.auxiliary_pool: Any = auxiliary_pool
-        self._auxiliary_pool_separate = auxiliary_pool is not pool
-        auxiliary_notifiers = getattr(auxiliary_pool, "set_completion_notifiers", None)
-        if self._auxiliary_pool_separate and callable(auxiliary_notifiers):
-            auxiliary_notifiers(
+            assert auxiliary_pool_factory is not None  # noqa: S101
+            pool = pool_factory(
+                size=work_window, shutdown=self.shutdown, completion_q=self.completion_q
+            )
+            auxiliary_pool = auxiliary_pool_factory(
+                size=config.learning_workers,
+                shutdown=self._force_shutdown,
+                completion_q=self.auxiliary_completion_q,
+            )
+        if pool is auxiliary_pool:
+            raise ValueError("main and auxiliary worker lanes must be distinct")
+        self.pool = pool
+        self.auxiliary_pool = auxiliary_pool
+        for lane in (pool, auxiliary_pool):
+            lane.set_completion_notifiers(
                 wakeup=self._completion_wakeup,
                 saturation=self._completion_saturation,
             )
@@ -257,15 +200,6 @@ class Coordinator(
         # here.  Paths discovered from Git alone can belong to a human or a
         # different automation process and must fail closed.
         self._pipeline_writer_worktrees: dict[tuple[str, str], WorkItem] = {}
-        # Known implementation plans retain their repository-scoped file
-        # claims for the lifetime of the submitted job.  Never reconstruct
-        # this from mutable issue comments during later drain rounds (#2451).
-        self._inflight_implementation_claims: dict[JobHandle, set[_admission.PlanFileClaim]] = {}
-        # An admission snapshot belongs to the WorkItem, not one of its
-        # worktree/agent/test/push jobs. Keeping it for the whole
-        # implementation stage prevents a later sub-job from re-fetching a
-        # mutable plan and changing the reservation that admitted this work.
-        self._implementation_file_claims: dict[int, set[_admission.PlanFileClaim]] = {}
         self.inflight_per_repo: Counter[str] = Counter()
         # A normal (non-implementation) drain claims instead of popping.  The
         # active lease reserves its source capacity while an item executes or
@@ -280,20 +214,20 @@ class Coordinator(
         # objects are never mutated into new identities. Do not add id()-keyed
         # state that outlives the item's live reference.
         self._leases: dict[int, StageQueueLease] = {}
-        self._pending_handoffs: dict[int, _PendingHandoff] = {}
-        self._direct_issue_source: _DirectIssueSource | None = None
-        self._direct_pr_source: _DirectPrSource | None = None
-        self._direct_wave_lease: WaveLease | None = None
+        self._pending_handoffs: dict[int, ct._PendingHandoff] = {}
+        self._direct_issue_source: ct._DirectIssueSource | None = None
+        self._direct_pr_source: ct._DirectPrSource | None = None
+        self._direct_wave_lease: ct.WaveLease | None = None
         self._wave_mode_active = False
         self._direct_scope_bootstrap_pending = False
-        self._repo_entry_source: _RepoEntrySource | None = None
-        self._repo_issue_sources: deque[_ActiveRepoIssueSource] = deque()
+        self._repo_entry_source: ct._RepoEntrySource | None = None
+        self._repo_issue_sources: deque[ct._ActiveRepoIssueSource] = deque()
         # A StageQueue's capacity only bounds that one stage.  This permit
         # set is the coordinator-wide admission budget: an item acquires one
         # permit on first entry and keeps it while it moves between queues,
         # leases, in-flight jobs, timers, and a retained handoff.  It releases
-        # only after the finished sink completes.  The set is therefore
-        # bounded by ``_work_window(config)``, not by the number of stages.
+        # after terminal bookkeeping completes. The set is therefore
+        # bounded by ``ct._work_window(config)``, not by the number of stages.
         self._live_work_permit_ids: set[int] = set()
         self._learning_work_permit_ids: set[int] = set()
         self.ledger: list[ItemResult] = []
@@ -304,14 +238,14 @@ class Coordinator(
         self.recovery_preserved: list[PreservedWorktree] = []
         self.items: list[WorkItem] = []
         self._terminal_summary = TerminalSummary()
-        self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
+        self.event_log: deque[tuple[ct.Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         # Observability is opt-in.  Keep imports and all socket setup out of
         # the default construction path so the product layer retains its
         # zero-I/O import contract.
-        self._metrics_registry: Any | None = None
-        self._metrics_server: Any | None = None
-        self._alert_tracker: Any | None = None
+        self._metrics_registry: ct.Any | None = None
+        self._metrics_server: ct.Any | None = None
+        self._alert_tracker: ct.Any | None = None
         # Gauges retain label series until explicitly updated.  Remember the
         # prior tick's dynamic labels so a completed job or state transition
         # is rendered as zero rather than as stale active work.
@@ -365,58 +299,13 @@ class Coordinator(
         self._fatal = False
         self._pool_shut_down = False
         self._seen_item_ids: set[int] = set()
-        self._stage_config = _StageRunConfig(
-            enable_advise=not config.no_advise,
-            enable_learn=config.enable_learn,
-            force=config.force,
-            agent=config.agent,
-            model=config.model,
-            planner_agent=config.planner_agent,
-            implementer_agent=config.implementer_agent,
-            reviewer_agent=config.reviewer_agent,
-            planner_model=config.planner_model,
-            reviewer_model=config.reviewer_model,
-            implementer_model=config.implementer_model,
-            fallback_model=config.fallback_model,
-            disable_pi_automation=config.disable_pi_automation,
-            auth_status_timeout=config.auth_status_timeout,
-            pi_isolation_adapter=config.pi_isolation_adapter,
-            pi_dir=config.pi_dir,
-            codex_isolation_adapter=config.codex_isolation_adapter,
-            codex_isolation_deployment_lock=config.codex_isolation_deployment_lock,
-            codex_isolation_deployment_lock_sha256=(config.codex_isolation_deployment_lock_sha256),
-            rate_guard_enabled=config.rate_guard_enabled,
-            rate_guard_threshold=config.rate_guard_threshold,
-            planner_timeout=config.planner_timeout,
-            reviewer_timeout=config.reviewer_timeout,
-            implementer_timeout=config.implementer_timeout,
-            address_review_timeout=config.address_review_timeout,
-            git_message_timeout=config.git_message_timeout,
-            poll_max_wait=config.poll_max_wait,
-            clone_timeout=config.clone_timeout,
-            network_timeout=config.network_timeout,
-            gh_timeout=config.gh_timeout,
-            metadata_timeout=config.metadata_timeout,
-            rebase_timeout=config.rebase_timeout,
-            diff_collect_timeout=config.diff_collect_timeout,
-            pre_pr_test_timeout=config.pre_pr_test_timeout,
-            dry_run=config.dry_run,
-            nitpick=config.nitpick,
-            drive_green_all=config.drive_green_all,
-            include_bot_prs=config.include_bot_prs,
-            include_all_authors=config.include_all_authors,
-            pre_pr_test_argv=config.pre_pr_test_argv,
-            run_pre_pr_tests=config.run_pre_pr_tests,
-            issue_limit=config.issue_limit,
-            reset_plan_review_sessions=set(config.reset_plan_review_sessions),
-        )
         # A context contains a GitHub accessor and path configuration but no
         # mutable item state.  At most C items can be live, so an LRU of C is
         # enough for concurrent work and prevents all-org discovery from
         # retaining one accessor per repository.
         self._ctx_cache: OrderedDict[str, StageContext] = OrderedDict()
         self._ctx_cache_capacity = work_window
-        from hephaestus.automation.arming_state import LearningClaimRegistry
+        from hephaestus.automation.learning_journal import LearningClaimRegistry
 
         self._learning_claim_registry = LearningClaimRegistry()
 
@@ -460,10 +349,9 @@ class Coordinator(
         return item
 
     def _seed_direct_issue_entry(
-        self, repo: str, issue: int, *, github: StageGitHub | None = None
+        self, repo: str, issue: int, *, github: StageGitHub
     ) -> _seeding.SeedEntry:
         """Classify a direct issue through its target repository accessor."""
-        github = github or (self._ctx_for_repo(repo).github if repo else self.github)
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
         facts = _seeding.seed_issue_from_github(issue, github)
         if STATE_PLAN_BLOCKED in facts.labels:
@@ -475,7 +363,7 @@ class Coordinator(
         return replace(entry, stage=stage, reason=reason, passed=passed)
 
 
-def run_pipeline(config: PipelineConfig) -> int:
+def run_pipeline(config: ct.PipelineConfig) -> int:
     """Run the queue-based pipeline to completion.
 
     Public entry point called from ``loop_runner.main()`` on the default
@@ -488,7 +376,7 @@ def run_pipeline(config: PipelineConfig) -> int:
         Exit code: 130 interrupt, 1 any fail/skip/blocked, 0 clean.
 
     """
-    _preflight_prompt_catalog()
+    ct._preflight_prompt_catalog()
 
     # Imported here: pipeline_github maps the accessor onto the real gh
     # helpers and must stay out of the pure pipeline import surface.
@@ -504,7 +392,7 @@ def run_pipeline(config: PipelineConfig) -> int:
         )
 
     repo = config.repos[0] if config.repos else ""
-    repo_root = _effective_repo_root(config, repo) if repo else Path(config.projects_dir)
+    repo_root = ct._effective_repo_root(config, repo) if repo else Path(config.projects_dir)
     github = (
         _github_for(repo, repo_root)
         if repo

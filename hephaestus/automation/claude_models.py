@@ -2,8 +2,6 @@
 
 from hephaestus.automation.agent_config import (
     advise_model as advise_model,
-    codex_advise_model as codex_advise_model,
-    git_message_model as git_message_model,
     implementer_model as implementer_model,
     learn_model as learn_model,
     normalize_claude_model as normalize_claude_model,
@@ -13,8 +11,6 @@ from hephaestus.automation.agent_config import (
 
 __all__ = [
     "advise_model",
-    "codex_advise_model",
-    "git_message_model",
     "implementer_model",
     "learn_model",
     "normalize_claude_model",

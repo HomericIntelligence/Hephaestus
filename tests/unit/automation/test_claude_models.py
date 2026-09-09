@@ -24,14 +24,6 @@ class TestDefaults:
         monkeypatch.delenv("HEPH_REVIEWER_MODEL", raising=False)
         assert claude_models.reviewer_model() == ""
 
-    def test_codex_advise_uses_tool_default(self) -> None:
-        assert claude_models.codex_advise_model() == ""
-
-    def test_git_message_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The public compatibility helper ignores the retired override."""
-        monkeypatch.setenv("HEPH_GIT_MESSAGE_MODEL", "terra:xhigh")
-        assert claude_models.git_message_model() == ""
-
     def test_fallback_requires_explicit_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The fallback requires an explicit model."""
         monkeypatch.delenv("HEPH_FALLBACK_MODEL", raising=False)
@@ -78,14 +70,12 @@ class TestModuleStable:
             claude_models.planner_model(),
             claude_models.implementer_model(),
             claude_models.reviewer_model(),
-            claude_models.codex_advise_model(),
         )
         importlib.reload(claude_models)
         assert expected == (
             claude_models.planner_model(),
             claude_models.implementer_model(),
             claude_models.reviewer_model(),
-            claude_models.codex_advise_model(),
         )
 
 

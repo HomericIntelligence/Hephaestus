@@ -53,6 +53,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
@@ -109,6 +110,7 @@ __all__ = [
     "WorkItem",
     "agent_provider",
     "athena_advise_failure_reason",
+    "planning_source_revision",
     "planning_source_workspace_binding",
     "source_workspace_binding",
     "stage_model",
@@ -223,6 +225,12 @@ class StageGitHub(Protocol):
     mutators (the pipeline architecture guard forbids ``github_api`` mutator
     names inside pipeline modules).
     """
+
+    def operation_deadline(
+        self, deadline_s: float, *, shutdown: threading.Event | None = None
+    ) -> AbstractContextManager[None]:
+        """Apply one deadline and cancellation signal to a service operation."""
+        ...
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Fetch issue JSON (mirrors ``github_api.issues.gh_issue_json``)."""
@@ -443,7 +451,7 @@ class StageGitHub(Protocol):
         threads: list[dict[str, Any]],
         *,
         expected_head_sha: str,
-        review_diff: str | None = None,
+        review_diff: str,
     ) -> list[dict[str, Any]]:
         """Post one source-anchored batch for the immutable reviewed snapshot.
 
@@ -541,48 +549,6 @@ class StageGitHub(Protocol):
     ) -> ConditionalMergeResult:
         """Request one server-enforced merge route for the reviewed head."""
         pass
-
-    def drive_green_learn_terminal(self, issue_number: int) -> bool:
-        """Return True when the post-merge ``/learn`` is already terminal.
-
-        An arming record whose ``learn_captured_at``/``learn_succeeded_at`` is
-        set, or whose ``learn_status`` is ``succeeded``/``failed``, must never
-        fire ``/learn`` again — the merge_wait MERGED path dedupes on this
-        read (doc section 7: "Post-merge learn (deduped via arming_state)").
-        """
-        ...
-
-    def drive_green_learn_inflight(self, issue_number: int) -> bool:
-        """Return whether a durable post-merge ``/learn`` claim is in flight.
-
-        An ``in_progress`` claim is deliberately distinct from a terminal
-        outcome. It is written and read back before the agent starts. If a
-        process dies after that boundary, a later process must not replay the
-        externally visible ``/learn`` operation.
-        """
-        pass
-
-    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
-        """Durably claim one post-merge ``/learn`` dispatch.
-
-        Returns ``True`` only after an ``in_progress`` record for this issue
-        and PR has been persisted and read back. ``False`` means a terminal
-        or previously in-flight claim already owns the dispatch. Raises when
-        persistence cannot be acknowledged, so the caller fails closed before
-        the agent can perform an external learning action.
-        """
-        pass
-
-    def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
-        """Durably record the post-merge ``/learn`` outcome on the arming record.
-
-        Mirrors ``post_merge_processor.mark_drive_green_learn_result``:
-        written as soon as the learn job completes (success or failure alike)
-        and BEFORE the FINISH_PASS outcome. The preceding durable in-flight
-        claim prevents a restart from replaying ``/learn`` if this final
-        outcome write fails.
-        """
-        ...
 
     # -- repo-stage surface (#1817) -----------------------------------------
 
@@ -710,22 +676,14 @@ def source_workspace_binding(
     revision: str | None = None,
     branch: str | None = None,
     preparation_timeout_s: float | None = None,
-) -> WorkspaceBinding | None:
-    """Prepare a typed source lane when production workspace ownership is wired.
-
-    Lightweight stage fixtures intentionally omit the manager; returning
-    ``None`` preserves their construction-only behavior. The production
-    coordinator always injects it, and missing revision evidence then fails
-    closed before a source-reading job can be submitted.
-    """
-    manager = getattr(ctx.paths, "source_workspaces", None)
-    if manager is None:
-        return None
+) -> WorkspaceBinding:
+    """Prepare the required source lane within a bounded operation."""
+    manager = ctx.paths.source_workspaces
     if callable(manager):
         manager = manager()
         ctx.paths.source_workspaces = manager
-        if manager is None:
-            return None
+    if manager is None:
+        raise RuntimeError("source workspace manager is required")
     item_number = item.issue or item.pr
     if item_number is None:
         raise RuntimeError("source workspace requires an issue or pull request number")
@@ -744,35 +702,34 @@ def source_workspace_binding(
     )
     if len(target) != 40:
         raise RuntimeError("source workspace requires a captured full revision")
-    if preparation_timeout_s is None:
-        binding = manager.prepare(item_number, lane, target, branch=branch)
-    else:
-        if preparation_timeout_s <= 0:
-            raise ValueError("preparation_timeout_s must be positive")
-        clock = ctx.now_fn or time.monotonic
-        deadline = _PreparationDeadline(
-            expires_at=clock() + preparation_timeout_s,
-            monotonic=clock,
-        )
-        binding = manager.prepare_bounded(
-            item_number,
-            lane,
-            target,
-            branch=branch,
-            deadline=deadline,
-        )
+    timeout = (
+        SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S
+        if preparation_timeout_s is None
+        else preparation_timeout_s
+    )
+    if timeout <= 0:
+        raise ValueError("preparation_timeout_s must be positive")
+    clock = ctx.now_fn or time.monotonic
+    deadline = _PreparationDeadline(
+        expires_at=clock() + timeout,
+        monotonic=clock,
+        shutdown=ctx.cancellation,
+    )
+    binding = manager.prepare_bounded(
+        item_number,
+        lane,
+        target,
+        branch=branch,
+        deadline=deadline,
+    )
     if lane is SourceLane.IMPLEMENTATION:
         item.payload["_impl_source_revision"] = binding.revision
+        item.payload["_impl_source_workspace"] = binding.to_dict()
     return cast(WorkspaceBinding, binding)
 
 
-def planning_source_workspace_binding(
-    item: WorkItem,
-    ctx: StageContext,
-    *,
-    preparation_timeout_s: float | None = None,
-) -> WorkspaceBinding | None:
-    """Prepare the detached review lane for a planning source read.
+def planning_source_revision(item: WorkItem) -> str:
+    """Return the captured default-branch revision for planning evidence.
 
     Planning uses the captured default-branch revision. It does not use
     implementation, cleanup, or pull-request revisions because those values
@@ -781,37 +738,30 @@ def planning_source_workspace_binding(
     synced_revision = item.payload.get("_synced_default_branch_sha")
     if synced_revision is None:
         synced_revision = item.payload.get("_direct_scope_base_sha")
-    selected_revision = synced_revision if isinstance(synced_revision, str) else ""
+    if (
+        not isinstance(synced_revision, str)
+        or len(synced_revision) != 40
+        or any(char not in "0123456789abcdef" for char in synced_revision)
+    ):
+        raise RuntimeError("planning source requires a captured full revision")
+    return synced_revision
+
+
+def planning_source_workspace_binding(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    preparation_timeout_s: float | None = None,
+) -> WorkspaceBinding:
+    """Prepare the detached review lane for the captured planning source."""
     return source_workspace_binding(
         item,
         ctx,
         SourceLane.REVIEW,
-        revision=selected_revision,
+        revision=planning_source_revision(item),
         branch=None,
         preparation_timeout_s=preparation_timeout_s,
     )
-
-
-def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
-    """Refresh the item's labels from GitHub and update ``labels_cache``.
-
-    Reads through ``ctx.github.gh_issue_json`` (mirrors
-    ``github_api.issues.gh_issue_json``); on any read failure the cached
-    labels are used so a transient API blip cannot mis-route the item.
-    Shared by every stage that gates on labels (single home — stages must
-    not import it from each other).
-    """
-    if item.issue is None:
-        return []
-    try:
-        data = ctx.github.gh_issue_json(item.issue)
-    except Exception as e:  # transient gh failure: fall back to cache
-        logger.warning("pipeline:%d: label refresh failed (using cache): %s", item.issue, e)
-        return list(item.labels_cache)
-    raw = data.get("labels", []) if isinstance(data, dict) else []
-    labels = [entry["name"] if isinstance(entry, dict) else str(entry) for entry in raw]
-    item.labels_cache = dict.fromkeys(labels, True)
-    return labels
 
 
 def _require_issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
@@ -854,28 +804,6 @@ def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> Stag
         action,
     )
     return StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
-
-
-def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJob:
-    """Build the mechanical rebase-onto-base GitJob (shared base-ref capture).
-
-    ``merge_wait`` uses this shared worker operation when a dirty-worktree
-    resolution needs to rebase the item's worktree onto the captured
-    ``item.payload["base_branch"]`` (defaulting to ``main``) via the same
-    worker ``op="rebase"`` (``git_utils.rebase_worktree_onto``) — single home
-    so all remaining consumers use one mechanic (#1861).
-    """
-    return GitJob(
-        repo=item.repo,
-        op="rebase",
-        timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
-        expected_repository=f"{ctx.org}/{item.repo}",
-        kwargs={
-            "cwd": _worktree_path(item, ctx),
-            "base_branch": str(item.payload.get("base_branch") or "main"),
-        },
-        descr=descr,
-    )
 
 
 def _reviewed_terminal_pr_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -979,6 +907,10 @@ class Stage(Protocol):
     3. ``on_job_done``: handle the result of a completed job (never called
        for interrupted results), storing parsed values on ``item.payload``.
     """
+
+    def on_cancelled_before_start(self, item: WorkItem, ctx: StageContext) -> None:
+        """Release stage-owned claims when execution did not start."""
+        return None
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Refresh labels and perform idempotent fast-forward checks on entry.

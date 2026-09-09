@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -29,6 +30,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _candidate_commit_tree_evidence,
     _dirty_worktree_content_snapshot,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -58,7 +60,6 @@ def test_file_change_failure_records_bounded_redacted_recovery_evidence() -> Non
 def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path) -> None:
     """A failed dirty writer prepares its commit before the reply gate."""
     repo = tmp_path / "repo"
-    writer = repo / "build" / "writer"
     repo.mkdir()
 
     def git(*args: str, cwd: Path = repo) -> subprocess.CompletedProcess[str]:
@@ -76,9 +77,13 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
     (repo / "module.py").write_text("value = 1\n", encoding="utf-8")
     git("add", "module.py")
     git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
-    git("worktree", "add", "-q", "-b", "2973-auto-impl", str(writer))
+    head = git("rev-parse", "HEAD").stdout.strip()
+    manager = SourceWorkspaceManager(repo, repository="test-repo")
+    binding = manager.prepare_bounded(
+        2973, SourceLane.IMPLEMENTATION, head, branch="2973-auto-impl"
+    )
+    writer = binding.cwd
     (writer / "module.py").write_text("value = 2\n", encoding="utf-8")
-    head = git("rev-parse", "HEAD", cwd=writer).stdout.strip()
 
     stage = ImplementationStage()
     item = WorkItem(
@@ -98,6 +103,7 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
             "issue_title": "Repair publication",
             "issue_body": "Keep workers local.",
             "_impl_source_revision": head,
+            "_impl_source_workspace": binding.to_dict(),
             "remediation_thread_snapshots": [
                 {
                     "id": "thread-1",
@@ -111,11 +117,11 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
         }
     )
     ctx = StageContext(
-        config=PipelineConfig(org="test-org", repos=["test-repo"]),
+        config=PipelineConfig(org="test-org", repos=["test-repo"], rate_guard_enabled=False),
         org="test-org",
         dry_run=False,
         github=FakeStageGitHub(),
-        paths=SimpleNamespace(repo_root=repo),
+        paths=SimpleNamespace(repo_root=repo, source_workspaces=manager),
         budget_fn=lambda _name: 2,
     )
 
@@ -140,12 +146,13 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
         lock_dir=tmp_path / "locks",
     )
     try:
-        inspection = pool._git_inspect_implementation_worktree(inspection_request.job)
+        inspection = pool._run_git(inspection_request.job)
     finally:
         pool.shutdown()
     assert inspection.ok is True
     assert isinstance(inspection.value, dict)
     assert inspection.value["outcome"] == "dirty"
+    assert inspection.value["source_workspace"] == binding.to_dict()
     # The coordinator delivers completion while the item is still in its
     # submitting state. It assigns ``on_done_state`` after this callback.
     stage.on_job_done(item, inspection, ctx)
@@ -258,7 +265,7 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
         }
     )
     ctx = StageContext(
-        config=PipelineConfig(org="test-org", repos=["test-repo"]),
+        config=PipelineConfig(org="test-org", repos=["test-repo"], rate_guard_enabled=False),
         org="test-org",
         dry_run=False,
         github=FakeStageGitHub(),

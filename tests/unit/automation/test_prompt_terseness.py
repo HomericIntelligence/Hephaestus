@@ -10,9 +10,7 @@ from hephaestus.automation.prompts import (
     get_address_review_prompt,
     get_advise_prompt,
     get_codex_advise_prompt,
-    get_comment_difficulty_prompt,
     get_dirty_reused_worktree_decision_prompt,
-    get_follow_up_prompt,
     get_impl_loop_review_prompt,
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
@@ -82,7 +80,6 @@ PROMPT_BUILDERS = [
     lambda: get_address_review_prompt(
         pr_number=1, issue_number=1, worktree_path="/x", threads_json="[]"
     ),
-    lambda: get_follow_up_prompt(issue_number=1),
     lambda: get_advise_prompt(
         issue_number=1,
         issue_title="t",
@@ -95,7 +92,6 @@ PROMPT_BUILDERS = [
         issue_body="b",
         marketplace_path="m.json",
     ),
-    lambda: get_comment_difficulty_prompt(issue_number=1, comments_json="[]"),
 ]
 
 WRITING_STANDARD_PROMPT_BUILDERS = [

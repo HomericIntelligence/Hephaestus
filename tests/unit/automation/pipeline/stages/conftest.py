@@ -11,15 +11,18 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.github_api import issue_body_digest
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
-from hephaestus.automation.pipeline.coordinator import PipelineConfig
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
@@ -52,11 +55,13 @@ from hephaestus.automation.review_journal import (
     render_current_review,
     render_pending_review,
 )
+from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_PLAN_NO_GO,
 )
+from hephaestus.utils.worktree_identity import source_worktree_name
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
 
@@ -98,7 +103,6 @@ class FakeStageGitHub(FakeGitHub):
         pr_state: dict[str, Any] | _DefaultPrState | None = _DEFAULT_PR_STATE,
         conversation_resolution: bool = True,
         pr_review_context: dict[str, str] | None = None,
-        learn_terminal: bool = False,
         plan_read_error: str | None = None,
         journal_read_error: str | None = None,
         issue_body_owned_by_viewer: bool = True,
@@ -133,9 +137,6 @@ class FakeStageGitHub(FakeGitHub):
                 PR-state read); ``None`` mirrors a transient read failure.
             conversation_resolution: Whether the admitted PR base has the
                 server-enforced required-conversation-resolution protection.
-            learn_terminal: Seed answer for drive_green_learn_terminal —
-                True mirrors an issue whose post-merge /learn already ran
-                terminally (the #848 dedupe record).
             plan_read_error: Optional failure returned by plan-comment
                 discovery.
             journal_read_error: Optional failure returned by review-journal
@@ -186,12 +187,20 @@ class FakeStageGitHub(FakeGitHub):
                 "pr_base_branch": "main",
             }
         )
-        self._learn_terminal = learn_terminal
         self._posted_thread_ids: dict[int, list[str]] = {}
         self._thread_replies: dict[str, list[dict[str, str]]] = {}
-        self.learn_results: dict[int, bool] = {}
-        self.learn_claims: set[int] = set()
         self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
+        self.operation_deadlines: list[tuple[float, threading.Event | None]] = []
+
+    @contextmanager
+    def operation_deadline(
+        self, deadline_s: float, *, shutdown: threading.Event | None = None
+    ) -> Iterator[None]:
+        """Record the worker operation scope without external I/O."""
+        self.operation_deadlines.append((deadline_s, shutdown))
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("test GitHub operation cancelled")
+        yield
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -500,7 +509,7 @@ class FakeStageGitHub(FakeGitHub):
         threads: list[dict[str, Any]],
         *,
         expected_head_sha: str,
-        review_diff: str | None = None,
+        review_diff: str,
     ) -> list[dict[str, Any]]:
         """Mirror a post-time immutable receipt returned by the coordinator."""
         del expected_head_sha, review_diff
@@ -764,33 +773,6 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_state = {"state": "MERGED"}
         return ConditionalMergeResult(status=200, body={"merged": True})
 
-    def drive_green_learn_terminal(self, issue_number: int) -> bool:
-        """Mirror ci_driver._learn_record_terminal over the arming record.
-
-        Terminal when seeded so (``learn_terminal=True``) or once
-        :meth:`mark_drive_green_learn_result` recorded an outcome — the
-        exactly-once /learn read-back (#848).
-        """
-        return self._learn_terminal or issue_number in self.learn_results
-
-    def drive_green_learn_inflight(self, issue_number: int) -> bool:
-        """Mirror a durable pre-dispatch /learn claim."""
-        return issue_number in self.learn_claims
-
-    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
-        """Record the pre-dispatch claim unless another run already owns it."""
-        if self.drive_green_learn_terminal(issue_number) or issue_number in self.learn_claims:
-            return False
-        self.learn_claims.add(issue_number)
-        self._log("claim_drive_green_learn", issue_number, pr_number)
-        return True
-
-    def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
-        """Mirror post_merge_processor.mark_drive_green_learn_result [durable]."""
-        self.learn_results[issue_number] = succeeded
-        self.learn_claims.discard(issue_number)
-        self._log("mark_drive_green_learn_result", issue_number, succeeded)
-
     def ensure_state_labels(self) -> None:
         """Mirror the repo-stage label-vocabulary ensure (records mutation)."""
         self._log("ensure_state_labels")
@@ -810,11 +792,48 @@ def _budget_fn(name: str) -> int:
     return 1
 
 
+class FakeSourceWorkspaceManager:
+    """Return explicit source bindings for tests that do not run a provider."""
+
+    def __init__(self, repo_root: Path = Path("/tmp/repo"), repository: str = "test-repo") -> None:
+        """Set the repository identity used by each test binding."""
+        self.repo_root = repo_root
+        self.repository = repository
+
+    def prepare_bounded(
+        self,
+        item_number: int,
+        lane: SourceLane,
+        revision: str,
+        *,
+        branch: str | None = None,
+        deadline: _PreparationDeadline | None = None,
+    ) -> WorkspaceBinding:
+        """Return a complete binding without Git or provider execution."""
+        return WorkspaceBinding.source(
+            cwd=self.repo_root
+            / "build"
+            / ".worktrees"
+            / source_worktree_name(item_number, lane.value),
+            reusable_root=self.repo_root,
+            repository=self.repository,
+            ownership_key=f"{self.repository}:test:{item_number}:{lane.value}",
+            item_number=item_number,
+            lane=lane,
+            revision=revision,
+            generation=1,
+            detached=branch is None,
+        )
+
+
 class _Paths:
-    """Path accessor stub for stage tests."""
+    """Supply an explicit source manager for stage tests."""
 
     repo_root = "/tmp/repo"
     worktree = "/tmp/repo/worktree"
+
+    def __init__(self) -> None:
+        self.source_workspaces = FakeSourceWorkspaceManager()
 
 
 @pytest.fixture
@@ -894,6 +913,10 @@ def make_work_item() -> Callable[..., WorkItem]:
             item.labels_cache = dict.fromkeys(labels, True)
         if payload:
             item.payload = payload
+        if not any(
+            key in item.payload for key in ("_synced_default_branch_sha", "_direct_scope_base_sha")
+        ):
+            item.payload["_synced_default_branch_sha"] = "a" * 40
         # Direct EVAL unit tests model a review job that has already crossed
         # the checkout barrier. Integration walks still install this proof only
         # after the barrier completes.

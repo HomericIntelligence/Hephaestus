@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import re
 import subprocess
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 
@@ -39,6 +42,53 @@ class SourceLane(StrEnum):
 
     IMPLEMENTATION = "impl"
     REVIEW = "review"
+
+
+@dataclass(frozen=True, slots=True)
+class DirtySourceOperation:
+    """Keep the exact scope and host pins for one dirty source operation."""
+
+    kind: Literal["inspect", "test-fix", "rebase-conflict"]
+    allowed_paths: tuple[str, ...] = ()
+    content_snapshot: tuple[tuple[str, str], ...] = ()
+    paused_head_sha: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject an unknown operation or incomplete source pins."""
+        if self.kind not in {"inspect", "test-fix", "rebase-conflict"}:
+            raise ValueError("dirty source operation is invalid")
+        if (
+            not isinstance(self.allowed_paths, tuple)
+            or len(set(self.allowed_paths)) != len(self.allowed_paths)
+            or any(
+                not isinstance(path, str)
+                or not path
+                or "\0" in path
+                or PurePosixPath(path).is_absolute()
+                or PurePosixPath(path).as_posix() != path
+                or ".." in PurePosixPath(path).parts
+                for path in self.allowed_paths
+            )
+            or (self.kind != "inspect" and not self.allowed_paths)
+        ):
+            raise ValueError("dirty source file scope is invalid")
+        if (self.kind in {"inspect", "rebase-conflict"} or self.content_snapshot) and (
+            set(dict(self.content_snapshot))
+            != {"index_sha256", "worktree_sha256", "untracked_sha256"}
+            or len(self.content_snapshot) != 3
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None for _, digest in self.content_snapshot
+            )
+        ):
+            raise ValueError("dirty source content pins are invalid")
+        if self.kind == "rebase-conflict":
+            if (
+                self.paused_head_sha is None
+                or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.paused_head_sha) is None
+            ):
+                raise ValueError("paused rebase pins are invalid")
+        elif self.paused_head_sha is not None:
+            raise ValueError("dirty source operation has unrelated rebase pins")
 
 
 _SOURCE_TOOLS = frozenset({"Read", "Glob", "Grep", "Write", "Edit", "Bash", "Agent"})
@@ -308,14 +358,22 @@ def _validate_shape(binding: WorkspaceBinding) -> None:
         raise WorkspaceBindingError("source workspace binding is incomplete")
 
 
-def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+def _run_git(
+    cwd: Path,
+    *args: str,
+    check: bool = True,
+    remaining_timeout: Callable[[], float],
+    shutdown: threading.Event | None,
+) -> subprocess.CompletedProcess[str]:
+    return run_subprocess(
         ["git", *args],
         cwd=cwd,
         check=check,
-        capture_output=True,
-        text=True,
+        timeout=remaining_timeout(),
         env=build_git_child_env(),
+        log_on_error=False,
+        track_process_group=True,
+        shutdown=shutdown,
     )
 
 
@@ -347,32 +405,67 @@ def _dirty_workspace_permit(binding: WorkspaceBinding) -> Iterator[object]:
 
 
 def validate_workspace_binding(
-    binding: WorkspaceBinding, *, allowed_tools: str = "", dirty_permit: object | None = None
+    binding: WorkspaceBinding,
+    *,
+    allowed_tools: str = "",
+    dirty_permit: object | None = None,
+    remaining_timeout: Callable[[], float] | None = None,
+    shutdown: threading.Event | None = None,
+    expected_branch: str | None = None,
 ) -> Path:
     """Validate a binding immediately before an agent invocation.
 
     Returns the canonical directory on success. No source-capable invocation
     may proceed from a session-only directory or the reusable checkout.
     """
+    deadline = time.monotonic() + 45.0
+
+    def remaining() -> float:
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("workspace validation cancelled")
+        timeout = (
+            remaining_timeout() if remaining_timeout is not None else deadline - time.monotonic()
+        )
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired("workspace validation", 0)
+        return timeout
+
+    remaining()
     _validate_shape(binding)
-    if binding.schema_version == 2 and not any(
+    active_permit = any(
         record.active and record.permit is dirty_permit and record.binding is binding
         for record in _DIRTY_PERMITS.get()
-    ):
+    )
+    if binding.schema_version == 2 and not active_permit:
         raise WorkspaceBindingError("dirty workspace requires an active exact permit")
-    lexical = binding.cwd.absolute()
-    try:
-        canonical = binding.cwd.resolve(strict=True)
-    except OSError as exc:
-        raise WorkspaceBindingError(f"workspace does not exist: {binding.cwd}") from exc
-    if lexical != canonical:
-        raise WorkspaceBindingError(f"workspace path contains a symlink: {binding.cwd}")
-    requested_tools = {part.strip() for part in allowed_tools.split(",") if part.strip()}
-    if binding.kind is WorkspaceKind.SESSION_ONLY and requested_tools & _SOURCE_TOOLS:
-        raise WorkspaceBindingError("session-only workspace cannot grant a source-reading tool")
+    canonical = _workspace_canonical_path(binding, allowed_tools)
     if binding.kind is not WorkspaceKind.SOURCE:
         return canonical
 
+    revision = _validate_source_path(binding, canonical)
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return _run_git(
+            canonical, *args, check=check, remaining_timeout=remaining, shutdown=shutdown
+        )
+
+    top = Path(git("rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    if top != canonical:
+        raise WorkspaceBindingError("workspace is not a registered worktree root")
+    head = git("rev-parse", "HEAD").stdout.strip()
+    if head != revision:
+        raise WorkspaceBindingError(f"workspace revision changed: expected {revision}, got {head}")
+    status = git("status", "--porcelain", "--untracked-files=all").stdout
+    if status and not active_permit:
+        raise WorkspaceBindingError("source workspace is dirty")
+    symbolic = git("symbolic-ref", "-q", "HEAD", check=False)
+    _validate_workspace_branch(binding, symbolic, expected_branch=expected_branch)
+    remaining()
+    return canonical
+
+
+def _validate_source_path(binding: WorkspaceBinding, canonical: Path) -> str:
+    """Require a complete source identity at its canonical lane path."""
     reusable_root = binding.reusable_root
     item_number = binding.item_number
     lane = binding.lane
@@ -386,25 +479,37 @@ def validate_workspace_binding(
         raise WorkspaceBindingError(
             f"source workspace path must end in {expected_name!r}, got {canonical.name!r}"
         )
-    top = Path(_run_git(canonical, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
-    if top != canonical:
-        raise WorkspaceBindingError("workspace is not a registered worktree root")
-    head = _run_git(canonical, "rev-parse", "HEAD").stdout.strip()
-    if head != revision:
-        raise WorkspaceBindingError(f"workspace revision changed: expected {revision}, got {head}")
-    status = _run_git(canonical, "status", "--porcelain", "--untracked-files=all").stdout
-    if status and binding.schema_version != 2:
-        raise WorkspaceBindingError("source workspace is dirty")
-    _validate_workspace_branch(binding, canonical)
+
+    return revision
+
+
+def _workspace_canonical_path(binding: WorkspaceBinding, allowed_tools: str) -> Path:
+    """Reject path aliases and source tools in session-only workspaces."""
+    lexical = binding.cwd.absolute()
+    try:
+        canonical = binding.cwd.resolve(strict=True)
+    except OSError as exc:
+        raise WorkspaceBindingError(f"workspace does not exist: {binding.cwd}") from exc
+    if lexical != canonical:
+        raise WorkspaceBindingError(f"workspace path contains a symlink: {binding.cwd}")
+    requested_tools = {part.strip() for part in allowed_tools.split(",") if part.strip()}
+    if binding.kind is WorkspaceKind.SESSION_ONLY and requested_tools & _SOURCE_TOOLS:
+        raise WorkspaceBindingError("session-only workspace cannot grant a source-reading tool")
     return canonical
 
 
-def _validate_workspace_branch(binding: WorkspaceBinding, canonical: Path) -> None:
+def _validate_workspace_branch(
+    binding: WorkspaceBinding,
+    symbolic: subprocess.CompletedProcess[str],
+    *,
+    expected_branch: str | None = None,
+) -> None:
     """Check attached branch identity before a source invocation."""
-    symbolic = _run_git(canonical, "symbolic-ref", "-q", "HEAD", check=False)
     if binding.dirty_claim is not None and symbolic.stdout.strip() != (
         f"refs/heads/{binding.dirty_claim.branch}"
     ):
         raise WorkspaceBindingError("dirty workspace branch changed")
     if binding.detached != (symbolic.returncode != 0):
         raise WorkspaceBindingError("workspace detached/branch state changed")
+    if expected_branch is not None and symbolic.stdout.strip() != f"refs/heads/{expected_branch}":
+        raise WorkspaceBindingError("workspace branch changed")

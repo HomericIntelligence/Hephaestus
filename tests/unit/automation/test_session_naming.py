@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,44 +12,17 @@ import pytest
 
 from hephaestus.automation import agent_config
 from hephaestus.automation.session_naming import (
-    AGENT_ADDRESS_REVIEW,
-    AGENT_ADVISE,
-    AGENT_CI_DRIVER,
+    AGENT_COMMIT_MESSAGE,
     AGENT_IMPLEMENTER,
-    AGENT_LEARNINGS,
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
     AGENT_PR_REVIEWER,
-    current_trunk_githash,
     resolve_session_jsonl_path,
     reviewer_agent,
     session_jsonl_path,
     session_name,
     session_uuid,
-    short_githash,
 )
-
-_GIT_REPO_ENV_KEYS = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-)
-
-
-def _git_test_env() -> dict[str, str]:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@t",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@t",
-    }
-    for key in _GIT_REPO_ENV_KEYS:
-        env.pop(key, None)
-    return env
 
 
 class TestReviewerAgent:
@@ -205,14 +176,11 @@ class TestSessionUUID:
 
     def test_each_agent_constant_yields_distinct_uuid(self) -> None:
         agents = [
+            AGENT_COMMIT_MESSAGE,
             AGENT_PLANNER,
             AGENT_PLAN_REVIEWER,
-            AGENT_ADVISE,
-            AGENT_LEARNINGS,
             AGENT_IMPLEMENTER,
             AGENT_PR_REVIEWER,
-            AGENT_ADDRESS_REVIEW,
-            AGENT_CI_DRIVER,
         ]
         uuids = {session_uuid("R", 1, a) for a in agents}
         assert len(uuids) == len(agents)
@@ -237,46 +205,6 @@ class TestSessionUUID:
             session_uuid("R", 1, AGENT_PLANNER, **bad_kwargs)
         with pytest.raises(TypeError):
             session_name("R", 1, AGENT_PLANNER, **bad_kwargs)
-
-
-@pytest.mark.requires_posix
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Creates a throwaway git repo via real `git init`/`git commit`; skipped on win32 (#742)",
-)
-class TestShortGithash:
-    """``git rev-parse --short=7 HEAD`` wrapper with graceful failure."""
-
-    def test_real_repo(self, tmp_path: Path) -> None:
-        env = _git_test_env()
-        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(tmp_path),
-                "commit",
-                "--allow-empty",
-                "-m",
-                "x",
-                "--no-gpg-sign",
-            ],
-            check=True,
-            env=env,
-        )
-        h = short_githash(tmp_path)
-        assert len(h) == 7
-        assert h != "unknown"
-        assert all(c in "0123456789abcdef" for c in h)
-
-    def test_missing_repo_returns_unknown(self, tmp_path: Path) -> None:
-        assert short_githash(tmp_path) == "unknown"
-
-    def test_ignores_outer_git_dir_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GIT_DIR", str(Path.cwd() / ".git"))
-        assert short_githash(tmp_path) == "unknown"
 
 
 class TestSessionJsonlPath:
@@ -509,58 +437,6 @@ class TestSessionJsonlPath:
             expected = min(paths, key=str)
             assert resolve_session_jsonl_path(sid, repo_root) == expected
             assert resolve_session_jsonl_path(sid, worktree_b) == expected
-
-
-@pytest.mark.requires_posix
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Creates a throwaway git repo via real `git init`/`git commit`; skipped on win32 (#742)",
-)
-class TestCurrentTrunkGithash:
-    """``current_trunk_githash`` uses explicit context or live rev-parse."""
-
-    def test_explicit_trunk_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HEPH_TRUNK_GITHASH", "deadbee")
-        # tmp_path is not a git repo; if the env var weren't honored we'd get
-        # "unknown" from the fallback.
-        assert current_trunk_githash(tmp_path, trunk_githash="deadbee") == "deadbee"
-
-    def test_falls_back_to_short_githash(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("HEPH_TRUNK_GITHASH", raising=False)
-        env = _git_test_env()
-        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(tmp_path),
-                "commit",
-                "--allow-empty",
-                "-m",
-                "x",
-                "--no-gpg-sign",
-            ],
-            check=True,
-            env=env,
-        )
-        h = current_trunk_githash(tmp_path)
-        assert len(h) == 7
-        assert h != "unknown"
-
-    def test_no_env_no_repo_returns_unknown(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("HEPH_TRUNK_GITHASH", raising=False)
-        assert current_trunk_githash(tmp_path) == "unknown"
-
-    def test_empty_env_var_falls_back(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An empty HEPH_TRUNK_GITHASH must fall back, not propagate ``""``."""
-        monkeypatch.setenv("HEPH_TRUNK_GITHASH", "")
-        assert current_trunk_githash(tmp_path) == "unknown"
 
 
 def test_distinct_literal_models_have_distinct_session_keys() -> None:

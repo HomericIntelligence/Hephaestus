@@ -7,11 +7,9 @@ import json
 import logging
 import re
 import subprocess
-import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import hephaestus.automation.github_api as github_api
 from hephaestus.automation._review_utils import (
@@ -22,7 +20,6 @@ from hephaestus.automation._review_utils import (
     get_pr_head_branch,
     has_exact_closing_line,
 )
-from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.github_api.graphql import (
@@ -68,10 +65,9 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
-from .operation_deadlines import PipelineGitHubDeadlineMixin
+from .operation_deadlines import GitHubCommandRunner, PipelineGitHubDeadlineMixin
 from .pipeline_github_contract import _PipelineGitHubHost
 
-# ruff: noqa: F811
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 type _Scalar = int | str
@@ -108,58 +104,21 @@ def _parse_included_http_response(
     return (status, parsed, False) if isinstance(parsed, dict) else (status, None, True)
 
 
-def rate_limit_remaining(*, timeout: int | None = None) -> tuple[int, int] | None:
-    """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or ``None``.
-
-    Feeds the coordinator's non-blocking rate gate. A blocking *sleeping* guard
-    would be fatal for a single coordinator thread, so the pipeline timer-parks
-    instead (see ``coordinator._rate_budget_ok``).
-    """
+def rate_limit_remaining(*, call: GitHubCommandRunner) -> tuple[int, int] | None:
+    """Read quota facts through the caller's bounded command runner."""
     try:
-        out = gh_call(["api", "rate_limit"], timeout=timeout)
+        out = call(["api", "rate_limit"])
     except (subprocess.SubprocessError, RuntimeError, OSError):
         return None
     try:
         data = json.loads(out.stdout)
         gql = data["resources"]["graphql"]
-        return int(gql["remaining"]), int(gql["reset"])
+        remaining, reset = gql["remaining"], gql["reset"]
+        if any(type(value) is not int or value < 0 for value in (remaining, reset)):
+            return None
+        return remaining, reset
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
         return None
-
-
-def rate_budget_ok(
-    now_epoch: float | None = None,
-    *,
-    enabled: bool = True,
-    threshold: int = 200,
-    timeout: int | None = None,
-) -> tuple[bool, float]:
-    """Non-blocking GraphQL rate-budget gate for the coordinator.
-
-    Args:
-        now_epoch: Current epoch seconds (injectable for tests).
-
-    Returns:
-        ``(ok, park_delay_s)``. ``ok`` is False when the GraphQL budget is
-        below the explicit threshold (default 200) and the guard is enabled;
-        ``park_delay_s`` is the
-        seconds until the upstream reset (+5s slack, mirroring the legacy
-        guard), 0.0 when ``ok``.
-
-    """
-    if not enabled:
-        return True, 0.0
-    rl = rate_limit_remaining(timeout=timeout)
-    if rl is None:
-        return True, 0.0
-    remaining, reset_epoch = rl
-    if remaining >= threshold:
-        return True, 0.0
-    now = time.time() if now_epoch is None else now_epoch
-    return False, max(0.0, reset_epoch - now + 5.0)
-
-
-_rate_budget_ok_impl = rate_budget_ok
 
 
 def _with_severity_marker(comment: dict[str, Any]) -> str:
@@ -189,34 +148,6 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
     return "\n".join([f"[Review] {body}", *markers])
 
 
-def _compat(name: str) -> Any:
-    facade = sys.modules.get("hephaestus.automation.pipeline_github")
-    return getattr(
-        facade or __import__("hephaestus.automation.pipeline_github", fromlist=["*"]), name
-    )
-
-
-class _CompatCallable:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return _compat(self.name)(*args, **kwargs)
-
-
-gh_call = _CompatCallable("gh_call")
-close_issue_as_covered = _CompatCallable("close_issue_as_covered")
-find_merged_closing_pr = _CompatCallable("find_merged_closing_pr")
-find_merged_pr_for_issue = _CompatCallable("find_merged_pr_for_issue")
-get_pr_head_branch = _CompatCallable("get_pr_head_branch")
-issue_auto_impl_branch_name = _CompatCallable("issue_auto_impl_branch_name")
-file_lock = _CompatCallable("file_lock")
-if TYPE_CHECKING:
-    rate_budget_ok = _rate_budget_ok_impl
-else:  # pragma: no cover - runtime seam exercised by coordinator tests
-    rate_budget_ok = cast(Callable[[], tuple[bool, float]], _CompatCallable("rate_budget_ok"))
-
-
 class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
     """Provide repository-scoped GitHub reads and guarded mutations."""
 
@@ -228,6 +159,7 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
         dry_run: bool = False,
         repo_root: Path | None = None,
         gh_timeout: int = 120,
+        command_runner: GitHubCommandRunner | None = None,
     ) -> None:
         """Initialize the accessor.
 
@@ -237,8 +169,7 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
                 org-only form is retained solely for discovery setup; review
                 thread reads and all mutations require a concrete repository.
             dry_run: When True, every mutator logs-and-skips.
-            repo_root: Repo checkout root anchoring the drive-green arming
-                state dir (defaults to the current working directory).
+            repo_root: Repository checkout root for current journals.
             gh_timeout: Maximum seconds for one GitHub CLI operation.
 
         """
@@ -247,7 +178,7 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
         self.dry_run = dry_run
         self._repo_root = repo_root or Path.cwd()
         self._gh_timeout = gh_timeout
-        self._arming = ArmingStateStore(lambda: ensure_state_dir(self._repo_root))
+        self._command_runner = command_runner if command_runner is not None else gh_call
         self._viewer_login_cache: str | None = None
 
     @property
@@ -264,9 +195,7 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
 
     def _viewer_login(self) -> str:
         """Return the authenticated actor used to own mutable journal comments."""
-        return self._deadline_viewer_login(
-            lambda: github_api.gh_current_login(timeout=self._gh_timeout) or ""
-        )
+        return self._deadline_viewer_login()
 
     def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool:
         """Fail closed unless GitHub proves the current actor authored a comment."""
@@ -410,15 +339,15 @@ __all__ = [
     'SCOPE_RETRACTION_MARKER_PREFIX', 'SEVERITY_MARKER_PREFIX', 'SKIP_REASON_MARKER',
     'STATE_IMPLEMENTATION_GO', 'STATE_IMPLEMENTATION_NO_GO', 'STATE_LABEL_SPECS', 'STATE_SKIP',
     'VALID_SEVERITIES', '_CLOSES_ISSUE_LINE_RE', '_FULL_COMMIT_SHA_RE', '_HTTP_STATUS_RE',
-    '_IMPLEMENTATION_REPLY_BODY_RE', '_STANDALONE_VERDICT_LINE_RE', 'Any', 'ArmingStateStore',
+    '_IMPLEMENTATION_REPLY_BODY_RE', '_STANDALONE_VERDICT_LINE_RE', 'Any',
     'ConditionalMergeResult', 'ImplementationThreadReplyResult', 'IssueComment',
     'LockUnavailableError', 'Path', 'PipelineGitHubTransport',
-    'ReviewerThreadReconciliationResult', '_CompatCallable', '_compat',
-    '_parse_included_http_response', '_rate_budget_ok_impl', '_with_severity_marker',
+    'ReviewerThreadReconciliationResult',
+    '_parse_included_http_response', '_with_severity_marker',
     'annotations', 'blocked_audit_recovery_body',
     'close_issue_as_covered', 'ensure_state_dir', 'file_lock', 'find_merged_closing_pr',
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
     'github_api', 'has_exact_closing_line', 'has_label', 'hashlib', 'is_implementation_go',
     'issue_auto_impl_branch_name', 'json', 'logger', 'logging', 'normalize_scope_retraction_paths',
-    'rate_budget_ok', 'rate_limit_remaining', 're', 'scope_retraction_marker', 'subprocess',
-    'sys', 'time']
+    'rate_limit_remaining', 're', 'scope_retraction_marker', 'subprocess',
+    'time']

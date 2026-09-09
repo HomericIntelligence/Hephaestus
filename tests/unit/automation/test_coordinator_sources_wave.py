@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -17,20 +18,22 @@ from hephaestus.automation.pipeline import (
     coordinator_types as coordinator_types,
     seeding as seeding_mod,
 )
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
+from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.requirements_recovery import evidence_digest
 from hephaestus.automation.review_journal import CommentJournalReadError
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 BASE_SHA = "a" * 40
 
 
-class _ImmediatePassStage:
+class _ImmediatePassStage(Stage):
     """Complete admitted planning work without an agent job."""
 
     def __init__(self, events: list[tuple[str, int]]) -> None:
@@ -82,7 +85,7 @@ def test_repo_source_isolates_issue_classification_failure_and_continues(
         return _planning_facts(issue)
 
     monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
     github = FakeStageGitHub(labels=["state:needs-plan"])
@@ -96,7 +99,7 @@ def test_repo_source_isolates_issue_classification_failure_and_continues(
             projects_dir=tmp_path,
         ),
         github=github,
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
@@ -124,7 +127,8 @@ def test_repo_source_iterator_failure_still_terminates_repository(
 ) -> None:
     """A page-fetch failure remains one terminal repository-source failure."""
 
-    def broken_source(_org: str, _repo: str) -> Any:
+    def broken_source(_org: str, _repo: str, *, shutdown: Event, network_timeout: float) -> Any:
+        del shutdown, network_timeout
         yield {"number": 471, "labels": ["state:needs-plan"], "title": "first"}
         raise RuntimeError("page fetch failed")
 
@@ -144,7 +148,7 @@ def test_repo_source_iterator_failure_still_terminates_repository(
             projects_dir=tmp_path,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage([])
@@ -186,7 +190,7 @@ def test_repo_source_github_read_failure_terminates_repository(
         raise read_error
 
     monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", fail_read)
     coordinator = Coordinator(
@@ -199,7 +203,7 @@ def test_repo_source_github_read_failure_terminates_repository(
             projects_dir=tmp_path,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
 
@@ -239,12 +243,12 @@ def test_explicit_issue_classification_failure_stays_fail_closed(
             projects_dir=tmp_path,
         ),
         github=github,
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", reject)
     coordinator._begin_direct_issue_source("repo-a", BASE_SHA)
@@ -275,7 +279,7 @@ def test_repo_source_does_not_misclassify_queue_failure_as_issue_failure(
             projects_dir=tmp_path,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     source = coordinator_types._ActiveRepoIssueSource(
@@ -324,12 +328,12 @@ def test_lease_backed_direct_exclusion_reaches_finished_and_records_failure(
     coordinator = Coordinator(
         config,
         github=github,
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     coordinator._direct_wave_lease = lease
     coordinator._begin_direct_issue_source("repo-a", BASE_SHA)
@@ -380,12 +384,12 @@ def test_lease_backed_non_code_intent_reenters_planning_for_label_repair(
     coordinator = Coordinator(
         config,
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     coordinator._direct_wave_lease = lease
     coordinator._begin_direct_issue_source("repo-a", BASE_SHA)
@@ -436,12 +440,12 @@ def test_lease_backed_retired_intent_projects_cleanup_provenance(
             labels=["state:skip", "epic"],
             issue_body="Implement the worker.",
         ),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     coordinator._direct_wave_lease = lease
     coordinator._begin_direct_issue_source("repo-a", BASE_SHA)

@@ -106,22 +106,6 @@ def test_resolve_agent_disable_pi_policy_fails_before_preflight(tmp_path: Path) 
         _RESOLVE_AGENT("pi", cwd=tmp_path, disable_pi_automation=True)
 
 
-def test_direct_agent_model_uses_only_explicit_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Removed environment names cannot influence provider model selection."""
-    monkeypatch.setenv("HEPH_PI_MODEL", "poison-pi")
-    monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "poison-phase")
-
-    for agent in agent_runtime.AGENT_CHOICES:
-        assert agent_runtime.direct_agent_model(agent, "explicit") == "explicit"
-        assert agent_runtime.direct_agent_model(agent, "") == ""
-        expected = ""
-        assert (
-            agent_runtime.direct_agent_model(agent, None, codex_default="established") == expected
-        )
-
-
 def test_removed_codex_grace_environment_has_no_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -141,7 +125,9 @@ def test_provider_child_environments_are_named_allowlists(
     monkeypatch.setenv("ANTHROPIC_API_KEY", expected)
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-leak")
 
-    claude = agent_runtime._claude_child_env()
+    from hephaestus.config.child_environments import build_claude_child_env
+
+    claude = build_claude_child_env()
     codex = agent_runtime._codex_child_env()
 
     for name in ("GH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "UNRELATED_SECRET"):

@@ -4,22 +4,17 @@ from __future__ import annotations
 
 import math
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from concurrent.futures import CancelledError
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Protocol, cast
+from threading import Event
+from typing import Any, Protocol
 
-from hephaestus.utils.file_lock import LockUnavailableError
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
-
-def _transport_seams(instance: object) -> Any:
-    """Return the composed adapter's patchable module seams."""
-    for base in type(instance).__mro__:
-        if base.__module__.endswith(".pipeline_github_transport"):
-            return sys.modules[base.__module__]
-    raise RuntimeError("GitHub deadline host has no transport seam")
+type GitHubCommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def operation_deadline_after(timeout_s: int | float) -> float:
@@ -37,9 +32,19 @@ def operation_deadline_after(timeout_s: int | float) -> float:
 class OperationDeadlineHost(Protocol):
     """Declare deadline operations used by composed GitHub collaborators."""
 
-    def _deadline_gh_call(
-        self, argv: list[str], **kwargs: Any
-    ) -> subprocess.CompletedProcess[str]: ...
+    _operation_deadline_s: float | None
+    _operation_shutdown: Event | None
+
+    def operation_deadline(
+        self, deadline_s: float, *, shutdown: Event | None = None
+    ) -> AbstractContextManager[None]:
+        """Keep an existing deadline and cancellation signal for this request."""
+        ...
+
+    def _operation_timeout(self, requested_s: int | float | None = None) -> float | None: ...
+
+    def _deadline_gh_call(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Run the command with the supplied process controls."""
 
     def _operation_file_lock(self, path: Path, *, require_exclusive: bool = False) -> Any: ...
 
@@ -49,10 +54,14 @@ class PipelineGitHubDeadlineMixin:
 
     _gh_timeout: int
     _operation_deadline_s: float | None = None
+    _operation_shutdown: Event | None = None
     _viewer_login_cache: str | None
+    _command_runner: GitHubCommandRunner
 
     @contextmanager
-    def operation_deadline(self, deadline_s: float) -> Iterator[None]:
+    def operation_deadline(
+        self, deadline_s: float, *, shutdown: Event | None = None
+    ) -> Iterator[None]:
         """Apply one absolute monotonic deadline to this operation."""
         if (
             isinstance(deadline_s, bool)
@@ -62,17 +71,23 @@ class PipelineGitHubDeadlineMixin:
         ):
             raise ValueError("deadline_s must be a finite positive monotonic time")
         prior = self._operation_deadline_s
-        self._operation_deadline_s = float(deadline_s)
+        prior_shutdown = self._operation_shutdown
+        self._operation_deadline_s = min(prior, deadline_s) if prior is not None else deadline_s
+        self._operation_shutdown = shutdown if shutdown is not None else prior_shutdown
         try:
+            self._operation_timeout()
             yield
         finally:
             self._operation_deadline_s = prior
+            self._operation_shutdown = prior_shutdown
 
     def _operation_timeout(self, requested_s: int | float | None = None) -> float | None:
         """Return the bounded time that remains before the operation deadline."""
+        if self._operation_shutdown is not None and self._operation_shutdown.is_set():
+            raise CancelledError("GitHub operation was cancelled")
         if self._operation_deadline_s is None:
             return float(requested_s) if requested_s is not None else None
-        now = cast(float, _transport_seams(self).time.monotonic())
+        now = time.monotonic()
         remaining_s = self._operation_deadline_s - now
         if remaining_s <= 0:
             raise subprocess.TimeoutExpired("GitHub operation deadline", 0)
@@ -81,24 +96,26 @@ class PipelineGitHubDeadlineMixin:
     def _deadline_gh_call(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         """Run one GitHub CLI child within the active operation deadline."""
         kwargs["timeout"] = self._operation_timeout(kwargs.get("timeout", self._gh_timeout))
-        return cast(
-            subprocess.CompletedProcess[str],
-            _transport_seams(self).gh_call(argv, **kwargs),
+        deadline = self._operation_deadline_s
+        if deadline is None:
+            deadline = operation_deadline_after(kwargs["timeout"] or self._gh_timeout)
+        requested_deadline = kwargs.get("deadline_s")
+        kwargs["deadline_s"] = (
+            min(deadline, requested_deadline) if requested_deadline is not None else deadline
         )
+        kwargs["max_retries"] = 1
+        kwargs["retry_on_rate_limit"] = False
+        if self._operation_shutdown is not None:
+            kwargs["shutdown"] = self._operation_shutdown
+        return self._command_runner(argv, **kwargs)
 
-    def _deadline_viewer_login(self, fallback: Callable[[], str]) -> str:
+    def _deadline_viewer_login(self) -> str:
         """Return the cached actor login within the active operation deadline."""
         if self._viewer_login_cache is None:
-            if self._operation_deadline_s is None:
-                self._viewer_login_cache = fallback()
-            else:
-                result = self._deadline_gh_call(
-                    ["api", "user", "--jq", ".login"],
-                    check=False,
-                )
-                self._viewer_login_cache = (
-                    (result.stdout or "").strip() if result.returncode == 0 else ""
-                )
+            result = self._deadline_gh_call(["api", "user", "--jq", ".login"], check=False)
+            self._viewer_login_cache = (
+                (result.stdout or "").strip() if result.returncode == 0 else ""
+            )
         if not self._viewer_login_cache:
             raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
         return self._viewer_login_cache
@@ -108,23 +125,26 @@ class PipelineGitHubDeadlineMixin:
         self, path: Path, *, require_exclusive: bool = False
     ) -> Iterator[None]:
         """Acquire one file lock without waiting past the operation deadline."""
-        if self._operation_deadline_s is None:
-            with _transport_seams(self).file_lock(path, require_exclusive=require_exclusive):
-                yield
-            return
+        deadline = self._operation_deadline_s or operation_deadline_after(self._gh_timeout)
         while True:
-            remaining_s = cast(float, self._operation_timeout())
+            self._operation_timeout()
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                raise subprocess.TimeoutExpired("GitHub file lock deadline", 0)
             stack = ExitStack()
             try:
                 stack.enter_context(
-                    _transport_seams(self).file_lock(
-                        path, blocking=False, require_exclusive=require_exclusive
-                    )
+                    file_lock(path, blocking=False, require_exclusive=require_exclusive)
                 )
             except LockUnavailableError:
                 stack.close()
-                _transport_seams(self).time.sleep(min(0.05, remaining_s))
+                delay = min(0.05, remaining_s)
+                if self._operation_shutdown is None:
+                    time.sleep(delay)
+                else:
+                    self._operation_shutdown.wait(delay)
                 continue
             with stack:
+                self._operation_timeout()
                 yield
                 return

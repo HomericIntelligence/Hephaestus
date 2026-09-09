@@ -42,18 +42,17 @@ re-pointed at the pipeline (#1820):
   ``prompts/planning.py get_plan_loop_review_prompt``,
   ``prompts/planning.py get_plan_prompt`` (composed with the reviewer
   feedback block by :func:`build_amend_prompt` for amends, then
-  upserted as the durable plan comment before the next review), and
-  ``learn.py build_learn_prompt`` (GO only).
-- Current plan and review comments are actor-owned canonical records. Replaced
-  revisions are append-once GitHub comments, and their plan record carries the
-  next-plan recovery payload so restart can finish an interrupted journal
-  transition before another agent runs.
+  upserted as the durable plan comment before the next review).
+- Current plan and review comments are actor-owned canonical records. Restart
+  repairs a missing pending review from the current plan before another job.
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hephaestus.agents.execution_policy import (
@@ -72,8 +71,11 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
-from hephaestus.automation.arming_state import LearningJournalStore
-from hephaestus.automation.comment_identity import validate_planning_body_for_write
+from hephaestus.automation.comment_identity import (
+    CommentAliasConflictError,
+    validate_planning_body_for_write,
+)
+from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
@@ -148,10 +150,9 @@ def _restore_reviewer_selection(
     reviewer_config: dict[str, object],
 ) -> str:
     """Restore structured direct-provider model metadata from the journal."""
-    if (
-        agent_uses_configured_model_default(provider)
-        and reviewer_config.get("model_selection_format") == _MODEL_SELECTION_FORMAT
-    ):
+    if agent_uses_configured_model_default(provider):
+        if reviewer_config.get("model_selection_format") != _MODEL_SELECTION_FORMAT:
+            raise PlanReviewSessionLostError("reviewer model selection format is invalid")
         effort = reviewer_config.get("reasoning_effort", "")
         if not isinstance(effort, str):
             raise PlanReviewSessionLostError("reviewer reasoning effort is invalid")
@@ -172,6 +173,40 @@ AMEND_WAIT = "AMEND_WAIT"
 #: Bounds the in-stage ERROR retry loop without burning ``plan_review_iter``
 #: or stamping labels (#911). Reset whenever a real verdict arrives.
 REVIEW_ERROR_RETRY_CAP = 2
+
+
+@dataclass(frozen=True)
+class _AcceptedPlanReview:
+    """Keep one review identity and its publication progress."""
+
+    verdict: ReviewVerdict
+    revision: int
+    fingerprint: str
+    charged_round: int | None = None
+    comment_published: bool = False
+    label_proposed: bool = False
+
+
+def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
+    """Bound consecutive reviewer failures without charging a plan revision."""
+    retries = int(item.payload.get("review_error_retries", 0)) + 1
+    item.payload["review_error_retries"] = retries
+    if retries > REVIEW_ERROR_RETRY_CAP:
+        logger.error("plan_review:%s: reviewer failures exhausted: %s", item.issue, reason)
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"reviewer error retries exhausted ({reason})",
+        )
+    logger.warning(
+        "plan_review:%s: %s; retry %d/%d",
+        item.issue,
+        reason,
+        retries,
+        REVIEW_ERROR_RETRY_CAP,
+    )
+    item.state = REVIEW_WAIT
+    return StageOutcome(Disposition.RETRY, reason)
+
 
 _PLAN_REVIEW_LABELS = {
     STATE_PLAN_GO: "GO",
@@ -222,12 +257,12 @@ def _normalize_review_comment(review: str, *, revision: int | None = None) -> st
     return render_current_review(review, revision=revision or 1)
 
 
-def _current_revision(comments: Sequence[IssueComment | str]) -> int:
+def _current_revision(comments: Sequence[IssueComment]) -> int:
     """Recover the current plan revision from durable issue comments."""
     return journal_snapshot(comments).revision
 
 
-def _plan_history(comments: Sequence[IssueComment | str]) -> str:
+def _plan_history(comments: Sequence[IssueComment]) -> str:
     """Return a bounded prior-plan excerpt for a resumed planner amendment."""
     return current_plan_context(comments)
 
@@ -356,32 +391,35 @@ def _restore_review_conversation(
 
 
 def _restart_review_conversation(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-    """Replace a lost local session after the admitted plan was validated.
-
-    A provider session is process-local evidence, not an approval record.  The
-    current canonical plan was reconciled on stage admission, so a lost or
-    corrupt local transcript can safely start a new cycle without changing
-    GitHub labels.  The old record is retained for audit by the session store.
-    """
+    """Replace a lost session within the current review failure budget."""
     if item.issue is None:
         return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
-    plan_text = str(item.payload.get("plan_text") or "")
-    revision = int(item.payload.get("plan_revision") or 0)
-    if not plan_text or revision < 1:
+    if STATE_PLAN_BLOCKED in _require_issue_labels(item, ctx):
+        return StageOutcome(Disposition.BLOCKED, "plan is blocked pending external intervention")
+    failure = _reviewer_failure(item, "review-session-lost")
+    if failure.disposition is Disposition.FINISH_FAIL:
+        return failure
+    snapshot = journal_snapshot(reconcile_plan_journal(item.issue, ctx.github))
+    if not snapshot.current_plan:
         return StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+    item.payload["plan_text"] = snapshot.current_plan
+    item.payload["plan_revision"] = snapshot.revision
+    item.payload.pop("prior_review", None)
+    if snapshot.current_review_revision == snapshot.revision:
+        item.payload["prior_review"] = snapshot.current_review
     ctx.plan_review_session_resets.add(item.issue)
     outcome = _restore_review_conversation(
         item,
         ctx,
-        plan_text=plan_text,
-        revision=revision,
+        plan_text=snapshot.current_plan,
+        revision=snapshot.revision,
         has_prior_review=True,
     )
     if outcome is not None:
         return outcome
     item.payload.pop("review_session_error", None)
     item.payload.pop("review_verdict", None)
-    item.payload["review_round"] = 0
+    item.payload.pop("accepted_plan_review", None)
     return None
 
 
@@ -667,13 +705,10 @@ class PlanReviewStage(Stage):
                 plan_text=snapshot.current_plan,
                 revision=snapshot.revision,
                 has_prior_review=(
-                    any(artifact.kind == "review" for artifact in snapshot.history)
-                    or (
-                        bool(snapshot.current_review)
-                        and not is_pending_review(
-                            snapshot.current_review,
-                            revision=snapshot.current_review_revision or snapshot.revision,
-                        )
+                    bool(snapshot.current_review)
+                    and not is_pending_review(
+                        snapshot.current_review,
+                        revision=snapshot.current_review_revision or snapshot.revision,
                     )
                 ),
             )
@@ -767,7 +802,7 @@ class PlanReviewStage(Stage):
             # Clear any stale verdict at submission so a failed later round
             # can never replay an earlier round's verdict in EVAL.
             item.payload.pop("review_verdict", None)
-            item.payload.pop("review_comment_published", None)
+            item.payload.pop("accepted_plan_review", None)
             logger.info(
                 "plan_review:%d: requesting review job cycle=%s session=%s round=%d revision=%s",
                 item.issue,
@@ -795,7 +830,7 @@ class PlanReviewStage(Stage):
                     else stage_model(ctx, "reviewer", reviewer_model)
                 ),
                 prompt_builder=get_plan_loop_review_prompt,
-                cwd=workspace.cwd if workspace else ctx.paths.worktree,
+                cwd=workspace.cwd,
                 timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",
@@ -868,7 +903,7 @@ class PlanReviewStage(Stage):
             return JobRequest(job, on_done_state="EVAL")
 
         if item.state == "EVAL":
-            return self._eval(item, ctx)
+            return self._publish_accepted_review(item, ctx)
 
         if item.state == "AMEND_WAIT":
             logger.info("plan_review:%d: requesting amend job", item.issue)
@@ -879,7 +914,7 @@ class PlanReviewStage(Stage):
                 agent=agent_provider(ctx, "planner"),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_amend_prompt,
-                cwd=workspace.cwd if workspace else ctx.paths.worktree,
+                cwd=workspace.cwd,
                 timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",
@@ -916,50 +951,53 @@ class PlanReviewStage(Stage):
         logger.warning("plan_review:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
-    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """EVAL [M]: decide the next action from the parsed reviewer verdict.
+    def _publish_accepted_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Retry bounded publication failures with the same accepted verdict."""
+        try:
+            outcome = self._eval(item, ctx)
+        except CommentAliasConflictError:
+            raise
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            if not isinstance(item.payload.get("accepted_plan_review"), _AcceptedPlanReview):
+                raise
+            logger.warning("plan_review:%s: publication failed: %s", item.issue, exc)
+            outcome = StageOutcome(Disposition.RETRY, "review publication failed")
+        if (
+            isinstance(outcome, StageOutcome)
+            and outcome.disposition is Disposition.RETRY
+            and item.state == EVAL
+            and isinstance(item.payload.get("accepted_plan_review"), _AcceptedPlanReview)
+        ):
+            retries = int(item.payload.get("review_publication_retries", 0)) + 1
+            item.payload["review_publication_retries"] = retries
+            if retries > REVIEW_ERROR_RETRY_CAP:
+                return StageOutcome(Disposition.FINISH_FAIL, "review publication retries exhausted")
+            item.payload["retry_delay_s"] = float(2 ** (retries - 1))
+        return outcome
 
-        Every durable label write below happens BEFORE the outcome that
-        causes a queue push (the load-bearing pipeline invariant). Both
-        iteration counters (lifetime ``attempts["plan_review_iter"]`` audit
-        trail and cycle-relative ``payload["review_round"]`` gate) advance
-        here, and only for real verdicts — never for ERROR or missing
-        verdicts (#911/#1554/#1794).
-        """
+    def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Publish one accepted review without charging its retries again."""
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         issue_number = item.issue
-        verdict = item.payload.get("review_verdict")
-
-        # ERROR verdict or missing verdict (the review job failed, so
-        # on_job_done stored nothing) = reviewer-infrastructure failure:
-        # labels untouched, no iteration burned, RETRY — bounded by the
-        # consecutive-failure cap so the retry loop cannot spin forever.
-        if verdict is None or verdict.verdict not in {"GO", "NOGO", "BLOCKED"}:
-            reason = "no verdict found" if verdict is None else "reviewer error"
-            retries = item.payload.get("review_error_retries", 0) + 1
-            item.payload["review_error_retries"] = retries
-            if retries > REVIEW_ERROR_RETRY_CAP:
-                logger.error(
-                    "plan_review:%d: %s; %d consecutive reviewer failures "
-                    "(cap %d) — failing without labels",
-                    item.issue,
-                    reason,
-                    retries,
-                    REVIEW_ERROR_RETRY_CAP,
-                )
-                return StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    f"reviewer error retries exhausted ({reason})",
-                )
-            logger.warning(
-                "plan_review:%d: %s; retry %d/%d (no iteration burned)",
-                item.issue,
-                reason,
-                retries,
-                REVIEW_ERROR_RETRY_CAP,
-            )
-            return StageOutcome(Disposition.RETRY, reason)
+        verdict = item.payload.pop("review_verdict", None)
+        review = item.payload.get("accepted_plan_review")
+        if verdict is not None:
+            if not isinstance(verdict, ReviewVerdict) or verdict.verdict not in {
+                "GO",
+                "NOGO",
+                "BLOCKED",
+            }:
+                item.payload.pop("accepted_plan_review", None)
+                return _reviewer_failure(item, "reviewer error")
+            plan_text = str(item.payload.get("plan_text") or "")
+            revision = int(item.payload.get("plan_revision") or 0)
+            review = _AcceptedPlanReview(verdict, revision, plan_fingerprint(plan_text))
+            item.payload["accepted_plan_review"] = review
+            item.payload.pop("review_publication_retries", None)
+        if not isinstance(review, _AcceptedPlanReview):
+            return _reviewer_failure(item, "no verdict found")
+        verdict = review.verdict
 
         # An operator may apply BLOCKED while the reviewer agent is running.
         # Re-read immediately before any audit or label write; automation must
@@ -971,30 +1009,15 @@ class PlanReviewStage(Stage):
                 "plan was blocked externally while review was in flight",
             )
 
-        # Re-read on every verdict replay. A completed comment write can be
-        # replayed after a crash, but it must not make a conflicting journal
-        # eligible for a later label mutation.
-        current_revision = _current_revision(ctx.github.issue_comments(issue_number))
-
-        # Real verdict: this review round counts. Advance the cycle-relative
-        # gate and the lifetime audit trail; reset the consecutive-failure cap.
-        item.payload["review_error_retries"] = 0
-        round_done = item.payload.get("review_round", 0) + 1
-        item.payload["review_round"] = round_done
-        item.attempts["plan_review_iter"] = item.attempts.get("plan_review_iter", 0) + 1
-
-        def publish_review_comment() -> None:
-            """Idempotently update the explanatory journal after safe state ordering."""
-            if item.payload.get("review_comment_published"):
-                return
-            revision = int(item.payload.get("plan_revision") or current_revision)
-            ctx.github.upsert_issue_comment(
-                issue_number,
-                PLAN_REVIEW_CANONICAL_MARKER,
-                _normalize_review_comment(verdict.raw, revision=revision),
-            )
-            item.payload["review_comment_published"] = True
-
+        if identity_outcome := self._review_identity_outcome(item, ctx, review):
+            return identity_outcome
+        if review.charged_round is None:
+            round_done = int(item.payload.get("review_round", 0)) + 1
+            review = replace(review, charged_round=round_done)
+            item.payload["accepted_plan_review"] = review
+            item.payload["review_round"] = round_done
+            item.attempts["plan_review_iter"] = item.attempts.get("plan_review_iter", 0) + 1
+            item.payload["review_error_retries"] = 0
         if verdict.verdict == "BLOCKED":
             # BLOCKED is the safety latch. Make it durable first so an audit
             # write failure cannot resume autonomous work; the retry still
@@ -1003,20 +1026,43 @@ class PlanReviewStage(Stage):
 
         # GO/NOGO audit text is durable before its proposed label. Regardless
         # of prose, only the confirmed exclusive label below can route.
-        publish_review_comment()
+        if not review.comment_published:
+            ctx.github.upsert_issue_comment(
+                issue_number,
+                PLAN_REVIEW_CANONICAL_MARKER,
+                _normalize_review_comment(verdict.raw, revision=review.revision),
+            )
+            review = replace(review, comment_published=True)
+            item.payload["accepted_plan_review"] = review
+        if identity_outcome := self._review_identity_outcome(item, ctx, review):
+            return identity_outcome
 
         if verdict.is_go:
-            return self._complete_go(item, ctx)
+            return self._complete_go(item, ctx, review)
+        return self._complete_nogo(item, ctx, review)
+
+    def _complete_nogo(
+        self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
+    ) -> StepResult:
+        """Confirm NOGO and apply the remaining review and plan budgets."""
+        assert item.issue is not None  # noqa: S101 - EVAL validates the issue
+        round_done = review.charged_round
+        assert round_done is not None  # noqa: S101 - EVAL charges the review
+        verdict = review.verdict
 
         # Every NOGO is durable control state, including rounds that can still
         # amend. The replacement plan publication transitions back to
         # state:needs-plan only after both canonical comments are updated.
+        review = replace(review, label_proposed=True)
+        item.payload["accepted_plan_review"] = review
         self._write_verdict_labels(item.issue, ctx, is_go=False)
         if not is_exclusive_plan_state(
             _require_issue_labels(item, ctx),
             STATE_PLAN_NO_GO,
         ):
             return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
+        if identity_outcome := self._review_identity_outcome(item, ctx, review):
+            return identity_outcome
 
         # NOGO: amend within the cycle-relative budget.
         budget_iter = ctx.budget("plan_review_iter")
@@ -1052,6 +1098,38 @@ class PlanReviewStage(Stage):
             )
             return StageOutcome(Disposition.FAIL_BACK, "plan_cycles_exhausted")
         return StageOutcome(Disposition.FAIL_BACK, "nogo")
+
+    @staticmethod
+    def _review_identity_outcome(
+        item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
+    ) -> StageOutcome | None:
+        """Reject a changed plan and remove any label this result proposed."""
+        assert item.issue is not None  # noqa: S101 - EVAL validates the issue
+        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
+        if (
+            snapshot.current_plan
+            and snapshot.revision == review.revision
+            and plan_fingerprint(snapshot.current_plan) == review.fingerprint
+        ):
+            return None
+        labels = _require_issue_labels(item, ctx)
+        if STATE_PLAN_BLOCKED in labels:
+            return StageOutcome(
+                Disposition.BLOCKED, "plan is blocked pending external intervention"
+            )
+        if review.label_proposed:
+            add, remove = enter_planning_transition()
+            ctx.github.edit_labels(item.issue, add=add, remove=remove)
+            labels = _require_issue_labels(item, ctx)
+            if STATE_PLAN_BLOCKED in labels:
+                return StageOutcome(
+                    Disposition.BLOCKED, "plan is blocked pending external intervention"
+                )
+            if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
+                return StageOutcome(Disposition.RETRY, "changed plan state was not confirmed")
+        return StageOutcome(
+            Disposition.FAIL_BACK, "plan_changed" if snapshot.current_plan else "plan_missing"
+        )
 
     def _complete_blocked(self, item: WorkItem, ctx: StageContext) -> StageOutcome:
         """Apply and confirm BLOCKED before returning its routing outcome."""
@@ -1090,10 +1168,11 @@ class PlanReviewStage(Stage):
             PLAN_REVIEW_CANONICAL_MARKER,
             comment_body,
         )
-        item.payload["review_comment_published"] = True
         return outcome
 
-    def _complete_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _complete_go(
+        self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
+    ) -> StepResult:
         """Apply GO, record auxiliary learning, and release the main stage."""
         assert item.issue is not None  # noqa: S101 - _eval narrows the issue
         logger.info("plan_review:%d: GO verdict; applying label and advancing", item.issue)
@@ -1114,12 +1193,16 @@ class PlanReviewStage(Stage):
                     identity=intent.journal_identity(),
                 )
             item.learning_resume_stage = StageName.IMPLEMENTATION
+        review = replace(review, label_proposed=True)
+        item.payload["accepted_plan_review"] = review
         self._write_verdict_labels(item.issue, ctx, is_go=True)
         if not is_exclusive_plan_state(
             _require_issue_labels(item, ctx),
             STATE_PLAN_GO,
         ):
             return StageOutcome(Disposition.RETRY, "plan-go label was not confirmed")
+        if identity_outcome := self._review_identity_outcome(item, ctx, review):
+            return identity_outcome
         _complete_review_cycle(item, ctx)
         return StageOutcome(Disposition.ADVANCE, "plan approved")
 

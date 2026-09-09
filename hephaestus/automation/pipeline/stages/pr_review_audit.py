@@ -10,6 +10,30 @@ from .pr_review_threads import *
 class PrReviewAudit:
     """Persist and publish clean-review audits without repeating review work."""
 
+    @staticmethod
+    def _require_current_audit(item: WorkItem) -> Continue | None:
+        """Require active review evidence before a publication retry can advance."""
+        audit = item.payload.get("pending_implementation_go_audit")
+        head_sha = item.payload.get("pending_implementation_go_audit_head")
+        if (
+            is_clean_go_review(audit)
+            and item.payload.get("review_audit") is audit
+            and is_full_commit_sha(head_sha)
+            and item.payload.get("reviewed_pr_head_sha") == head_sha
+        ):
+            return None
+        # Keep the durable record. A new review can replace or reconcile it,
+        # but that record cannot restore this process's review evidence.
+        for key in (
+            "pending_implementation_go_audit",
+            "pending_implementation_go_audit_head",
+            "pending_implementation_go_label_confirmed",
+            "implementation_go_audit_retries",
+        ):
+            item.payload.pop(key, None)
+        _clear_round_review_state(item)
+        return Continue(next_state=ENTER)
+
     def _handle_clean_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Enter the durable audit receipt state after a clean structural proof."""
         if item.pr is None or item.issue is None:
@@ -44,6 +68,8 @@ class PrReviewAudit:
 
     def _go_audit_receipt(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Persist the exact-head audit before applying the GO label."""
+        if recovery := self._require_current_audit(item):
+            return recovery
         if item.pr is None or item.issue is None:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
@@ -60,7 +86,6 @@ class PrReviewAudit:
             )
             item.state = GO_AUDIT_RECEIPT
             return self._audit_retry(item, reason="implementation_go_audit_receipt_retry")
-        item.payload["reviewed_pr_head_sha"] = head_sha
         outcome = self._write_go(item, ctx)  # type: ignore[attr-defined]
         if isinstance(outcome, StageOutcome) and outcome.disposition is Disposition.ADVANCE:
             item.payload["implementation_go_audit_retries"] = 0
@@ -76,6 +101,8 @@ class PrReviewAudit:
 
     def _go_audit_publish(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Reconcile the public audit without repeating review or label writes."""
+        if recovery := self._require_current_audit(item):
+            return recovery
         if item.pr is None or item.issue is None:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")

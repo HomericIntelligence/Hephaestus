@@ -1,13 +1,11 @@
 """Pure model and rendering helpers for canonical plan-review comments.
 
-The latest plan and latest review are the only automation comments retained on
-the linked issue, while mutually-exclusive ``state:*`` labels remain the
-authoritative pipeline state. Legacy history parsers remain for safe migration.
+The current plan and review supply the active journal. Exclusive ``state:*``
+labels control the pipeline state. Retired archives supply no current authority.
 """
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
@@ -60,8 +58,6 @@ PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
 #: so legacy superseded artifacts cannot compete with active feedback.
 MAX_CURRENT_REVISION_CONTEXT_CHARS: Final[int] = 12_000
 
-_OLD_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:old-plan -->"
-_NEW_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:new-plan -->"
 _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
@@ -132,38 +128,16 @@ class PlanDiscoveryResult:
 
 
 @dataclass(frozen=True)
-class HistoryArtifact:
-    """One legacy superseded plan or review comment awaiting compaction."""
-
-    revision: int
-    kind: str
-    body: str
-
-
-@dataclass(frozen=True)
 class JournalSnapshot:
-    """Current canonical artifacts plus any legacy history found on GitHub."""
+    """Current canonical comments and their bounded plan metadata."""
 
     revision: int
     current_plan: str
     current_review: str
     current_review_revision: int | None
-    history: tuple[HistoryArtifact, ...]
     prior_plan_fingerprints: tuple[str, ...] = ()
     forced_planning_epoch: bool = False
     recovery_source_digest: str | None = None
-
-
-def as_issue_comment(comment: IssueComment | str) -> IssueComment:
-    """Coerce legacy body-only tests/callers into an automation-owned comment."""
-    if isinstance(comment, IssueComment):
-        return comment
-    return IssueComment(body=comment, viewer_did_author=True)
-
-
-def comment_body(comment: IssueComment | str) -> str:
-    """Return a comment body from structured or legacy input."""
-    return as_issue_comment(comment).body
 
 
 def is_plan_comment(body: str) -> bool:
@@ -425,7 +399,7 @@ def render_pending_review(*, revision: int) -> str:
 
 
 def blocked_audit_recovery_body(
-    comments: Sequence[IssueComment | str],
+    comments: Sequence[IssueComment],
 ) -> str | None:
     """Return an actionable repair body when BLOCKED lacks a current explanation.
 
@@ -502,117 +476,34 @@ def plan_fingerprint(plan: str) -> str:
     return hashlib.sha256(normalized_plan(plan).encode("utf-8")).hexdigest()
 
 
-def archive_plan_body(revision: int, old_plan: str, new_plan: str) -> str:
-    """Render the retired history format for migration compatibility tests."""
-    old_payload = extract_current_plan(old_plan)
-    new_payload = extract_current_plan(new_plan)
-    diff = (
-        "\n".join(
-            difflib.unified_diff(
-                old_payload.splitlines(),
-                new_payload.splitlines(),
-                fromfile=f"Plan {revision}",
-                tofile=f"Plan {revision + 1}",
-                lineterm="",
-            )
-        )
-        or "_(no textual changes)_"
-    )
-    marker = HISTORY_MARKER.format(revision=revision, kind="plan")
-    return (
-        f"{marker}\n## Previous Implementation Plan — Revision {revision}\n\n"
-        f"### Changes from Revision {revision} to Revision {revision + 1}\n\n"
-        f"```diff\n{diff}\n```\n\n"
-        f"### Complete Plan {revision}\n\n{_OLD_PLAN_PAYLOAD}\n{old_payload}\n\n"
-        f"### Recovery Payload for Plan {revision + 1}\n\n"
-        f"{_NEW_PLAN_PAYLOAD}\n{new_payload}"
-    )
-
-
-def archive_review_body(revision: int, review: str) -> str:
-    """Render the retired review-history format for migration compatibility."""
-    marker = HISTORY_MARKER.format(revision=revision, kind="review")
-    return (
-        f"{marker}\n## Review of Previous Plan — Revision {revision}\n\n"
-        f"{extract_current_review(review)}"
-    )
-
-
-def archived_new_plan(body: str) -> str:
-    """Recover the proposed next plan from an immutable plan-history comment."""
-    _before, marker, payload = body.partition(_NEW_PLAN_PAYLOAD)
-    return payload.strip() if marker else ""
-
-
-def archived_old_plan(body: str) -> str:
-    """Recover the superseded plan from an immutable plan-history comment."""
-    _before, marker, payload = body.partition(_OLD_PLAN_PAYLOAD)
-    if not marker:
-        return ""
-    old_plan, _new_marker, _new_plan = payload.partition(_NEW_PLAN_PAYLOAD)
-    old_plan = re.sub(
-        r"\n\n### Recovery Payload for Plan \d+\s*$",
-        "",
-        old_plan,
-    )
-    return old_plan.strip()
-
-
-def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
-    """Reconstruct current plan/review and ordered legacy history."""
-    normalized_comments = [as_issue_comment(comment) for comment in comments]
+def journal_snapshot(comments: Sequence[IssueComment]) -> JournalSnapshot:
+    """Read current canonical comments with explicit ownership metadata."""
+    if any(not isinstance(comment, IssueComment) for comment in comments):
+        raise TypeError("journal comments require explicit ownership metadata")
     validate_planning_comment_identities(
-        normalized_comments,
+        comments,
         body_of=lambda comment: comment.body,
         owned_of=lambda comment: comment.viewer_did_author,
     )
-    owned = [comment for comment in normalized_comments if comment.viewer_did_author]
-    history: list[HistoryArtifact] = []
-    history_bodies: dict[tuple[int, str], str] = {}
     current_plan_body = ""
     current_review_body = ""
-    for comment in owned:
-        # Canonical journal markers are opaque protocol tokens.  Treating a
-        # whitespace-prefixed token as canonical would let inert prose alter
-        # the durable timeline reconstruction.
-        body = comment.body
-        match = HISTORY_RE.match(body)
-        if match:
-            identity = (int(match.group("revision")), match.group("kind"))
-            prior_body = history_bodies.get(identity)
-            if prior_body is not None and prior_body != body:
-                raise RuntimeError(
-                    "conflicting immutable plan journal artifacts for "
-                    f"revision {identity[0]} {identity[1]}; manual recovery is required"
-                )
-            history_bodies[identity] = body
-            history.append(
-                HistoryArtifact(
-                    revision=identity[0],
-                    kind=identity[1],
-                    body=body,
-                )
-            )
-        elif is_plan_comment(body):
-            current_plan_body = body
-        elif is_plan_review_comment(body):
-            current_review_body = body
-
-    archived_max = max((artifact.revision for artifact in history), default=0)
-    explicit_revision = comment_revision(current_plan_body) if current_plan_body else None
-    revision = explicit_revision or max(1, archived_max + 1)
+    for comment in comments:
+        if not comment.viewer_did_author:
+            continue
+        if is_plan_comment(comment.body):
+            current_plan_body = comment.body
+        elif is_plan_review_comment(comment.body):
+            current_review_body = comment.body
+    revision = comment_revision(current_plan_body) if current_plan_body else None
     review_revision = comment_revision(current_review_body) if current_review_body else None
     current_plan, prior_fingerprints, forced_epoch, recovery_source = _current_plan_parts(
         current_plan_body
     )
-    if current_review_body and review_revision is None and archived_max == 0:
-        review_revision = revision
     return JournalSnapshot(
-        revision=revision,
+        revision=revision or 1,
         current_plan=current_plan if current_plan_body else "",
         current_review=(extract_current_review(current_review_body) if current_review_body else ""),
         current_review_revision=review_revision,
-        history=tuple(sorted(history, key=lambda item: (item.revision, item.kind != "plan"))),
         prior_plan_fingerprints=prior_fingerprints,
         forced_planning_epoch=forced_epoch,
         recovery_source_digest=recovery_source,
@@ -635,7 +526,7 @@ def _bounded_excerpt(text: str, max_chars: int) -> str:
 
 
 def current_plan_context(
-    comments: Sequence[IssueComment | str],
+    comments: Sequence[IssueComment],
     *,
     max_chars: int = MAX_CURRENT_REVISION_CONTEXT_CHARS,
 ) -> str:
@@ -660,14 +551,14 @@ def current_plan_context(
 
 
 def current_revision_context(
-    comments: Sequence[IssueComment | str],
+    comments: Sequence[IssueComment],
     *,
     max_chars: int = MAX_CURRENT_REVISION_CONTEXT_CHARS,
 ) -> str:
     """Return bounded current plan context while preserving its paired review.
 
     Superseded plan/review artifacts are deliberately excluded because they
-    contain stale, mutually incompatible critique and are removed by migration.
+    can contain stale critique. Stored archive comments remain unchanged.
     When space is constrained, preserve the current review in full whenever
     possible and spend the remaining budget on a deterministic plan excerpt.
     """

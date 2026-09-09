@@ -41,16 +41,16 @@ operation_deadline = _git_runtime.operation_deadline
 remaining_operation_timeout = _git_runtime.remaining_operation_timeout
 
 
-class DetachedHeadPushError(RuntimeError):
-    """Base error for a failed lease-protected detached-head publication."""
+class BranchPublicationError(RuntimeError):
+    """Base error for branch publication with an exact remote lease."""
 
 
-class DetachedHeadPushRemoteHeadChangedError(DetachedHeadPushError):
-    """The remote branch changed after the reviewed-head proof was obtained."""
+class BranchPublicationRemoteHeadChangedError(BranchPublicationError):
+    """The remote branch no longer has the expected commit."""
 
     def __init__(
         self,
-        message: str = "Detached review push observed a different remote head",
+        message: str = "Branch publication observed a different remote head",
         *,
         failure_kind: str = "remote_head_changed",
     ) -> None:
@@ -59,12 +59,12 @@ class DetachedHeadPushRemoteHeadChangedError(DetachedHeadPushError):
         self.failure_kind = failure_kind
 
 
-class DetachedHeadPushRemoteHeadUnchangedError(DetachedHeadPushError):
-    """The detached push failed while the remote branch still matched its proof."""
+class BranchPublicationRemoteHeadUnchangedError(BranchPublicationError):
+    """Publication failed while the remote branch retained its expected commit."""
 
     def __init__(
         self,
-        message: str = "Detached review push failed while the remote head remained unchanged",
+        message: str = "Branch publication failed while the remote head remained unchanged",
         *,
         failure_kind: str = "remote_head_unchanged",
     ) -> None:
@@ -73,12 +73,12 @@ class DetachedHeadPushRemoteHeadUnchangedError(DetachedHeadPushError):
         self.failure_kind = failure_kind
 
 
-class DetachedHeadPushRemoteProbeError(DetachedHeadPushError):
-    """The remote branch could not be checked after a detached push failure."""
+class BranchPublicationRemoteProbeError(BranchPublicationError):
+    """The remote branch could not be checked after publication failed."""
 
     def __init__(
         self,
-        message: str = "Detached review push failed and the remote head could not be verified",
+        message: str = "Branch publication failed and the remote head could not be verified",
         *,
         failure_kind: str = "remote_probe_failed",
     ) -> None:
@@ -607,7 +607,7 @@ def push_head_to_branch(
     expected_remote_sha: str,
     worktree_path: Path,
     *,
-    source_sha: str | None = None,
+    source_sha: str,
     timeout: int | None = None,
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
@@ -615,21 +615,16 @@ def push_head_to_branch(
     disable_hooks: bool = False,
     remote: str = "origin",
 ) -> None:
-    """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
+    """Publish an exact writer commit with the expected remote branch lease.
 
-    Direct PR review uses a detached, isolated worktree so it can never reset
-    or remove a writer checkout. Addressing commits therefore live on its
-    detached ``HEAD`` rather than on the local branch ref. The explicit lease
-    permits an address agent to rebase onto current main while refusing to
-    overwrite a PR head that changed after its reviewed-head proof.
+    The caller supplies the immutable source commit and the expected remote
+    commit. After a failed push, read the remote branch to find whether the
+    source commit was published or the remote branch changed.
 
-    Set ``disable_hooks`` only for a host-validated recovery commit. This adds
-    one command-scope null hook path before the lease-protected push.
-
-    Set ``remote`` to a literal trusted URL when mutable repository remote
-    configuration must not select the destination.
+    Set ``disable_hooks`` only for a recovery commit that the host validated.
+    This adds a null hook path for one command. Set ``remote`` to a trusted
+    literal URL when repository configuration must not select the destination.
     """
-    source_ref = source_sha or "HEAD"
     run_kwargs = _timeout_kw(timeout)
     if env is not None:
         run_kwargs["env"] = env
@@ -643,12 +638,14 @@ def push_head_to_branch(
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 remote,
-                f"{source_ref}:refs/heads/{branch_name}",
+                f"{source_sha}:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
             **run_kwargs,
         )
-        logger.info("Published detached HEAD to the trusted remote branch %s", branch_name)
+        logger.info(
+            "Published the exact source commit to the trusted remote branch %s", branch_name
+        )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         # The rejected push can be a local pre-push-hook failure, transport
         # failure, or a server-side lease rejection.  Never infer which from
@@ -673,22 +670,20 @@ def push_head_to_branch(
                 **run_kwargs,
             ).stdout.split()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as probe_exc:
-            raise DetachedHeadPushRemoteProbeError(
-                "Detached review push failed and the remote head could not be verified",
+            raise BranchPublicationRemoteProbeError(
+                "Branch publication failed and the remote head could not be verified",
                 failure_kind=(
                     "timeout" if isinstance(probe_exc, subprocess.TimeoutExpired) else "transport"
                 ),
             ) from probe_exc
-        if source_sha is not None and observed and observed[0] == source_sha:
-            # A transport error can arrive after receive-pack accepted this
-            # exact immutable source commit. The intended remote state is
-            # already present, so treating it as drift would needlessly start
-            # a second review and preserve a checkout that was published.
-            logger.info("Detached review commit was published before the push result was lost")
+        if observed and observed[0] == source_sha:
+            # A transport error can arrive after the server accepts the exact
+            # source commit. The remote branch already has the required state.
+            logger.info("The source commit was published before the push result was lost")
             return
         if not observed or observed[0] != expected_remote_sha:
-            raise DetachedHeadPushRemoteHeadChangedError(
-                "Detached review push observed a different remote head",
+            raise BranchPublicationRemoteHeadChangedError(
+                "Branch publication observed a different remote head",
                 failure_kind="lease_drift",
             ) from exc
         if isinstance(exc, subprocess.TimeoutExpired):
@@ -704,8 +699,8 @@ def push_head_to_branch(
             failure_kind = "unknown"
         else:
             failure_kind = "transport"
-        raise DetachedHeadPushRemoteHeadUnchangedError(
-            "Detached review push failed while the remote head remained unchanged",
+        raise BranchPublicationRemoteHeadUnchangedError(
+            "Branch publication failed while the remote head remained unchanged",
             failure_kind=failure_kind,
         ) from exc
 

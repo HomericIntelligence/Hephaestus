@@ -29,13 +29,19 @@ import hephaestus.automation.pipeline.stages.base as stage_base_mod
 import hephaestus.automation.pipeline.stages.pr_review as pr_review_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
 import hephaestus.prompts.catalog as prompt_catalog_mod
+from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_NO_GO, STATE_PLAN_GO
 from hephaestus.prompts import PromptCatalog
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    claim_test_item,
+    fake_worker_factories,
+    script_source_passes,
+)
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 Coordinator = coordinator_mod.Coordinator
-PipelineConfig = coordinator_mod.PipelineConfig
+PipelineConfig = coordinator_types_mod.PipelineConfig
 _budget_lookup = coordinator_types_mod._budget_lookup
 run_pipeline = coordinator_mod.run_pipeline
 
@@ -79,17 +85,22 @@ def _coordinator(
     coordinator_kwargs: dict[str, Any] | None = None,
     **config_overrides: Any,
 ) -> Coordinator:
-    config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path, **config_overrides)
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
+    config_overrides.setdefault("rate_guard_enabled", False)
+    config = PipelineConfig(
+        org="org",
+        repos=["repo-a"],
+        projects_dir=tmp_path,
+        **config_overrides,
+    )
     coordinator_kwargs = coordinator_kwargs or {}
     coordinator = Coordinator(
         config,
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
         **coordinator_kwargs,
     )
-    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+    script_source_passes(coordinator, monkeypatch, [seed or []])
     return coordinator
 
 
@@ -103,6 +114,8 @@ def _complete_direct_scope_bootstrap(coordinator: Coordinator) -> None:
     coordinator._drain_queues()
     coordinator._drain_completions()
     coordinator._drain_completions()
+    coordinator._drain_direct_pr_source()
+    coordinator._drain_direct_issue_source()
 
 
 class TestWiring:
@@ -138,7 +151,7 @@ class TestWiring:
             def __init__(self, *, gh_extra_path_root: Path | None = None) -> None:
                 created["athena_gh_extra_path_root"] = gh_extra_path_root
 
-        class SpyPool:
+        class SpyPool(FakeWorkerPool):
             def __init__(
                 self,
                 size: int,
@@ -154,6 +167,7 @@ class TestWiring:
                 host_verification_pyxis_authority: Path | None = None,
                 host_verification_pyxis_quota_root: Path | None = None,
             ) -> None:
+                super().__init__(size=size, shutdown=shutdown, completion_q=completion_q)
                 created["size"] = size
                 created["shutdown"] = shutdown
                 created["completion_q"] = completion_q
@@ -179,6 +193,7 @@ class TestWiring:
             max_workers=4,
             projects_dir=tmp_path,
             gh_extra_path_root=gh_root,
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
@@ -208,7 +223,9 @@ class TestWiring:
             MagicMock(return_value=accessor),
         )
         monkeypatch.setattr(coordinator_mod.Coordinator, "run", lambda self: 7)
-        config = PipelineConfig(org="org", repos=["r"], dry_run=True, projects_dir=tmp_path)
+        config = PipelineConfig(
+            org="org", repos=["r"], dry_run=True, projects_dir=tmp_path, rate_guard_enabled=False
+        )
 
         assert run_pipeline(config) == 7
 
@@ -237,7 +254,11 @@ class TestWiring:
 
         try:
             with pytest.raises(SystemExit) as exc_info:
-                run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+                run_pipeline(
+                    PipelineConfig(
+                        org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False
+                    )
+                )
         finally:
             PromptCatalog.clear_current()
 
@@ -261,7 +282,11 @@ class TestWiring:
 
         try:
             with pytest.raises(SystemExit) as exc_info:
-                run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+                run_pipeline(
+                    PipelineConfig(
+                        org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False
+                    )
+                )
         finally:
             PromptCatalog.clear_current()
 
@@ -282,7 +307,11 @@ class TestWiring:
         coordinator_factory, github_factory = self._stub_pipeline_runtime(monkeypatch)
 
         with pytest.raises(SystemExit, match="uv sync") as exc_info:
-            run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+            run_pipeline(
+                PipelineConfig(
+                    org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False
+                )
+            )
 
         assert exc_info.value.__cause__ is failure
         github_factory.assert_not_called()
@@ -299,7 +328,11 @@ class TestWiring:
         coordinator_factory, github_factory = self._stub_pipeline_runtime(monkeypatch)
 
         with pytest.raises(TemplateSyntaxError) as exc_info:
-            run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+            run_pipeline(
+                PipelineConfig(
+                    org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False
+                )
+            )
 
         assert exc_info.value is failure
         github_factory.assert_not_called()
@@ -320,12 +353,13 @@ class TestWiring:
             repos=["target-repo"],
             projects_dir=tmp_path / "projects",
             repo_roots={"target-repo": checkout},
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
             github_factory=github_factory,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
@@ -343,9 +377,9 @@ class TestWiring:
 
     def test_step_with_watchdog_uses_stage_step_result_contract(self) -> None:
         """The watchdog wrapper should preserve the stage step result union."""
-        assert hasattr(coordinator_mod, "StageStepResult")
+        assert hasattr(coordinator_types_mod, "StageStepResult")
         hints = get_type_hints(Coordinator._step_with_watchdog)
-        assert hints["return"] is coordinator_mod.StageStepResult
+        assert hints["return"] is coordinator_types_mod.StageStepResult
 
 
 class TestExitCode:
@@ -529,9 +563,11 @@ class TestCompletionEdges:
         pool.queue_result(JobResult(ok=True, value="out", duration_s=2.5))
         item = _item()
         item.state = "PLAN_WAIT"
-        coordinator._submit(item, JobRequest(_agent_job(), on_done_state="VERIFY"))
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(), on_done_state="VERIFY")
+        )
 
-        class RecordStage:
+        class RecordStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -557,9 +593,11 @@ class TestCompletionEdges:
         pool = coordinator.pool
         assert isinstance(pool, FakeWorkerPool)
         item = _item()
-        coordinator._submit(item, JobRequest(_agent_job(), on_done_state="VERIFY"))
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(), on_done_state="VERIFY")
+        )
 
-        class PoisonStage:
+        class PoisonStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -586,7 +624,7 @@ class TestRunItemEdges:
     ) -> None:
         coordinator = _coordinator(tmp_path, monkeypatch)
 
-        class FastForwardStage:
+        class FastForwardStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return StageOutcome(Disposition.ADVANCE, "already plan-go")
 
@@ -610,7 +648,7 @@ class TestRunItemEdges:
         """A stage that only ever Continues trips the per-tick step bound."""
         coordinator = _coordinator(tmp_path, monkeypatch)
 
-        class SpinStage:
+        class SpinStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -623,7 +661,7 @@ class TestRunItemEdges:
         coordinator.stages[StageName.PLANNING] = SpinStage()
         item = _item()
 
-        coordinator._run_item(item)
+        coordinator._run_item(claim_test_item(coordinator, item))
 
         assert item.result is not None
         assert "exceeded" in item.result.reason
@@ -634,7 +672,7 @@ class TestRunItemEdges:
         coordinator = _coordinator(tmp_path, monkeypatch, dry_run=True)
         job = GitJob(repo="repo-a", op="rebase", timeout_s=5)  # no descr
 
-        class GitRequestingStage:
+        class GitRequestingStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -647,7 +685,7 @@ class TestRunItemEdges:
         coordinator.stages[StageName.PR_REVIEW] = GitRequestingStage()
 
         with caplog.at_level("INFO"):
-            coordinator._run_item(_item(stage=StageName.PR_REVIEW))
+            coordinator._run_item(claim_test_item(coordinator, _item(stage=StageName.PR_REVIEW)))
 
         assert any("[dry-run] would submit GitJob: GitJob" in r.message for r in caplog.records)
 
@@ -659,19 +697,18 @@ class TestSubmitEdges:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """M4: --phase-timeout bounds each queue-pipeline AGENT JOB."""
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline_github.rate_budget_ok",
-            lambda now_epoch=None: (True, 0.0),
-        )
         coordinator = _coordinator(tmp_path, monkeypatch, phase_timeout_s=1234.0)
         pool = coordinator.pool
         assert isinstance(pool, FakeWorkerPool)
 
-        coordinator._submit(_item(), JobRequest(_agent_job(), on_done_state="V"))
+        coordinator._submit(
+            claim_test_item(coordinator, _item()), JobRequest(_agent_job(), on_done_state="V")
+        )
 
         submitted = pool.submitted[0].job
         assert isinstance(submitted, AgentJob)
-        assert submitted.timeout_s == 1234
+        assert submitted.timeout_s == 10
+        assert submitted.deadline_s is not None
 
     def test_submit_preserves_implementation_codex_isolation_inputs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -695,7 +732,9 @@ class TestSubmitEdges:
             codex_isolation_deployment_lock_sha256=digest,
         )
 
-        coordinator._submit(_item(), JobRequest(job, on_done_state="V"))
+        coordinator._submit(
+            claim_test_item(coordinator, _item()), JobRequest(job, on_done_state="V")
+        )
 
         submitted = pool.submitted[0].job
         assert isinstance(submitted, AgentJob)
@@ -707,18 +746,17 @@ class TestSubmitEdges:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Only agent jobs are rate-gated; git jobs always submit."""
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline_github.rate_budget_ok",
-            lambda now_epoch=None: (False, 60.0),
-        )
-        coordinator = _coordinator(tmp_path, monkeypatch)
+        coordinator = _coordinator(tmp_path, monkeypatch, rate_guard_enabled=True)
         pool = coordinator.pool
         assert isinstance(pool, FakeWorkerPool)
         job = GitJob(repo="repo-a", op="clone", timeout_s=5, kwargs={"repo": "o/r", "dest": "d"})
 
-        coordinator._submit(_item(), JobRequest(job, on_done_state="D"))
+        coordinator._submit(
+            claim_test_item(coordinator, _item()), JobRequest(job, on_done_state="D")
+        )
 
         assert len(pool.submitted) == 1
+        assert pool.submitted[0].job is job
         assert coordinator.timers == []
 
     def test_compact_job_receives_pi_execution_configuration(
@@ -744,7 +782,9 @@ class TestSubmitEdges:
             timeout_s=10,
         )
 
-        coordinator._submit(_item(), JobRequest(job, on_done_state="V"))
+        coordinator._submit(
+            claim_test_item(coordinator, _item()), JobRequest(job, on_done_state="V")
+        )
 
         submitted = pool.submitted[0].job
         assert isinstance(submitted, CompactJob)
@@ -780,6 +820,7 @@ class TestSeedingEdges:
         coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
 
         coordinator._seed_pass()
+        coordinator._drain_repo_issue_sources()
 
         item = coordinator.queues[StageName.MERGE_WAIT].snapshot()[0]
         assert item.kind is ItemKind.PR and item.pr == 88 and item.repo == "repo-a"
@@ -800,6 +841,7 @@ class TestSeedingEdges:
         coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
 
         coordinator._seed_pass()
+        coordinator._drain_repo_issue_sources()
 
         item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
         assert item.kind is ItemKind.ISSUE
@@ -822,15 +864,15 @@ class TestSeedingEdges:
                 issues=[1818],
                 projects_dir=tmp_path,
                 explicit_pr_review=True,
+                rate_guard_enabled=False,
             ),
             github=github,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
 
         _complete_direct_scope_bootstrap(coordinator)
@@ -844,13 +886,8 @@ class TestSeedingEdges:
     ) -> None:
         """Direct --issues seeding must read the target repo, not ambient cwd state."""
         monkeypatch.setattr(
-            seeding_mod,
-            "seed_issue",
-            MagicMock(side_effect=AssertionError("ambient issue seeding called")),
-        )
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         target_github = FakeStageGitHub(
             labels=[STATE_PLAN_GO],
@@ -868,15 +905,15 @@ class TestSeedingEdges:
             repos=["target-repo"],
             issues=[1818],
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
             github_factory=github_factory,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
         _complete_direct_scope_bootstrap(coordinator)
 
@@ -891,11 +928,6 @@ class TestSeedingEdges:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Direct --prs seeding must read PR labels through the target repo accessor."""
-        monkeypatch.setattr(
-            seeding_mod,
-            "gh_pr_label_names",
-            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
-        )
         target_github = FakeStageGitHub(
             pr_impl_state=(True, False),
             pr_issue=1818,
@@ -912,15 +944,15 @@ class TestSeedingEdges:
             repos=["target-repo"],
             prs=[1854],
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
             github_factory=github_factory,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
         _complete_direct_scope_bootstrap(coordinator)
 
@@ -935,11 +967,6 @@ class TestSeedingEdges:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Direct --prs seeding preserves linked issue context for PR review."""
-        monkeypatch.setattr(
-            seeding_mod,
-            "gh_pr_label_names",
-            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
-        )
         target_github = FakeStageGitHub(pr_impl_state=(False, False), pr_issue=1818)
 
         def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
@@ -950,15 +977,15 @@ class TestSeedingEdges:
             repos=["target-repo"],
             prs=[1854],
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
             github_factory=github_factory,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
         _complete_direct_scope_bootstrap(coordinator)
 
@@ -972,11 +999,6 @@ class TestSeedingEdges:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Direct --prs seeding must not adopt a deleted branch for a merged PR."""
-        monkeypatch.setattr(
-            seeding_mod,
-            "gh_pr_label_names",
-            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
-        )
 
         class MergedPrGitHub(FakeStageGitHub):
             def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
@@ -995,15 +1017,15 @@ class TestSeedingEdges:
             repos=["target-repo"],
             prs=[2004],
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
             github_factory=github_factory,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
         assert coordinator.run() == 0
 
@@ -1018,11 +1040,6 @@ class TestSeedingEdges:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Direct --prs seeding must not adopt a deleted branch for a closed PR."""
-        monkeypatch.setattr(
-            seeding_mod,
-            "gh_pr_label_names",
-            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
-        )
 
         class ClosedPrGitHub(FakeStageGitHub):
             def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
@@ -1041,15 +1058,15 @@ class TestSeedingEdges:
             repos=["target-repo"],
             prs=[2004],
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
             github_factory=github_factory,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
         assert coordinator.run() == 1
 
@@ -1064,11 +1081,6 @@ class TestSeedingEdges:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A non-implementation-go direct PR must not enter review/merge scope."""
-        monkeypatch.setattr(
-            seeding_mod,
-            "gh_pr_label_names",
-            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
-        )
         target_github = FakeStageGitHub(pr_impl_state=(False, False), pr_issue=1818)
 
         def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
@@ -1080,15 +1092,15 @@ class TestSeedingEdges:
             prs=[1854],
             projects_dir=tmp_path,
             scope=routing_mod.PipelineScope(frozenset({StageName.MERGE_WAIT})),
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
             github_factory=github_factory,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
         assert coordinator.run() == 1
 
@@ -1097,33 +1109,17 @@ class TestSeedingEdges:
         assert not coordinator.ledger[0].passed
         assert "not ready for selected scope" in coordinator.ledger[0].reason
 
-    def test_repo_product_finished_entry_gets_pass_result(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A merged-PR product enters finished with an idempotent pass result."""
-        coordinator = _coordinator(tmp_path, monkeypatch)
-        repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
-        repo_item.payload["products"] = [
-            {"kind": "issue", "number": 1, "stage": StageName.FINISHED, "reason": "PR merged"}
-        ]
-
-        coordinator._seed_products(repo_item)
-
-        finished = coordinator.queues[StageName.FINISHED].snapshot()[0]
-        assert finished.result is not None and finished.result.passed
-        assert coordinator._pass_work_count == 0  # finished entries are not work
-
 
 class TestLivenessAndFatal:
     """Stall guard, grace expiry, fatal seeding errors."""
 
-    def test_stall_guard_force_runs_most_downstream_item(
+    def test_stall_guard_retries_normal_downstream_admission(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         coordinator = _coordinator(tmp_path, monkeypatch)
         ran: list[int] = []
 
-        class SinkStage:
+        class SinkStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -1172,13 +1168,13 @@ class TestLivenessAndFatal:
         coordinator = _coordinator(
             tmp_path,
             monkeypatch,
-            coordinator_kwargs={"stall_ticks_before_force": 1},
+            coordinator_kwargs={"stall_ticks_before_retry": 1},
         )
         ran: list[int] = []
 
-        assert coordinator._stall_ticks_before_force == 1
+        assert coordinator._stall_ticks_before_retry == 1
 
-        class SinkStage:
+        class SinkStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -1202,7 +1198,7 @@ class TestLivenessAndFatal:
 
         assert ran == [1]
 
-    def test_force_run_one_asserts_no_in_flight_work(
+    def test_retry_stalled_queues_asserts_no_in_flight_work(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The stall escape hatch must only run after the event loop is truly idle."""
@@ -1211,12 +1207,12 @@ class TestLivenessAndFatal:
         coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
         coordinator.in_flight[object()] = _item(2)  # type: ignore[index]
 
-        with pytest.raises(AssertionError, match="force-run requires no in-flight work"):
-            coordinator._force_run_one()
+        with pytest.raises(AssertionError, match="stalled retry requires no in-flight work"):
+            coordinator._retry_stalled_queues()
 
         assert coordinator.queues[StageName.MERGE_WAIT].snapshot() == [item]
 
-    def test_force_run_one_logs_inflight_per_repo_snapshot(
+    def test_retry_stalled_queues_logs_inflight_per_repo_snapshot(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1225,7 +1221,7 @@ class TestLivenessAndFatal:
         """A forced run should expose leaked per-repo slots in its diagnostic log."""
         coordinator = _coordinator(tmp_path, monkeypatch)
 
-        class SinkStage:
+        class SinkStage(Stage):
             def on_enter(self, i: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -1240,7 +1236,7 @@ class TestLivenessAndFatal:
         coordinator._push_item(_item(1, StageName.MERGE_WAIT), StageName.MERGE_WAIT, enter=False)
 
         with caplog.at_level("ERROR"):
-            coordinator._force_run_one()
+            coordinator._retry_stalled_queues()
 
         assert any("inflight_per_repo={'repo-a': 1}" in record.message for record in caplog.records)
 
@@ -1250,7 +1246,9 @@ class TestLivenessAndFatal:
         coordinator = _coordinator(tmp_path, monkeypatch)
         coordinator._progress = True
         coordinator._stalled_ticks = 2
-        coordinator._timer_park(_item(), 0.01)  # bounds the blocking wait
+        coordinator._timer_park(
+            claim_test_item(coordinator, _item()), 0.01
+        )  # bounds the blocking wait
 
         coordinator._idle_wait()
 
@@ -1262,6 +1260,7 @@ class TestLivenessAndFatal:
         """A graceful shutdown that outlives its grace window tears down."""
         coordinator = _coordinator(tmp_path, monkeypatch, grace_s=0.0)
         item = _item()
+        claim_test_item(coordinator, item)
         coordinator.in_flight[object()] = item  # type: ignore[index]
         coordinator.shutdown.set()
         coordinator._grace_deadline = 0.0  # already expired
@@ -1281,7 +1280,9 @@ class TestLivenessAndFatal:
         def boom(r: Any, i: Any, p: Any) -> Any:
             raise RuntimeError("gh exploded")
 
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", boom)
+        monkeypatch.setattr(
+            coordinator, "_begin_repo_entry_source", lambda _repos: boom(None, None, None)
+        )
 
         with caplog.at_level("INFO"):
             exit_code = coordinator.run()

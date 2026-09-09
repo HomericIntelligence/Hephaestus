@@ -10,8 +10,6 @@ import time
 from datetime import UTC, datetime
 from threading import Event
 
-import hephaestus.automation.github_api as github_api
-
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_commit_statuses import (
     _current_evidence_timestamp,
@@ -310,10 +308,12 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             if remaining <= 0:
                 return None
             page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
-            result = github_api.gh_call(
+            result = self._deadline_gh_call(
                 ["api", page_endpoint],
                 check=False,
                 timeout=min(float(self._gh_timeout), remaining),
+                deadline_s=deadline_s,
+                shutdown=cancellation,
             )
             if result.returncode != 0:
                 raise RuntimeError("GitHub returned an error for Check Runs")

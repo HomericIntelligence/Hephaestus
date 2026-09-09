@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from hephaestus.automation import loop_runner
+from hephaestus.automation import pipeline_cli as loop_runner
 
 ROOT = Path(__file__).parents[3]
 RUNTIME_ROOT = ROOT / "hephaestus"
@@ -65,7 +65,7 @@ def test_shared_subprocess_calls_always_supply_an_environment() -> None:
 
 def test_loop_cli_values_are_typed_and_override_defaults() -> None:
     """Representative model, timeout, rate, path, and provider values resolve once."""
-    args = loop_runner._build_parser().parse_args(
+    args = loop_runner.build_parser().parse_args(
         [
             "--planner-model",
             "planner-explicit",

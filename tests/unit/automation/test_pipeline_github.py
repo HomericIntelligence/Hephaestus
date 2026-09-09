@@ -12,12 +12,11 @@ import json
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
-from multiprocessing import get_context
 from pathlib import Path
-from time import sleep
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch
@@ -25,11 +24,13 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 import hephaestus.automation.github_api as github_api_mod
-import hephaestus.automation.pipeline_github as pg
+import hephaestus.automation.github_api.prs as prs_mod
+import hephaestus.automation.pipeline_github_mutations as mutations_mod
 import hephaestus.automation.pipeline_github_queries as queries_mod
 import hephaestus.automation.pipeline_github_required_checks as required_checks_mod
 import hephaestus.automation.pipeline_github_reviews as reviews_mod
 import hephaestus.automation.pipeline_github_transport as transport_mod
+from hephaestus.automation.github_api.graphql import GraphQLSpec
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
 )
@@ -42,6 +43,7 @@ from hephaestus.automation.pipeline.stages.base import (
     ImplementationReplyProgress,
     StageGitHub,
 )
+from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import (
     EffectiveMergePolicy,
     RequiredCheck,
@@ -74,9 +76,22 @@ from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_NO_GO,
 )
 from hephaestus.github.client import GitHubRateLimitError
-from hephaestus.utils.file_lock import LockUnavailableError
 
 _BATCH_NONCE = "b" * 32
+
+
+def _assert_bounded_command_kwargs(kwargs: Mapping[str, Any], started_at: float) -> None:
+    """Check the deadline and retry bounds for one command."""
+    assert 0 < kwargs["timeout"] <= 120
+    assert started_at < kwargs["deadline_s"] <= time.monotonic() + 120
+    assert kwargs["max_retries"] == 1
+    assert kwargs["retry_on_rate_limit"] is False
+
+
+def _viewer_login_command(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    """Return the current actor for the expected login command."""
+    assert argv == ["api", "user", "--jq", ".login"]
+    return subprocess.CompletedProcess(argv, 0, stdout="bot\n", stderr="")
 
 
 def _recovery_body(version: int = 3) -> str:
@@ -725,7 +740,7 @@ def test_merge_cycle_rechecks_final_admission_after_check_traversal(
     assert receipt.attempted is False
 
 
-class PipelineGitHubForTest(pg.PipelineGitHub):
+class PipelineGitHubForTest(PipelineGitHub):
     """Production adapter with an explicit test-only operation nonce default."""
 
     def _implementation_thread_reply_body(
@@ -762,33 +777,29 @@ class PipelineGitHubForTest(pg.PipelineGitHub):
         )
 
 
-def _claim_drive_green_learn_from_process(repo_root: str, start_barrier: Any, results: Any) -> None:
-    """Race one real adapter claim from a separate process for lock coverage."""
-    adapter = pg.PipelineGitHub("org", dry_run=False, repo_root=Path(repo_root))
-    original_save = adapter._arming.save
-
-    def delayed_save(issue_number: int, record: dict[str, Any]) -> bool:
-        sleep(0.1)
-        return original_save(issue_number, record)
-
-    with patch.object(adapter._arming, "save", side_effect=delayed_save):
-        start_barrier.wait()
-        results.put(adapter.claim_drive_green_learn(33, 703))
+@pytest.fixture
+def command_runner() -> MagicMock:
+    """Reject each command that a test does not supply."""
+    return MagicMock(side_effect=AssertionError("unexpected GitHub command"))
 
 
 @pytest.fixture
-def adapter(tmp_path: Path) -> PipelineGitHubForTest:
+def adapter(tmp_path: Path, command_runner: MagicMock) -> PipelineGitHubForTest:
     """Live-mutator adapter anchored at a temp repo root."""
-    return PipelineGitHubForTest("org", dry_run=False, repo_root=tmp_path)
+    return PipelineGitHubForTest(
+        "org", dry_run=False, repo_root=tmp_path, command_runner=command_runner
+    )
 
 
 @pytest.fixture
-def dry_adapter(tmp_path: Path) -> PipelineGitHubForTest:
+def dry_adapter(tmp_path: Path, command_runner: MagicMock) -> PipelineGitHubForTest:
     """Dry-run adapter: every mutator must log-and-skip."""
-    return PipelineGitHubForTest("org", dry_run=True, repo_root=tmp_path)
+    return PipelineGitHubForTest(
+        "org", dry_run=True, repo_root=tmp_path, command_runner=command_runner
+    )
 
 
-def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> None:
+def test_adapter_satisfies_stage_github_protocol(adapter: PipelineGitHub) -> None:
     """Runtime protocol conformance (mypy checks it statically too)."""
     assert isinstance(adapter, StageGitHub)
 
@@ -798,10 +809,11 @@ def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> 
     [("maintainer", True), ("contributor", False), (None, False)],
 )
 def test_issue_body_editor_must_match_authenticated_viewer(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
     editor: str | None,
     expected: bool,
+    command_runner: MagicMock,
 ) -> None:
     """Finalization trusts only the current actor's latest body edit."""
     adapter.repo = "repo"
@@ -828,7 +840,7 @@ def test_issue_body_editor_must_match_authenticated_viewer(
             returncode=0,
         )
 
-    monkeypatch.setattr(transport_mod, "gh_call", fake_gh_call)
+    command_runner.side_effect = fake_gh_call
 
     assert adapter.issue_body_edited_by_viewer(2795) is expected
 
@@ -846,14 +858,15 @@ def test_issue_body_editor_must_match_authenticated_viewer(
 
 @pytest.mark.parametrize("issue_number", [0, -1, 2_147_483_648, True, 1.5, "2795"])
 def test_issue_body_editor_rejects_invalid_number_before_github_io(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
     issue_number: Any,
+    command_runner: MagicMock,
 ) -> None:
     """Invalid issue numbers are rejected before the transport is called."""
     adapter.repo = "repo"
     transport = MagicMock()
-    monkeypatch.setattr(transport_mod, "gh_call", transport)
+    command_runner.side_effect = transport
 
     with pytest.raises(ValueError, match="issue_number must be a positive integer"):
         adapter.issue_body_edited_by_viewer(issue_number)
@@ -871,20 +884,17 @@ def test_issue_body_editor_rejects_invalid_number_before_github_io(
     ],
 )
 def test_repo_scoped_editor_auth_normalizes_transport_and_json_failures(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
     failure: subprocess.SubprocessError | OSError | None,
+    command_runner: MagicMock,
 ) -> None:
     """The repo-scoped adapter normalizes transport and decoding failures."""
     adapter.repo = "repo"
     if failure is not None:
-        monkeypatch.setattr(transport_mod, "gh_call", MagicMock(side_effect=failure))
+        command_runner.side_effect = MagicMock(side_effect=failure)
     else:
-        monkeypatch.setattr(
-            transport_mod,
-            "gh_call",
-            MagicMock(return_value=SimpleNamespace(stdout="not-json")),
-        )
+        command_runner.side_effect = MagicMock(return_value=SimpleNamespace(stdout="not-json"))
 
     with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
         adapter.issue_body_edited_by_viewer(2795)
@@ -933,7 +943,7 @@ def _open_pr_identity(*, head_sha: str = "a" * 40) -> dict[str, Any]:
 
 
 def _submitted_implementation_receipt(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     thread: dict[str, Any],
     reply: str,
     *,
@@ -969,7 +979,7 @@ class TestAllThreadReplyAndReviewerResolution:
     """The implementation/reviewer split applies to every open thread author."""
 
     def test_published_review_and_response_bodies_have_visible_role_prefixes(
-        self, adapter: pg.PipelineGitHub
+        self, adapter: PipelineGitHub
     ) -> None:
         """The GitHub-visible role is unambiguous without inspecting markers."""
         implementation = adapter._implementation_thread_reply_body(
@@ -983,7 +993,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert feedback.startswith("[Review] Reviewer validation found this still unresolved:")
 
     def test_recovered_batch_reuses_exact_pending_review_after_create_crash(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A fresh delivery does not create a second marked pending review."""
         thread = _external_reviewer_thread("thread-one")
@@ -1011,12 +1021,12 @@ class TestAllThreadReplyAndReviewerResolution:
         )
         monkeypatch.setattr(adapter, "_review_thread_snapshot", lambda _pr, _id: live)
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             nonlocal live
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
+            if "addPullRequestReview(input:" in query.query:
                 raise AssertionError("recovery must reuse the marked pending review")
-            if "addPullRequestReviewThreadReply" in query:
+            if "addPullRequestReviewThreadReply" in query.query:
                 calls.append("reply")
                 live = {
                     **live,
@@ -1034,14 +1044,8 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": "implementation-comment"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
+                return {"id": "implementation-comment"}
+            if "submitPullRequestReview" in query.query:
                 calls.append("submit")
                 live = {
                     **live,
@@ -1051,14 +1055,8 @@ class TestAllThreadReplyAndReviewerResolution:
                     ],
                 }
                 return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {
-                                "id": pending_review_id,
-                                "state": "COMMENTED",
-                            }
-                        }
-                    }
+                    "id": pending_review_id,
+                    "state": "COMMENTED",
                 }
             raise AssertionError(query)
 
@@ -1075,7 +1073,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert calls == ["reply", "submit"]
 
     def test_recovered_mixed_batch_posts_only_the_unchanged_thread(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A submitted crash receipt and untouched thread finish as one union."""
         first = _external_reviewer_thread("thread-one")
@@ -1097,11 +1095,11 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr, thread_id: live_by_id[thread_id],
         )
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "new"}}}}
-            if "addPullRequestReviewThreadReply" in query:
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "new"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 posted.append(thread_id)
                 live_by_id[thread_id] = {
@@ -1120,22 +1118,10 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": f"implementation-{thread_id}"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
+                return {"id": f"implementation-{thread_id}"}
+            if "submitPullRequestReview" in query.query:
                 live_by_id["thread-two"]["comments"][-1]["review_state"] = "COMMENTED"
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "new", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "new", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -1152,7 +1138,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert posted == ["thread-two"]
 
     def test_recovered_commented_pending_and_untouched_reuse_pending_review(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A second crash keeps the proved pending review for the last reply."""
         threads = [_external_reviewer_thread(f"thread-{index}") for index in range(1, 4)]
@@ -1183,12 +1169,12 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr, thread_id: live_by_id[thread_id],
         )
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
+            if "addPullRequestReview(input:" in query.query:
                 created.append("created")
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "new"}}}}
-            if "addPullRequestReviewThreadReply" in query:
+                return {"id": "new"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 review_id = pending_id
                 posted.append((thread_id, review_id))
@@ -1207,24 +1193,12 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": f"implementation-{thread_id}"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
+                return {"id": f"implementation-{thread_id}"}
+            if "submitPullRequestReview" in query.query:
                 assert fields["reviewId"] == pending_id
                 for thread_id in ("thread-2", "thread-3"):
                     live_by_id[thread_id]["comments"][-1]["review_state"] = "COMMENTED"
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": pending_id, "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": pending_id, "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -1253,7 +1227,7 @@ class TestAllThreadReplyAndReviewerResolution:
         )
 
     def test_all_recovered_mixed_reviews_submit_remaining_pending_review(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Recovery succeeds only after every exact reply is submitted."""
         threads = [_external_reviewer_thread(f"thread-{index}") for index in range(1, 4)]
@@ -1288,18 +1262,12 @@ class TestAllThreadReplyAndReviewerResolution:
             lambda _pr, thread_id: live_by_id[thread_id],
         )
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "submitPullRequestReview" in query:
+            if "submitPullRequestReview" in query.query:
                 submitted.append(str(fields["reviewId"]))
                 live_by_id["thread-3"]["comments"][-1]["review_state"] = "COMMENTED"
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": pending_id, "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": pending_id, "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -1319,7 +1287,7 @@ class TestAllThreadReplyAndReviewerResolution:
         )
 
     def test_implementation_batch_uses_one_pending_review_then_submits_once(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """All replies from one implementation pass share one submitted review."""
         first = _external_reviewer_thread("thread-one")
@@ -1332,12 +1300,12 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
+            if "addPullRequestReview(input:" in query.query:
                 created_reviews.append(fields)
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 attached_review_ids.append("review-1")
                 live_by_id[thread_id] = {
@@ -1356,14 +1324,8 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": f"implementation-{thread_id}"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
+                return {"id": f"implementation-{thread_id}"}
+            if "submitPullRequestReview" in query.query:
                 submitted_review_ids.append("review-1")
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
@@ -1373,13 +1335,7 @@ class TestAllThreadReplyAndReviewerResolution:
                             {**live["comments"][-1], "review_state": "COMMENTED"},
                         ],
                     }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -1401,7 +1357,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert submitted_review_ids == ["review-1"]
 
     def test_singleton_implementation_response_uses_one_submitted_review(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A one-thread pass retains the same submitted-review handoff contract."""
         thread = _external_reviewer_thread("thread-one")
@@ -1413,13 +1369,13 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, _thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live)
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
             nonlocal live
-            if "addPullRequestReview(input:" in query:
+            if "addPullRequestReview(input:" in query.query:
                 created_reviews.append(fields)
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 attached_review_ids.append("review-1")
                 body = str(fields["body"])
                 live = {
@@ -1438,14 +1394,8 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": "implementation-comment"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
+                return {"id": "implementation-comment"}
+            if "submitPullRequestReview" in query.query:
                 submitted_review_ids.append("review-1")
                 live = {
                     **live,
@@ -1454,13 +1404,7 @@ class TestAllThreadReplyAndReviewerResolution:
                         {**live["comments"][-1], "review_state": "COMMENTED"},
                     ],
                 }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -1481,7 +1425,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert submitted_review_ids == ["review-1"]
 
     def test_reply_batch_retries_when_thread_snapshot_lags_the_current_pr_head(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A second GitHub read seeing the old head is visibility lag, not thread drift."""
         thread = _external_reviewer_thread("thread-one")
@@ -1512,7 +1456,7 @@ class TestAllThreadReplyAndReviewerResolution:
         graphql.assert_not_called()
 
     def test_reply_batch_accepts_a_full_sha256_head(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The reply adapter preserves the pipeline's 40-or-64 OID contract."""
         head_sha = "a" * 64
@@ -1544,7 +1488,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == (thread["id"],)
 
     def test_implementation_replies_share_one_source_attached_batch(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """One implementation pass attaches every response to its own thread."""
         first = _external_reviewer_thread("thread-one")
@@ -1555,12 +1499,11 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
-                assert "review-1" == "review-1"
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 reply_bodies.append(str(fields["body"]))
                 comment_id = f"implementation-{thread_id}"
@@ -1580,11 +1523,9 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
-                }
-            if "submitPullRequestReview" in query:
-                assert "review-1" == "review-1"
+                return {"id": comment_id}
+            if "submitPullRequestReview" in query.query:
+                assert fields["reviewId"] == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -1593,13 +1534,7 @@ class TestAllThreadReplyAndReviewerResolution:
                             {**live["comments"][-1], "review_state": "COMMENTED"},
                         ],
                     }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -1622,7 +1557,7 @@ class TestAllThreadReplyAndReviewerResolution:
         }
 
     def test_reply_batch_retry_recovers_attached_replies_and_adds_only_missing_one(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A retry recognizes its source-attached reply before posting again."""
         first = _external_reviewer_thread("thread-one")
@@ -1633,12 +1568,11 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
-                assert "review-1" == "review-1"
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 reply_calls.append(thread_id)
                 if thread_id == second["id"] and reply_calls.count(thread_id) == 1:
@@ -1663,11 +1597,9 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
-                }
-            if "submitPullRequestReview" in query:
-                assert "review-1" == "review-1"
+                return {"id": comment_id}
+            if "submitPullRequestReview" in query.query:
+                assert fields["reviewId"] == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -1676,13 +1608,7 @@ class TestAllThreadReplyAndReviewerResolution:
                             {**live["comments"][-1], "review_state": "COMMENTED"},
                         ],
                     }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -1717,7 +1643,7 @@ class TestAllThreadReplyAndReviewerResolution:
 
     def test_reply_batch_recovers_after_a_lost_thread_reply_response(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A direct reply may apply before its response is lost without replaying it."""
@@ -1729,12 +1655,11 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
-                assert "review-1" == "review-1"
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 reply_calls.append(thread_id)
                 comment_id = f"implementation-{thread_id}"
@@ -1754,9 +1679,9 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {"data": {"addPullRequestReviewThreadReply": None}}
-            if "submitPullRequestReview" in query:
-                assert "review-1" == "review-1"
+                return {}
+            if "submitPullRequestReview" in query.query:
+                assert fields["reviewId"] == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -1765,13 +1690,7 @@ class TestAllThreadReplyAndReviewerResolution:
                             {**live["comments"][-1], "review_state": "COMMENTED"},
                         ],
                     }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -1799,7 +1718,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert reply_calls == [first["id"], second["id"]]
 
     def test_parallel_reply_batches_recover_one_attached_reply_per_thread(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The PR-scoped lock prevents two local loops duplicating thread replies."""
         first = _external_reviewer_thread("thread-one")
@@ -1810,15 +1729,14 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
-                assert "review-1" == "review-1"
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 reply_calls.append(thread_id)
-                sleep(0.05)
+                time.sleep(0.05)
                 comment_id = f"implementation-{thread_id}"
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
@@ -1836,11 +1754,9 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
-                }
-            if "submitPullRequestReview" in query:
-                assert "review-1" == "review-1"
+                return {"id": comment_id}
+            if "submitPullRequestReview" in query.query:
+                assert fields["reviewId"] == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -1849,13 +1765,7 @@ class TestAllThreadReplyAndReviewerResolution:
                             {**live["comments"][-1], "review_state": "COMMENTED"},
                         ],
                     }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -1885,7 +1795,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert reply_calls == [first["id"], second["id"]]
 
     def test_linked_worktrees_share_one_reply_lock(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Separate worktree roots serialize implementation reviews through common Git metadata."""
         common_git_dir = tmp_path / "repository" / ".git"
@@ -1900,8 +1810,12 @@ class TestAllThreadReplyAndReviewerResolution:
             (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
             (root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
 
-        first_adapter = PipelineGitHubForTest("org", repo="repo-a", repo_root=first_root)
-        second_adapter = PipelineGitHubForTest("org", repo="repo-a", repo_root=second_root)
+        first_adapter = PipelineGitHubForTest(
+            "org", repo="repo-a", repo_root=first_root, command_runner=command_runner
+        )
+        second_adapter = PipelineGitHubForTest(
+            "org", repo="repo-a", repo_root=second_root, command_runner=command_runner
+        )
         assert first_adapter._implementation_reply_lock_path(7) == (
             second_adapter._implementation_reply_lock_path(7)
         )
@@ -1913,15 +1827,14 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, _thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live)
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
             nonlocal live
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
-                assert "review-1" == "review-1"
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 reply_calls.append(str(fields["body"]))
-                sleep(0.05)
+                time.sleep(0.05)
                 live = {
                     **live,
                     "comments": [
@@ -1938,15 +1851,9 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": "implementation-comment"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
-                assert "review-1" == "review-1"
+                return {"id": "implementation-comment"}
+            if "submitPullRequestReview" in query.query:
+                assert fields["reviewId"] == "review-1"
                 live = {
                     **live,
                     "comments": [
@@ -1954,13 +1861,7 @@ class TestAllThreadReplyAndReviewerResolution:
                         {**live["comments"][-1], "review_state": "COMMENTED"},
                     ],
                 }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         for candidate in (first_adapter, second_adapter):
@@ -1989,7 +1890,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert sum(result.blocked_thread_ids == (thread["id"],) for result in resolved) == 1
 
     def test_linked_worktrees_with_invalid_git_metadata_fail_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Malformed linked-worktree metadata cannot fall back to private locks."""
         first_root = tmp_path / "worktree-first"
@@ -1998,7 +1899,11 @@ class TestAllThreadReplyAndReviewerResolution:
         for root in (first_root, second_root):
             root.mkdir()
             (root / ".git").write_text("not valid git metadata\n", encoding="utf-8")
-            adapters.append(PipelineGitHubForTest("org", repo="repo-a", repo_root=root))
+            adapters.append(
+                PipelineGitHubForTest(
+                    "org", repo="repo-a", repo_root=root, command_runner=command_runner
+                )
+            )
 
         thread = _external_reviewer_thread("thread-one")
         for adapter in adapters:
@@ -2023,7 +1928,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert all(result.retryable for result in results)
 
     def test_linked_worktrees_with_unusable_git_dir_fail_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A shaped-but-invalid worktree target cannot create a private lock."""
         adapters: list[PipelineGitHubForTest] = []
@@ -2033,7 +1938,11 @@ class TestAllThreadReplyAndReviewerResolution:
             (root / ".git").write_text(
                 f"gitdir: /missing/.git/worktrees/{name}\n", encoding="utf-8"
             )
-            adapters.append(PipelineGitHubForTest("org", repo="repo-a", repo_root=root))
+            adapters.append(
+                PipelineGitHubForTest(
+                    "org", repo="repo-a", repo_root=root, command_runner=command_runner
+                )
+            )
 
         thread = _external_reviewer_thread("thread-one")
         for adapter in adapters:
@@ -2058,21 +1967,20 @@ class TestAllThreadReplyAndReviewerResolution:
         assert all(result.retryable for result in results)
 
     def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An externally authored thread receives the standard two-role handoff."""
         thread = _external_reviewer_thread()
         live = [thread]
         calls: list[str] = []
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
+            if "addPullRequestReview(input:" in query.query:
                 calls.append("create-implementation-review")
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 calls.append("implementation-reply")
-                assert "review-1" == "review-1"
                 reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
@@ -2089,16 +1997,10 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": "implementation-comment"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
+                return {"id": "implementation-comment"}
+            if "submitPullRequestReview" in query.query:
                 calls.append("submit-implementation-review")
-                assert "review-1" == "review-1"
+                assert fields["reviewId"] == "review-1"
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -2106,20 +2008,13 @@ class TestAllThreadReplyAndReviewerResolution:
                         {**live[0]["comments"][-1], "review_state": "COMMENTED"},
                     ],
                 }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
-            if "resolveReviewThread" in query:
+                return {"id": "review-1", "state": "COMMENTED"}
+            if "resolveReviewThread" in query.query:
                 calls.append("resolve")
                 live.clear()
                 return {
-                    "data": {
-                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
-                    }
+                    "clientMutationId": "test-validated-receipt",
+                    **{"id": thread["id"], "isResolved": True},
                 }
             raise AssertionError(query)
 
@@ -2191,22 +2086,20 @@ class TestAllThreadReplyAndReviewerResolution:
         ]
 
     def test_reviewer_rejection_posts_explanation_and_keeps_thread_open(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A rejected fix yields a reviewer reply rather than a premature close."""
         thread = _external_reviewer_thread()
         live = [thread]
         calls: list[str] = []
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 calls.append(str(fields["body"]))
-                is_implementation_reply = "AddImplementationReply" in query
-                if is_implementation_reply:
-                    assert "review-1" == "review-1"
+                is_implementation_reply = "AddImplementationReply" in query.query
                 reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
@@ -2225,15 +2118,9 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": f"reply-{len(calls)}"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
-                assert "review-1" == "review-1"
+                return {"id": f"reply-{len(calls)}"}
+            if "submitPullRequestReview" in query.query:
+                assert fields["reviewId"] == "review-1"
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -2241,14 +2128,8 @@ class TestAllThreadReplyAndReviewerResolution:
                         {**live[0]["comments"][-1], "review_state": "COMMENTED"},
                     ],
                 }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
-            if "resolveReviewThread" in query:
+                return {"id": "review-1", "state": "COMMENTED"}
+            if "resolveReviewThread" in query.query:
                 pytest.fail("reviewer rejection must leave the thread open")
             raise AssertionError(query)
 
@@ -2286,7 +2167,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert "Reviewer validation found this still unresolved" in calls[-1]
 
     def test_reviewer_reconciles_each_thread_against_its_own_receipt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A mixed batch does not bind every thread to the final receipt."""
         reviewed_head_sha = "a" * 40
@@ -2336,18 +2217,17 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id], resolved=thread_id in resolved_ids)
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
             thread_id = str(fields["threadId"])
-            if "resolveReviewThread" in query:
+            if "resolveReviewThread" in query.query:
                 calls.append(("resolve", thread_id))
                 resolved_ids.add(thread_id)
                 return {
-                    "data": {
-                        "resolveReviewThread": {"thread": {"id": thread_id, "isResolved": True}}
-                    }
+                    "clientMutationId": "test-validated-receipt",
+                    **{"id": thread_id, "isResolved": True},
                 }
-            if "addPullRequestReviewThreadReply" in query:
+            if "addPullRequestReviewThreadReply" in query.query:
                 calls.append(("feedback", thread_id))
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
@@ -2361,13 +2241,7 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": f"reviewer-{thread_id}"}
-                        }
-                    }
-                }
+                return {"id": f"reviewer-{thread_id}"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -2401,7 +2275,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert calls == [("feedback", feedback["id"]), ("resolve", resolving["id"])]
 
     def test_noncommented_direct_reply_is_not_a_reviewer_validation_receipt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Only a COMMENTED, exact-head direct reply may be resolved."""
         thread = _external_reviewer_thread()
@@ -2450,7 +2324,7 @@ class TestAllThreadReplyAndReviewerResolution:
         ]
 
     def test_direct_replies_with_split_reviews_are_not_validation_receipts(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """One implementation pass must remain one submitted GitHub review."""
         head_sha = "a" * 40
@@ -2502,7 +2376,7 @@ class TestAllThreadReplyAndReviewerResolution:
     )
     def test_reply_batch_recovers_after_a_lost_submit_response_without_empty_review(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         thread_ids: tuple[str, ...],
     ) -> None:
@@ -2515,13 +2389,13 @@ class TestAllThreadReplyAndReviewerResolution:
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return _open_thread_snapshot(live_by_id[thread_id])
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
             nonlocal created, submitted
-            if "addPullRequestReview(input:" in query:
+            if "addPullRequestReview(input:" in query.query:
                 created += 1
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 thread_id = str(fields["threadId"])
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
@@ -2539,14 +2413,8 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {
-                    "data": {
-                        "addPullRequestReviewThreadReply": {
-                            "comment": {"id": f"implementation-{thread_id}"}
-                        }
-                    }
-                }
-            if "submitPullRequestReview" in query:
+                return {"id": f"implementation-{thread_id}"}
+            if "submitPullRequestReview" in query.query:
                 submitted += 1
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
@@ -2556,7 +2424,7 @@ class TestAllThreadReplyAndReviewerResolution:
                             {**live["comments"][-1], "review_state": "COMMENTED"},
                         ],
                     }
-                return {"data": {"submitPullRequestReview": None}}
+                return {}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
@@ -2580,7 +2448,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert submitted == 1
 
     def test_reply_batch_fails_closed_when_review_creation_is_ambiguous(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A lost create response never schedules a duplicate empty review."""
         first = _external_reviewer_thread("thread-one")
@@ -2595,9 +2463,7 @@ class TestAllThreadReplyAndReviewerResolution:
             adapter,
             "_graphql",
             lambda query, **_fields: (
-                {"data": {"addPullRequestReview": None}}
-                if "addPullRequestReview(input:" in query
-                else pytest.fail(query)
+                {} if "addPullRequestReview(input:" in query.query else pytest.fail(query)
             ),
         )
 
@@ -2612,7 +2478,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.retryable is False
 
     def test_reply_batch_fails_closed_for_recovered_split_reviews(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Recovered legacy replies cannot bypass the one-review contract."""
         head_sha = "a" * 40
@@ -2660,7 +2526,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == (first["id"], second["id"])
 
     def test_validation_receipt_ignores_unanchored_review_body(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Only the attached direct-reply marker contributes to validation."""
         thread = _external_reviewer_thread()
@@ -2698,7 +2564,7 @@ class TestAllThreadReplyAndReviewerResolution:
         ]
 
     def test_malformed_reply_response_recovers_an_exact_host_read_receipt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A singleton reply mutation applied before a malformed response remains recoverable."""
         thread = _external_reviewer_thread()
@@ -2712,13 +2578,12 @@ class TestAllThreadReplyAndReviewerResolution:
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
 
-        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+        def graphql(query: GraphQLSpec[Any], **fields: str | int) -> dict[str, Any]:
             fields = {**getattr(query, "variables", {}), **fields}
             nonlocal live
-            if "addPullRequestReview(input:" in query:
-                return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
-            if "addPullRequestReviewThreadReply" in query:
-                assert "review-1" == "review-1"
+            if "addPullRequestReview(input:" in query.query:
+                return {"id": "review-1"}
+            if "addPullRequestReviewThreadReply" in query.query:
                 live = {
                     **live,
                     "comments": [
@@ -2735,8 +2600,8 @@ class TestAllThreadReplyAndReviewerResolution:
                         },
                     ],
                 }
-                return {"data": {"addPullRequestReviewThreadReply": None}}
-            if "submitPullRequestReview" in query:
+                return {}
+            if "submitPullRequestReview" in query.query:
                 assert fields["reviewId"] == "review-1"
                 live = {
                     **live,
@@ -2745,13 +2610,7 @@ class TestAllThreadReplyAndReviewerResolution:
                         {**live["comments"][-1], "review_state": "COMMENTED"},
                     ],
                 }
-                return {
-                    "data": {
-                        "submitPullRequestReview": {
-                            "pullRequestReview": {"id": "review-1", "state": "COMMENTED"}
-                        }
-                    }
-                }
+                return {"id": "review-1", "state": "COMMENTED"}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -2768,7 +2627,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.receipts[0]["implementation_reply_id"] == "implementation-comment"
 
     def test_reply_without_submitted_review_metadata_is_not_recovered(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A legacy reply without a submitted-review receipt cannot authorize recovery."""
         thread = _external_reviewer_thread()
@@ -2806,7 +2665,7 @@ class TestAllThreadReplyAndReviewerResolution:
         graphql.assert_not_called()
 
     def test_reconciliation_rejects_a_receipt_without_the_host_read_reply(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Metadata alone cannot authorize a thread resolution."""
         thread = _external_reviewer_thread()
@@ -2831,7 +2690,7 @@ class TestAllThreadReplyAndReviewerResolution:
         graphql.assert_not_called()
 
     def test_foreign_marker_cannot_become_a_resolution_receipt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Only the host viewer's final comment can carry a resolve receipt."""
         thread = _external_reviewer_thread()
@@ -2912,7 +2771,7 @@ class TestAllThreadReplyAndReviewerResolution:
         graphql.assert_not_called()
 
     def test_head_race_after_resolve_blocks_without_unresolving(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A stale-head resolution blocks for fresh review without reopening it."""
         thread = _external_reviewer_thread()
@@ -2935,8 +2794,8 @@ class TestAllThreadReplyAndReviewerResolution:
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: next(state_reads))
         calls: list[str] = []
 
-        def graphql(query: str, **_fields: str) -> dict[str, Any]:
-            if "unresolveReviewThread" in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query.query:
                 calls.append("unresolve")
                 live.append(
                     {
@@ -2959,13 +2818,12 @@ class TestAllThreadReplyAndReviewerResolution:
                         }
                     }
                 }
-            if "resolveReviewThread" in query:
+            if "resolveReviewThread" in query.query:
                 calls.append("resolve")
                 live.clear()
                 return {
-                    "data": {
-                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
-                    }
+                    "clientMutationId": "test-validated-receipt",
+                    **{"id": thread["id"], "isResolved": True},
                 }
             raise AssertionError(query)
 
@@ -3010,7 +2868,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert live == []
 
     def test_post_resolve_comment_race_blocks_without_unresolving(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A reply racing resolution is never hidden by the resolved-thread list."""
         thread = _external_reviewer_thread()
@@ -3041,8 +2899,8 @@ class TestAllThreadReplyAndReviewerResolution:
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
 
-        def graphql(query: str, **_fields: str) -> dict[str, Any]:
-            if "unresolveReviewThread" in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query.query:
                 calls.append("unresolve")
                 live.append(dict(receipt))
                 return {
@@ -3052,13 +2910,12 @@ class TestAllThreadReplyAndReviewerResolution:
                         }
                     }
                 }
-            if "resolveReviewThread" in query:
+            if "resolveReviewThread" in query.query:
                 calls.append("resolve")
                 live.clear()
                 return {
-                    "data": {
-                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
-                    }
+                    "clientMutationId": "test-validated-receipt",
+                    **{"id": thread["id"], "isResolved": True},
                 }
             raise AssertionError(query)
 
@@ -3077,7 +2934,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert live == []
 
     def test_unproven_resolve_blocks_for_fresh_review(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An unknown resolve outcome is blocked without an unsafe compensation write."""
         thread = _external_reviewer_thread()
@@ -3101,11 +2958,10 @@ class TestAllThreadReplyAndReviewerResolution:
             "_graphql",
             lambda query, **_fields: (
                 {
-                    "data": {
-                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
-                    }
+                    "clientMutationId": "test-validated-receipt",
+                    **{"id": thread["id"], "isResolved": True},
                 }
-                if "resolveReviewThread" in query
+                if "resolveReviewThread" in query.query
                 else pytest.fail(query)
             ),
         )
@@ -3122,7 +2978,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert result.blocked_thread_ids == (thread["id"],)
 
     def test_malformed_resolve_payload_blocks_without_compensation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A malformed response blocks without reopening a possibly foreign resolution."""
         thread = _external_reviewer_thread()
@@ -3143,8 +2999,8 @@ class TestAllThreadReplyAndReviewerResolution:
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
 
-        def graphql(query: str, **_fields: str) -> dict[str, Any]:
-            if "unresolveReviewThread" in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query.query:
                 calls.append("unresolve")
                 return {
                     "data": {
@@ -3153,10 +3009,10 @@ class TestAllThreadReplyAndReviewerResolution:
                         }
                     }
                 }
-            if "resolveReviewThread" in query:
+            if "resolveReviewThread" in query.query:
                 calls.append("resolve")
                 # GitHub accepted the request but returned a malformed body.
-                return {"data": {"resolveReviewThread": None}}
+                return {}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -3174,7 +3030,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert calls == ["resolve"]
 
     def test_ambiguous_resolve_never_emits_an_unresolve_mutation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An uncertain resolve stops for re-review instead of reopening a thread."""
         thread = _external_reviewer_thread()
@@ -3187,8 +3043,8 @@ class TestAllThreadReplyAndReviewerResolution:
         )
         monkeypatch.setattr(adapter, "_unresolved_threads", lambda _pr: [dict(receipt)])
 
-        def graphql(query: str, **_fields: str) -> dict[str, Any]:
-            if "unresolveReviewThread" in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query.query:
                 calls.append("unresolve")
                 return {
                     "data": {
@@ -3197,11 +3053,11 @@ class TestAllThreadReplyAndReviewerResolution:
                         }
                     }
                 }
-            if "resolveReviewThread" in query:
+            if "resolveReviewThread" in query.query:
                 calls.append("resolve")
                 # A transport/protocol ambiguity cannot prove whether the
                 # mutation took effect.
-                return {"data": {"resolveReviewThread": None}}
+                return {}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -3219,7 +3075,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert calls == ["resolve"]
 
     def test_unproven_resolve_never_attempts_an_unresolve_mutation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An uncertain resolve is blocked without issuing a compensating mutation."""
         thread = _external_reviewer_thread()
@@ -3240,13 +3096,13 @@ class TestAllThreadReplyAndReviewerResolution:
 
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
 
-        def graphql(query: str, **_fields: str) -> dict[str, Any]:
-            if "unresolveReviewThread" in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str) -> dict[str, Any]:
+            if "unresolveReviewThread" in query.query:
                 calls.append("unresolve")
                 return {"data": {"unresolveReviewThread": None}}
-            if "resolveReviewThread" in query:
+            if "resolveReviewThread" in query.query:
                 calls.append("resolve")
-                return {"data": {"resolveReviewThread": None}}
+                return {}
             raise AssertionError(query)
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -3264,7 +3120,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert calls == ["resolve"]
 
     def test_resolve_proof_uses_the_atomic_thread_and_pr_snapshot(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The post-resolve proof must not make a second, racy PR-state read."""
         thread = _external_reviewer_thread()
@@ -3297,11 +3153,10 @@ class TestAllThreadReplyAndReviewerResolution:
             "_graphql",
             lambda query, **_fields: (
                 {
-                    "data": {
-                        "resolveReviewThread": {"thread": {"id": thread["id"], "isResolved": True}}
-                    }
+                    "clientMutationId": "test-validated-receipt",
+                    **{"id": thread["id"], "isResolved": True},
                 }
-                if "resolveReviewThread" in query
+                if "resolveReviewThread" in query.query
                 else pytest.fail(query)
             ),
         )
@@ -3318,7 +3173,7 @@ class TestAllThreadReplyAndReviewerResolution:
         assert state_reads == 0
 
 
-def test_unscoped_adapter_rejects_legacy_review_thread_fallback(adapter: pg.PipelineGitHub) -> None:
+def test_unscoped_adapter_rejects_legacy_review_thread_fallback(adapter: PipelineGitHub) -> None:
     """Review-thread lifecycle needs complete repo-scoped GraphQL snapshots."""
     with pytest.raises(RuntimeError, match="repo-scoped"):
         adapter.list_unresolved_review_threads(7)
@@ -3328,23 +3183,27 @@ class TestConditionalMerge:
     """The conditional REST merge seam preserves the server's exact outcome."""
 
     def test_uses_only_sha_and_squash_method_in_repo_scoped_put(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """The atomic SHA condition replaces every native auto-merge path."""
         adapter.repo = "repo"
         call_mock = MagicMock(
-            return_value=SimpleNamespace(
+            return_value=subprocess.CompletedProcess(
+                args=[],
                 stdout='HTTP/2.0 200 OK\ncontent-type: application/json\n\n{"merged": true}',
                 returncode=0,
+                stderr="",
             )
         )
-        monkeypatch.setattr(pg, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
+        started_at = time.monotonic()
         result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
         assert result.status == 200
         assert result.body == {"merged": True}
-        call_mock.assert_called_once_with(
+        call_mock.assert_called_once()
+        assert call_mock.call_args.args == (
             [
                 "api",
                 "--method",
@@ -3356,11 +3215,9 @@ class TestConditionalMerge:
                 "-f",
                 "merge_method=squash",
             ],
-            check=False,
-            retry_on_rate_limit=False,
-            max_retries=1,
-            timeout=120,
         )
+        assert call_mock.call_args.kwargs["check"] is False
+        _assert_bounded_command_kwargs(call_mock.call_args.kwargs, started_at)
 
     @pytest.mark.parametrize(
         ("pr_number", "head_sha"),
@@ -3369,15 +3226,16 @@ class TestConditionalMerge:
     )
     def test_invalid_identity_is_rejected_before_transport(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         pr_number: int,
         head_sha: str,
+        command_runner: MagicMock,
     ) -> None:
         """An invalid PR or SHA cannot reach the merge transport."""
         adapter.repo = "repo"
         call_mock = MagicMock()
-        monkeypatch.setattr(pg, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         result = adapter.merge_pr_if_head(pr_number, head_sha, policy=_direct_merge_policy())
 
@@ -3385,25 +3243,20 @@ class TestConditionalMerge:
         call_mock.assert_not_called()
 
     def test_preserves_a_409_response_for_stage_level_head_drift_handling(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """The adapter does not collapse an expected SHA conflict into transport failure."""
         adapter.repo = "repo"
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            MagicMock(
-                return_value=SimpleNamespace(
-                    stdout='HTTP/2.0 409 Conflict\n\n{"message": "head changed"}', returncode=1
-                )
-            ),
+        command_runner.side_effect = MagicMock(
+            return_value=SimpleNamespace(
+                stdout='HTTP/2.0 409 Conflict\n\n{"message": "head changed"}', returncode=1
+            )
         )
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
             lambda issue: [{"body": render_current_plan("Plan"), "user": {"login": "bot"}}],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
@@ -3412,7 +3265,7 @@ class TestConditionalMerge:
         assert result.transport_error is False
 
     def test_conditional_put_does_not_require_a_native_review_capability(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """The stage, not the mutation adapter, owns merge admission."""
         adapter.repo = "repo"
@@ -3422,7 +3275,7 @@ class TestConditionalMerge:
                 returncode=0,
             )
         )
-        monkeypatch.setattr(pg, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
@@ -3430,12 +3283,12 @@ class TestConditionalMerge:
         call_mock.assert_called_once()
 
     def test_transport_exception_is_explicit_and_never_retried_by_adapter(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Only merge-wait's lifecycle reconciliation may choose a bounded retry."""
         adapter.repo = "repo"
         call_mock = MagicMock(side_effect=OSError("connection reset"))
-        monkeypatch.setattr(pg, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         result = adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
@@ -3444,7 +3297,7 @@ class TestConditionalMerge:
         call_mock.assert_called_once()
 
     def test_unknown_queue_mutation_outcome_is_terminal_and_not_retryable(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An uncertain queue admission cannot become a replayable transport error."""
         adapter.repo = "repo"
@@ -3482,7 +3335,7 @@ class TestConditionalMerge:
         graphql.assert_called_once()
 
     def test_idempotent_queue_readback_uses_remaining_merge_deadline(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A queue readback uses the time left in the merge cycle."""
         adapter.repo = "repo"
@@ -3537,7 +3390,7 @@ class TestConditionalMerge:
         assert graphql_mock.call_count == 2
 
     def test_expired_queue_readback_budget_fails_closed(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An expired queue readback budget does not call GitHub again."""
         adapter.repo = "repo"
@@ -3582,7 +3435,7 @@ class TestConditionalMerge:
         graphql_mock.assert_called_once()
 
     def test_cancelled_queue_readback_fails_closed(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Cancellation prevents an idempotent queue readback."""
         adapter.repo = "repo"
@@ -3625,12 +3478,15 @@ class TestConditionalMerge:
         graphql_mock.assert_called_once()
 
     def test_dry_run_returns_a_non_mutating_result_without_calling_github(
-        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self,
+        dry_adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
     ) -> None:
         """Dry-run may report the intended merge but cannot issue the PUT."""
         dry_adapter.repo = "repo"
         call_mock = MagicMock()
-        monkeypatch.setattr(pg, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         result = dry_adapter.merge_pr_if_head(7, "a" * 40, policy=_direct_merge_policy())
 
@@ -3666,7 +3522,7 @@ class TestExactHeadChecks:
 
     @staticmethod
     def _passes(
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         head: str,
         policy: EffectiveMergePolicy,
     ) -> bool:
@@ -3738,10 +3594,11 @@ class TestExactHeadChecks:
     )
     def test_required_commit_status_enforces_seven_day_freshness(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         updated_at: object,
         expected: bool,
+        command_runner: MagicMock,
     ) -> None:
         """A required commit status is current only in the seven-day window."""
         adapter.repo = "repo"
@@ -3752,17 +3609,13 @@ class TestExactHeadChecks:
             "total_count": 1,
             "statuses": [self._commit_status(head, updated_at=updated_at)],
         }
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._json_response(empty_runs),
-                    self._json_response(empty_runs),
-                    self._json_response(status),
-                    self._json_response(status),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                self._json_response(empty_runs),
+                self._json_response(empty_runs),
+                self._json_response(status),
+                self._json_response(status),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is expected
@@ -3774,9 +3627,10 @@ class TestExactHeadChecks:
     )
     def test_optional_commit_status_freshness_does_not_block_required_status(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         optional_updated_at: str,
+        command_runner: MagicMock,
     ) -> None:
         """Only required commit-status evidence must satisfy the freshness window."""
         adapter.repo = "repo"
@@ -3795,23 +3649,19 @@ class TestExactHeadChecks:
                 ),
             ],
         }
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._json_response(empty_runs),
-                    self._json_response(empty_runs),
-                    self._json_response(statuses),
-                    self._json_response(statuses),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                self._json_response(empty_runs),
+                self._json_response(empty_runs),
+                self._json_response(statuses),
+                self._json_response(statuses),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
 
     def test_required_context_can_be_satisfied_by_commit_status_only(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A successful exact-head commit status can satisfy an unbound context."""
         adapter.repo = "repo"
@@ -3822,23 +3672,19 @@ class TestExactHeadChecks:
             "total_count": 1,
             "statuses": [self._commit_status(head)],
         }
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._json_response(empty_runs),
-                    self._json_response(empty_runs),
-                    self._json_response(status),
-                    self._json_response(status),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                self._json_response(empty_runs),
+                self._json_response(empty_runs),
+                self._json_response(status),
+                self._json_response(status),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
 
     def test_commit_status_entry_must_bind_to_the_reviewed_head(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A status entry for another commit cannot satisfy an exact-head gate."""
         adapter.repo = "repo"
@@ -3851,23 +3697,19 @@ class TestExactHeadChecks:
             "total_count": 1,
             "statuses": [status_entry],
         }
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._json_response(empty_runs),
-                    self._json_response(empty_runs),
-                    self._json_response(status),
-                    self._json_response(status),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                self._json_response(empty_runs),
+                self._json_response(empty_runs),
+                self._json_response(status),
+                self._json_response(status),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
 
     def test_same_name_failed_status_blocks_a_successful_check_run(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A required name must pass as both a Check Run and a commit status when both exist."""
         adapter.repo = "repo"
@@ -3878,23 +3720,19 @@ class TestExactHeadChecks:
             "total_count": 1,
             "statuses": [self._commit_status(head, state="failure")],
         }
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._json_response(runs),
-                    self._json_response(runs),
-                    self._json_response(status),
-                    self._json_response(status),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                self._json_response(runs),
+                self._json_response(runs),
+                self._json_response(status),
+                self._json_response(status),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
 
     def test_changed_commit_status_snapshot_fails_closed(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A changed status reread cannot authorize the conditional request."""
         adapter.repo = "repo"
@@ -3910,23 +3748,19 @@ class TestExactHeadChecks:
             "total_count": 1,
             "statuses": [self._commit_status(head, state="failure")],
         }
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._json_response(runs),
-                    self._json_response(runs),
-                    self._json_response(success),
-                    self._json_response(failure),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                self._json_response(runs),
+                self._json_response(runs),
+                self._json_response(success),
+                self._json_response(failure),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
 
     def test_later_commit_status_page_failure_fails_closed(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A failed required status on a later page prevents merge admission."""
         adapter.repo = "repo"
@@ -3956,12 +3790,12 @@ class TestExactHeadChecks:
                 return self._json_response(first_page)
             raise AssertionError(args)
 
-        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
+        command_runner.side_effect = gh_call
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
 
     def test_app_bound_requirement_is_not_satisfied_by_commit_status_only(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A commit status cannot prove a required GitHub App identity."""
         adapter.repo = "repo"
@@ -3972,23 +3806,19 @@ class TestExactHeadChecks:
             "total_count": 1,
             "statuses": [self._commit_status(head)],
         }
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    self._json_response(empty_runs),
-                    self._json_response(empty_runs),
-                    self._json_response(status),
-                    self._json_response(status),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                self._json_response(empty_runs),
+                self._json_response(empty_runs),
+                self._json_response(status),
+                self._json_response(status),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=1)) is False
 
     def test_ruleset_only_failed_required_run_blocks_merge(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A failed active-rules requirement prevents the merge request."""
         from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
@@ -4065,7 +3895,7 @@ class TestExactHeadChecks:
             merge_queue_method=None,
         )
         monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
-        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
+        command_runner.side_effect = gh_call
 
         receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
             RunMergeWaitCycleRequest(
@@ -4084,8 +3914,9 @@ class TestExactHeadChecks:
 
     def test_wrong_required_app_id_blocks_merge_request(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
     ) -> None:
         """A same-name Check Run from another GitHub App cannot cause a merge."""
         from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
@@ -4147,7 +3978,7 @@ class TestExactHeadChecks:
                 )
             raise AssertionError(args)
 
-        monkeypatch.setattr(github_api_mod, "gh_call", gh_call)
+        command_runner.side_effect = gh_call
 
         receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
             RunMergeWaitCycleRequest(
@@ -4165,44 +3996,40 @@ class TestExactHeadChecks:
         assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
 
     def test_matching_required_app_id_satisfies_check_context(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A required check succeeds only when its GitHub App also matches."""
         adapter.repo = "repo"
         head = "a" * 40
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    SimpleNamespace(
-                        returncode=0,
-                        stdout=json.dumps(
-                            {
-                                "total_count": 1,
-                                "check_runs": [self._check_run(head, app_id=17)],
-                            }
-                        ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "check_runs": [self._check_run(head, app_id=17)],
+                        }
                     ),
-                    SimpleNamespace(
-                        returncode=0,
-                        stdout=json.dumps(
-                            {
-                                "total_count": 1,
-                                "check_runs": [self._check_run(head, app_id=17)],
-                            }
-                        ),
+                ),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "check_runs": [self._check_run(head, app_id=17)],
+                        }
                     ),
-                    self._empty_status_response(head),
-                    self._empty_status_response(head),
-                ]
-            ),
+                ),
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=17)) is True
 
     def test_optional_failed_run_does_not_block_successful_required_run(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A failed optional Check Run cannot block green required checks."""
         adapter.repo = "repo"
@@ -4232,12 +4059,12 @@ class TestExactHeadChecks:
                 self._empty_status_response(head),
             ]
         )
-        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
 
     def test_accepts_only_complete_successful_runs_for_requested_head(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A completed successful Check Run for the reviewed SHA permits merging."""
         adapter.repo = "repo"
@@ -4254,7 +4081,7 @@ class TestExactHeadChecks:
                 self._empty_status_response(head),
             ]
         )
-        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
         assert [entry.args[0] for entry in call_mock.call_args_list] == [
@@ -4287,11 +4114,12 @@ class TestExactHeadChecks:
     )
     def test_rejects_stale_pending_or_failed_check_runs(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         returned_head: str,
         status: str,
         conclusion: str,
+        command_runner: MagicMock,
     ) -> None:
         """Stale, pending, and failed evidence cannot authorize a merge."""
         adapter.repo = "repo"
@@ -4311,36 +4139,28 @@ class TestExactHeadChecks:
                 }
             ),
         )
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(side_effect=[response, response]),
-        )
+        command_runner.side_effect = MagicMock(side_effect=[response, response])
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
 
     def test_empty_check_run_response_fails_closed(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Missing Check Runs do not count as green required checks."""
         adapter.repo = "repo"
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    SimpleNamespace(
-                        returncode=0,
-                        stdout=json.dumps({"total_count": 0, "check_runs": []}),
-                    ),
-                    SimpleNamespace(
-                        returncode=0,
-                        stdout=json.dumps({"total_count": 0, "check_runs": []}),
-                    ),
-                    self._empty_status_response("a" * 40),
-                    self._empty_status_response("a" * 40),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"total_count": 0, "check_runs": []}),
+                ),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"total_count": 0, "check_runs": []}),
+                ),
+                self._empty_status_response("a" * 40),
+                self._empty_status_response("a" * 40),
+            ]
         )
 
         assert self._passes(adapter, "a" * 40, self._policy("required-ci")) is False
@@ -4352,10 +4172,11 @@ class TestExactHeadChecks:
     )
     def test_one_page_check_run_response_rejects_invalid_identity(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         first_id: int,
         second_id: int,
+        command_runner: MagicMock,
     ) -> None:
         """A one-page response with invalid identities cannot permit a merge."""
         adapter.repo = "repo"
@@ -4364,23 +4185,19 @@ class TestExactHeadChecks:
             self._check_run(head, check_run_id=first_id),
             self._check_run(head, check_run_id=second_id),
         ]
-        monkeypatch.setattr(
-            github_api_mod,
-            "gh_call",
-            MagicMock(
-                side_effect=[
-                    SimpleNamespace(
-                        returncode=0,
-                        stdout=json.dumps({"total_count": 2, "check_runs": check_runs}),
-                    ),
-                ]
-            ),
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"total_count": 2, "check_runs": check_runs}),
+                ),
+            ]
         )
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
 
     def test_paginates_and_rechecks_large_check_run_snapshots(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A large Check Runs response must be complete and stable."""
         adapter.repo = "repo"
@@ -4410,16 +4227,17 @@ class TestExactHeadChecks:
                 self._empty_status_response(head),
             ]
         )
-        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
         assert call_mock.call_count == 6
 
     def test_rejects_check_run_totals_above_the_safety_ceiling(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        command_runner: MagicMock,
     ) -> None:
         """An oversized Check Runs total must fail closed on the first page."""
         adapter.repo = "repo"
@@ -4447,7 +4265,7 @@ class TestExactHeadChecks:
             )
 
         call_mock = MagicMock(side_effect=fake_gh_call)
-        monkeypatch.setattr(github_api_mod, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
         assert call_mock.call_count == 1
@@ -4456,25 +4274,22 @@ class TestExactHeadChecks:
 
 # ---------------------------------------------------------------------------
 # Mutator mapping matrix: (method, args, patch-owner, underlying-name)
-# 'module' = a function bound into pipeline_github's namespace at import.
+# Each owner is the namespace that calls the dependency.
 # ---------------------------------------------------------------------------
 _MUTATOR_CASES = [
     ("add_labels", (5, ["x"]), "github_api", "gh_issue_add_labels"),
     ("remove_labels", (5, ["x"]), "github_api", "gh_issue_remove_labels"),
-    ("close_issue_as_covered", (5, 7), "module", "close_issue_as_covered"),
+    ("close_issue_as_covered", (5, 7), "mutations", "close_issue_as_covered"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
 ]
 
 
-_OWNERS = {"github_api": github_api_mod}
+_OWNERS = {"github_api": github_api_mod, "mutations": mutations_mod}
 
 
 def _patch_target(monkeypatch: pytest.MonkeyPatch, owner: str, name: str) -> MagicMock:
     mock = MagicMock(return_value=[] if name == "gh_pr_review_post" else None)
-    if owner == "module":
-        monkeypatch.setattr(pg, name, mock)
-    else:
-        monkeypatch.setattr(_OWNERS[owner], name, mock)
+    monkeypatch.setattr(_OWNERS[owner], name, mock)
     return mock
 
 
@@ -4484,7 +4299,7 @@ class TestMutatorMapping:
     @pytest.mark.parametrize(("method", "args", "owner", "name"), _MUTATOR_CASES)
     def test_mutator_delegates(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         method: str,
         args: tuple[Any, ...],
@@ -4500,7 +4315,7 @@ class TestMutatorMapping:
     @pytest.mark.parametrize(("method", "args", "owner", "name"), _MUTATOR_CASES)
     def test_dry_run_logs_and_skips(
         self,
-        dry_adapter: pg.PipelineGitHub,
+        dry_adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         method: str,
@@ -4518,7 +4333,7 @@ class TestMutatorMapping:
         assert any("[dry-run] would" in record.message for record in caplog.records)
 
     def test_upsert_plan_comment_keys_on_marker(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         body = render_current_plan("body")
         assert body.startswith("<!-- HomericIntelligence:plan-issue -->\n")
@@ -4538,7 +4353,7 @@ class TestMutatorMapping:
         post.assert_called_once_with(5, body)
 
     def test_upsert_plan_comment_migrates_owned_legacy_marker_in_place(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """One-write migration upgrades an owned legacy plan without a duplicate."""
         legacy_body = "# Implementation Plan\n\n<!-- hephaestus-plan:canonical -->\n\nOld plan"
@@ -4560,7 +4375,7 @@ class TestMutatorMapping:
         assert fetch.call_args_list == [call(5), call(5)]
 
     def test_upsert_plan_comment_rejects_mixed_current_and_legacy_aliases_without_mutation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A current and legacy actor-owned plan are an identity conflict, not duplicates."""
         body = render_current_plan("new plan")
@@ -4591,7 +4406,7 @@ class TestMutatorMapping:
         delete_comment.assert_not_called()
 
     def test_upsert_create_requires_owned_exact_body_readback(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A successful transport write is not a durable publication receipt."""
         body = render_current_plan("body")
@@ -4602,7 +4417,7 @@ class TestMutatorMapping:
             adapter.upsert_plan_comment(5, body)
 
     def test_upsert_patch_requires_owned_exact_body_readback(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """PATCH success cannot advance until GitHub returns the requested body."""
         old = render_current_plan("old")
@@ -4613,7 +4428,7 @@ class TestMutatorMapping:
             "_repo_issue_comments",
             MagicMock(side_effect=[[stale], [stale]]),
         )
-        monkeypatch.setattr(pg, "gh_call", MagicMock())
+        command_runner.side_effect = MagicMock()
 
         with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
             adapter.upsert_plan_comment(5, new)
@@ -4621,7 +4436,7 @@ class TestMutatorMapping:
     @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
     def test_recovery_create_rejects_post_write_identity_conflicts(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         conflict: str,
     ) -> None:
@@ -4646,7 +4461,7 @@ class TestMutatorMapping:
 
     def test_recovery_create_confirms_owned_exact_body_and_database_id(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A recovery create can use only one actor-owned exact-body readback with an ID."""
@@ -4672,7 +4487,7 @@ class TestMutatorMapping:
     @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
     def test_recovery_update_rejects_post_write_identity_conflicts(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         conflict: str,
     ) -> None:
@@ -4700,7 +4515,7 @@ class TestMutatorMapping:
 
     def test_recovery_update_preserves_comment_id_across_version_migration(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The pipeline adapter updates a v1 recovery comment in place to v3."""
@@ -4749,7 +4564,7 @@ class TestMutatorMapping:
     )
     def test_recovery_upsert_rejects_malformed_rest_metadata_before_mutation(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         comment: dict[str, object],
     ) -> None:
@@ -4768,7 +4583,7 @@ class TestMutatorMapping:
         patch_comment.assert_not_called()
 
     def test_upsert_rejects_foreign_canonical_marker_without_shadow_comment(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A foreign planning marker is an identity conflict, not an absence."""
         body = render_current_plan("safe plan")
@@ -4792,7 +4607,7 @@ class TestMutatorMapping:
         assert fetch.call_count == 1
 
     def test_upsert_rejects_one_owned_comment_with_plan_and_review_markers(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A shared comment cannot be patched once for each planning role."""
         body = render_current_plan("safe plan")
@@ -4818,7 +4633,7 @@ class TestMutatorMapping:
         post.assert_not_called()
 
     def test_upsert_rejects_cross_role_outgoing_body_before_any_write(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A malformed candidate body stops before it is posted or patched."""
         body = (
@@ -4840,7 +4655,7 @@ class TestMutatorMapping:
         patch_comment.assert_not_called()
 
     def test_upsert_rejects_planning_marker_in_nonplanning_outgoing_body(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An unrelated pipeline comment cannot carry a shared planning marker."""
         marker = "<!-- unrelated:status -->"
@@ -4860,7 +4675,7 @@ class TestMutatorMapping:
         patch_comment.assert_not_called()
 
     def test_upsert_rejects_cross_role_legacy_marker_without_mutation(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A plan upsert cannot use a review alias as a legacy migration key."""
         body = render_current_plan("safe plan")
@@ -4881,7 +4696,7 @@ class TestMutatorMapping:
         post.assert_not_called()
 
     def test_upsert_rejects_legacy_marker_as_a_write_target(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A legacy alias may be read for migration but cannot be written."""
         marker = "<!-- hephaestus-plan:canonical -->"
@@ -4897,7 +4712,7 @@ class TestMutatorMapping:
         post.assert_not_called()
 
     def test_canonical_create_rejects_owned_race_duplicates(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A post-create duplicate requires manual recovery before any delete."""
         body = render_current_plan("safe plan")
@@ -4924,7 +4739,7 @@ class TestMutatorMapping:
         delete.assert_not_called()
 
     def test_ensure_blocked_audit_repairs_missing_explanation_without_label_write(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Restart repair writes only the canonical audit record."""
         monkeypatch.setattr(
@@ -4946,7 +4761,7 @@ class TestMutatorMapping:
         assert upsert.call_args.kwargs == {}
 
     def test_ensure_blocked_audit_preserves_existing_detailed_review(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A valid BLOCKED explanation is never replaced by the recovery text."""
         monkeypatch.setattr(
@@ -4974,7 +4789,7 @@ class TestMutatorMapping:
 
     def test_dry_run_blocked_audit_repair_is_read_only(
         self,
-        dry_adapter: pg.PipelineGitHub,
+        dry_adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -5003,7 +4818,7 @@ class TestMutatorMapping:
         assert any("[dry-run] would upsert" in record.message for record in caplog.records)
 
     def test_immutable_append_ignores_foreign_collision(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A foreign immutable marker does not establish replay identity or block append."""
         marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
@@ -5037,7 +4852,7 @@ class TestMutatorMapping:
         assert fetch.call_count == 2
 
     def test_immutable_append_requires_positive_post_write_visibility(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A missing post-write journal cannot authorize later cleanup."""
         marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
@@ -5054,7 +4869,7 @@ class TestMutatorMapping:
         assert fetch.call_count == 2
 
     def test_immutable_append_rejects_embedded_planning_marker_before_post(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An immutable nonplanning artifact must not claim a planning role."""
         marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
@@ -5071,7 +4886,7 @@ class TestMutatorMapping:
         post.assert_not_called()
 
     def test_immutable_append_is_replay_safe_and_conflict_detecting(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
         body = f"{marker}\narchive"
@@ -5090,7 +4905,7 @@ class TestMutatorMapping:
         post.assert_not_called()
 
     def test_immutable_append_rejects_identical_owned_duplicates(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Append-only history remains immutable even after a create race."""
         marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
@@ -5115,14 +4930,14 @@ class TestMutatorMapping:
         delete.assert_not_called()
 
     def test_immutable_append_serializes_two_runner_create_race(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Two fresh accessors can create only one immutable journal entry."""
         marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
         body = f"{marker}\narchive"
         adapters = [
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path),
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path),
+            PipelineGitHub("org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner),
+            PipelineGitHub("org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner),
         ]
         comments: list[dict[str, object]] = []
         state_lock = threading.Lock()
@@ -5158,7 +4973,7 @@ class TestMutatorMapping:
         assert comments == [{"body": body, "databaseId": 1, "viewerDidAuthor": True}]
 
     def test_public_go_audit_precedes_matching_handoff_cleanup(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Recovery receipts are deleted only after an owned public audit readback."""
         head = "a" * 40
@@ -5184,7 +4999,7 @@ class TestMutatorMapping:
         delete.assert_called_once_with(11)
 
     def test_go_audit_readback_failure_preserves_recovery_handoff(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A stale or failed public write never deletes the replay artifact."""
         head = "a" * 40
@@ -5208,7 +5023,7 @@ class TestMutatorMapping:
         delete.assert_not_called()
 
     def test_go_audit_commit_timeout_and_read_lag_converges_duplicates(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An ambiguous committed POST converges to one audit before cleanup."""
         head = "a" * 40
@@ -5248,7 +5063,7 @@ class TestMutatorMapping:
         assert delete.call_args_list == [call(12), call(11)]
 
     def test_go_audit_promotes_pending_receipt_after_ambiguous_patch(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A committed PATCH with a lost response retries one durable comment ID."""
         head = "a" * 40
@@ -5288,7 +5103,7 @@ class TestMutatorMapping:
         delete.assert_called_once_with(11)
 
     def test_restart_recovers_public_audit_while_exact_head_handoff_remains(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A crash after receipt promotion still resumes required journal cleanup."""
         head = "a" * 40
@@ -5317,7 +5132,7 @@ class TestMutatorMapping:
         assert receipt.audit.summary == "Clean"
 
     def test_go_audit_replaces_matching_legacy_public_receipt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A typed audit replaces one owned public receipt that predates verdicts."""
         head = "a" * 40
@@ -5336,7 +5151,7 @@ class TestMutatorMapping:
         patch_comment.assert_called_once_with(12, body)
 
     def test_legacy_pending_go_audit_is_inert_for_restart_recovery(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A pre-verdict journal cannot authorize GO or prevent a fresh review."""
         head = "a" * 40
@@ -5368,7 +5183,7 @@ class TestMutatorMapping:
         assert receipt.audit.verdict is None
 
     def test_typed_public_audit_cleanup_removes_matching_legacy_receipt(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A replacement typed audit may remove its same-head legacy journal."""
         head = "a" * 40
@@ -5390,7 +5205,7 @@ class TestMutatorMapping:
 
 
 def test_mark_go_uses_adapter_labels_and_readback(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GO transitions use the adapter-owned label primitives for every scope."""
@@ -5407,7 +5222,7 @@ def test_mark_go_uses_adapter_labels_and_readback(
 
 
 def test_mark_no_go_uses_adapter_labels_and_readback(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """NO-GO transitions use the adapter-owned label primitives for every scope."""
@@ -5424,35 +5239,44 @@ def test_mark_no_go_uses_adapter_labels_and_readback(
 
 
 def test_unscoped_mark_go_uses_transport_without_repo_selector(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
+    command_runner: MagicMock,
 ) -> None:
     """Unscoped implementation labels use transport commands without ``--repo``."""
     calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+    def fake_gh_call(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append((argv, kwargs))
         if argv[:2] == ["pr", "view"]:
-            return SimpleNamespace(
-                stdout=json.dumps({"labels": [{"name": STATE_IMPLEMENTATION_GO}]})
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"labels": [{"name": STATE_IMPLEMENTATION_GO}]}),
+                stderr="",
             )
-        return SimpleNamespace(stdout="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(adapter, "_label_names", lambda: set(ALL_IMPLEMENTATION_STATE_LABELS))
-    monkeypatch.setattr(transport_mod, "gh_call", fake_gh_call)
+    command_runner.side_effect = fake_gh_call
 
+    started_at = time.monotonic()
     adapter.mark_pr_implementation_go(7)
 
-    assert calls == [
-        (["issue", "edit", "7", "--add-label", STATE_IMPLEMENTATION_GO], {"timeout": 120}),
-        (["issue", "edit", "7", "--remove-label", STATE_IMPLEMENTATION_NO_GO], {"timeout": 120}),
-        (["pr", "view", "7", "--json", "labels"], {"check": False, "timeout": 120}),
+    assert [argv for argv, _kwargs in calls] == [
+        ["issue", "edit", "7", "--add-label", STATE_IMPLEMENTATION_GO],
+        ["issue", "edit", "7", "--remove-label", STATE_IMPLEMENTATION_NO_GO],
+        ["pr", "view", "7", "--json", "labels"],
     ]
+    assert calls[-1][1]["check"] is False
+    for _argv, kwargs in calls:
+        _assert_bounded_command_kwargs(kwargs, started_at)
 
 
 def test_scoped_mark_no_go_appends_repo_selector(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
+    command_runner: MagicMock,
 ) -> None:
     """The same state transition remains explicitly repository scoped."""
     adapter.repo = "repo-a"
@@ -5468,7 +5292,7 @@ def test_scoped_mark_no_go_appends_repo_selector(
         return SimpleNamespace(stdout="")
 
     monkeypatch.setattr(adapter, "_label_names", lambda: set(ALL_IMPLEMENTATION_STATE_LABELS))
-    monkeypatch.setattr(transport_mod, "gh_call", fake_gh_call)
+    command_runner.side_effect = fake_gh_call
 
     adapter.mark_pr_implementation_no_go(7)
 
@@ -5496,36 +5320,38 @@ def test_scoped_mark_no_go_appends_repo_selector(
 
 
 def test_unscoped_label_read_transport_error_fails_closed(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
+    command_runner: MagicMock,
 ) -> None:
     """Treat unscoped transport failures as an absence of valid state."""
-    monkeypatch.setattr(
-        transport_mod, "gh_call", MagicMock(side_effect=RuntimeError("gh unavailable"))
-    )
+    command_runner.side_effect = MagicMock(side_effect=RuntimeError("gh unavailable"))
 
     assert adapter.pr_has_implementation_state_label(7) == (False, False)
 
 
 @pytest.mark.parametrize("stdout", ["not-json", "[]", "{}"])  # malformed or non-object payloads
 def test_unscoped_label_read_malformed_response_fails_closed(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
     stdout: str,
+    command_runner: MagicMock,
 ) -> None:
     """Treat malformed label payloads as an absence of valid state."""
-    call_mock = MagicMock(return_value=SimpleNamespace(stdout=stdout))
-    monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+    call_mock = MagicMock(return_value=subprocess.CompletedProcess([], 0, stdout=stdout, stderr=""))
+    command_runner.side_effect = call_mock
 
+    started_at = time.monotonic()
     assert adapter.pr_has_implementation_state_label(7) == (False, False)
-    call_mock.assert_called_once_with(
-        ["pr", "view", "7", "--json", "labels"], check=False, timeout=120
-    )
+    call_mock.assert_called_once()
+    assert call_mock.call_args.args == (["pr", "view", "7", "--json", "labels"],)
+    assert call_mock.call_args.kwargs["check"] is False
+    _assert_bounded_command_kwargs(call_mock.call_args.kwargs, started_at)
 
 
 @pytest.mark.parametrize("state", [(False, False), (True, True)])
 def test_mark_go_rejects_nonexclusive_readback(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
     state: tuple[bool, bool],
 ) -> None:
@@ -5540,7 +5366,7 @@ def test_mark_go_rejects_nonexclusive_readback(
 
 @pytest.mark.parametrize("state", [(True, True), (False, False)])
 def test_mark_no_go_rejects_nonexclusive_readback(
-    adapter: pg.PipelineGitHub,
+    adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
     state: tuple[bool, bool],
 ) -> None:
@@ -5554,12 +5380,13 @@ def test_mark_no_go_rejects_nonexclusive_readback(
 
 
 def test_dry_run_state_transitions_do_not_reach_transport(
-    dry_adapter: pg.PipelineGitHub,
+    dry_adapter: PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
+    command_runner: MagicMock,
 ) -> None:
     """Dry-run state transitions issue no GitHub transport calls."""
     call_mock = MagicMock()
-    monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+    command_runner.side_effect = call_mock
     monkeypatch.setattr(dry_adapter, "_add_labels", MagicMock())
     monkeypatch.setattr(dry_adapter, "_remove_labels", MagicMock())
 
@@ -5572,7 +5399,7 @@ class TestRepoScoping:
     """PipelineGitHub must target its configured repository explicitly."""
 
     def test_issue_comments_returns_bodies_in_adapter_order(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         monkeypatch.setattr(
             adapter,
@@ -5582,7 +5409,7 @@ class TestRepoScoping:
                 {"body": "review", "databaseId": 2, "user": {"login": "bot"}},
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
+        command_runner.side_effect = _viewer_login_command
 
         assert adapter.issue_comments(7) == [
             IssueComment(body="plan", author_login="bot", viewer_did_author=True, database_id=1),
@@ -5590,7 +5417,7 @@ class TestRepoScoping:
         ]
 
     def test_issue_reads_include_repo_arg(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         calls: list[list[str]] = []
 
@@ -5605,10 +5432,12 @@ class TestRepoScoping:
             }
             return SimpleNamespace(stdout=json.dumps(payload))
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
         assert (
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).gh_issue_json(5)["number"]
+            PipelineGitHub(
+                "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+            ).gh_issue_json(5)["number"]
             == 5
         )
 
@@ -5649,6 +5478,7 @@ class TestRepoScoping:
         monkeypatch: pytest.MonkeyPatch,
         payload: dict[str, object],
         expected: bool,
+        command_runner: MagicMock,
     ) -> None:
         """Fork heads are readable but cannot receive a base-origin address push."""
         calls: list[list[str]] = []
@@ -5657,8 +5487,10 @@ class TestRepoScoping:
             calls.append(argv)
             return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         assert adapter.pr_head_is_writable(17) is expected
         assert calls == [
@@ -5674,7 +5506,7 @@ class TestRepoScoping:
         ]
 
     def test_label_mutators_include_repo_arg(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         calls: list[list[str]] = []
 
@@ -5684,9 +5516,11 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout="[]")
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).add_labels(5, ["state:x"])
+        PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).add_labels(5, ["state:x"])
 
         assert calls[-1] == [
             "issue",
@@ -5711,8 +5545,11 @@ class TestRepoScoping:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         failure: BaseException,
+        command_runner: MagicMock,
     ) -> None:
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "_label_names", lambda: {"state:plan-go"})
         monkeypatch.setattr(adapter, "_gh", MagicMock(side_effect=failure))
 
@@ -5720,9 +5557,11 @@ class TestRepoScoping:
             adapter.edit_labels(5, add=["state:plan-go"], remove=["state:plan-no-go"])
 
     def test_plan_presence_does_not_backfill_from_review_comment(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
@@ -5733,14 +5572,16 @@ class TestRepoScoping:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
+        command_runner.side_effect = _viewer_login_command
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
     def test_repo_scoped_discover_plan_detects_plan_comment(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
@@ -5754,7 +5595,7 @@ class TestRepoScoping:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
+        command_runner.side_effect = _viewer_login_command
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.FOUND
 
@@ -5770,23 +5611,28 @@ class TestRepoScoping:
         body: str,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
     ) -> None:
         """Only an exact first-line marker identifies a canonical plan."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
             lambda issue: [{"body": body, "user": {"login": "bot"}}],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
+        command_runner.side_effect = _viewer_login_command
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
     def test_repo_scoped_discover_plan_ignores_foreign_plan_marker(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Foreign marker text is inert and cannot impersonate the plan artifact."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
@@ -5797,15 +5643,17 @@ class TestRepoScoping:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
+        command_runner.side_effect = _viewer_login_command
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
     def test_repo_scoped_discover_plan_ignores_review_state_text(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Artifact presence is independent from the authoritative state label."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
@@ -5820,7 +5668,7 @@ class TestRepoScoping:
                 },
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
+        command_runner.side_effect = _viewer_login_command
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.FOUND
 
@@ -5833,37 +5681,41 @@ class TestRepoScoping:
         failure: Exception,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
     ) -> None:
         """Transport and rate-limit failures remain READ_ERROR outcomes."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter, "_repo_issue_comments", lambda issue: (_ for _ in ()).throw(failure)
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.READ_ERROR
 
     def test_repo_scoped_pr_lookup_raises_on_gh_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Repo-scoped seeding must fail closed instead of inventing no-PR state."""
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             raise RuntimeError("gh unavailable")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
         with pytest.raises(RuntimeError, match="gh unavailable"):
-            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_pr_for_issue(5)
+            PipelineGitHub(
+                "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+            ).find_pr_for_issue(5)
 
     def test_repo_scoped_pr_lookup_uses_shared_branch_formatter(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """The head-branch lookup should consult the shared branch-name formatter."""
         calls: list[list[str]] = []
 
         monkeypatch.setattr(
-            pg,
+            queries_mod,
             "issue_auto_impl_branch_name",
             lambda issue_number: f"branch-{issue_number}",
             raising=False,
@@ -5881,9 +5733,11 @@ class TestRepoScoping:
                 stderr="",
             )
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        pr_number = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_pr_for_issue(7)
+        pr_number = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).find_pr_for_issue(7)
 
         assert pr_number == 5
         assert calls == [
@@ -5902,7 +5756,7 @@ class TestRepoScoping:
         ]
 
     def test_repo_scoped_pr_lookup_reads_all_head_prs_without_mutating_them(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Repo-scoped discovery contains every head PR before selecting main."""
         calls: list[list[str]] = []
@@ -5923,17 +5777,21 @@ class TestRepoScoping:
             calls.append(argv)
             return next(responses)
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         assert adapter.find_pr_for_issue(5) == 5
         assert len(calls) == 1
 
     def test_repo_scoped_pr_lookup_returns_all_siblings_without_auto_merge_mutation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Discovery is read-only; a sibling cannot trigger a merge mutation."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         monkeypatch.setattr(
             github_api_mod,
@@ -5944,7 +5802,7 @@ class TestRepoScoping:
         assert adapter._open_prs_for_branch("branch") == [(5, "main"), (6, "release")]
 
     def test_repo_scoped_lookup_contains_valid_prs_before_rejecting_malformed_discovery(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Malformed discovery still fails closed without mutating a valid PR."""
         calls: list[list[str]] = []
@@ -5962,8 +5820,10 @@ class TestRepoScoping:
                 )
             raise AssertionError(f"unexpected gh invocation: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
             adapter._open_prs_for_branch("branch")
@@ -5971,7 +5831,7 @@ class TestRepoScoping:
         assert len(calls) == 1
 
     def test_repo_scoped_closing_pr_lookup_contains_every_fallback_head_sibling(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A noncanonical ``Closes`` fallback selects a sibling without arm changes."""
         calls: list[list[str]] = []
@@ -5997,36 +5857,38 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps({"headRefName": "legacy-7-head"}))
             raise AssertionError(f"unexpected gh invocation: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         assert adapter.find_pr_for_issue(7) == 8
 
         assert not any("state,autoMergeRequest" in call for call in calls)
 
     def test_repo_scoped_pr_lookup_rejects_empty_successful_output(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Blank discovery output cannot become an invented no-PR state."""
-        monkeypatch.setattr(pg, "gh_call", lambda _argv, **_kwargs: SimpleNamespace(stdout=""))
+        command_runner.side_effect = lambda _argv, **_kwargs: SimpleNamespace(stdout="")
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
             adapter.find_pr_for_issue(5)
 
     def test_repo_scoped_merged_pr_lookup_requires_exact_closing_line(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A merged PR is linked only by the exact policy closing line."""
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda _argv, **_kwargs: SimpleNamespace(
-                stdout=json.dumps([{"number": 5, "body": "Closes #5\r\n"}])
-            ),
+        command_runner.side_effect = lambda _argv, **_kwargs: SimpleNamespace(
+            stdout=json.dumps([{"number": 5, "body": "Closes #5\r\n"}])
         )
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         assert adapter.find_merged_pr_for_issue(5) == 5
 
     @pytest.mark.parametrize(
@@ -6039,22 +5901,20 @@ class TestRepoScoping:
         ],
     )
     def test_repo_scoped_merged_pr_lookup_rejects_trailing_text(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, command_runner: MagicMock
     ) -> None:
         """Repo-scoped merged lookup requires the complete canonical line."""
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda _argv, **_kwargs: SimpleNamespace(
-                stdout=json.dumps([{"number": 5, "body": body}])
-            ),
+        command_runner.side_effect = lambda _argv, **_kwargs: SimpleNamespace(
+            stdout=json.dumps([{"number": 5, "body": body}])
         )
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         assert adapter.find_merged_pr_for_issue(5) is None
 
     def test_repo_scoped_unresolved_threads_returns_every_open_thread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         calls: list[list[str]] = []
 
@@ -6108,8 +5968,10 @@ class TestRepoScoping:
             }
             return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         snapshots = {
             "T1": {
                 "id": "T1",
@@ -6188,6 +6050,7 @@ class TestRepoScoping:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         body: str,
+        command_runner: MagicMock,
     ) -> None:
         """A leading @ in an agent reply remains text, never a gh file reference."""
         calls: list[list[str]] = []
@@ -6220,8 +6083,10 @@ class TestRepoScoping:
                 returncode=0,
             )
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         receipt = adapter._add_reviewer_feedback_reply("T1", body, expected_head_sha="a" * 40)
         assert receipt["id"] == "C1"
@@ -6232,7 +6097,7 @@ class TestRepoScoping:
         assert ["-F", f"body={body}"] != argv[body_index - 1 : body_index + 1]
 
     def test_graphql_preserves_typed_integer_fields(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """GraphQL Int variables retain gh's typed-field encoding."""
         calls: list[list[str]] = []
@@ -6264,8 +6129,10 @@ class TestRepoScoping:
                 returncode=0,
             )
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         adapter._graphql(
             github_api_mod.unresolved_review_threads_page_query("org", "repo-a", 7),
@@ -6278,7 +6145,7 @@ class TestRepoScoping:
         assert argv[argv.index("number=7") - 1] == "-F"
 
     def test_pipeline_graphql_marks_guarded_transport_internal(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """The typed pipeline adapter is the only caller allowed past the GraphQL guard."""
         call_kwargs: list[dict[str, object]] = []
@@ -6307,8 +6174,10 @@ class TestRepoScoping:
                 returncode=0,
             )
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         adapter._graphql(
             github_api_mod.unresolved_review_threads_page_query("org", "repo-a", 7),
@@ -6331,9 +6200,12 @@ class TestRepoScoping:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         review_threads: dict[str, Any],
+        command_runner: MagicMock,
     ) -> None:
         """Missing or malformed pagination never turns into an empty thread set."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: _open_pr_identity())
         monkeypatch.setattr(
             adapter,
@@ -6347,10 +6219,12 @@ class TestRepoScoping:
             adapter.list_unresolved_review_threads(7)
 
     def test_thread_snapshot_accepts_deleted_author_and_outdated_side(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Valid nullable GitHub fields cannot wedge an otherwise open thread."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_graphql",
@@ -6395,14 +6269,16 @@ class TestRepoScoping:
         assert snapshot["comments"][0]["author"] == ""
 
     def test_stable_unresolved_snapshot_keeps_comment_without_review_or_author(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Both complete passes keep a deleted-author comment with no owning review."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: _open_pr_identity())
 
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "PipelineThreadSnapshot" not in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str | int) -> dict[str, Any]:
+            if "PipelineThreadSnapshot" not in query.query:
                 return {
                     "nodes": [{"id": "T1", "isResolved": False}],
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -6456,10 +6332,12 @@ class TestRepoScoping:
         assert '"author":""' in RemediationReviewInput.canonical_thread_snapshot(threads)
 
     def test_multi_page_thread_snapshot_requires_a_stable_reread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A long conversation is reread before it can authorize a mutation."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         comments = [
             {
                 "id": f"C{index}",
@@ -6512,10 +6390,12 @@ class TestRepoScoping:
         assert calls == [None, "cursor-100", None, "cursor-100"]
 
     def test_multi_page_thread_snapshot_fails_closed_when_later_page_arms_pr(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A changed PR state on a later connection page invalidates the whole read."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         def graphql(_query: str, **fields: str | int) -> dict[str, Any]:
             after = fields.get("after") == "cursor-1"
@@ -6559,10 +6439,12 @@ class TestRepoScoping:
         assert adapter._review_thread_snapshot(7, "T1") is None
 
     def test_thread_snapshot_rejects_comment_cap_plus_one(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Hydration stops before it retains comment 2,001."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         recovery_mod = reviews_mod.reply_recovery
         monkeypatch.setattr(recovery_mod, "THREAD_COMMENT_MAX", 2_000)
         monkeypatch.setattr(recovery_mod, "REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES", 10**9)
@@ -6608,10 +6490,12 @@ class TestRepoScoping:
         assert adapter._review_thread_snapshot(7, "T1") is None
 
     def test_thread_snapshot_rejects_hydration_byte_limit(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Hydration stops before it retains an over-limit comment payload."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         recovery_mod = reviews_mod.reply_recovery
         monkeypatch.setattr(recovery_mod, "REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES", 10)
         monkeypatch.setattr(
@@ -6654,10 +6538,12 @@ class TestRepoScoping:
         assert adapter._review_thread_snapshot(7, "T1") is None
 
     def test_thread_snapshot_rejects_pathological_empty_comment_pages(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Unique cursors cannot bypass the per-thread comment page limit."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         recovery_mod = reviews_mod.reply_recovery
         monkeypatch.setattr(recovery_mod, "THREAD_COMMENT_PAGE_MAX", 2)
         calls = 0
@@ -6699,7 +6585,7 @@ class TestRepoScoping:
         assert calls == 2
 
     def test_repo_scoped_unresolved_threads_fetches_page_after_first_hundred(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Every open thread is returned even when it appears after page one."""
         calls: list[list[str]] = []
@@ -6745,8 +6631,10 @@ class TestRepoScoping:
             }
             return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         def snapshot(_pr: int, thread_id: str) -> dict[str, Any]:
             return {
@@ -6779,10 +6667,12 @@ class TestRepoScoping:
         assert "after=cursor-1" in calls[3]
 
     def test_repo_scoped_unresolved_threads_rejects_an_unstable_page_traversal(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A thread set changing between complete reads cannot authorize a clean state."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         reads = 0
 
         def graphql(_query: str, **_fields: str | int) -> dict[str, Any]:
@@ -6812,10 +6702,12 @@ class TestRepoScoping:
             adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_unresolved_threads_rejects_changed_hydrated_snapshot(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Two complete traversals must include every comment body and author."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_graphql",
@@ -6856,10 +6748,12 @@ class TestRepoScoping:
             adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_threads_reject_resolution_during_hydration(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A resolution between enumeration and hydration invalidates the pass."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: _open_pr_identity())
         monkeypatch.setattr(
             adapter,
@@ -6886,10 +6780,12 @@ class TestRepoScoping:
             adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_empty_threads_reject_final_head_change(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """An empty thread set still needs the final exact PR identity proof."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "_graphql",
@@ -6912,10 +6808,12 @@ class TestRepoScoping:
         assert reads == 5
 
     def test_repo_scoped_unresolved_threads_rejects_a_cursor_cycle(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A non-adjacent repeated cursor cannot loop forever."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         def graphql(_query: str, **fields: str | int) -> dict[str, Any]:
             after = fields.get("after")
@@ -6931,10 +6829,12 @@ class TestRepoScoping:
             adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_threads_reject_pathological_empty_pages(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Unique cursors cannot bypass the all-thread page limit."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: _open_pr_identity())
         monkeypatch.setattr(queries_mod, "_THREAD_PAGE_MAX", 2)
         calls = 0
@@ -6953,10 +6853,12 @@ class TestRepoScoping:
         assert calls == 2
 
     def test_repo_scoped_threads_reject_thread_cap_plus_one(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Enumeration stops before it retains thread 10,001."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: _open_pr_identity())
         monkeypatch.setattr(queries_mod, "REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES", 10**9)
         monkeypatch.setattr(
@@ -6973,10 +6875,12 @@ class TestRepoScoping:
             adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_threads_reject_aggregate_hydration_byte_limit(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Many valid small threads cannot exceed the complete snapshot budget."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: _open_pr_identity())
         monkeypatch.setattr(queries_mod, "REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES", 600)
         monkeypatch.setattr(
@@ -7011,10 +6915,10 @@ class TestRepoScoping:
                 {"id": "C1", "author": "reviewer", "body": "duplicate"},
             ]
         }
-        assert pg.PipelineGitHub._thread_comment_snapshot(thread) is None
+        assert PipelineGitHub._thread_comment_snapshot(thread) is None
 
     def test_repo_scoped_unresolved_threads_reads_every_comment_in_long_thread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A long-lived open conversation is passed to remediation in full."""
         comments = [
@@ -7033,8 +6937,8 @@ class TestRepoScoping:
             for index in range(21)
         ]
 
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "node(id:$threadId)" in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str | int) -> dict[str, Any]:
+            if "node(id:$threadId)" in query.query:
                 return {
                     "pr_node_id": "PR1",
                     "pr_state": {
@@ -7067,7 +6971,9 @@ class TestRepoScoping:
                 "nodes": [{"id": "T1", "isResolved": False}],
             }
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "_graphql", graphql)
         monkeypatch.setattr(adapter, "gh_pr_state", lambda _pr: _open_pr_identity())
 
@@ -7146,17 +7052,19 @@ class TestRepoScoping:
         assert progress.pending_review_id == "PRR_pending"
 
     def test_repo_scoped_unresolved_threads_fail_closed_on_truncated_comments(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A truncated comment page cannot produce an incomplete thread snapshot."""
         all_comments = [
             {"body": f"bot reply {index}", "author": {"login": "ci-bot"}} for index in range(20)
         ]
         all_comments.append({"body": "human reply", "author": {"login": "reviewer"}})
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
-        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
-            if "node(id:$threadId)" in query:
+        def graphql(query: GraphQLSpec[Any], **_fields: str | int) -> dict[str, Any]:
+            if "node(id:$threadId)" in query.query:
                 return {
                     "pr_node_id": "PR1",
                     "pr_state": {
@@ -7195,21 +7103,23 @@ class TestRepoScoping:
             adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_fetch_error_fails_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A repo-scoped GraphQL failure must not hide open review threads."""
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             raise RuntimeError("gh: GraphQL: Head sha can't be blank")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         with pytest.raises(RuntimeError, match="could not verify PR identity"):
             adapter.list_unresolved_review_threads(7)
 
     def test_repo_scoped_upsert_plan_comment_updates_marker_comment(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         calls: list[list[str]] = []
         current_body = render_current_plan("old")
@@ -7234,18 +7144,18 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_plan_comment(
-            5, render_current_plan("new")
-        )
+        PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).upsert_plan_comment(5, render_current_plan("new"))
 
         assert any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
         assert any("/repos/org/repo-a/issues/comments/9" in call for call in calls)
         assert not any(call[:2] == ["issue", "comment"] for call in calls)
 
     def test_repo_scoped_review_post_skips_an_unanchored_summary(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         calls: list[list[str]] = []
 
@@ -7286,21 +7196,28 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
-        posted = adapter.post_review_threads(7, [], expected_head_sha="a" * 40)
+        posted = adapter.post_review_threads(
+            7,
+            [],
+            expected_head_sha="a" * 40,
+            review_diff=("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"),
+        )
 
         assert posted == []
         assert calls == []
 
     def test_repo_scoped_review_post_has_no_review_level_response_parameter(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A source-anchored finding has no review-level response pathway."""
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
@@ -7314,8 +7231,10 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
             raise AssertionError(f"unexpected GitHub call: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
@@ -7331,6 +7250,7 @@ class TestRepoScoping:
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
             expected_head_sha="a" * 40,
+            review_diff=diff,
         )
 
         assert review_payloads == [
@@ -7349,7 +7269,7 @@ class TestRepoScoping:
         ]
 
     def test_repo_scoped_review_post_rejects_mixed_anchor_batch_before_write(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """An invalid anchor must not leave a partially posted review batch."""
         calls: list[list[str]] = []
@@ -7361,9 +7281,11 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=diff)
             raise AssertionError(f"unexpected GitHub write/query: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
@@ -7377,17 +7299,17 @@ class TestRepoScoping:
                     {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
                 ],
                 expected_head_sha="a" * 40,
+                review_diff=diff,
             )
 
-        assert len(calls) == 1
-        assert calls[0][:3] == ["pr", "diff", "7"]
+        assert calls == []
 
     def test_repo_scoped_review_post_does_not_reject_a_reviewed_commit_after_a_push(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A later push does not discard the one review batch for the snapshot."""
         calls: list[list[str]] = []
-        head_changed = False
+        head_changed = True
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
@@ -7400,8 +7322,10 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
             raise AssertionError(f"unexpected GitHub call: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
@@ -7417,14 +7341,14 @@ class TestRepoScoping:
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
             expected_head_sha="a" * 40,
+            review_diff=diff,
         )
 
-        assert len(calls) == 2
-        assert calls[0][:3] == ["pr", "diff", "7"]
-        assert calls[1][:3] == ["api", "-X", "POST"]
+        assert len(calls) == 1
+        assert calls[0][:3] == ["api", "-X", "POST"]
 
     def test_repo_scoped_review_post_submits_the_reviewed_snapshot_after_head_advances(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A review bound to H is still submitted once another writer advances the PR."""
         review_payloads: list[dict[str, object]] = []
@@ -7436,8 +7360,10 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
             raise AssertionError(f"unexpected GitHub call: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
@@ -7458,15 +7384,13 @@ class TestRepoScoping:
         assert len(comments) == 1
 
     def test_repo_scoped_review_post_warns_on_zero_matched_threads(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        command_runner: MagicMock,
     ) -> None:
-        """A posted review with comments that matches no GraphQL thread logs a warning.
-
-        The ``pr diff`` call below is unmatched by ``fake_gh_call`` and returns
-        empty stdout, so ``_filter_comments_to_diff`` fails open (diff.py:95-96)
-        and ``review_comments`` stays non-empty — required for the warning branch
-        (posted comments but zero matched threads) to trigger.
-        """
+        """A posted review without matching thread receipts logs a warning."""
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             if argv[:2] == ["api", "graphql"]:
@@ -7520,10 +7444,12 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps({"id": 999, "node_id": "review-node"}))
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        with caplog.at_level("WARNING", logger=pg.__name__):
-            adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        with caplog.at_level("WARNING", logger=transport_mod.__name__):
+            adapter = PipelineGitHub(
+                "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+            )
             monkeypatch.setattr(
                 adapter,
                 "gh_pr_state",
@@ -7537,6 +7463,9 @@ class TestRepoScoping:
                 7,
                 [{"path": "a.py", "line": 1, "body": "x"}],
                 expected_head_sha="a" * 40,
+                review_diff=(
+                    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+                ),
             )
 
         assert posted == []
@@ -7545,7 +7474,7 @@ class TestRepoScoping:
         )
 
     def test_repo_scoped_review_post_rejects_same_login_reply_before_receipt(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A reply before first receipt readback cannot become a process receipt."""
 
@@ -7611,9 +7540,11 @@ class TestRepoScoping:
                 return SimpleNamespace(stdout=json.dumps({"id": 999, "node_id": "review-node"}))
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(
             adapter,
             "gh_pr_state",
@@ -7623,6 +7554,7 @@ class TestRepoScoping:
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "finding"}],
             expected_head_sha="a" * 40,
+            review_diff=("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"),
         )
 
         assert posted == []
@@ -7632,7 +7564,7 @@ class TestRepoReviewThreadReceipts:
     """Post-time receipt lookup binds immutable first comments to the REST review id."""
 
     def test_fetches_matching_review_thread_after_first_hundred(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Receipt lookup paginates without accepting another review's threads."""
         calls: list[list[str]] = []
@@ -7712,9 +7644,9 @@ class TestRepoReviewThreadReceipts:
             }
             return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        gh = PipelineGitHub("org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner)
 
         receipts = gh._repo_review_thread_receipts_for_review(
             7,
@@ -7727,7 +7659,7 @@ class TestRepoReviewThreadReceipts:
         assert "after=cursor-1" in calls[1]
 
     def test_round_trips_rest_node_id_against_graphql_review_id(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Pins the domain-equality invariant: REST node_id IS the GraphQL id.
 
@@ -7818,9 +7750,9 @@ class TestRepoReviewThreadReceipts:
                 return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        gh = PipelineGitHub("org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner)
         result = gh._repo_review_thread_receipts_for_review(
             7,
             str(rest_review_response["node_id"]),
@@ -7830,7 +7762,7 @@ class TestRepoReviewThreadReceipts:
         assert [receipt["id"] for receipt in result] == ["PRRT_matching"]
 
     def test_resolved_thread_from_same_review_is_excluded(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             if argv[:2] == ["api", "graphql"]:
@@ -7882,9 +7814,9 @@ class TestRepoReviewThreadReceipts:
                 return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        gh = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        gh = PipelineGitHub("org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner)
         result = gh._repo_review_thread_receipts_for_review(
             7,
             "review-node",
@@ -7897,15 +7829,23 @@ class TestRepoReviewThreadReceipts:
 class TestRepoScopedAutoMerge:
     """The pipeline adapter intentionally exposes no auto-merge mutators."""
 
-    def test_pipeline_adapter_has_no_auto_merge_mutation_surface(self, tmp_path: Path) -> None:
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    def test_pipeline_adapter_has_no_auto_merge_mutation_surface(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         assert not hasattr(adapter, "arm_auto_merge")
         assert not hasattr(adapter, "defer_auto_merge")
 
-    def test_pipeline_adapter_has_no_unanchored_pr_comment_surface(self, tmp_path: Path) -> None:
+    def test_pipeline_adapter_has_no_unanchored_pr_comment_surface(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
         """PR responses must be review-thread replies, never issue comments."""
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
         assert not hasattr(adapter, "post_pr_comment")
         assert not hasattr(adapter, "upsert_pr_comment")
@@ -7915,46 +7855,45 @@ class TestCreatePr:
     """create_pr: idempotent reuse, given-body create, dry-run neutral."""
 
     def test_repo_scoped_reuses_existing_open_pr(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(adapter, "_open_prs_for_branch", lambda branch: [])
         monkeypatch.setattr(adapter, "find_pr_for_issue", lambda issue: 77)
-        create = _patch_target(monkeypatch, "github_api", "gh_pr_create")
 
         assert adapter.create_pr(5, "branch", "t", "b") == 77
-        create.assert_not_called()
+        command_runner.assert_not_called()
 
-    def test_unscoped_create_fails_closed_without_legacy_helper(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    def test_unscoped_create_fails_before_transport(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
     ) -> None:
-        """PR creation cannot delegate to the legacy auto-merge-capable path."""
-        create = MagicMock()
-        monkeypatch.setattr(github_api_mod, "gh_pr_create", create)
-
+        """PR creation requires an explicit repository before any command."""
         with pytest.raises(RuntimeError, match="repo-scoped"):
             adapter.create_pr(5, "branch", "title", "body\n\nCloses #5")
 
-        create.assert_not_called()
+        command_runner.assert_not_called()
 
-    def test_dry_run_returns_zero(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        dry_adapter = pg.PipelineGitHub("org", repo="repo-a", dry_run=True, repo_root=tmp_path)
+    def test_dry_run_returns_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        dry_adapter = PipelineGitHub(
+            "org", repo="repo-a", dry_run=True, repo_root=tmp_path, command_runner=command_runner
+        )
         monkeypatch.setattr(dry_adapter, "_open_prs_for_branch", lambda branch: [])
         monkeypatch.setattr(dry_adapter, "find_pr_for_issue", lambda issue: None)
-        create = _patch_target(monkeypatch, "github_api", "gh_pr_create")
 
         assert dry_adapter.create_pr(5, "b", "t", "x") == 0
-        create.assert_not_called()
+        command_runner.assert_not_called()
 
     def test_repo_scoped_create_pr_parses_pull_url(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         calls: list[list[str]] = []
 
-        monkeypatch.setattr(pg.PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
-        monkeypatch.setattr(
-            github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None
-        )
+        monkeypatch.setattr(PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
+        monkeypatch.setattr(prs_mod, "_assert_branch_commits_signed", lambda branch, **kwargs: None)
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
@@ -7962,24 +7901,22 @@ class TestCreatePr:
                 return SimpleNamespace(stdout="[]")
             return SimpleNamespace(stdout="https://github.com/org/repo-a/pull/1888\n")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        pr_number = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).create_pr(
-            1887, "1887-auto-impl", "title", "body\n\nCloses #1887"
-        )
+        pr_number = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).create_pr(1887, "1887-auto-impl", "title", "body\n\nCloses #1887")
 
         assert pr_number == 1888
         assert calls[0][-2:] == ["--repo", "org/repo-a"]
 
     def test_repo_scoped_create_pr_contains_all_existing_head_prs(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """A custom branch cannot bypass all-head containment before PR reuse."""
         calls: list[list[str]] = []
-        monkeypatch.setattr(pg.PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
-        monkeypatch.setattr(
-            github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None
-        )
+        monkeypatch.setattr(PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
+        monkeypatch.setattr(prs_mod, "_assert_branch_commits_signed", lambda branch, **kwargs: None)
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(argv)
@@ -7995,9 +7932,11 @@ class TestCreatePr:
                 )
             raise AssertionError(f"unexpected gh invocation: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
         assert adapter.create_pr(7, "custom-branch", "title", "body\n\nCloses #7") == 9
         assert not any("state,autoMergeRequest" in call for call in calls)
 
@@ -8014,22 +7953,23 @@ class TestCreatePr:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         stdout: str,
+        command_runner: MagicMock,
     ) -> None:
-        monkeypatch.setattr(pg.PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
-        monkeypatch.setattr(
-            github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None
-        )
+        monkeypatch.setattr(PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
+        monkeypatch.setattr(prs_mod, "_assert_branch_commits_signed", lambda branch, **kwargs: None)
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             if argv[:2] == ["pr", "list"]:
                 return SimpleNamespace(stdout="[]")
             return SimpleNamespace(stdout=stdout)
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
 
-        with caplog.at_level("ERROR", logger=pg.__name__):
+        with caplog.at_level("ERROR", logger=transport_mod.__name__):
             with pytest.raises(RuntimeError, match="Failed to parse PR number") as excinfo:
                 adapter.create_pr(1887, "1887-auto-impl", "title", "body\n\nCloses #1887")
 
@@ -8041,7 +7981,7 @@ class TestReadSurface:
     """Reads delegate verbatim (and stay LIVE even under dry-run)."""
 
     def test_repo_scoped_issue_read_exposes_exact_body_digest(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         raw_body = "raw\x00body"
         adapter.repo = "repo-a"
@@ -8069,9 +8009,7 @@ class TestReadSurface:
         assert result["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
         assert result["authoritySanitized"] is True
 
-    def test_gh_issue_json(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_gh_issue_json(self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(github_api_mod, "gh_issue_json", lambda n: {"number": n})
 
         assert adapter.gh_issue_json(4) == {"number": 4}
@@ -8087,7 +8025,7 @@ class TestReadSurface:
     )
     def test_repo_scoped_issue_read_normalizes_transport_and_json_failures(
         self,
-        adapter: pg.PipelineGitHub,
+        adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         failure: BaseException | None,
     ) -> None:
@@ -8105,27 +8043,11 @@ class TestReadSurface:
             adapter.gh_issue_json(4)
 
     def test_module_bound_reads(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        monkeypatch.setattr(pg, "find_merged_closing_pr", lambda n: 1)
+        monkeypatch.setattr(queries_mod, "find_merged_closing_pr", lambda n: 1)
         monkeypatch.setattr(adapter, "_find_pr_for_issue", lambda n, state: 2)
-        monkeypatch.setattr(pg, "get_pr_head_branch", lambda n: "head")
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda argv, **kwargs: SimpleNamespace(
-                stdout=json.dumps(
-                    {
-                        "comments": [
-                            {
-                                "body": render_current_plan("Plan"),
-                                "viewerDidAuthor": True,
-                            }
-                        ]
-                    }
-                )
-            ),
-        )
+        monkeypatch.setattr(queries_mod, "get_pr_head_branch", lambda n: "head")
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
@@ -8136,7 +8058,7 @@ class TestReadSurface:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
+        command_runner.side_effect = _viewer_login_command
 
         assert adapter.find_merged_closing_pr(9) == 1
         assert adapter.find_pr_for_issue(9) == 2
@@ -8144,26 +8066,22 @@ class TestReadSurface:
         assert adapter.discover_plan(9).status is PlanDiscoveryStatus.FOUND
 
     def test_unscoped_pr_lookup_contains_every_same_head_pr(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """The optional unscoped accessor discovers siblings read-only."""
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda argv, **_kwargs: SimpleNamespace(
-                stdout=json.dumps(
-                    [
-                        {"number": 5, "state": "OPEN", "baseRefName": "main"},
-                        {"number": 6, "state": "OPEN", "baseRefName": "release"},
-                    ]
-                )
-            ),
+        command_runner.side_effect = lambda argv, **_kwargs: SimpleNamespace(
+            stdout=json.dumps(
+                [
+                    {"number": 5, "state": "OPEN", "baseRefName": "main"},
+                    {"number": 6, "state": "OPEN", "baseRefName": "release"},
+                ]
+            )
         )
 
         assert adapter.find_pr_for_issue(5) == 5
 
     def test_find_issue_for_pr_parses_exact_closes_line(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         calls: list[list[str]] = []
 
@@ -8171,29 +8089,31 @@ class TestReadSurface:
             calls.append(argv)
             return SimpleNamespace(stdout=json.dumps({"body": "Summary\n\nCloses #1899\n"}))
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        issue = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_issue_for_pr(1984)
+        issue = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).find_issue_for_pr(1984)
 
         assert issue == 1899
         assert calls == [["pr", "view", "1984", "--json", "body", "--repo", "org/repo-a"]]
 
     @pytest.mark.parametrize("body", ["Fixes #1899\n", "Closes #1899, #1900\n", ""])
     def test_find_issue_for_pr_rejects_non_policy_body(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, command_runner: MagicMock
     ) -> None:
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda argv, **kwargs: SimpleNamespace(stdout=json.dumps({"body": body})),
+        command_runner.side_effect = lambda argv, **kwargs: SimpleNamespace(
+            stdout=json.dumps({"body": body})
         )
 
-        issue = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_issue_for_pr(1984)
+        issue = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).find_issue_for_pr(1984)
 
         assert issue is None
 
     def test_pr_review_context_reads_metadata_for_a_checkout_bound_diff(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """The checkout barrier, not mutable GitHub diff output, supplies the diff."""
         calls: list[list[str]] = []
@@ -8215,11 +8135,11 @@ class TestReadSurface:
                 )
             raise AssertionError(f"unexpected gh invocation: {argv}")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        context = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).pr_review_context(
-            1984
-        )
+        context = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).pr_review_context(1984)
 
         assert context == {
             "pr_node_id": "PR_exact",
@@ -8242,7 +8162,7 @@ class TestReadSurface:
         ]
 
     def test_pr_review_context_does_not_request_mutable_remote_diff(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """An A -> B -> A race cannot pair B's remote diff with proof for A."""
         calls: list[list[str]] = []
@@ -8261,11 +8181,11 @@ class TestReadSurface:
                 )
             )
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
-        context = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).pr_review_context(
-            1984
-        )
+        context = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        ).pr_review_context(1984)
 
         assert context is not None
         assert context["pr_head_sha"] == "a" * 40
@@ -8273,28 +8193,28 @@ class TestReadSurface:
         assert all(argv[:2] != ["pr", "diff"] for argv in calls)
 
     def test_unscoped_implementation_label_read_uses_adapter_transport(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         call_mock = MagicMock(
-            return_value=SimpleNamespace(
-                stdout=json.dumps({"labels": [{"name": STATE_IMPLEMENTATION_GO}]})
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout=json.dumps({"labels": [{"name": STATE_IMPLEMENTATION_GO}]}), stderr=""
             )
         )
-        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+        command_runner.side_effect = call_mock
 
+        started_at = time.monotonic()
         assert adapter.pr_has_implementation_state_label(7) == (True, False)
-        call_mock.assert_called_once_with(
-            ["pr", "view", "7", "--json", "labels"],
-            check=False,
-            timeout=120,
-        )
+        call_mock.assert_called_once()
+        assert call_mock.call_args.args == (["pr", "view", "7", "--json", "labels"],)
+        assert call_mock.call_args.kwargs["check"] is False
+        _assert_bounded_command_kwargs(call_mock.call_args.kwargs, started_at)
 
 
 class TestGhPrState:
     """The merge_wait single PR-state read (re-housed CIDriver._gh_pr_state)."""
 
     def test_success_parses_json(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         payload = {"state": "OPEN", "headRefOid": "abc", "mergedAt": None}
         calls: list[list[str]] = []
@@ -8303,7 +8223,7 @@ class TestGhPrState:
             calls.append(argv)
             return SimpleNamespace(stdout=json.dumps(payload))
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        command_runner.side_effect = fake_gh_call
 
         assert adapter.gh_pr_state(7) == payload
         assert calls == [
@@ -8317,180 +8237,45 @@ class TestGhPrState:
         ]
 
     def test_failure_returns_none(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         def boom(argv: list[str], **_kwargs: Any) -> Any:
             raise RuntimeError("gh down")
 
-        monkeypatch.setattr(pg, "gh_call", boom)
+        command_runner.side_effect = boom
 
         assert adapter.gh_pr_state(7) is None
 
 
-class TestDriveGreenLearning:
-    """Post-merge learning state remains independent of merge arming."""
-
-    def test_learn_claim_is_durable_and_never_replayable(self, adapter: pg.PipelineGitHub) -> None:
-        """A crash after dispatch claim is an explicit unknown, never a replay."""
-        assert adapter.claim_drive_green_learn(31, 701) is True
-        assert adapter.drive_green_learn_inflight(31) is True
-        assert adapter.claim_drive_green_learn(31, 701) is False
-        assert adapter.drive_green_learn_terminal(31) is False
-
-    def test_concurrent_learn_claims_allow_exactly_one_dispatch(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Two coordinators racing on one issue cannot both claim /learn."""
-        original_save = adapter._arming.save
-
-        def delayed_save(issue_number: int, record: dict[str, Any]) -> bool:
-            # Without the stable claim lock both workers load an unclaimed
-            # record during this delay and would each report a successful
-            # claim. The lock holds the second worker outside the read.
-            sleep(0.05)
-            return original_save(issue_number, record)
-
-        monkeypatch.setattr(adapter._arming, "save", delayed_save)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            outcomes = list(
-                pool.map(
-                    lambda _unused: adapter.claim_drive_green_learn(32, 702),
-                    range(2),
-                )
-            )
-
-        assert outcomes.count(True) == 1
-        assert outcomes.count(False) == 1
-
-    def test_process_racing_learn_claims_allow_exactly_one_dispatch(self, tmp_path: Path) -> None:
-        """The claim lock coordinates separate automation-loop processes."""
-        pytest.importorskip("fcntl")
-        context = get_context("spawn")
-        start_barrier = context.Barrier(2)
-        results = context.Queue()
-        processes = [
-            context.Process(
-                target=_claim_drive_green_learn_from_process,
-                args=(str(tmp_path), start_barrier, results),
-            )
-            for _ in range(2)
-        ]
-        for process in processes:
-            process.start()
-        for process in processes:
-            process.join(timeout=10)
-            assert process.exitcode == 0
-
-        outcomes = [results.get(timeout=1) for _ in processes]
-        assert outcomes.count(True) == 1
-        assert outcomes.count(False) == 1
-
-    def test_learn_claim_fails_closed_without_an_exclusive_lock(
-        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The pipeline refuses an external /learn action if locking is absent."""
-        unavailable_lock = MagicMock(side_effect=LockUnavailableError("exclusive lock unsupported"))
-        monkeypatch.setattr(pg, "file_lock", unavailable_lock)
-
-        with pytest.raises(LockUnavailableError, match="exclusive lock unsupported"):
-            adapter.claim_drive_green_learn(34, 704)
-
-        unavailable_lock.assert_called_once_with(
-            adapter._arming.learn_claim_lock_path(34),
-            require_exclusive=True,
-        )
-        assert adapter._arming.load(34) is None
-
-    def test_failed_learn_is_also_terminal(self, adapter: pg.PipelineGitHub) -> None:
-        adapter.mark_drive_green_learn_result(4, succeeded=False)
-
-        assert adapter.drive_green_learn_terminal(4) is True
-
-
-class TestRateBudget:
-    """The non-blocking port of the legacy rate guard."""
-
-    def test_explicit_timeout_reaches_rate_limit_probe(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The CLI-owned GitHub timeout must bound the guard's live probe."""
-        observed: list[int | None] = []
-
-        def _remaining(*, timeout: int | None = None) -> tuple[int, int]:
-            observed.append(timeout)
-            return 5000, 0
-
-        monkeypatch.setattr(pg, "rate_limit_remaining", _remaining)
-
-        assert pg.rate_budget_ok(timeout=17) == (True, 0.0)
-        assert observed == [17]
-
-    def test_guard_disabled_by_explicit_option(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The removed ambient toggle cannot disable the explicit guard."""
-        monkeypatch.setenv("HEPHAESTUS_RATE_GUARD", "0")
-        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: (10, 1_000_000))
-
-        assert pg.rate_budget_ok(now_epoch=999_995.0) == (False, 10.0)
-        assert pg.rate_budget_ok(enabled=False) == (True, 0.0)
-
-    def test_unknown_budget_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("HEPHAESTUS_RATE_GUARD", raising=False)
-        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: None)
-
-        assert pg.rate_budget_ok() == (True, 0.0)
-
-    def test_high_budget_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("HEPHAESTUS_RATE_GUARD", raising=False)
-        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: (5000, 0))
-
-        assert pg.rate_budget_ok() == (True, 0.0)
-
-    def test_low_budget_returns_park_delay(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Low budget: (False, seconds-until-reset + 5s slack) — never a sleep."""
-        monkeypatch.delenv("HEPHAESTUS_RATE_GUARD", raising=False)
-        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: (10, 1_000_000))
-
-        ok, delay = pg.rate_budget_ok(now_epoch=999_995.0)
-
-        assert ok is False
-        assert delay == pytest.approx(10.0)  # (reset - now) + 5
+class TestRateLimitParsing:
+    """Read the current quota through the injected command runner."""
 
     def test_rate_limit_remaining_parses_graphql_budget(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         payload = {"resources": {"graphql": {"remaining": 42, "reset": 123}}}
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda argv, **_: SimpleNamespace(stdout=json.dumps(payload)),
-        )
+        command_runner.side_effect = lambda argv, **_: SimpleNamespace(stdout=json.dumps(payload))
 
-        assert pg.rate_limit_remaining() == (42, 123)
+        assert transport_mod.rate_limit_remaining(call=command_runner) == (42, 123)
 
-    def test_rate_limit_remaining_none_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_rate_limit_remaining_none_on_error(
+        self, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
         def boom(argv: list[str], **_: Any) -> Any:
             raise RuntimeError("gh down")
 
-        monkeypatch.setattr(pg, "gh_call", boom)
+        command_runner.side_effect = boom
 
-        assert pg.rate_limit_remaining() is None
+        assert transport_mod.rate_limit_remaining(call=command_runner) is None
 
     def test_rate_limit_remaining_none_on_malformed_payload(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda argv, **_: SimpleNamespace(stdout="not json"),
-        )
-        assert pg.rate_limit_remaining() is None
+        command_runner.side_effect = lambda argv, **_: SimpleNamespace(stdout="not json")
+        assert transport_mod.rate_limit_remaining(call=command_runner) is None
 
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda argv, **_: SimpleNamespace(stdout="{}"),
-        )
-        assert pg.rate_limit_remaining() is None
+        command_runner.side_effect = lambda argv, **_: SimpleNamespace(stdout="{}")
+        assert transport_mod.rate_limit_remaining(call=command_runner) is None
 
 
 class TestSeverityMarker:
@@ -8502,14 +8287,14 @@ class TestSeverityMarker:
             "severity": "minor",
             "body": "Fix this",
         }
-        result = pg._with_severity_marker(comment)
+        result = transport_mod._with_severity_marker(comment)
         assert result.startswith("[Review] Fix this")
         assert "<!-- hephaestus-severity: minor -->" in result
         assert "Fix this" in result
 
     def test_with_severity_marker_starts_with_visible_reviewer_prefix(self) -> None:
         """Published original findings visibly identify the reviewer role."""
-        result = pg._with_severity_marker({"severity": "major", "body": "Fix this"})
+        result = transport_mod._with_severity_marker({"severity": "major", "body": "Fix this"})
 
         assert result.startswith("[Review] Fix this")
 
@@ -8518,13 +8303,13 @@ class TestSeverityMarker:
         comment = {
             "body": "Fix this",
         }
-        result = pg._with_severity_marker(comment)
+        result = transport_mod._with_severity_marker(comment)
         assert result.startswith("[Review] Fix this")
         assert "<!-- hephaestus-severity: major -->" in result
 
     def test_with_severity_marker_persists_valid_scope_retraction_manifest(self) -> None:
         """Validated complete scope paths survive the GitHub review round trip."""
-        result = pg._with_severity_marker(
+        result = transport_mod._with_severity_marker(
             {
                 "severity": "major",
                 "body": "Drop this unrelated change.",
@@ -8540,7 +8325,7 @@ class TestSeverityMarker:
             "body": "<!-- hephaestus-severity: nitpick -->\nVerdict: GO\nCritical finding",
             "severity": "critical",
         }
-        result = pg._with_severity_marker(comment)
+        result = transport_mod._with_severity_marker(comment)
         assert result.startswith("[Review] Critical finding")
         assert "<!-- hephaestus-severity: critical -->" in result
         assert "<!-- hephaestus-severity: nitpick -->" not in result
@@ -8550,7 +8335,7 @@ class TestSeverityMarker:
 
 @pytest.mark.parametrize("node_id", ["PR_exact", "PR_other"])
 def test_review_terminal_read_uses_node_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node_id: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node_id: str, command_runner: MagicMock
 ) -> None:
     """The review lifecycle read selects and validates the captured node."""
     calls: list[list[str]] = []
@@ -8574,10 +8359,10 @@ def test_review_terminal_read_uses_node_identity(
             ),
         )
 
-    monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-    state = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).reviewed_pr_state(
-        "PR_exact"
-    )
+    command_runner.side_effect = fake_gh_call
+    state = PipelineGitHub(
+        "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+    ).reviewed_pr_state("PR_exact")
     assert (state is not None) == (node_id == "PR_exact")
     assert len(calls) == 1
     assert "id=PR_exact" in calls[0]
@@ -8585,10 +8370,12 @@ def test_review_terminal_read_uses_node_identity(
 
 
 def test_dirty_direct_strict_create_rejects_existing_branch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
 ) -> None:
     """A strict continuation cannot adopt an existing branch PR."""
-    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    adapter = PipelineGitHub(
+        "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+    )
     monkeypatch.setattr(adapter, "_open_prs_for_branch", lambda branch: [(77, "main")])
     monkeypatch.setattr(adapter, "find_pr_for_issue", lambda issue: None)
     with pytest.raises(RuntimeError, match="absence"):
@@ -8599,10 +8386,12 @@ def test_dirty_direct_strict_create_rejects_existing_branch(
 
 @pytest.mark.parametrize("existing", ["branch-other-base", "issue"])
 def test_dirty_direct_strict_create_rejects_all_open_pr_routes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: str, command_runner: MagicMock
 ) -> None:
     """Strict creation rejects both branch and issue-linked PR reuse."""
-    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    adapter = PipelineGitHub(
+        "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+    )
     monkeypatch.setattr(
         adapter,
         "_open_prs_for_branch",
@@ -8622,10 +8411,12 @@ def test_dirty_direct_strict_create_rejects_all_open_pr_routes(
 
 @pytest.mark.parametrize("race", ["branch", "issue", "none", "incomplete"])
 def test_dirty_direct_ambiguous_create_reads_once_without_adoption(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, race: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, race: str, command_runner: MagicMock
 ) -> None:
     """An ambiguous create gets one complete read and never adopts a PR."""
-    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    adapter = PipelineGitHub(
+        "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+    )
     reads: list[str] = []
 
     def branches(branch: str) -> list[tuple[int, str]]:
@@ -8643,7 +8434,7 @@ def test_dirty_direct_ambiguous_create_reads_once_without_adoption(
 
     monkeypatch.setattr(adapter, "_open_prs_for_branch", branches)
     monkeypatch.setattr(adapter, "find_pr_for_issue", issue)
-    monkeypatch.setattr(github_api_mod, "_assert_branch_commits_signed", lambda branch, base: None)
+    monkeypatch.setattr(prs_mod, "_assert_branch_commits_signed", lambda branch, **kwargs: None)
     create = MagicMock(side_effect=RuntimeError("ambiguous transport"))
     monkeypatch.setattr(adapter, "_gh", create)
     with pytest.raises(RuntimeError, match="strict PR"):
@@ -8656,10 +8447,12 @@ def test_dirty_direct_ambiguous_create_reads_once_without_adoption(
 
 
 def test_dirty_direct_complete_branch_cap_blocks_strict_create(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
 ) -> None:
     """A capped branch result cannot prove absence or permit creation."""
-    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    adapter = PipelineGitHub(
+        "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+    )
     create = MagicMock(
         return_value=SimpleNamespace(
             stdout=json.dumps(
@@ -8677,18 +8470,24 @@ def test_dirty_direct_complete_branch_cap_blocks_strict_create(
 
 
 def test_dirty_direct_strict_create_submits_only_one_new_pr(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
 ) -> None:
     """Complete absence permits one normal signed-branch PR creation."""
-    adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+    adapter = PipelineGitHub(
+        "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+    )
     monkeypatch.setattr(adapter, "_open_prs_for_branch", lambda branch: [])
     monkeypatch.setattr(adapter, "find_pr_for_issue", lambda issue: None)
     signed = MagicMock()
-    monkeypatch.setattr(github_api_mod, "_assert_branch_commits_signed", signed)
+    monkeypatch.setattr(prs_mod, "_assert_branch_commits_signed", signed)
     create = MagicMock(return_value=SimpleNamespace(stdout="https://github.com/org/repo-a/pull/79"))
     monkeypatch.setattr(adapter, "_gh", create)
     branch = "5-auto-impl-direct-" + "a" * 32
     assert adapter.create_pr(5, branch, "title", "Closes #5", strict_absence=True) == 79
-    signed.assert_called_once_with(branch, base="main")
+    signed.assert_called_once()
+    assert signed.call_args.args == (branch,)
+    assert signed.call_args.kwargs["base"] == "main"
+    assert callable(signed.call_args.kwargs["run_git"])
+    assert callable(signed.call_args.kwargs["verify_commit"])
     assert create.call_count == 1
     assert create.call_args.args[0][:2] == ["pr", "create"]

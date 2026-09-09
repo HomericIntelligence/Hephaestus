@@ -6,6 +6,7 @@ import queue
 import threading
 from concurrent.futures import Future
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,7 +17,8 @@ from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.job_results import JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from hephaestus.automation.state_labels import STATE_PLAN_GO
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -94,8 +96,7 @@ def test_learning_journal_error_releases_capacity_and_preserves_claim(
             rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, pr=7, stage=StageName.LEARNING)
@@ -137,3 +138,82 @@ def test_learning_journal_error_releases_capacity_and_preserves_claim(
     assert coordinator._terminal_summary.dispositions["resumable"] == 1
     assert journal.path(intent.key).read_bytes() == before
     assert journal.claim_is_active(intent.key)
+
+
+def test_issue_body_dependencies_order_each_repository(tmp_path: Path) -> None:
+    """Fetched dependency text orders equal issue numbers in each repository."""
+
+    class IssueGitHub(FakeStageGitHub):
+        def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+            snapshot = super().gh_issue_json(issue_number)
+            snapshot["body"] = "Depends on #2" if issue_number == 1 else ""
+            return snapshot
+
+    github = IssueGitHub(labels=[STATE_PLAN_GO])
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["a", "b"],
+            projects_dir=tmp_path,
+            max_workers=4,
+            serialize_file_overlap=False,
+            rate_guard_enabled=False,
+        ),
+        github=github,
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
+        install_signals=False,
+    )
+    for issue in (1, 2):
+        for repo in ("a", "b"):
+            entry = coordinator._seed_direct_issue_entry(repo, issue, github=github)
+            item = coordinator._entry_to_item(entry, repo)
+            assert coordinator._push_item(item, item.stage, enter=True)
+
+    selected = coordinator._select_implementation_dispatch(
+        coordinator.queues[StageName.IMPLEMENTATION].snapshot()
+    )
+
+    identities = [(item.repo, item.issue) for item in selected]
+    assert set(identities) == {("a", 1), ("a", 2), ("b", 1), ("b", 2)}
+    for repo in ("a", "b"):
+        assert identities.index((repo, 2)) < identities.index((repo, 1))
+
+
+def test_direct_issue_classification_failure_keeps_later_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed direct issue records one failure and admits the next issue."""
+
+    class IssueGitHub(FakeStageGitHub):
+        def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+            snapshot = super().gh_issue_json(issue_number)
+            if issue_number == 1:
+                snapshot["labels"] = "invalid labels"
+            return snapshot
+
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            issues=[1, 2],
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
+        github=IssueGitHub(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
+        install_signals=False,
+    )
+    coordinator._begin_direct_issue_source("repo", "a" * 40)
+
+    assert coordinator._drain_direct_issue_source() == 1
+
+    failed = [item for item in coordinator.items if item.issue == 1]
+    assert len(failed) == 1
+    assert failed[0].result is not None and not failed[0].result.passed
+    assert "IssueClassificationError" in failed[0].result.reason
+    assert [item.issue for item in coordinator.queues[StageName.PLANNING].snapshot()] == [2]
+    assert coordinator._direct_issue_source is None

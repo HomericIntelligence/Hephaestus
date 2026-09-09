@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import hephaestus.automation.pipeline.coordinator_types as ct
-from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.automation.learning_journal import LearningJournalStore
 
 from .coordinator_contract import _CoordinatorHost
 from .work_item import LearningIntent
@@ -29,8 +29,6 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
         if not isinstance(journal, LearningJournalStore):
             return
         records = journal.incomplete_for_issue(repo=item.repo, issue=item.issue)
-        if not records and primary_stage is ct.StageName.FINISHED and item.pr is not None:
-            records = self._adopt_legacy_post_merge_intent(item, journal)
         if not records:
             return
         restored: list[LearningIntent] = []
@@ -110,34 +108,3 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
                 all_disabled = False
                 continue
         return all_disabled
-
-    def _adopt_legacy_post_merge_intent(
-        self,
-        item: ct.WorkItem,
-        journal: LearningJournalStore,
-    ) -> list[dict[str, ct.Any]]:
-        """Convert a merged legacy learning state into the new journal once."""
-        assert item.issue is not None and item.pr is not None  # noqa: S101
-        github = self._ctx_for_repo(item.repo).github
-        pr_state = github.gh_pr_state(item.pr) or {}
-        if str(pr_state.get("state") or "").upper() != "MERGED" and not pr_state.get("mergedAt"):
-            return []
-        if github.drive_green_learn_terminal(item.issue):
-            return []
-        intent = LearningIntent.post_merge(repo=item.repo, issue=item.issue, pr=item.pr)
-        record = journal.ensure_pending(
-            intent.key,
-            kind=intent.kind.value,
-            identity=intent.journal_identity(),
-        )
-        if record["status"] in {"succeeded", "failed"}:
-            return []
-        if github.drive_green_learn_inflight(item.issue):
-            if journal.claim(intent.key):
-                journal.finish(
-                    intent.key,
-                    succeeded=False,
-                    error="legacy_outcome_unknown",
-                )
-            return []
-        return [record]

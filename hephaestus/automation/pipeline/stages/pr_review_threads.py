@@ -1,93 +1,13 @@
-"""PR-review stage: detached read-only review, validation, and approval.
+"""Shared contracts for detached PR review and thread validation.
 
-The queue stage is the sole live implementation of the review/validate/address
-state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
+The review stage owns review checkouts, structural audits, and thread
+validation. The implementation queue owns all source changes and reply
+publication. A clean audit can grant GO only for its current-process reviewed
+head after complete live thread and label checks. Merge wait verifies the
+same head and the required server policy before each merge request.
 
-- Normal path: ENTER first reads every open thread. Any thread without a
-  current-head implementation response writes NO-GO and fails directly back
-  to ``implementation``; it never triggers another broad review. Fully
-  replied threads create a detached checkout for comment validation only.
-  A thread-free entry creates a detached review checkout, REVIEW_WAIT binds it
-  once to PR head ``H``, then REVIEW_WAIT -> VALIDATE_WAIT -> POST -> EVAL.
-  A clean audit writes GO and removes the checkout before advancing to
-  ``merge_wait``.
-  Recovery-only mini-states for interrupted older items preserve their
-  original routing but cannot grant the review stage writer capability.
-- Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
-  cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
-  strictly decreases under the progress-aware extension contract).
-  Both read from ROUTES via
-  ``ctx.budget``, never hardcoded here.
-- Iteration accounting: ``item.attempts["pr_review_iter"]`` is the
-  PER-LIFETIME audit trail (routing.py contract: attempts are never
-  reset), so EVAL gates on the CYCLE-RELATIVE counter
-  ``item.payload["pr_review_round"]``, reset by ``on_enter`` whenever a
-  fresh implementation pass starts a new review cycle (keyed on
-  ``attempts["implement"]``). ``attempts["pr_review_hard"]`` audits the
-  extension rounds (rounds past the soft cap).
-- Rounds advance in EVAL and ONLY for valid structural review audits.
-  Missing or malformed audits never burn a round or touch labels
-  (#911/#1554/#1794); they RETRY, bounded in-stage by
-  ``payload["review_error_retries"]`` (cap :data:`REVIEW_ERROR_RETRY_CAP`
-  consecutive failures, reset on any valid audit — the plan_review
-  pattern). At the cap the item fails back ``agent_error`` (routes to
-  implementation: a fresh implement pass, bounded by the ``implement``
-  budget, is the doc's designated agent-error recovery).
-- Review snapshot and thread ownership semantics: the reviewer fetches a
-  detached checkout of `H`, verifies it once, and submits all newly found
-  source-anchored findings in a single GitHub review request. A later push
-  does not invalidate that published review; exact-current-head checks remain
-  exclusively for implementation-state labels. Every open review thread—regardless of
-  author—is implementation work. The implementation agent investigates and
-  fixes each thread, then returns a concise reply. The host posts that reply
-  against the verified current head and never resolves the thread. A reply
-  without a corresponding commit carries an explicit warning. The
-  reviewer then performs a fresh comment validation of the current change,
-  prior review, implementation reply, and every open thread. The reviewer is
-  the sole actor that can resolve a valid
-  thread or post precise rejection feedback while leaving it open. Any open
-  thread -> no-go label, review-checkout cleanup, and implementation handoff. A clean audit ->
-  ``_write_go`` performs one final complete-thread live-read, requires a
-  confirmed-unarmed live PR, and applies ``state:implementation-go``.
-  The checkout GitJob-proven reviewed head accompanies that label;
-  ``merge_wait`` verifies it before each bounded SHA-conditional normal merge
-  attempt. Every
-  real blocking round durably writes ``state:implementation-no-go`` before
-  looping/regressing, non-fatally. Exhaustion -> durably
-  apply ``state:skip`` [durable] -> SKIP.
-- Downgraded-eligibility cost: when open automation threads invalidate an
-  otherwise clean audit, this stage records the downgrade in EVAL and lets
-  the NEXT round's POST re-count the live threads before dispatching the
-  address leg, so a downgraded GO costs one extra review round. Chosen
-  because POST live-checks the unresolved counts (a thread resolved
-  out-of-band between rounds skips the address leg entirely) and the
-  budget/extension gate stays a single chokepoint in EVAL.
-- Progress metric (#1554 parity): the extension gate compares the total
-  open-thread count. Only a reviewer resolution may demonstrate progress.
-- POST publishes only genuinely new blocking audit findings. Validation does
-  not recreate, replace, or suppress existing threads; it only gives the
-  reviewer the authority to reconcile current implementation replies.
-- The implementation stage owns rebase, commit/push, and reply handoff. It
-  binds every `[Response]` reply to the verified current head and marks a
-  no-commit reply for thorough reviewer analysis; the review stage does not
-  commit, push, or rebase.
-- Recovery for interrupted pre-migration items is read-only and fail-closed:
-  it may preserve an already-pushed reply handoff or take a fresh detached
-  snapshot, but it cannot dispatch a writer agent or publish a branch from
-  this stage.
-- agent_error fail-backs (reviewer-error cap or missing PR/worktree) set
-  ``payload["agent_error_failback"]`` so the implementation GATE consumes the
-  ``implement`` budget on re-adoption. ``review_error_retries`` is reset by
-  ``on_enter`` on each fresh implementation cycle.
-- Prompt functions (imported, never re-authored):
-  ``prompts/pr_review.py build_bounded_pr_review_analysis_prompt`` /
-  ``build_bounded_review_validation_prompt``.
-- The structural audit is parsed IN-WORKER (carried as the review job's
-  ``parse`` callable; symbol-scoped zero-I/O exemption mirrors plan_review's).
-  REVIEW_WAIT clears all stale round-scoped payload at submission so a failed
-  later round can never replay an earlier audit or threads. Grades, summaries,
-  and supplemental feedback are informational; only confirmed GitHub
-  implementation-state label transitions control downstream admission.
+Only valid structural audits use the review budget. Host check failures,
+malformed audits, and scope dependencies use their bounded queue paths.
 """
 
 # This module intentionally re-exports the stage's shared imported namespace.
@@ -104,15 +24,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from hephaestus.automation.address_review_core import (
-    parse_addressed_replies,
-)
 from hephaestus.automation.agent_config import (
-    implementer_claude_timeout,
-    implementer_model,
     pr_reviewer_claude_timeout,
     reviewer_model,
 )
+from hephaestus.automation.issue_waves import is_full_commit_sha
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     VALID_SEVERITIES,
@@ -125,20 +41,10 @@ from hephaestus.automation.review_audit import (
     parse_review_audit,
 )
 from hephaestus.automation.session_naming import (
-    AGENT_ADDRESS_REVIEW,
-    AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
-from ..reply_handoff import (
-    IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
-    PENDING_IMPLEMENTATION_REPLY_HANDOFF as _PENDING_IMPLEMENTATION_REPLY_HANDOFF,
-    PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES as _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES,
-    PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES as _REPLY_VISIBILITY_RETRIES,
-    implementation_reply_handoff,
-    pr_is_current_open_head,
-)
 from ..scope_retraction import scope_retraction_paths_for_threads
 from ..work_item import ItemKind
 from .base import (
@@ -179,7 +85,6 @@ from .pr_review_verification import (
     _host_verification_specs,
     _HostVerificationSpec,
 )
-from .repo import is_full_commit_sha
 
 logger = logging.getLogger(__name__)
 
@@ -199,11 +104,6 @@ def _host_verification_receipts_match(
         )
     )
 
-
-# Compatibility aliases for callers that used the former stage-local helpers.
-# The shared reply-handoff module is the sole implementation.
-_implementation_reply_handoff = implementation_reply_handoff
-_pr_is_current_open_head = pr_is_current_open_head
 
 _JSON_RESPONSE_BLOCK_RE = re.compile(
     r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
@@ -239,26 +139,11 @@ VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
 SCOPE_EXPANSION_PREPARE_SUBMIT = "SCOPE_EXPANSION_PREPARE_SUBMIT"
 POST_APPLY = "POST_APPLY"
-RECOVERY_REPLY_WAIT = "RECOVERY_REPLY_WAIT"
-ADDRESS_WAIT = "ADDRESS_WAIT"
-PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
 GO_AUDIT_RECEIPT = "GO_AUDIT_RECEIPT"
 GO_AUDIT_PUBLISH = "GO_AUDIT_PUBLISH"
 COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
-COMPACT_WRITER_WAIT = "COMPACT_WRITER_WAIT"
 CLEANUP_REVIEW_WORKTREE_WAIT = "CLEANUP_REVIEW_WORKTREE_WAIT"
-
-# A failed push with an unchanged live remote may be a transient local
-# pre-push-hook or transport failure. Retry the already-created detached
-# commit once; never ask the address agent to recreate it or discard it.
-DIRECT_PUSH_RETRY_CAP = 1
-
-# A changed remote requires a new review checkout because the previous one is
-# a recovery artifact. One fresh pass handles a concurrent update without
-# allowing a continuously advancing branch to accumulate unbounded agent runs
-# and preserved worktrees in one coordinator invocation.
-DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP = 1
 
 # Public audit publication is a receipt-backed external reconciliation, not a
 # review round. Three delayed attempts (1s, 2s, 4s) bound one coordinator run;
@@ -276,19 +161,12 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     POST: "_post",
     SCOPE_EXPANSION_PREPARE_SUBMIT: "_scope_expansion_prepare_submit",
     POST_APPLY: "_post_apply",
-    RECOVERY_REPLY_WAIT: "_recovery_reply_wait",
-    ADDRESS_WAIT: "_address",
-    PUSH_WAIT: "_push_wait",
     EVAL: "_eval",
     GO_AUDIT_RECEIPT: "_go_audit_receipt",
     GO_AUDIT_PUBLISH: "_go_audit_publish",
     COMPACT_REVIEWER_WAIT: "_compact_reviewer_wait",
-    COMPACT_WRITER_WAIT: "_compact_writer_wait",
     CLEANUP_REVIEW_WORKTREE_WAIT: "_cleanup_review_worktree_wait",
 }
-
-_REPLY_HANDOFF_RECEIPT = "_reply_handoff_receipt"
-_REPLY_HANDOFF_RECEIPT_ERROR = "_reply_handoff_receipt_error"
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -318,9 +196,6 @@ _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
 _ROUND_PAYLOAD_KEYS = (
-    "host_verification_bootstrap_proof",
-    "host_verification_bootstrap_json",
-    "review_status_manifest",
     "review_audit",
     "review_feedback",
     "review_text",
@@ -331,15 +206,8 @@ _ROUND_PAYLOAD_KEYS = (
     "posted_thread_ids",
     "remediation_threads",
     "remediation_thread_snapshots",
-    "address_error",
-    "address_output",
-    "direct_push_retries",
-    "detached_push_retry_head_sha",
-    "push_no_commit",
-    "no_commit_retry_done",
     "unaddressed_findings",
     "review_audit_failure",
-    "review_refresh_required",
     "prior_comments_json",
     "validation_threads",
     "validation_receipt_fingerprints",
@@ -536,17 +404,6 @@ def _normalize_remediation_threads(
     return normalized
 
 
-def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict[str, str] | None:
-    """Validate one implementation reply for every supplied open thread.
-
-    An address pass is not complete when an agent silently omits a thread.
-    The host therefore accepts only an exact, duplicate-free mapping of every
-    snapshot ID to a bounded reply.  The agent may not resolve a thread; the
-    returned prose is posted by the host only after its fix commit is pushed.
-    """
-    return parse_addressed_replies(address_result, threads)
-
-
 def _validation_thread_snapshots(
     live_threads: list[dict[str, Any]], receipts: list[dict[str, Any]]
 ) -> list[dict[str, Any]] | None:
@@ -727,20 +584,6 @@ def _reviewer_thread_decisions(  # noqa: C901
     return (resolved_ids, feedback)
 
 
-def _address_review_feedback(item: WorkItem) -> str:
-    """Serialize normalized live blocking threads for fresh-PR remediation."""
-    threads = item.payload.get("remediation_threads")
-    host_failure = item.payload.get("host_verification_failure")
-    feedback: dict[str, object] = {"findings": threads if isinstance(threads, list) else []}
-    if isinstance(host_failure, dict):
-        feedback["host_verification_failure"] = host_failure
-    return json.dumps(
-        feedback,
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-
 if _typing.TYPE_CHECKING:
 
     class _PrReviewHost(_typing.Protocol):
@@ -759,13 +602,6 @@ if _typing.TYPE_CHECKING:
         ) -> StepResult:
             raise NotImplementedError
 
-        @staticmethod
-        def _restart_direct_pr_review(item: WorkItem) -> StageOutcome | None:
-            raise NotImplementedError
-
-        @staticmethod
-        def _consume_reply_handoff_receipt(item: WorkItem) -> str:
-            raise NotImplementedError
 
 else:
 
@@ -773,78 +609,102 @@ else:
         """Runtime-empty base for the statically checked host contract."""
 
 
-# Class-qualified compatibility calls resolve after both collaborators load.
-class _StageReference:
-    _bind_current_head_for_negative: Callable[[WorkItem, StageContext], StageOutcome | None]
-    _fail_back_implementation_remediation: Callable[[WorkItem], StageOutcome]
-    _handle_late_threads_after_go_write: Callable[[WorkItem, int, StageContext], StageOutcome]
-    _on_direct_pr_worktree_done: Callable[[WorkItem, JobResult], None]
-    _read_existing_thread_entry: Callable[
-        [WorkItem, StageContext],
-        tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]
-        | StageOutcome
-        | None,
-    ]
-    _require_reviewed_unarmed: Callable[[WorkItem, StageContext], StepResult | None]
-    _write_no_go: Callable[[WorkItem, StageContext], StepResult | None]
-
-    def __getattr__(self, name: str) -> object:
-        import sys
-
-        for module_name, class_name in (
-            ("hephaestus.automation.pipeline.stages.pr_review_jobs", "PrReviewJobs"),
-            ("hephaestus.automation.pipeline.stages.pr_review_gate", "PrReviewGate"),
-        ):
-            module = sys.modules.get(module_name)
-            candidate = getattr(module, class_name, None) if module is not None else None
-            if candidate is not None and hasattr(candidate, name):
-                return getattr(candidate, name)
-        raise AttributeError(name)
-
-
-PrReviewStage = _StageReference()
-
 # These are internal stage APIs shared by the façade and its collaborators.
-# fmt: off
 __all__ = [
-    'ADDRESS_WAIT', 'ADOPT_WORKTREE_WAIT', 'AGENT_ADDRESS_REVIEW', 'AGENT_IMPLEMENTER',
-    'AGENT_PR_REVIEWER', 'BLOCKING_SEVERITIES', 'CLEANUP_REVIEW_WORKTREE_WAIT',
-    'COMPACT_REVIEWER_WAIT', 'COMPACT_WRITER_WAIT', 'DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP',
-    'DIRECT_PUSH_RETRY_CAP', 'ENTER', 'EVAL', 'GIT_JOB_TIMEOUT_S', 'GO_AUDIT_PUBLISH',
-    'GO_AUDIT_RECEIPT',
-    'HOST_VERIFICATION_DIAGNOSTIC_MAX', 'HOST_VERIFICATION_TIMEOUT_S', 'HOST_VERIFICATION_WAIT',
-    'IMPLEMENTATION_GO_AUDIT_RETRY_CAP', 'IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP', 'POST',
-    'PUSH_WAIT', 'RECOVERY_REPLY_WAIT',
-    'REVIEW_CHECKOUT_RETRY_CAP',
-    'REVIEW_CHECKOUT_WAIT', 'REVIEW_ERROR_RETRY_CAP', 'REVIEW_WAIT', 'SCOPE_DEPENDENCY_WAIT',
-    'SCOPE_EXPANSION_PREPARE_SUBMIT', 'STATE_SKIP', 'UNSUPPORTED_HOST_VERIFICATION_ERROR',
-    'VALIDATE_WAIT', 'VALID_SEVERITIES', '_COMMENT_VALIDATION_ONLY', '_HOST_VERIFICATION_PENDING',
-    '_JSON_RESPONSE_BLOCK_RE', '_PENDING_IMPLEMENTATION_REPLY_HANDOFF',
-    '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES',
-    '_REPLY_HANDOFF_RECEIPT', '_REPLY_HANDOFF_RECEIPT_ERROR', '_REPLY_VISIBILITY_RETRIES',
-    '_ROUND_PAYLOAD_KEYS', '_STEP_HANDLER_NAMES',
-    'AgentJob', 'Any', 'BuildTestJob', 'Callable', 'CompactJob', 'Continue', 'Disposition',
-    'GitJob', 'ItemKind', 'JobRequest', 'JobResult', 'PrReviewStage', 'ReviewAudit', 'Stage',
-    'StageContext', 'StageOutcome', 'StepResult', 'WorkItem', '_HostVerificationSpec',
-    '_ParsedReviewResponse', '_PrReviewHost', '_StageReference', '_address_replies',
-    '_address_review_feedback',
-    '_clear_round_review_state', '_durable_thread_id', '_finding_key',
-    '_host_verification_failure_kind', '_host_verification_receipt_matches',
-    '_host_verification_receipts_match',
-    '_host_verification_result_status', '_host_verification_specs',
-    '_implementation_reply_handoff', '_is_confirmed_open_unarmed',
-    '_is_postable_finding', '_issue_number', '_normalize_remediation_threads',
-    '_parse_review_response', '_parse_validation_result', '_payload_host_verification_specs',
-    '_pr_is_current_open_head', '_prepare_host_checks', '_review_context_kind',
-    '_reviewer_thread_decisions', '_scope_retraction_paths', '_thread_ids',
-    '_validation_pr_metadata_fingerprint', '_validation_receipt_fingerprints',
-    '_validation_thread_snapshots', '_without_duplicate_live_findings', '_worktree_path',
-    'agent_provider', 'annotations', 'cast', 'dataclass', 'get_pr_review_analysis_prompt',
-    'get_review_validation_prompt', 'has_reserved_finding_control', 'hashlib',
-    'implementation_reply_handoff', 'implementer_claude_timeout', 'implementer_model',
-    'is_full_commit_sha', 'json', 'logger', 'logging', 'parse_addressed_replies',
-    'parse_review_audit', 'pr_is_current_open_head', 'pr_reviewer_claude_timeout', 're',
-    'reviewer_model',
-    'scope_retraction_paths_for_threads', 'secrets', 'stage_model', 'stage_timeout',
-    'write_skip_label']
-# fmt: on
+    "ADOPT_WORKTREE_WAIT",
+    "AGENT_PR_REVIEWER",
+    "BLOCKING_SEVERITIES",
+    "CLEANUP_REVIEW_WORKTREE_WAIT",
+    "COMPACT_REVIEWER_WAIT",
+    "ENTER",
+    "EVAL",
+    "GIT_JOB_TIMEOUT_S",
+    "GO_AUDIT_PUBLISH",
+    "GO_AUDIT_RECEIPT",
+    "HOST_VERIFICATION_DIAGNOSTIC_MAX",
+    "HOST_VERIFICATION_TIMEOUT_S",
+    "HOST_VERIFICATION_WAIT",
+    "IMPLEMENTATION_GO_AUDIT_RETRY_CAP",
+    "POST",
+    "REVIEW_CHECKOUT_RETRY_CAP",
+    "REVIEW_CHECKOUT_WAIT",
+    "REVIEW_ERROR_RETRY_CAP",
+    "REVIEW_WAIT",
+    "SCOPE_DEPENDENCY_WAIT",
+    "SCOPE_EXPANSION_PREPARE_SUBMIT",
+    "STATE_SKIP",
+    "UNSUPPORTED_HOST_VERIFICATION_ERROR",
+    "VALIDATE_WAIT",
+    "VALID_SEVERITIES",
+    "_COMMENT_VALIDATION_ONLY",
+    "_HOST_VERIFICATION_PENDING",
+    "_JSON_RESPONSE_BLOCK_RE",
+    "_ROUND_PAYLOAD_KEYS",
+    "_STEP_HANDLER_NAMES",
+    "AgentJob",
+    "Any",
+    "BuildTestJob",
+    "Callable",
+    "CompactJob",
+    "Continue",
+    "Disposition",
+    "GitJob",
+    "ItemKind",
+    "JobRequest",
+    "JobResult",
+    "ReviewAudit",
+    "Stage",
+    "StageContext",
+    "StageOutcome",
+    "StepResult",
+    "WorkItem",
+    "_HostVerificationSpec",
+    "_ParsedReviewResponse",
+    "_PrReviewHost",
+    "_clear_round_review_state",
+    "_durable_thread_id",
+    "_finding_key",
+    "_host_verification_failure_kind",
+    "_host_verification_receipt_matches",
+    "_host_verification_receipts_match",
+    "_host_verification_result_status",
+    "_host_verification_specs",
+    "_is_confirmed_open_unarmed",
+    "_is_postable_finding",
+    "_issue_number",
+    "_normalize_remediation_threads",
+    "_parse_review_response",
+    "_parse_validation_result",
+    "_payload_host_verification_specs",
+    "_prepare_host_checks",
+    "_review_context_kind",
+    "_reviewer_thread_decisions",
+    "_scope_retraction_paths",
+    "_thread_ids",
+    "_validation_pr_metadata_fingerprint",
+    "_validation_receipt_fingerprints",
+    "_validation_thread_snapshots",
+    "_without_duplicate_live_findings",
+    "_worktree_path",
+    "agent_provider",
+    "annotations",
+    "cast",
+    "dataclass",
+    "get_pr_review_analysis_prompt",
+    "get_review_validation_prompt",
+    "has_reserved_finding_control",
+    "hashlib",
+    "is_full_commit_sha",
+    "json",
+    "logger",
+    "logging",
+    "parse_review_audit",
+    "pr_reviewer_claude_timeout",
+    "re",
+    "reviewer_model",
+    "scope_retraction_paths_for_threads",
+    "secrets",
+    "stage_model",
+    "stage_timeout",
+    "write_skip_label",
+]

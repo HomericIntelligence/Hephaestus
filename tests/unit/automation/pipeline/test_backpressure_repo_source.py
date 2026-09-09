@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
 
 from hephaestus.automation import loop_repo_manager
 from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.stages.base import Continue
+from hephaestus.automation.pipeline.stages.base import Continue, Stage
 from hephaestus.automation.pipeline.stages.repo import RepoStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-class _ImmediatePassStage:
+class _ImmediatePassStage(Stage):
     """Finish planning synchronously so source admission order is observable."""
 
     def __init__(self, events: list[tuple[str, int]]) -> None:
@@ -71,7 +73,8 @@ def test_repo_discovery_never_materializes_an_unbounded_products_spill(
         {
             "org": "org",
             "github": FakeStageGitHub(labels=["state:needs-plan"]),
-            "config": type("Config", (), {"drive_green_all": False})(),
+            "config": PipelineConfig(org="org", repos=["repo-a"]),
+            "cancellation": Event(),
         },
     )()
     metadata = [
@@ -79,7 +82,7 @@ def test_repo_discovery_never_materializes_an_unbounded_products_spill(
         {"number": 102, "labels": ["state:needs-plan"], "title": "second"},
     ]
     monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda issue, _github: _facts(issue))
 
@@ -111,7 +114,7 @@ def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
         return _facts(issue)
 
     monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
 
@@ -124,9 +127,10 @@ def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
             max_workers=1,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
@@ -171,7 +175,7 @@ def test_repo_entries_are_source_pulled_in_order_at_capacity_one(
     monkeypatch.setattr(
         loop_repo_manager,
         "_iter_open_issue_meta",
-        lambda _org, repo: iter(metadata[repo]),
+        lambda _org, repo, **_kwargs: iter(metadata[repo]),
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
 
@@ -184,9 +188,10 @@ def test_repo_entries_are_source_pulled_in_order_at_capacity_one(
             max_workers=1,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
@@ -212,7 +217,7 @@ def test_resettable_org_repo_source_pulls_only_one_repository_at_capacity_one(
     pulls: list[str] = []
     factories: list[object] = []
 
-    def source_factory() -> Any:
+    def source_factory(_shutdown: Event) -> Any:
         factories.append(object())
         for repo in ("repo-a", "repo-b", "repo-c"):
             pulls.append(repo)
@@ -228,9 +233,10 @@ def test_resettable_org_repo_source_pulls_only_one_repository_at_capacity_one(
             max_workers=1,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
 
@@ -264,7 +270,7 @@ def test_repo_sources_round_robin_across_repositories_at_capacity_two(
     monkeypatch.setattr(
         loop_repo_manager,
         "_iter_open_issue_meta",
-        lambda _org, repo: iter(metadata[repo]),
+        lambda _org, repo, **_kwargs: iter(metadata[repo]),
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
     coordinator = Coordinator(
@@ -276,9 +282,10 @@ def test_repo_sources_round_robin_across_repositories_at_capacity_two(
             max_workers=2,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
@@ -324,7 +331,7 @@ def test_repo_setup_reserves_a_future_source_slot_before_registry_is_full(
     monkeypatch.setattr(
         loop_repo_manager,
         "_iter_open_issue_meta",
-        lambda _org, repo: iter(metadata[repo]),
+        lambda _org, repo, **_kwargs: iter(metadata[repo]),
     )
     monkeypatch.setattr(
         seeding_mod,
@@ -340,9 +347,10 @@ def test_repo_setup_reserves_a_future_source_slot_before_registry_is_full(
             max_workers=2,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage([])
@@ -369,7 +377,7 @@ def test_repo_source_reseed_drains_second_pass_before_zero_work_convergence(
     """
     events: list[tuple[str, int]] = []
 
-    class _FailThenPassStage:
+    class _FailThenPassStage(Stage):
         def on_enter(self, item: WorkItem, ctx: Any) -> None:
             del item, ctx
 
@@ -394,7 +402,7 @@ def test_repo_source_reseed_drains_second_pass_before_zero_work_convergence(
     monkeypatch.setattr(
         loop_repo_manager,
         "_iter_open_issue_meta",
-        lambda _org, _repo: iter(
+        lambda _org, _repo, **_kwargs: iter(
             [{"number": 101, "labels": ["state:needs-plan"], "title": "retry"}]
         ),
     )
@@ -408,9 +416,10 @@ def test_repo_source_reseed_drains_second_pass_before_zero_work_convergence(
             max_workers=1,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _FailThenPassStage()
@@ -431,7 +440,9 @@ def test_empty_repo_source_still_converges_after_one_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A drained source with no actionable issue does not cause a reseed loop."""
-    monkeypatch.setattr(loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(()))
+    monkeypatch.setattr(
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(())
+    )
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -439,9 +450,10 @@ def test_empty_repo_source_still_converges_after_one_pass(
             loops=3,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
 
@@ -466,7 +478,7 @@ def test_repo_source_semantically_admits_tracker_candidate_and_next_issue(
         return _facts(issue)
 
     monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
     github = FakeStageGitHub(labels=["state:needs-plan"])
@@ -479,9 +491,10 @@ def test_repo_source_semantically_admits_tracker_candidate_and_next_issue(
             max_workers=1,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=github,
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)

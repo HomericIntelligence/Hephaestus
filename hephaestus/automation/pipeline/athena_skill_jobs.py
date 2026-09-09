@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from hephaestus.agents.workspace import WorkspaceBinding
+from hephaestus.agents.workspace import (
+    WorkspaceBinding,
+    WorkspaceKind,
+    validate_workspace_binding,
+)
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceManager,
+    _PreparationDeadline,
+)
 
 AthenaSkillKind = Literal["advise", "learn"]
 
@@ -48,6 +58,9 @@ class AthenaSkillExecutor(Protocol):
 
     def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
         """Execute a typed Athena skill request."""
+
+    def cancel(self) -> None:
+        """Stop active host subprocess groups."""
 
 
 def build_athena_skill_request(
@@ -99,3 +112,35 @@ class AthenaSkillJob:
     def timeout_s(self) -> int:
         """Timeout carried by the underlying request."""
         return self.request.timeout_s
+
+
+@contextmanager
+def athena_workspace_lease(
+    job: AthenaSkillJob, *, deadline: _PreparationDeadline
+) -> Iterator[Path]:
+    """Validate one host skill under its source lease and execution deadline."""
+    request = job.request
+    binding = request.workspace
+    deadline.remaining()
+    if binding is None:
+        raise RuntimeError("Athena request requires a workspace binding")
+    WorkspaceBinding.from_dict(binding.to_dict())
+    if binding.cwd != request.cwd:
+        raise RuntimeError("Athena request cwd does not match its workspace binding")
+    if binding.kind is not WorkspaceKind.SOURCE:
+        yield validate_workspace_binding(
+            binding,
+            allowed_tools="Read,Glob,Grep",
+            remaining_timeout=deadline.remaining,
+            shutdown=deadline.shutdown,
+        )
+        return
+    if binding.reusable_root is None or binding.repository is None:
+        raise RuntimeError("source workspace binding is incomplete")
+    manager = SourceWorkspaceManager(
+        binding.reusable_root,
+        repository=binding.repository,
+        base_dir=binding.cwd.parent,
+    )
+    with manager.acquire(binding, allowed_tools="Read,Glob,Grep", deadline=deadline) as leased:
+        yield leased

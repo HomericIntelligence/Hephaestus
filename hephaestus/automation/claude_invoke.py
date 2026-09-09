@@ -164,7 +164,6 @@ def invoke_claude_with_session(
     input_via_stdin: bool = False,
     session_lifecycle: str | None = None,
     require_new_session: bool = True,
-    recreate_on_resume_failure: bool = True,  # accepted for back-compat; no longer used
 ) -> tuple[str, str]:
     """Invoke Claude with a deterministic per-(repo, issue, agent, model) session.
 
@@ -223,9 +222,6 @@ def invoke_claude_with_session(
         output_format: ``--output-format`` (``"text"``, ``"json"``, or
             ``"stream-json"``).
         input_via_stdin: When True, ``prompt`` is fed via stdin instead of argv.
-        recreate_on_resume_failure: Deprecated/ignored. Retained so existing
-            keyword callers keep working; the always-resume model needs no
-            recreate toggle.
         require_new_session: Reject an existing transcript for a new durable
             cycle. Ordinary deterministic retries can reuse the transcript.
 
@@ -247,7 +243,6 @@ def invoke_claude_with_session(
         fallback_model_value = parse_model_selection(fallback_model_value).model
     if timeout is None:
         timeout = agent_default_timeout()
-    del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
 
     def _attempt(effective_model: str) -> tuple[str, str]:
         return _invoke_claude_once(

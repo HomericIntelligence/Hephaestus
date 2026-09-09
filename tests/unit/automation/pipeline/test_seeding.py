@@ -1,8 +1,6 @@
 """GitHub-journal seeding: classification of issues into stage queues.
 
-Tests the classifier that maps GitHub state (labels, PR, epic) → entry stage,
-the tri-state fetch layer (open / merged / closed-normalized / no PR), epic
-detection, and the CLI seed mapping.
+Test issue classification, repository GitHub snapshots, and queue source entries.
 """
 
 from __future__ import annotations
@@ -10,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -19,6 +18,8 @@ import pytest
 from hephaestus.automation import state_labels
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
     IssueFacts,
@@ -26,10 +27,9 @@ from hephaestus.automation.pipeline.seeding import (
     _label_at_or_past,
     classify_issue,
     seed_entry_from_facts,
-    seed_from_cli,
-    seed_issue,
     seed_issue_from_github,
 )
+from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
@@ -42,6 +42,8 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+from tests.unit.automation.pipeline.conftest import fake_worker_factories
+from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
 def _finalized_body() -> str:
@@ -546,13 +548,7 @@ class TestClassificationIsStageNameSSOT:
 
 
 def _fake_gh_backend(prs: list[dict[str, Any]]) -> Any:
-    """Build a ``_gh_call`` side-effect simulating ``gh pr list`` state filters.
-
-    Each PR dict carries ``number``, ``state`` (OPEN/MERGED/CLOSED),
-    ``headRefName``, and ``body``. The fake honors ``--state`` and ``--head``
-    args the way GitHub does, so a CLOSED PR is invisible to both the open
-    and merged lookups — exactly the normalization seed_issue relies on.
-    """
+    """Supply PR rows through the repository adapter's GitHub command boundary."""
 
     def _gh_call(args: list[str], **_kw: Any) -> SimpleNamespace:
         state = args[args.index("--state") + 1] if "--state" in args else "open"
@@ -560,28 +556,37 @@ def _fake_gh_backend(prs: list[dict[str, Any]]) -> Any:
         rows = [pr for pr in prs if pr["state"].lower() == state.lower()]
         if head is not None:
             rows = [pr for pr in rows if pr["headRefName"] == head]
-        payload = [{"number": pr["number"], "body": pr.get("body", "")} for pr in rows]
+        payload = [
+            {
+                "number": pr["number"],
+                "state": pr["state"],
+                "body": pr.get("body", ""),
+                "baseRefName": pr.get("baseRefName", "main"),
+            }
+            for pr in rows
+        ]
         return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
     return _gh_call
 
 
-def _issue_info(
+def _issue_snapshot(
     number: int,
     labels: list[str],
     title: str = "A task",
     state: IssueState = IssueState.OPEN,
     *,
     authority_sanitized: bool = False,
-) -> MagicMock:
-    info = MagicMock()
-    info.number = number
-    info.labels = labels
-    info.title = title
-    info.state = state
-    info.body = ""
-    info.authority_sanitized = authority_sanitized
-    return info
+) -> dict[str, Any]:
+    """Build the JSON issue snapshot that the repository accessor returns."""
+    return {
+        "number": number,
+        "labels": [{"name": label} for label in labels],
+        "title": title,
+        "state": state.value,
+        "body": "",
+        "authoritySanitized": authority_sanitized,
+    }
 
 
 class TestSeedIssueFetchLayer:
@@ -597,26 +602,31 @@ class TestSeedIssueFetchLayer:
         issue_state: IssueState = IssueState.OPEN,
         authority_sanitized: bool = False,
     ) -> IssueFacts:
+        github = PipelineGitHub("org", repo="repo")
+        implementation_labels = pr_labels or []
         with (
-            patch(
-                "hephaestus.automation.pipeline.seeding.fetch_issue_info",
-                return_value=_issue_info(
+            patch.object(
+                github,
+                "gh_issue_json",
+                return_value=_issue_snapshot(
                     issue,
                     labels,
                     state=issue_state,
                     authority_sanitized=authority_sanitized,
                 ),
             ),
-            patch(
-                "hephaestus.automation._review_utils._gh_call",
-                side_effect=_fake_gh_backend(prs),
+            patch.object(github, "_gh", side_effect=_fake_gh_backend(prs)),
+            patch.object(
+                github,
+                "pr_has_implementation_state_label",
+                return_value=(
+                    STATE_IMPLEMENTATION_GO in implementation_labels,
+                    STATE_IMPLEMENTATION_NO_GO in implementation_labels,
+                ),
             ),
-            patch(
-                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-                return_value=pr_labels or [],
-            ),
+            patch.object(github, "pending_implementation_go_audit", return_value=None),
         ):
-            return seed_issue(issue)
+            return seed_issue_from_github(issue, github)
 
     def test_open_pr(self) -> None:
         """An OPEN PR on the issue branch → pr_is_open, not merged."""
@@ -711,12 +721,12 @@ class TestSeedIssueFetchLayer:
         assert facts.pr_is_merged is False
 
     def test_labels_and_number_threaded(self) -> None:
-        """seed_issue carries number and the full label set into IssueFacts."""
+        """The repository snapshot supplies the issue number and complete label set."""
         facts = self._seed(101, [STATE_PLAN_GO, "other-label"], [])
         assert facts.number == 101
         assert {STATE_PLAN_GO, "other-label"} <= facts.labels
 
-    def test_global_issue_seed_preserves_sanitized_authority_flag(self) -> None:
+    def test_issue_snapshot_preserves_sanitized_authority_flag(self) -> None:
         facts = self._seed(101, [STATE_NEEDS_PLAN], [], authority_sanitized=True)
 
         assert facts.authority_sanitized is True
@@ -785,8 +795,8 @@ class TestSeedIssueFetchLayer:
         assert entry.pending_implementation_go_audit is not None
         assert entry.pending_implementation_go_label_confirmed is True
 
-    def test_legacy_go_audit_receipt_routes_stale_go_label_back_to_pr_review(self) -> None:
-        """An untyped receipt must never let a retained GO label reach merge wait."""
+    def test_invalid_go_audit_receipt_routes_stale_go_label_back_to_pr_review(self) -> None:
+        """An invalid audit cannot let a retained GO label reach merge wait."""
 
         class RestartGitHub:
             def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
@@ -818,7 +828,7 @@ class TestSeedIssueFetchLayer:
                     head_sha="a" * 40,
                     audit=ReviewAudit(
                         grade=None,
-                        summary="Legacy receipt requires a fresh review.",
+                        summary="Invalid audit requires a fresh review.",
                         findings=(),
                         raw_feedback="",
                         valid=False,
@@ -837,121 +847,77 @@ class TestSeedIssueFetchLayer:
 class TestSeedIssueEpicDetection:
     """Epic detection uses state_labels.is_epic (labels + title markers, #1669)."""
 
-    def _seed_no_pr(self, info: MagicMock) -> IssueFacts:
-        with (
-            patch("hephaestus.automation.pipeline.seeding.fetch_issue_info", return_value=info),
-            patch("hephaestus.automation.pipeline.seeding.find_pr_for_issue", return_value=None),
-            patch(
-                "hephaestus.automation.pipeline.seeding.find_merged_pr_for_issue",
-                return_value=None,
-            ),
-        ):
-            return seed_issue(info.number)
+    def _seed_no_pr(self, snapshot: dict[str, Any]) -> IssueFacts:
+        github = FakeStageGitHub(
+            labels=[label["name"] for label in snapshot["labels"]],
+            issue_title=snapshot["title"],
+        )
+        return seed_issue_from_github(snapshot["number"], github)
 
     def test_epic_label_detected(self) -> None:
         """An 'epic' label marks the issue as an epic."""
-        facts = self._seed_no_pr(_issue_info(103, ["epic", STATE_NEEDS_PLAN]))
+        facts = self._seed_no_pr(_issue_snapshot(103, ["epic", STATE_NEEDS_PLAN]))
         assert facts.is_epic is True
 
     def test_roadmap_label_detected(self) -> None:
         """A 'roadmap' label ALSO marks the issue as an epic (EPIC_LABELS)."""
-        facts = self._seed_no_pr(_issue_info(104, ["roadmap"]))
+        facts = self._seed_no_pr(_issue_snapshot(104, ["roadmap"]))
         assert facts.is_epic is True
 
     def test_title_marker_detected(self) -> None:
         """A title marker ('[Epic] ...') marks an unlabeled issue as an epic."""
-        facts = self._seed_no_pr(_issue_info(105, [], title="[Epic] Queue-based pipeline"))
+        facts = self._seed_no_pr(_issue_snapshot(105, [], title="[Epic] Queue-based pipeline"))
         assert facts.is_epic is True
         assert facts.title == "[Epic] Queue-based pipeline"
 
     def test_plain_issue_not_epic(self) -> None:
         """No epic label and no title marker → not an epic."""
-        facts = self._seed_no_pr(_issue_info(106, [STATE_PLAN_GO], title="Fix the widget"))
+        facts = self._seed_no_pr(_issue_snapshot(106, [STATE_PLAN_GO], title="Fix the widget"))
         assert facts.is_epic is False
 
 
 class TestSeedIssueFailClosed:
-    """PR-probe failures re-raise: never misclassify toward implementation."""
+    """Repository read failures cannot become actionable issue facts."""
 
-    def test_open_pr_lookup_failure_raises(self) -> None:
-        """find_pr_for_issue raising propagates (fail-closed, no PR-less fallback)."""
+    @pytest.mark.parametrize(
+        ("method", "message"),
+        [
+            ("gh_issue_json", "issue fetch down"),
+            ("find_pr_for_issue", "open probe down"),
+            ("find_merged_pr_for_issue", "merged probe down"),
+        ],
+    )
+    def test_read_failure_propagates(self, method: str, message: str) -> None:
+        """Each failed read propagates through the canonical issue source."""
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
         with (
-            patch(
-                "hephaestus.automation.pipeline.seeding.fetch_issue_info",
-                return_value=_issue_info(104, [STATE_PLAN_GO]),
-            ),
-            patch(
-                "hephaestus.automation.pipeline.seeding.find_pr_for_issue",
-                side_effect=RuntimeError("API error"),
-            ),
-            pytest.raises(RuntimeError, match="API error"),
+            patch.object(github, method, side_effect=RuntimeError(message)),
+            pytest.raises(RuntimeError, match=message),
         ):
-            seed_issue(104)
-
-    def test_merged_pr_lookup_failure_raises(self) -> None:
-        """find_merged_pr_for_issue raising propagates too."""
-        with (
-            patch(
-                "hephaestus.automation.pipeline.seeding.fetch_issue_info",
-                return_value=_issue_info(104, [STATE_PLAN_GO]),
-            ),
-            patch("hephaestus.automation.pipeline.seeding.find_pr_for_issue", return_value=None),
-            patch(
-                "hephaestus.automation.pipeline.seeding.find_merged_pr_for_issue",
-                side_effect=RuntimeError("merged probe down"),
-            ),
-            pytest.raises(RuntimeError, match="merged probe down"),
-        ):
-            seed_issue(104)
-
-    def test_issue_fetch_failure_raises(self) -> None:
-        """fetch_issue_info raising propagates (parity with the PR probes)."""
-        with (
-            patch(
-                "hephaestus.automation.pipeline.seeding.fetch_issue_info",
-                side_effect=RuntimeError("issue fetch down"),
-            ),
-            pytest.raises(RuntimeError, match="issue fetch down"),
-        ):
-            seed_issue(104)
+            seed_issue_from_github(104, github)
 
 
-class TestSeedFromCli:
-    """CLI mapping: repos → repo queue; issues → classified; prs → review/merge."""
+class TestSeedEntries:
+    """Normalized issue facts supply complete queue entries."""
 
-    def test_repos_arm(self) -> None:
-        """Each repo becomes a StageName.REPO discovery seed."""
-        entries = seed_from_cli(["RepoA", "RepoB"], [], [])
-        assert [e.kind for e in entries] == ["repo", "repo"]
-        assert [e.identifier for e in entries] == ["RepoA", "RepoB"]
-        assert all(e.stage is StageName.REPO for e in entries)
-
-    def test_issues_arm_classified_via_seed_issue(self) -> None:
-        """Issues run through seed_issue + classify_issue."""
+    def test_issue_entry_preserves_requirements_context(self) -> None:
+        """The entry retains the title and body for downstream stages."""
         facts = _facts(
             number=9,
             title="Hydrate planner context",
             body="Use the real issue body.",
             labels={STATE_PLAN_GO},
         )
-        with patch(
-            "hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts
-        ) as mock_seed:
-            entries = seed_from_cli([], [9], [])
-        mock_seed.assert_called_once_with(9)
-        assert entries == [
-            SeedEntry(
-                kind="issue",
-                identifier=9,
-                stage=StageName.IMPLEMENTATION,
-                reason=f"#9 at-or-past {STATE_PLAN_GO}, no PR yet",
-                issue_title="Hydrate planner context",
-                issue_body="Use the real issue body.",
-            )
-        ]
+        entry = seed_entry_from_facts(facts)
 
-    def test_issues_arm_open_pr_preserves_pr_number(self) -> None:
-        """Direct --issues seeding must keep the open PR number for PR stages."""
+        assert entry.kind == "issue"
+        assert entry.identifier == 9
+        assert entry.stage is StageName.IMPLEMENTATION
+        assert entry.issue_title == facts.title
+        assert entry.issue_body == facts.body
+
+    def test_open_pr_entry_preserves_pr_number(self) -> None:
+        """The queue entry retains the open PR identity for later stages."""
         facts = _facts(
             number=9,
             labels={STATE_PLAN_GO},
@@ -959,197 +925,107 @@ class TestSeedFromCli:
             pr_is_open=True,
             pr_has_implementation_go=True,
         )
-        with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
-            entries = seed_from_cli([], [9], [])
+        entry = seed_entry_from_facts(facts)
 
-        assert entries == [
-            SeedEntry(
-                kind="issue",
-                identifier=9,
-                stage=StageName.MERGE_WAIT,
-                reason=f"#9 open PR with {STATE_IMPLEMENTATION_GO}",
-                pr_number=77,
-                issue_title="A task",
-            )
-        ]
+        assert entry.kind == "issue"
+        assert entry.identifier == 9
+        assert entry.stage is StageName.MERGE_WAIT
+        assert entry.pr_number == 77
 
-    def test_issues_arm_excluded_issue_maps_to_none_stage(self) -> None:
-        """An excluded (skip/epic) issue surfaces stage=None to the caller."""
-        facts = _facts(number=10, labels={STATE_SKIP})
-        with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
-            entries = seed_from_cli([], [10], [])
-        assert entries[0].stage is None
+    def test_excluded_issue_has_no_entry_stage(self) -> None:
+        """An explicit skip label excludes the issue from stage admission."""
+        entry = seed_entry_from_facts(_facts(number=10, labels={STATE_SKIP}))
 
-    def test_labeled_epic_has_no_skip_obligation_before_model_review(self) -> None:
-        facts = _facts(number=10, is_epic=True, labels={"epic"})
-        with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
-            entry = seed_from_cli([], [10], [])[0]
+        assert entry.stage is None
 
-        assert entry.stage is StageName.PLANNING
+    @pytest.mark.parametrize(
+        ("title", "labels"),
+        [("A task", {"epic"}), ("Epic: queue work", set())],
+    )
+    def test_epic_enters_planning_before_disposition(self, title: str, labels: set[str]) -> None:
+        """An epic candidate requires independent semantic review."""
+        facts = _facts(number=10, title=title, labels=labels, is_epic=True)
 
-    def test_title_inferred_epic_has_no_skip_obligation_before_model_review(self) -> None:
-        facts = _facts(number=10, title="Epic: queue work", is_epic=True)
-        with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
-            entry = seed_from_cli([], [10], [])[0]
+        assert seed_entry_from_facts(facts).stage is StageName.PLANNING
 
-        assert entry.stage is StageName.PLANNING
 
-    def test_prs_with_impl_go_route_to_merge_wait_for_fresh_admission(self) -> None:
-        """The durable label routes work; merge_wait still requires both proofs."""
-        with (
-            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
-            patch(
-                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-                return_value=[STATE_IMPLEMENTATION_GO],
+class TestDirectPrSource:
+    """The coordinator classifies explicit PRs through their repository accessor."""
+
+    def _entry(
+        self,
+        tmp_path: Path,
+        *,
+        state: str = "OPEN",
+        implementation_state: tuple[bool, bool] = (False, False),
+        issue_number: int | None = 9,
+    ) -> SeedEntry:
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=77,
+            pr_issue=issue_number,
+            pr_impl_state=implementation_state,
+            pr_review_context={
+                "pr_title": "A current PR title",
+                "pr_description": "Closes #9",
+                "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
+            },
+            pr_state={
+                "state": state,
+                "mergedAt": "2026-01-01T00:00:00Z" if state == "MERGED" else None,
+            },
+        )
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo"],
+                projects_dir=tmp_path,
+                rate_guard_enabled=False,
             ),
-        ):
-            entries = seed_from_cli([], [], [77])
-        assert entries == [
-            SeedEntry(
-                kind="pr",
-                identifier=77,
-                stage=StageName.MERGE_WAIT,
-                reason=f"PR #77 carries {STATE_IMPLEMENTATION_GO}",
-                pr_number=77,
-            )
-        ]
+            github=github,
+            **fake_worker_factories(),
+            install_signals=False,
+        )
+        return coordinator._seed_direct_pr_entry("repo", 77, github=github)
 
-    def test_prs_arm_no_go_routes_to_pr_review(self) -> None:
-        """A PR without impl-GO (e.g. NO-GO) seeds into pr_review."""
-        with (
-            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
-            patch(
-                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-                return_value=[STATE_IMPLEMENTATION_NO_GO],
-            ),
-        ):
-            entries = seed_from_cli([], [], [78])
-        assert entries[0].stage is StageName.PR_REVIEW
+    @pytest.mark.parametrize(
+        ("implementation_state", "expected_stage"),
+        [
+            ((True, False), StageName.MERGE_WAIT),
+            ((False, True), StageName.PR_REVIEW),
+            ((False, False), StageName.PR_REVIEW),
+        ],
+    )
+    def test_open_pr_routes_from_repository_labels(
+        self,
+        tmp_path: Path,
+        implementation_state: tuple[bool, bool],
+        expected_stage: StageName,
+    ) -> None:
+        """The PR label selects its current stage and retains its linked issue."""
+        entry = self._entry(tmp_path, implementation_state=implementation_state)
 
-    def test_prs_arm_label_fetch_failure_reads_as_not_reviewed(self) -> None:
-        """An empty label fetch (best-effort failure) → pr_review.
+        assert entry.stage is expected_stage
+        assert entry.kind == "pr"
+        assert entry.pr_number == 77
+        assert entry.issue_number == 9
 
-        Mirrors _review_existing_pr's (False, False) "not yet reviewed" semantics.
-        """
-        with (
-            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
-            patch("hephaestus.automation.pipeline.seeding.gh_pr_label_names", return_value=[]),
-        ):
-            entries = seed_from_cli([], [], [79])
-        assert entries[0].stage is StageName.PR_REVIEW
+    @pytest.mark.parametrize(("state", "passed"), [("MERGED", True), ("CLOSED", False)])
+    def test_terminal_pr_records_its_result(self, tmp_path: Path, state: str, passed: bool) -> None:
+        """Merged and closed PRs terminate with different completion results."""
+        entry = self._entry(tmp_path, state=state)
 
-    def test_prs_arm_uses_repo_scoped_accessor_when_given(self) -> None:
-        """A repo-scoped github accessor routes the --prs state/label reads through it.
+        assert entry.stage is StageName.FINISHED
+        assert entry.passed is passed
+        assert entry.pr_number == 77
 
-        Not the ambient gh_pr_state/gh_pr_label_names, closing the multi-repo
-        misclassification (#1864).
-        """
-        github = MagicMock()
-        github.gh_pr_state.return_value = None
-        github.pr_has_implementation_state_label.return_value = (True, False)
-        with (
-            patch(
-                "hephaestus.automation.pipeline.seeding.gh_pr_state",
-                side_effect=AssertionError("must not call ambient state read when github is given"),
-            ),
-            patch(
-                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-                side_effect=AssertionError("must not call ambient label read when github is given"),
-            ),
-        ):
-            entries = seed_from_cli([], [], [77], github=github)
-        github.gh_pr_state.assert_called_once_with(77)
-        github.pr_has_implementation_state_label.assert_called_once_with(77)
-        assert entries == [
-            SeedEntry(
-                kind="pr",
-                identifier=77,
-                stage=StageName.MERGE_WAIT,
-                reason=f"PR #77 carries {STATE_IMPLEMENTATION_GO}",
-                pr_number=77,
-            )
-        ]
+    def test_pr_without_linked_issue_fails_admission(self, tmp_path: Path) -> None:
+        """A PR cannot enter review without its issue requirements."""
+        entry = self._entry(tmp_path, issue_number=None)
 
-    def test_prs_arm_repo_scoped_no_go_routes_to_pr_review(self) -> None:
-        """Repo-scoped accessor without impl-GO seeds into pr_review."""
-        github = MagicMock()
-        github.gh_pr_state.return_value = None
-        github.pr_has_implementation_state_label.return_value = (False, True)
-        entries = seed_from_cli([], [], [78], github=github)
-        assert entries[0].stage is StageName.PR_REVIEW
-
-    def test_prs_arm_repo_scoped_merged_pr_routes_to_finished(self) -> None:
-        """Repo-scoped accessor: a merged PR classifies FINISHED via github.gh_pr_state (#1865)."""
-        github = MagicMock()
-        github.gh_pr_state.return_value = {"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"}
-        entries = seed_from_cli([], [], [80], github=github)
-        assert entries == [
-            SeedEntry(
-                kind="pr",
-                identifier=80,
-                stage=StageName.FINISHED,
-                reason="PR #80 merged (idempotent)",
-                pr_number=80,
-            )
-        ]
-        github.pr_has_implementation_state_label.assert_not_called()
-
-    def test_prs_arm_repo_scoped_closed_pr_excluded(self) -> None:
-        """Repo-scoped accessor: a closed PR is excluded via github.gh_pr_state (#1865)."""
-        github = MagicMock()
-        github.gh_pr_state.return_value = {"state": "CLOSED", "mergedAt": None}
-        entries = seed_from_cli([], [], [81], github=github)
-        assert entries[0].stage is None
-        github.pr_has_implementation_state_label.assert_not_called()
-
-    def test_prs_arm_merged_pr_routes_to_finished(self) -> None:
-        """A merged PR passed via --prs classifies FINISHED, not PR_REVIEW (#1865)."""
-        with patch(
-            "hephaestus.automation.pipeline.seeding.gh_pr_state",
-            return_value={"state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"},
-        ):
-            entries = seed_from_cli([], [], [80])
-        assert entries == [
-            SeedEntry(
-                kind="pr",
-                identifier=80,
-                stage=StageName.FINISHED,
-                reason="PR #80 merged (idempotent)",
-                pr_number=80,
-            )
-        ]
-
-    def test_prs_arm_closed_pr_excluded(self) -> None:
-        """A closed (unmerged) PR passed via --prs is excluded, not re-reviewed (#1865)."""
-        with patch(
-            "hephaestus.automation.pipeline.seeding.gh_pr_state",
-            return_value={"state": "CLOSED", "mergedAt": None},
-        ):
-            entries = seed_from_cli([], [], [81])
-        assert entries[0].stage is None
-
-    def test_prs_arm_state_fetch_failure_falls_through_to_labels(self) -> None:
-        """A gh_pr_state read failure (None) falls through to label routing, not FINISHED."""
-        with (
-            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
-            patch(
-                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
-                return_value=[STATE_IMPLEMENTATION_GO],
-            ),
-        ):
-            entries = seed_from_cli([], [], [82])
-        assert entries[0].stage is StageName.MERGE_WAIT
-
-    def test_order_repos_then_issues_then_prs(self) -> None:
-        """Entries preserve CLI order: repos, then issues, then prs."""
-        facts = _facts(number=5)
-        with (
-            patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts),
-            patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
-            patch("hephaestus.automation.pipeline.seeding.gh_pr_label_names", return_value=[]),
-        ):
-            entries = seed_from_cli(["R"], [5], [6])
-        assert [e.kind for e in entries] == ["repo", "issue", "pr"]
+        assert entry.stage is StageName.FINISHED
+        assert entry.passed is False
 
 
 class TestLabelRank:

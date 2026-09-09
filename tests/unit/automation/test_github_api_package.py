@@ -19,8 +19,6 @@ def test_public_reexports_match_canonical_submodules() -> None:
         "issues": ["gh_issue_json", "gh_issue_create", "fetch_issue_info"],
         "labels": ["gh_list_labels", "gh_create_label", "_ensure_labels_exist"],
         "prs": [
-            "gh_pr_create",
-            "fetch_open_prs",
             "gh_current_login",
             "gh_pr_label_names",
             "gh_pr_state",

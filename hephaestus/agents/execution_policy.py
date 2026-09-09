@@ -19,7 +19,6 @@ from typing import Final
 class AgentRole(StrEnum):
     """The automation role that owns an agent invocation."""
 
-    ADVISOR = "advisor"
     PLANNER = "planner"
     PLAN_REVIEWER = "plan_reviewer"
     IMPLEMENTER = "implementer"
@@ -30,7 +29,6 @@ class AgentRole(StrEnum):
 class AgentOperation(StrEnum):
     """An operation with a separately reviewable privilege boundary."""
 
-    ADVISE = "advise"
     PLAN = "plan"
     AMEND = "amend"
     COMPACT = "compact"
@@ -41,10 +39,8 @@ class AgentOperation(StrEnum):
     TEST_FIX = "test_fix"
     ADDRESS_REVIEW = "address_review"
     GIT_MESSAGE = "git_message"
-    AUDIT_REVIEW = "audit_review"
     PR_REVIEW = "pr_review"
     REVIEW_VALIDATE = "review_validate"
-    COMMENT_CLASSIFY = "comment_classify"
     LEARN = "learn"
 
 
@@ -60,7 +56,6 @@ class FilesystemMode(StrEnum):
     """External-isolation mount layouts available to an execution policy."""
 
     CHECKOUT_RO = "checkout_ro"
-    KNOWLEDGE_RO = "knowledge_ro"
     WORKTREE_RW = "worktree_rw"
     MNEMOSYNE_RW = "mnemosyne_rw"
     SESSION_ONLY = "session_only"
@@ -109,16 +104,6 @@ _READ: Final = frozenset({"read", "grep", "find", "ls"})
 _READ_SHELL: Final = _READ | {"bash"}
 _WRITE: Final = _READ_SHELL | {"write", "edit"}
 _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
-    (AgentRole.ADVISOR, AgentOperation.ADVISE): ExecutionPolicy(
-        AgentRole.ADVISOR,
-        AgentOperation.ADVISE,
-        frozenset({SessionLifecycle.ONE_SHOT}),
-        FilesystemMode.KNOWLEDGE_RO,
-        _READ_SHELL,
-        frozenset({"athena:advise"}),
-        False,
-        NetworkMode.PROVIDER_RELAY,
-    ),
     (AgentRole.PLANNER, AgentOperation.PLAN): ExecutionPolicy(
         AgentRole.PLANNER,
         AgentOperation.PLAN,
@@ -232,16 +217,6 @@ _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
         False,
         NetworkMode.PROVIDER_RELAY,
     ),
-    (AgentRole.PR_REVIEWER, AgentOperation.AUDIT_REVIEW): ExecutionPolicy(
-        AgentRole.PR_REVIEWER,
-        AgentOperation.AUDIT_REVIEW,
-        frozenset({SessionLifecycle.ONE_SHOT}),
-        FilesystemMode.CHECKOUT_RO,
-        _READ,
-        frozenset(),
-        False,
-        NetworkMode.PROVIDER_RELAY,
-    ),
     (AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW): ExecutionPolicy(
         AgentRole.PR_REVIEWER,
         AgentOperation.PR_REVIEW,
@@ -263,16 +238,6 @@ _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
         AgentRole.PR_REVIEWER,
         AgentOperation.REVIEW_VALIDATE,
         frozenset({SessionLifecycle.START_NEW, SessionLifecycle.RESUME_REQUIRED}),
-        FilesystemMode.CHECKOUT_RO,
-        _READ,
-        frozenset(),
-        False,
-        NetworkMode.PROVIDER_RELAY,
-    ),
-    (AgentRole.PR_REVIEWER, AgentOperation.COMMENT_CLASSIFY): ExecutionPolicy(
-        AgentRole.PR_REVIEWER,
-        AgentOperation.COMMENT_CLASSIFY,
-        frozenset({SessionLifecycle.ONE_SHOT}),
         FilesystemMode.CHECKOUT_RO,
         _READ,
         frozenset(),

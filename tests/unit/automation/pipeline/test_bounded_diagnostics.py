@@ -8,12 +8,17 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import SeedEntry
+from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    fake_worker_factories,
+    script_source_passes,
+)
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -26,11 +31,12 @@ def _coordinator(tmp_path: Path) -> Coordinator:
         metrics_port=9123,
         event_log_capacity=3,
         terminal_detail_capacity=2,
+        rate_guard_enabled=False,
     )
     return Coordinator(
         config,
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
 
@@ -95,7 +101,7 @@ def test_coordinator_metric_policy_rejects_unknown_stage(tmp_path: Path) -> None
         )
 
 
-class _TerminalStage:
+class _TerminalStage(Stage):
     """Return one terminal outcome per re-seeded planning item."""
 
     def __init__(self, *outcomes: StageOutcome) -> None:
@@ -123,17 +129,15 @@ def test_terminal_summary_uses_only_the_latest_reseed_pass(
             [SeedEntry(kind="issue", identifier=7, stage=StageName.PLANNING, reason="second")],
         ]
     )
-    monkeypatch.setattr(
-        seeding_mod,
-        "seed_from_cli",
-        lambda _repos, _issues, _prs: list(passes.popleft()) if passes else [],
-    )
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo-a"], loops=2, projects_dir=tmp_path),
+        PipelineConfig(
+            org="org", repos=["repo-a"], loops=2, projects_dir=tmp_path, rate_guard_enabled=False
+        ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
+    script_source_passes(coordinator, monkeypatch, list(passes))
     coordinator.stages[StageName.PLANNING] = _TerminalStage(
         StageOutcome(Disposition.FINISH_FAIL, "first failed"),
         StageOutcome(Disposition.FINISH_PASS, "replacement passed"),

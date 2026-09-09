@@ -12,10 +12,11 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import github_api, loop_runner
+from hephaestus.automation import github_api, loop_runner, pipeline_cli
 from hephaestus.automation.pipeline import coordinator as coordinator_module
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -38,7 +39,9 @@ def _restore_logging() -> Iterator[None]:
 
 def _coordinator_with_fake_pool(config: PipelineConfig, **kwargs: Any) -> Coordinator:
     """Use Coordinator without external agent processes."""
-    return Coordinator(config, pool=FakeWorkerPool(), install_signals=False, **kwargs)
+    return Coordinator(
+        config, **fake_worker_factories(FakeWorkerPool(), None), install_signals=False, **kwargs
+    )
 
 
 def _run_selected_repository(
@@ -58,9 +61,9 @@ def _run_selected_repository(
     monkeypatch.chdir(checkout)
     monkeypatch.setattr(github_api, "_issue_state_cache", {})
     monkeypatch.setattr(github_api, "get_repo_info", lambda: ambient)
-    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda **kwargs: ambient)
-    monkeypatch.setattr(loop_runner, "DEFAULT_STATE_DIR", tmp_path / "state")
-    monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_cli, "_detect_cwd_repo", lambda **kwargs: ambient)
+    monkeypatch.setattr(pipeline_cli, "DEFAULT_STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(pipeline_cli, "_preflight_token_scopes", lambda *args, **kwargs: None)
     monkeypatch.setattr("hephaestus.utils.terminal.install_sigtstp_only", lambda: None)
     monkeypatch.setattr(
         "hephaestus.automation.pipeline_github_transport.rate_limit_remaining",
@@ -132,8 +135,8 @@ def _run_selected_repository(
                 "27" if read_failure else "27,28",
                 "--projects-dir",
                 str(tmp_path),
-                "--phases",
-                "plan",
+                "--stages",
+                "planning,plan_review",
                 "--loops",
                 "1",
                 "--max-workers",
@@ -160,13 +163,17 @@ def test_cli_selected_repository_ignores_checkout_repository(
 
 
 def test_cli_unverifiable_repository_state_returns_nonzero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A target read failure that continues must return exit code 1."""
+    """A failed source read stops the run before an issue is admitted."""
     result, summary, _ = _run_selected_repository(tmp_path, monkeypatch, capsys, read_failure=True)
     assert result == 1
-    assert summary["dispositions"] == {"fail": 1}
+    assert summary["dispositions"] == {}
     assert summary["agent_jobs"] == 0
+    assert "NOT_FOUND: target issue is unavailable" in caplog.text
 
 
 def test_cli_current_checkout_scope_is_preserved(

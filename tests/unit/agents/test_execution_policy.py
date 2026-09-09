@@ -549,7 +549,7 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
 def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A START_NEW request never silently turns into a session resume."""
+    """New and one-shot calls reject a resume binding."""
     binding = create_pi_binding(
         session_id="pi-session-123", cwd=tmp_path, role=AgentRole.PLANNER, model="model"
     )
@@ -575,13 +575,13 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
 
     one_shot_request = ExecutionRequest(
         AgentRole.PR_REVIEWER,
-        AgentOperation.AUDIT_REVIEW,
+        AgentOperation.PR_REVIEW,
         SessionLifecycle.ONE_SHOT,
     )
     with pytest.raises(PiSessionBindingError, match="start-new or one-shot"):
         agent_runtime.run_agent_session(
             "pi",
-            "audit",
+            "review",
             cwd=tmp_path,
             timeout=30,
             model="model",

@@ -18,13 +18,10 @@ from unittest.mock import patch
 
 import pytest
 
-import hephaestus.automation.github_api as github_api
 import hephaestus.automation.pipeline.stages.pr_review_jobs as pr_review_jobs
-from hephaestus.agents.execution_policy import AgentRole
-from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.address_review_core import parse_addressed_replies
 from hephaestus.automation.pipeline.github_jobs import (
-    DeliverReplyHandoffRequest,
     EnsureScopeExpansionChildrenRequest,
     FrozenJson,
     GitHubJob,
@@ -43,43 +40,42 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import (
+    implementation_reply_handoff,
     implementation_reply_handoff_journal_entry,
     journaled_implementation_reply_handoff,
+    pr_is_current_open_head,
 )
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
     Continue,
-    ImplementationThreadReplyResult,
     JobRequest,
     StageOutcome,
-    pr_review as stage_module,
 )
-from hephaestus.automation.pipeline.stages.pr_review import (
-    ADOPT_WORKTREE_WAIT,
-    CLEANUP_REVIEW_WORKTREE_WAIT,
-    DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
-    DIRECT_PUSH_RETRY_CAP,
-    HOST_VERIFICATION_WAIT,
-    REVIEW_CHECKOUT_WAIT,
-    REVIEW_ERROR_RETRY_CAP,
-    PrReviewStage,
-    _address_replies,
-    _implementation_reply_handoff,
-    _is_postable_finding,
-    _normalize_remediation_threads,
-    _parse_validation_result,
-    _pr_is_current_open_head,
-    _reviewer_thread_decisions,
-    _validation_receipt_fingerprints,
-    _validation_thread_snapshots,
-    _without_duplicate_live_findings,
+from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
+from hephaestus.automation.pipeline.stages.pr_review_receipts import (
+    _host_verification_receipt_matches,
 )
 from hephaestus.automation.pipeline.stages.pr_review_scope_expansion import (
     POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP,
 )
-from hephaestus.automation.pipeline.stages.pr_review_threads import _scope_retraction_paths
+from hephaestus.automation.pipeline.stages.pr_review_threads import (
+    ADOPT_WORKTREE_WAIT,
+    CLEANUP_REVIEW_WORKTREE_WAIT,
+    HOST_VERIFICATION_WAIT,
+    REVIEW_CHECKOUT_WAIT,
+    REVIEW_ERROR_RETRY_CAP,
+    _is_postable_finding,
+    _normalize_remediation_threads,
+    _parse_validation_result,
+    _reviewer_thread_decisions,
+    _scope_retraction_paths,
+    _validation_receipt_fingerprints,
+    _validation_thread_snapshots,
+    _without_duplicate_live_findings,
+)
 from hephaestus.automation.pipeline.stages.pr_review_verification import (
     _FULL_UNIT_COVERAGE_SPEC,
+    _host_verification_specs,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -210,56 +206,6 @@ def test_pr_review_post_dispatches_without_inline_github_calls(
     assert stage.step(item, ctx) == Continue(next_state="EVAL")
 
 
-def test_pr_review_recovery_handoff_dispatches_without_inline_github_calls(
-    make_ctx: Any,
-    make_work_item: Any,
-) -> None:
-    """Recovery freezes the exact handoff before any GitHub state read or reply."""
-
-    class InlineGitHubForbidden:
-        def gh_pr_state(self, *_args: object, **_kwargs: object) -> object:
-            raise AssertionError("GitHub head read ran inline")
-
-        def post_implementation_thread_replies(self, *_args: object, **_kwargs: object) -> object:
-            raise AssertionError("GitHub reply post ran inline")
-
-    item = make_work_item(issue=3, pr=7, state="EVAL")
-    item.payload["pending_implementation_reply_handoff"] = {
-        "head_sha": "a" * 40,
-        "batch_nonce": "b" * 32,
-        "threads": [
-            {
-                "id": "thread-1",
-                "path": "a.py",
-                "line": 1,
-                "side": "RIGHT",
-                "body": "fix",
-                "comments": [{"id": "comment-1", "body": "fix"}],
-            }
-        ],
-        "replies": {"thread-1": "Fixed."},
-    }
-    stage = PrReviewStage()
-    ctx = make_ctx(github=InlineGitHubForbidden())
-
-    assert stage.step(item, ctx) == Continue(next_state="RECOVERY_REPLY_WAIT")
-    item.state = "RECOVERY_REPLY_WAIT"
-    started = time.monotonic()
-    result = stage.step(item, ctx)
-    elapsed = time.monotonic() - started
-
-    assert isinstance(result, JobRequest)
-    assert isinstance(result.job, GitHubJob)
-    assert isinstance(result.job.request, DeliverReplyHandoffRequest)
-    assert result.job.request.handoff.thaw() == item.payload["pending_implementation_reply_handoff"]
-    assert result.job.request.deadline_s is not None
-    assert result.job.request.deadline_s > started
-    retried = stage.step(item, ctx)
-    assert isinstance(retried, JobRequest)
-    assert retried.job.request == result.job.request
-    assert elapsed < 0.25
-
-
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 80) -> Any:
     """Drive a stage through the canonical FakeWorkerPool until an outcome."""
     entry = stage.on_enter(item, ctx)
@@ -304,9 +250,6 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
 def _complete_github_job(stage: PrReviewStage, item: Any, ctx: Any) -> Any:
     """Run one PR-review GitHub request only after its stage dispatch."""
     request = stage.step(item, ctx)
-    if request == Continue(next_state="RECOVERY_REPLY_WAIT"):
-        item.state = "RECOVERY_REPLY_WAIT"
-        request = stage.step(item, ctx)
     if not isinstance(request, JobRequest) or not isinstance(request.job, GitHubJob):
         return request
     try:
@@ -320,10 +263,6 @@ def _complete_github_job(stage: PrReviewStage, item: Any, ctx: Any) -> Any:
                 request.job.request,
                 ctx.github,
             )
-        elif isinstance(request.job.request, DeliverReplyHandoffRequest):
-            from hephaestus.automation.pipeline.reply_handoff import attempt_reply_handoff
-
-            receipt = attempt_reply_handoff(request.job.request, ctx.github)
         else:  # pragma: no cover - PR review owns two GitHub operations
             raise AssertionError(f"unexpected request: {request.job.request!r}")
         result = JobResult(ok=True, value=receipt)
@@ -451,7 +390,7 @@ class TestExplicitPrReviewRetry:
                 threads: list[dict[str, Any]],
                 *,
                 expected_head_sha: str,
-                review_diff: str | None = None,
+                review_diff: str,
             ) -> list[dict[str, Any]]:
                 receipts = super().post_review_threads(
                     pr_number,
@@ -549,7 +488,7 @@ class TestExplicitPrReviewRetry:
         item.state = reconciliation.on_done_state
         assert item.state == "POST_APPLY"
         posted = stage.step(item, ctx)
-        assert posted == Continue(next_state="ADDRESS_WAIT")
+        assert posted == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
         assert {thread["thread_id"] for thread in item.payload["remediation_threads"]} == {
             "inherited-1",
             "inherited-2",
@@ -562,9 +501,6 @@ class TestExplicitPrReviewRetry:
         }
 
         item.state = posted.next_state
-        cleanup = stage.step(item, ctx)
-        assert cleanup == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
-        item.state = cleanup.next_state
         removal = stage.step(item, ctx)
         assert isinstance(removal, JobRequest)
         assert isinstance(removal.job, GitJob)
@@ -878,7 +814,7 @@ class TestPrReviewStageOnEnter:
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
 
     def test_checkout_rejects_empty_diff_before_review_or_go(
@@ -944,7 +880,7 @@ class TestPrReviewStageOnEnter:
                 "pr_diff": "diff --git a/example.py b/example.py\n+new line\n",
             }
         )
-        specs = stage_module._host_verification_specs(item.payload["pr_diff"])
+        specs = _host_verification_specs(item.payload["pr_diff"])
         item.payload["host_verification_receipts"] = [
             {
                 "head_sha": "a" * 40,
@@ -959,7 +895,7 @@ class TestPrReviewStageOnEnter:
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
 
     def test_comment_validation_resolves_threads_without_posting_a_second_review(
@@ -1780,10 +1716,10 @@ class TestPrReviewStageStep:
         assert result.job.execution_request is not None
         assert result.job.execution_request.lifecycle.value == "resume_required"
 
-    def test_nogo_compacts_reviewer_and_writer_before_the_next_review(
+    def test_nogo_compacts_reviewer_before_the_next_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A Claude writer is compacted after a failed round, before re-review."""
+        """A failed round can compact the reviewer before the next review."""
         stage = PrReviewStage()
         ctx = make_ctx(github=FakeStageGitHub(unresolved=[(3, 0)]))
         item = make_work_item(issue=1, pr=1001, state="EVAL")
@@ -1799,15 +1735,7 @@ class TestPrReviewStageStep:
         assert isinstance(reviewer_compact.job, CompactJob)
         assert reviewer_compact.job.session_agent == "pr-reviewer"
         assert reviewer_compact.job.sandbox == "read-only"
-        assert reviewer_compact.on_done_state == "COMPACT_WRITER_WAIT"
-
-        item.state = reviewer_compact.on_done_state
-        writer_compact = stage.step(item, ctx)
-        assert isinstance(writer_compact, JobRequest)
-        assert isinstance(writer_compact.job, CompactJob)
-        assert writer_compact.job.session_agent == "implementer"
-        assert writer_compact.job.sandbox == "read-only"
-        assert writer_compact.on_done_state == "REVIEW_WAIT"
+        assert reviewer_compact.on_done_state == "REVIEW_WAIT"
 
     def test_validation_continues_the_reused_reviewer_session(
         self, make_ctx: Any, make_work_item: Any
@@ -1883,13 +1811,9 @@ class TestPrReviewStageStep:
         stage.on_job_done(item, JobResult(ok=True, value='{"unaddressed": []}'), ctx)
         item.state = "POST"
         post = _complete_github_job(stage, item, ctx)
-        assert post == Continue(next_state="ADDRESS_WAIT")
+        assert post == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert github.reviews[1001][0]["comments"] == item.payload["review_threads"]
 
-        item.state = "ADDRESS_WAIT"
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FAIL_BACK, "implementation_remediation"
-        )
         assert github.mutation_log == [
             ("gh_pr_review_post", (1001, "COMMENT")),
             ("mark_pr_implementation_no_go", (1001,)),
@@ -1926,7 +1850,7 @@ class TestPrReviewStageStep:
         """Submission clears ALL stale round results (M3 pattern).
 
         A failed later round can never replay an earlier round's verdict,
-        threads, or address output in EVAL.
+        threads, or validation result in EVAL.
         """
         stage = PrReviewStage()
         ctx = make_ctx()
@@ -1940,8 +1864,6 @@ class TestPrReviewStageStep:
                 "posted_thread_ids": ["t1"],
                 "remediation_threads": [{"thread_id": "t1"}],
                 "validation_result": "stale",
-                "address_error": True,
-                "address_output": "stale",
             }
         )
 
@@ -1956,8 +1878,6 @@ class TestPrReviewStageStep:
             "posted_thread_ids",
             "remediation_threads",
             "validation_result",
-            "address_error",
-            "address_output",
         ):
             assert key not in item.payload
 
@@ -2346,7 +2266,7 @@ class TestPrReviewStageStep:
         """Deleted tests have no new-side path for host pytest to execute."""
         deleted_path = "tests/unit/automation/pipeline/stages/test_deleted.py"
         kept_path = "tests/unit/automation/pipeline/stages/test_kept.py"
-        specs = stage_module._host_verification_specs(
+        specs = _host_verification_specs(
             f"diff --git a/{deleted_path} b/{deleted_path}\n"
             "deleted file mode 100644\n"
             f"--- a/{deleted_path}\n"
@@ -2376,7 +2296,7 @@ class TestPrReviewStageStep:
         directory = "tests/unit/automation/pipeline/stages"
         conftest_path = f"{directory}/conftest.py"
         test_path = f"{directory}/test_stage_pr_review.py"
-        specs = stage_module._host_verification_specs(
+        specs = _host_verification_specs(
             f"diff --git a/{conftest_path} b/{conftest_path}\n"
             f"--- a/{conftest_path}\n"
             f"+++ b/{conftest_path}\n"
@@ -2410,7 +2330,7 @@ class TestPrReviewStageStep:
         child_directory = f"{parent_directory}/pipeline"
         parent_conftest_path = f"{parent_directory}/conftest.py"
         child_conftest_path = f"{child_directory}/conftest.py"
-        specs = stage_module._host_verification_specs(
+        specs = _host_verification_specs(
             f"diff --git a/{parent_conftest_path} b/{parent_conftest_path}\n"
             f"--- a/{parent_conftest_path}\n"
             f"+++ b/{parent_conftest_path}\n"
@@ -2446,7 +2366,7 @@ class TestPrReviewStageStep:
         directory = "tests/unit/automation"
         conftest_path = f"{directory}/conftest.py"
         ordinary_path = "tests/unit/automation/stages/test_plan_review.py"
-        specs = stage_module._host_verification_specs(
+        specs = _host_verification_specs(
             f"diff --git a/{conftest_path} b/{conftest_path}\n"
             f"--- a/{conftest_path}\n"
             f"+++ b/{conftest_path}\n"
@@ -2481,7 +2401,7 @@ class TestPrReviewStageStep:
         """The emitted conftest directory target runs through the immutable receipt path."""
         directory = "tests/unit/host_conftest_receipt"
         conftest_path = f"{directory}/conftest.py"
-        specs = stage_module._host_verification_specs(
+        specs = _host_verification_specs(
             f"diff --git a/{conftest_path} b/{conftest_path}\n"
             f"--- a/{conftest_path}\n"
             f"+++ b/{conftest_path}\n"
@@ -2637,11 +2557,9 @@ class TestPrReviewStageStep:
             "stderr_tail": result.stderr_tail,
             "stdout_tail": result.stdout_tail,
         }
-        assert stage_module._host_verification_receipt_matches(receipt, spec, expected_head)
-        assert not stage_module._host_verification_receipt_matches(
-            {**receipt, "ok": False}, spec, expected_head
-        )
-        assert not stage_module._host_verification_receipt_matches(receipt, spec, "c" * 40)
+        assert _host_verification_receipt_matches(receipt, spec, expected_head)
+        assert not _host_verification_receipt_matches({**receipt, "ok": False}, spec, expected_head)
+        assert not _host_verification_receipt_matches(receipt, spec, "c" * 40)
 
         skipped = {
             "argv": list(spec.argv),
@@ -2655,20 +2573,18 @@ class TestPrReviewStageStep:
             "stderr_tail": "",
             "stdout_tail": "",
         }
-        assert not stage_module._host_verification_receipt_matches(skipped, spec, expected_head)
-        assert not stage_module._host_verification_receipt_matches(
+        assert not _host_verification_receipt_matches(skipped, spec, expected_head)
+        assert not _host_verification_receipt_matches(
             {**skipped, "platform": "darwin"}, spec, expected_head
         )
-        assert not stage_module._host_verification_receipt_matches(
+        assert not _host_verification_receipt_matches(
             {**skipped, "status": "failed"}, spec, expected_head
         )
-        assert not stage_module._host_verification_receipt_matches(
+        assert not _host_verification_receipt_matches(
             {**skipped, "platform": ""}, spec, expected_head
         )
-        assert not stage_module._host_verification_receipt_matches(
-            {**skipped, "error": ""}, spec, expected_head
-        )
-        assert not stage_module._host_verification_receipt_matches(
+        assert not _host_verification_receipt_matches({**skipped, "error": ""}, spec, expected_head)
+        assert not _host_verification_receipt_matches(
             {**skipped, "immutable_source": True}, spec, expected_head
         )
 
@@ -2709,11 +2625,19 @@ class TestPrReviewStageStep:
 
             def __init__(self) -> None:
                 self.calls: list[tuple[int, object, str, str | None]] = []
+                self.deadlines: list[Any] = []
 
-            def prepare(
-                self, item_number: int, lane: object, revision: str, *, branch: str | None = None
+            def prepare_bounded(
+                self,
+                item_number: int,
+                lane: object,
+                revision: str,
+                *,
+                branch: str | None = None,
+                deadline: Any,
             ) -> SimpleNamespace:
                 self.calls.append((item_number, lane, revision, branch))
+                self.deadlines.append(deadline)
                 return SimpleNamespace(cwd=tmp_path, revision=revision)
 
         source_workspaces = SourceWorkspaces()
@@ -2736,11 +2660,15 @@ class TestPrReviewStageStep:
             }
         )
 
-        result = PrReviewStage().step(item, make_ctx(paths=paths))
+        ctx = make_ctx(paths=paths, now_fn=lambda: 100.0)
+        result = PrReviewStage().step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
         assert source_workspaces.calls == [(1, SourceLane.REVIEW, head, None)]
+
+        assert source_workspaces.deadlines[0].expires_at == 145.0
+        assert source_workspaces.deadlines[0].shutdown is ctx.cancellation
 
     def test_checkout_fails_closed_when_review_source_binding_fails(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
@@ -2770,7 +2698,7 @@ class TestPrReviewStageStep:
         assert result == StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
 
     def test_non_hephaestus_repository_has_no_hephaestus_host_plan(self) -> None:
-        specs = stage_module._host_verification_specs(
+        specs = _host_verification_specs(
             "diff --git a/scripts/validate.py b/scripts/validate.py\n",
             profile=None,
         )
@@ -2968,10 +2896,9 @@ class TestPrReviewStageStep:
             ctx,
         )
 
-        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
-        item.state = "ADDRESS_WAIT"
-        result = stage.step(item, ctx)
-        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
+        )
         failure = item.payload["host_verification_failure"]
         assert failure["argv"] == ["uv", "run", "ruff", "check", "hephaestus/", "tests/"]
         assert failure["stdout_tail"] == "Found 1 error."
@@ -3035,7 +2962,9 @@ class TestPrReviewStageStep:
             ctx,
         )
 
-        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
+        )
         assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
         assert item.payload["host_verification_failure"] == {
             "argv": list(request.job.argv),
@@ -3059,7 +2988,9 @@ class TestPrReviewStageStep:
         assert "**Failure classification**\n\n    test" in comment
         assert "1 failed in 0.44s" in comment
 
-        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
+        )
         repeated_comments = [
             entry.body if isinstance(entry, IssueComment) else entry
             for entry in ctx.github.comments[1001]
@@ -3120,7 +3051,9 @@ class TestPrReviewStageStep:
             ctx,
         )
 
-        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
+        )
         assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
         assert item.payload["host_verification_failure"]["error"] == "timeout"
         assert "review_audit_failure" not in item.payload
@@ -3332,9 +3265,11 @@ class TestPrReviewStageStep:
 
         result = _complete_github_job(stage, item, ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "ADDRESS_WAIT"
-        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert github.mutation_log == [
+            ("gh_pr_review_post", (1001, "COMMENT")),
+            ("mark_pr_implementation_no_go", (1001,)),
+        ]
         assert item.payload["posted_thread_ids"] == ["thread-1001-0", "thread-1001-1"]
         assert item.payload["unresolved_threads_before_address"] == 2
 
@@ -3387,7 +3322,7 @@ class TestPrReviewStageStep:
 
         post_result = _complete_github_job(stage, item, ctx)
 
-        assert post_result == Continue(next_state="ADDRESS_WAIT")
+        assert post_result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert 1001 not in github.reviews
         remediation = [
             {
@@ -3399,10 +3334,6 @@ class TestPrReviewStageStep:
         ]
         assert item.payload["remediation_threads"] == remediation
 
-        item.state = "ADDRESS_WAIT"
-        address_result = stage.step(item, ctx)
-
-        assert address_result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["implementation_remediation"] is True
 
     def test_address_fresh_pr_hands_off_to_implementation(
@@ -3411,7 +3342,7 @@ class TestPrReviewStageStep:
         """Fresh PR feedback is not implemented from the review stage."""
         stage = PrReviewStage()
         ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
+        item = make_work_item(issue=1, pr=1001, state="POST_APPLY")
         item.worktree = "/tmp/wt"
         item.payload["review_audit"] = _valid_audit()
         item.payload["remediation_threads"] = [
@@ -3419,7 +3350,7 @@ class TestPrReviewStageStep:
         ]
         item.payload["pr_review_round"] = 1
 
-        result = stage.step(item, ctx)
+        result = stage._handoff_implementation(item, ctx)
 
         assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["implementation_remediation"] is True
@@ -3442,11 +3373,9 @@ class TestPrReviewStageStep:
         stage.on_job_done(item, JobResult(ok=True, value=audit), ctx)
         item.state = "POST"
         item.payload["reviewed_pr_head_sha"] = "a" * 40
-        assert _complete_github_job(stage, item, ctx) == Continue(next_state="ADDRESS_WAIT")
-        item.state = "ADDRESS_WAIT"
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert _complete_github_job(stage, item, ctx) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
+        )
         assert item.payload["implementation_remediation"] is True
 
     def test_address_hands_review_threads_to_implementation_without_a_write_job(
@@ -3455,7 +3384,7 @@ class TestPrReviewStageStep:
         """The review stage labels no-go and hands remediation to the writer stage."""
         stage = PrReviewStage()
         ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
+        item = make_work_item(issue=1, pr=1001, state="POST_APPLY")
         item.worktree = "/tmp/wt"
         item.payload["existing_pr"] = True
         item.payload["remediation_threads"] = [
@@ -3463,34 +3392,11 @@ class TestPrReviewStageStep:
         ]
         item.payload["reviewed_pr_head_sha"] = "a" * 40
 
-        result = stage.step(item, ctx)
+        result = stage._handoff_implementation(item, ctx)
 
         assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["implementation_remediation"] is True
         assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
-
-    @pytest.mark.parametrize("state", ["PUSH_WAIT", "ADDRESS_WAIT"])
-    def test_legacy_review_writer_states_fail_back_to_implementation(
-        self, state: str, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Interrupted legacy writer states cannot mutate from pr_review."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state=state)
-        item.worktree = "/tmp/review-checkout"
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "remediation_threads": [
-                    {"thread_id": "thread-1", "path": "a.py", "line": 1, "body": "fix"}
-                ],
-            }
-        )
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
-        assert item.payload["implementation_remediation"] is True
 
     @pytest.mark.parametrize("state", ["FOLLOWUP_WAIT", "PR_FINISH"])
     def test_retired_legacy_followup_states_fail_closed(
@@ -3608,7 +3514,7 @@ class TestReviewThreadLifecycle:
         threads = [self._thread("thread-1", 3, "first"), self._thread("thread-2", 4, "second")]
 
         assert (
-            _address_replies(
+            parse_addressed_replies(
                 {
                     "addressed": ["thread-1"],
                     "replies": {"thread-1": "Fixed the first concern."},
@@ -3617,7 +3523,7 @@ class TestReviewThreadLifecycle:
             )
             is None
         )
-        assert _address_replies(
+        assert parse_addressed_replies(
             {
                 "addressed": ["thread-1", "thread-2"],
                 "replies": {
@@ -3666,12 +3572,12 @@ class TestReviewThreadLifecycle:
         self, result: object, threads: list[object]
     ) -> None:
         """Malformed implementation handoffs cannot skip or forge a reply."""
-        assert _address_replies(result, threads) is None  # type: ignore[arg-type]
+        assert parse_addressed_replies(result, threads) is None  # type: ignore[arg-type]
 
     def test_implementation_reply_handoff_is_immutable_and_well_formed(self) -> None:
         """The retry journal preserves only a valid, copied host snapshot."""
         thread = self._thread("thread-1", 3, "first")
-        handoff = _implementation_reply_handoff(
+        handoff = implementation_reply_handoff(
             "a" * 40,
             [thread],
             {"thread-1": "  Fixed the first concern.  "},
@@ -3686,7 +3592,7 @@ class TestReviewThreadLifecycle:
             "reconciliation_only": False,
         }
         assert (
-            _implementation_reply_handoff(
+            implementation_reply_handoff(
                 "c" * 64,
                 [self._thread("thread-2", 4, "second")],
                 {"thread-2": "Fixed the second concern."},
@@ -3697,22 +3603,20 @@ class TestReviewThreadLifecycle:
         thread["body"] = "mutated after the handoff"
         assert handoff["threads"][0]["body"] != thread["body"]
         assert (
-            _implementation_reply_handoff(
+            implementation_reply_handoff(
                 "not-a-sha", [self._thread("thread-1", 3, "x")], {}, "b" * 32
             )
             is None
         )
-        assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}, "b" * 32) is None
-        assert (
-            _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}, "b" * 32) is None
-        )
+        assert implementation_reply_handoff("a" * 40, ["not-a-thread"], {}, "b" * 32) is None
+        assert implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}, "b" * 32) is None
 
     def test_implementation_reply_handoff_journal_requires_actor_and_exact_source_comments(
         self,
     ) -> None:
         """Recovery binds to our immutable source comments, not mutable anchors."""
         thread = self._thread("thread-1", 3, "first")
-        handoff = _implementation_reply_handoff(
+        handoff = implementation_reply_handoff(
             "a" * 40,
             [thread],
             {"thread-1": "Fixed the first concern."},
@@ -3821,9 +3725,9 @@ class TestReviewThreadLifecycle:
         assert _validation_thread_snapshots([{"id": "thread-1"}, {"id": "thread-1"}], []) is None
         assert _validation_thread_snapshots([{"id": "thread-1"}], [{"id": "thread-2"}]) is None
         state = {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None}
-        assert _pr_is_current_open_head(state, "a" * 40)
-        assert not _pr_is_current_open_head({**state, "autoMergeRequest": {}}, "a" * 40)
-        assert not _pr_is_current_open_head({**state, "headRefOid": "b" * 40}, "a" * 40)
+        assert pr_is_current_open_head(state, "a" * 40)
+        assert not pr_is_current_open_head({**state, "autoMergeRequest": {}}, "a" * 40)
+        assert not pr_is_current_open_head({**state, "headRefOid": "b" * 40}, "a" * 40)
 
     def test_validation_parser_uses_only_a_complete_final_json_verdict(self) -> None:
         """Prose and malformed JSON cannot become reviewer authorization."""
@@ -4091,8 +3995,8 @@ class TestReviewThreadLifecycle:
         )
 
         stage = PrReviewStage()
-        assert _complete_github_job(stage, item, make_ctx(github=BotGitHub())) == Continue(
-            next_state="ADDRESS_WAIT"
+        assert _complete_github_job(stage, item, make_ctx(github=BotGitHub())) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
         )
         assert item.payload["remediation_threads"] == [
             {
@@ -4140,8 +4044,8 @@ class TestReviewThreadLifecycle:
             }
         )
 
-        assert _complete_github_job(stage, item, make_ctx(github=RestartGitHub())) == Continue(
-            next_state="ADDRESS_WAIT"
+        assert _complete_github_job(stage, item, make_ctx(github=RestartGitHub())) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
         )
         assert item.payload["remediation_threads"] == [
             {
@@ -4174,7 +4078,7 @@ class TestReviewThreadLifecycle:
                 threads: list[dict[str, Any]],
                 *,
                 expected_head_sha: str,
-                review_diff: str | None = None,
+                review_diff: str,
             ) -> list[dict[str, Any]]:
                 del expected_head_sha, review_diff
                 self.posted_batches.append([dict(thread) for thread in threads])
@@ -4245,7 +4149,7 @@ class TestReviewThreadLifecycle:
 
         result = _complete_github_job(stage, item, ctx)
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert len(github.posted_batches) == 1
         assert len(github.posted_batches[0]) == 7
         assert len(github.live) == 29
@@ -4277,7 +4181,7 @@ class TestReviewThreadLifecycle:
 
         result = _complete_github_job(PrReviewStage(), item, make_ctx(github=github))
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
     def test_preexisting_thread_is_not_resolved_before_fresh_validation(
@@ -4308,7 +4212,7 @@ class TestReviewThreadLifecycle:
 
         result = _complete_github_job(PrReviewStage(), item, make_ctx(github=github))
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert github.calls == []
 
     def test_minor_finding_is_audit_only_not_an_inline_merge_blocker(
@@ -4327,7 +4231,7 @@ class TestReviewThreadLifecycle:
                 threads: list[dict[str, Any]],
                 *,
                 expected_head_sha: str,
-                review_diff: str | None = None,
+                review_diff: str,
             ) -> list[dict[str, Any]]:
                 self.posted_batches.append([dict(thread) for thread in threads])
                 return super().post_review_threads(
@@ -4414,7 +4318,7 @@ class TestReviewThreadLifecycle:
                 threads: list[dict[str, Any]],
                 *,
                 expected_head_sha: str,
-                review_diff: str | None = None,
+                review_diff: str,
             ) -> list[dict[str, Any]]:
                 del expected_head_sha, review_diff
                 self.posted = [dict(thread) for thread in threads]
@@ -4477,7 +4381,7 @@ class TestReviewThreadLifecycle:
                 threads: list[dict[str, Any]],
                 *,
                 expected_head_sha: str,
-                review_diff: str | None = None,
+                review_diff: str,
             ) -> list[dict[str, Any]]:
                 del expected_head_sha, review_diff
                 self.posted = [dict(thread) for thread in threads]
@@ -4522,7 +4426,7 @@ class TestReviewThreadLifecycle:
 
         result = _complete_github_job(PrReviewStage(), item, make_ctx(github=github))
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert github.posted == []
         assert item.payload["remediation_threads"][0]["thread_id"] == "thread-1"
 
@@ -4707,7 +4611,7 @@ class TestReviewThreadLifecycle:
                 threads: list[dict[str, Any]],
                 *,
                 expected_head_sha: str,
-                review_diff: str | None = None,
+                review_diff: str,
             ) -> list[dict[str, Any]]:
                 del expected_head_sha, review_diff
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
@@ -4729,13 +4633,13 @@ class TestReviewThreadLifecycle:
         result = _complete_github_job(stage, item, ctx)
 
         if pr_state["headRefOid"] != "a" * 40:
-            assert result == Continue(next_state="ADDRESS_WAIT")
+            assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
             assert not any("reconcile" in name for name, _ in github.mutation_log)
 
     def test_unaddressed_thread_routes_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A verified prior finding is sent to the address leg, not handed off."""
+        """A verified prior finding writes NO-GO and goes to implementation."""
 
         class GuardRaceGitHub(FakeStageGitHub):
             def __init__(self, live: dict[str, Any]) -> None:
@@ -4763,7 +4667,7 @@ class TestReviewThreadLifecycle:
 
         result = _complete_github_job(PrReviewStage(), item, make_ctx(github=github))
 
-        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["remediation_threads"] == [
             {
                 "thread_id": "thread-1",
@@ -4772,7 +4676,7 @@ class TestReviewThreadLifecycle:
                 "body": "<!-- hephaestus-severity: major -->\nfix this",
             }
         ]
-        assert ("mark_pr_implementation_no_go", (1001,)) not in github.mutation_log
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_truncated_live_thread_facts_skip_validation_and_all_writes(
         self, make_ctx: Any, make_work_item: Any
@@ -4802,7 +4706,7 @@ class TestPrReviewRestartSafetyGuards:
         ("method_name", "state"),
         [
             pytest.param("_post", "POST", id="post"),
-            pytest.param("_address", "ADDRESS_WAIT", id="address"),
+            pytest.param("_handoff_implementation", "POST_APPLY", id="handoff"),
             pytest.param("_eval", "EVAL", id="eval"),
         ],
     )
@@ -5202,10 +5106,10 @@ class TestEvalVerdicts:
         assert item.attempts["pr_review_iter"] == 1
         assert 1001 in github.pending_go_audits
 
-    def test_restart_resumes_pending_audit_without_reviewer_or_label_rewrite(
+    def test_restart_requires_a_new_review_before_audit_publication(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A reseeded exact-head receipt resumes directly at publication recovery."""
+        """A recovered receipt cannot authorize a new process to publish GO."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)], pr_impl_state=(True, False))
         item = make_work_item(issue=1, pr=1001, state="ENTER")
@@ -5218,14 +5122,10 @@ class TestEvalVerdicts:
         )
         ctx = make_ctx(github=github)
 
-        assert stage.step(item, ctx) == Continue(next_state="GO_AUDIT_RECEIPT")
-        item.state = "GO_AUDIT_RECEIPT"
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.ADVANCE, "review audit; merge wait pending"
-        )
-        names = [name for name, _args in github.mutation_log]
-        assert "mark_pr_implementation_go" not in names
-        assert "publish_implementation_go_audit" in names
+        assert stage.step(item, ctx) == Continue(next_state="ENTER")
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert "pending_implementation_go_audit" not in item.payload
+        assert github.mutation_log == []
         assert item.attempts["pr_review_iter"] == 0
 
     def test_restart_stale_pending_audit_restarts_review_instead_of_publishing_go(
@@ -5244,12 +5144,7 @@ class TestEvalVerdicts:
         )
         ctx = make_ctx(github=github)
 
-        assert stage.step(item, ctx) == Continue(next_state="GO_AUDIT_RECEIPT")
-        item.state = "GO_AUDIT_RECEIPT"
-
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state="REVIEW_WAIT")
+        assert stage.step(item, ctx) == Continue(next_state="ENTER")
         assert "reviewed_pr_head_sha" not in item.payload
         assert "pending_implementation_go_audit" not in item.payload
         assert "pending_implementation_go_audit_head" not in item.payload
@@ -5969,275 +5864,6 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
         assert item.attempts.get("pr_review_iter", 0) == 0
 
-    def test_address_error_fails_back_without_burning_a_round(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A hard-failed address/push leg fails back agent_error, no round burned."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=1, pr=1001, state="EVAL")
-        item.payload["address_error"] = True
-        item.payload["review_audit"] = _valid_audit()
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FAIL_BACK
-        assert result.note == "agent_error"
-        assert item.attempts["pr_review_iter"] == 0  # no round burned
-        assert github.mutation_log == []
-
-    def test_detached_push_with_unchanged_remote_retries_without_reinvoking_agent(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A pre-push failure retries the existing detached commit exactly once."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value={
-                    "detached_push_failure": "remote_unchanged",
-                    "detached_push_head_sha": "b" * 40,
-                },
-                error="detached review push failed while remote head was unchanged",
-            ),
-            ctx,
-        )
-        item.state = "EVAL"
-
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state="PUSH_WAIT")
-        assert item.payload["direct_push_retries"] == 1
-        assert item.payload["detached_push_retry_head_sha"] == "b" * 40
-        assert "address_error" not in item.payload
-
-    def test_detached_push_retry_cap_preserves_the_checkout(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Repeated local push failures terminate safely instead of failing back."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
-        item.worktree = "/tmp/review-pr-1001"
-        item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value={
-                    "detached_push_failure": "remote_unchanged",
-                    "detached_push_head_sha": "b" * 40,
-                },
-                error="detached review push failed while remote head was unchanged",
-            ),
-            ctx,
-        )
-        item.state = "EVAL"
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "detached_push_failed")
-        assert item.payload["detached_push_failure"] == "remote_unchanged"
-
-    def test_successful_detached_push_resets_the_retry_budget_for_the_next_round(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A later independent failure receives its own bounded retry."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
-        item.payload["direct_push_retries"] = DIRECT_PUSH_RETRY_CAP
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        assert "direct_push_retries" not in item.payload
-        item.state = "PUSH_WAIT"
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value={
-                    "detached_push_failure": "remote_unchanged",
-                    "detached_push_head_sha": "b" * 40,
-                },
-                error="detached review push failed while remote head was unchanged",
-            ),
-            ctx,
-        )
-        item.state = "EVAL"
-
-        assert stage.step(item, ctx) == Continue(next_state="PUSH_WAIT")
-
-    def test_detached_push_with_advanced_remote_preserves_the_checkout(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A changed remote must not be overwritten or called an agent failure."""
-        stage = PrReviewStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_head_branch="1001-auto"))
-        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
-        item.worktree = "/tmp/review-pr-1001"
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value={"detached_push_failure": "remote_changed"},
-                error="detached review push observed a different remote head",
-            ),
-            ctx,
-        )
-        item.state = "EVAL"
-
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state="ENTER")
-        assert item.worktree == ""
-        assert "preserved_direct_worktrees" not in item.payload
-        assert item.payload["direct_pr_worktree_generation"] == 1
-        assert "address_error" not in item.payload
-
-        item.state = "ENTER"
-        retry = _reconcile_then_enter(stage, item, ctx)
-
-        assert isinstance(retry, JobRequest)
-        assert isinstance(retry.job, GitJob)
-        assert retry.job.kwargs["isolated_generation"] == 1
-
-    def test_direct_pr_drift_restart_rebinds_the_recreated_checkout(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A fresh direct checkout binds its new snapshot without a rebase."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub(
-            pr_review_context={
-                "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
-                "pr_description": "Closes #1",
-                "pr_head_sha": "a" * 40,
-                "pr_base_branch": "main",
-            }
-        )
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="PUSH_WAIT")
-        item.worktree = "/tmp/review-pr-1001"
-        item.branch = "review-branch"
-        item.payload.update({})
-
-        assert PrReviewStage._restart_direct_pr_review(item) is None
-        item.worktree = "/tmp/review-pr-1001-1"
-        item.payload["direct_pr_worktree"] = item.worktree
-        item.state = "REVIEW_WAIT"
-        restart = stage.step(item, ctx)
-
-        assert isinstance(restart, JobRequest)
-        assert isinstance(restart.job, GitJob)
-        assert restart.job.op == "verify_pr_review_checkout"
-        assert restart.on_done_state == REVIEW_CHECKOUT_WAIT
-
-    def test_direct_pr_drift_restart_clears_pi_bound_review_sessions(
-        self, make_work_item: Any
-    ) -> None:
-        """A recreated checkout cannot resume a binding from the old worktree."""
-        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="PUSH_WAIT")
-        item.worktree = "/tmp/review-pr-1001"
-        item.session_ids["pr-reviewer"] = "saved-pi-session"
-        item.session_bindings["pr-reviewer"] = create_pi_binding(
-            session_id="saved-pi-session",
-            cwd=Path(item.worktree),
-            role=AgentRole.PR_REVIEWER,
-            model="pi-reviewer",
-        )
-
-        assert PrReviewStage._restart_direct_pr_review(item) is None
-
-        assert "pr-reviewer" not in item.session_ids
-        assert "pr-reviewer" not in item.session_bindings
-
-    def test_detached_push_without_a_durable_recovery_receipt_preserves_the_checkout(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The stage must not restart if the worker could not persist provenance."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
-        item.worktree = "/tmp/review-pr-1001"
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value={"detached_push_failure": "remote_changed_unrecorded"},
-                error="remote changed and receipt storage failed",
-            ),
-            ctx,
-        )
-        item.state = "EVAL"
-
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "detached_push_failed"
-        )
-        assert item.worktree == "/tmp/review-pr-1001"
-
-    def test_unclassified_direct_push_failure_preserves_the_checkout(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Publication setup uncertainty must not orphan a detached address commit."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
-        item.worktree = "/tmp/review-pr-1001"
-        item.payload["direct_pr_worktree"] = item.worktree
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=False, error="cannot bind detached review push head"),
-            ctx,
-        )
-        item.state = "EVAL"
-
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "detached_push_failed"
-        )
-        assert item.payload["detached_push_failure"] == "remote_unconfirmed"
-        assert "address_error" not in item.payload
-
-    def test_detached_push_remote_changed_recovery_has_a_bounded_restart_budget(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Repeated concurrent head changes preserve the current checkout and stop."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
-        item.worktree = "/tmp/review-pr-1001-1"
-        item.payload["direct_push_remote_changed_restarts"] = DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value={"detached_push_failure": "remote_changed"},
-                error="detached review push observed a different remote head",
-            ),
-            ctx,
-        )
-        item.state = "EVAL"
-
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "detached_push_failed"
-        )
-        assert item.worktree == "/tmp/review-pr-1001-1"
-        assert item.payload["detached_push_failure"] == "remote_changed"
-
     # Severity-aware GO gate tests (#1856)
     def test_same_login_external_reply_remains_actionable(
         self, make_ctx: Any, make_work_item: Any
@@ -6809,43 +6435,6 @@ class TestPrReviewOnJobDone:
         stage.on_job_done(item, JobResult(ok=True, value='{"unaddressed": []}'), ctx)
         assert item.payload["validation_result"] == '{"unaddressed": []}'
 
-    def test_failed_address_or_push_flags_address_error(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Failed address/push jobs flag address_error for EVAL's fail-back."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
-
-        stage.on_job_done(item, JobResult(ok=False, error="agent crashed"), ctx)
-        address_error = item.payload.pop("address_error")
-        assert address_error is True
-
-        item.state = "PUSH_WAIT"
-        stage.on_job_done(item, JobResult(ok=False, error="push rejected"), ctx)
-        assert item.payload["address_error"] is True
-
-    def test_scope_retraction_publish_failure_is_not_an_address_agent_failure(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The terminal safety outcome must not re-adopt and retry an unsafe draft."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=2137, pr=2346, state="PUSH_WAIT")
-
-        stage.on_job_done(
-            item,
-            JobResult(
-                ok=False,
-                value={"scope_retraction_failure": True},
-                error="scope retraction incomplete",
-            ),
-            ctx,
-        )
-
-        assert item.payload["scope_retraction_failure"] is True
-        assert "address_error" not in item.payload
-
 
 class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""
@@ -7135,654 +6724,6 @@ class TestPreexistingThreadRemediation:
 class TestRealCommitGate:
     """M4 (#1575): a no-commit address turn is never treated as addressed."""
 
-    def test_push_result_records_the_no_commit_flag(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """commit_push requires a matching immutable publication receipt."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-
-        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
-        assert item.payload["push_no_commit"] is True
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-        assert item.payload["push_no_commit"] is False
-
-    def test_successful_push_discards_review_evidence_and_forces_fresh_review(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A newly pushed head cannot inherit an earlier audit or receipt."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(1, 0)])
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        item.worktree = "/tmp/wt40"
-        item.payload.update(
-            {
-                "review_audit": _valid_audit(),
-                "review_feedback": "stale feedback",
-                "review_threads": [{"thread_id": "stale"}],
-                "validation_result": '{"unaddressed": []}',
-                "reviewed_pr_head_sha": "a" * 40,
-                "pr_diff": "stale diff",
-                "host_verification_receipts": [{"head_sha": "a" * 40}],
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        for key in (
-            "review_audit",
-            "review_feedback",
-            "review_threads",
-            "validation_result",
-            "reviewed_pr_head_sha",
-            "pr_diff",
-            "host_verification_receipts",
-        ):
-            assert key not in item.payload
-
-        item.state = "EVAL"
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state="COMPACT_REVIEWER_WAIT")
-        assert item.attempts["pr_review_iter"] == 0
-        assert github.mutation_log == []
-
-    def test_head_drift_after_push_cannot_post_an_implementation_reply(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A later push cannot inherit a reply from the implementation commit."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub(
-            pr_state={"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
-        )
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        thread = {
-            "id": "thread-1",
-            "path": "a.py",
-            "line": 3,
-            "side": "RIGHT",
-            "body": "fix this",
-            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
-        }
-        item.payload.update(
-            {
-                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
-                "remediation_thread_snapshots": [thread],
-                "address_output": {
-                    "addressed": ["thread-1"],
-                    "replies": {"thread-1": "Fixed the guard."},
-                },
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            make_ctx(github=github),
-        )
-
-        assert not any(
-            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
-        )
-        assert "pending_thread_reply_receipts" not in item.payload
-
-    def test_reply_handoff_retries_the_pushed_fix_without_a_second_commit(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A transient reply-post failure must not turn a real fix into a no-op loop."""
-
-        class ReplyFailsOnceGitHub(FakeStageGitHub):
-            def __init__(self) -> None:
-                super().__init__()
-                self.reply_attempts = 0
-
-            def post_implementation_thread_replies(
-                self,
-                pr_number: int,
-                *,
-                expected_head_sha: str,
-                threads: list[dict[str, Any]],
-                replies: dict[str, str],
-                batch_nonce: str,
-                progress: object = None,
-                recover_pending_review: bool = False,
-            ) -> Any:
-                self.reply_attempts += 1
-                if self.reply_attempts == 1:
-                    raise github_api.GraphQLRetryableError(
-                        "circuit open",
-                        pre_dispatch=True,
-                    )
-                kwargs: dict[str, Any] = {
-                    "expected_head_sha": expected_head_sha,
-                    "threads": threads,
-                    "replies": replies,
-                    "batch_nonce": batch_nonce,
-                    "recover_pending_review": recover_pending_review,
-                }
-                if progress is not None:
-                    kwargs["progress"] = progress
-                return super().post_implementation_thread_replies(pr_number, **kwargs)
-
-        stage = PrReviewStage()
-        github = ReplyFailsOnceGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        snapshot = {
-            "id": "thread-1",
-            "path": "a.py",
-            "line": 3,
-            "side": "RIGHT",
-            "body": "fix this",
-            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
-        }
-        item.payload.update(
-            {
-                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
-                "remediation_thread_snapshots": [snapshot],
-                "address_output": {
-                    "addressed": ["thread-1"],
-                    "replies": {"thread-1": "Fixed the guard."},
-                },
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        assert "pending_implementation_reply_handoff" in item.payload
-        assert github.reply_attempts == 0
-
-        item.state = "EVAL"
-        assert _complete_github_job(stage, item, ctx) == StageOutcome(
-            Disposition.RETRY, "implementation_reply_handoff_retry"
-        )
-        assert github.reply_attempts == 1
-        assert _complete_github_job(stage, item, ctx) == Continue(next_state="REVIEW_WAIT")
-        assert github.reply_attempts == 2
-        assert "pending_implementation_reply_handoff" not in item.payload
-        assert item.payload["push_no_commit"] is False
-
-    def test_retry_rejects_handoff_without_a_persisted_batch_nonce(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A recovered handoff cannot mint a replacement ownership nonce."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub()
-        item = make_work_item(issue=40, pr=1001, state="EVAL")
-        item.payload["pending_implementation_reply_handoff"] = {
-            "head_sha": "a" * 40,
-            "threads": [
-                {
-                    "id": "thread-1",
-                    "path": "a.py",
-                    "line": 3,
-                    "side": "RIGHT",
-                    "body": "fix this",
-                    "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
-                }
-            ],
-            "replies": {"thread-1": "Fixed the guard."},
-        }
-
-        assert _complete_github_job(stage, item, make_ctx(github=github)) == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid"
-        )
-        assert github.mutation_log == []
-
-    def test_reply_handoff_waits_for_post_push_head_visibility(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A stale read immediately after push earns a delayed host-only retry."""
-
-        class HeadVisibilityLagGitHub(FakeStageGitHub):
-            def __init__(self) -> None:
-                super().__init__()
-                self._states = deque(
-                    [
-                        {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
-                        {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
-                    ]
-                )
-                self.reply_attempts = 0
-
-            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-                del pr_number
-                return self._states.popleft() if self._states else None
-
-            def post_implementation_thread_replies(
-                self,
-                pr_number: int,
-                *,
-                expected_head_sha: str,
-                threads: list[dict[str, Any]],
-                replies: dict[str, str],
-                batch_nonce: str,
-                progress: object = None,
-                recover_pending_review: bool = False,
-            ) -> ImplementationThreadReplyResult:
-                del progress
-                self.reply_attempts += 1
-                return super().post_implementation_thread_replies(
-                    pr_number,
-                    expected_head_sha=expected_head_sha,
-                    threads=threads,
-                    replies=replies,
-                    batch_nonce=batch_nonce,
-                    recover_pending_review=recover_pending_review,
-                )
-
-        stage = PrReviewStage()
-        github = HeadVisibilityLagGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        snapshot = {
-            "id": "thread-1",
-            "path": "a.py",
-            "line": 3,
-            "side": "RIGHT",
-            "body": "fix this",
-            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
-        }
-        item.payload.update(
-            {
-                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
-                "remediation_thread_snapshots": [snapshot],
-                "address_output": {
-                    "addressed": ["thread-1"],
-                    "replies": {"thread-1": "Fixed the guard."},
-                },
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        item.state = "EVAL"
-        assert _complete_github_job(stage, item, ctx) == StageOutcome(
-            Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
-        )
-        assert item.payload["retry_delay_s"] == 1.0
-        assert github.reply_attempts == 0
-
-        assert _complete_github_job(stage, item, ctx) == Continue(next_state="REVIEW_WAIT")
-        assert github.reply_attempts == 1
-        assert "pending_implementation_reply_handoff" not in item.payload
-
-    def test_reply_handoff_stops_waiting_when_the_head_stays_drifted(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A persistent different open head drops its stale direct-reply handoff."""
-
-        class HeadStaysDriftedGitHub(FakeStageGitHub):
-            def __init__(self) -> None:
-                super().__init__()
-                self.reply_attempts = 0
-
-            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-                del pr_number
-                return {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
-
-            def post_implementation_thread_replies(
-                self,
-                pr_number: int,
-                *,
-                expected_head_sha: str,
-                threads: list[dict[str, Any]],
-                replies: dict[str, str],
-                batch_nonce: str,
-                progress: object = None,
-                recover_pending_review: bool = False,
-            ) -> ImplementationThreadReplyResult:
-                del progress
-                self.reply_attempts += 1
-                return super().post_implementation_thread_replies(
-                    pr_number,
-                    expected_head_sha=expected_head_sha,
-                    threads=threads,
-                    replies=replies,
-                    batch_nonce=batch_nonce,
-                    recover_pending_review=recover_pending_review,
-                )
-
-        stage = PrReviewStage()
-        github = HeadStaysDriftedGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        snapshot = {
-            "id": "thread-1",
-            "path": "a.py",
-            "line": 3,
-            "side": "RIGHT",
-            "body": "fix this",
-            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
-        }
-        item.payload.update(
-            {
-                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
-                "remediation_thread_snapshots": [snapshot],
-                "address_output": {
-                    "addressed": ["thread-1"],
-                    "replies": {"thread-1": "Fixed the guard."},
-                },
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        item.state = "EVAL"
-        for _ in range(2):
-            assert _complete_github_job(stage, item, ctx) == StageOutcome(
-                Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
-            )
-        assert _complete_github_job(stage, item, ctx) == Continue(next_state="REVIEW_WAIT")
-        assert github.reply_attempts == 0
-        assert "pending_implementation_reply_handoff" not in item.payload
-        assert github.mutation_log == []
-
-    def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A post/read-back race must not exhaust retries on a stale snapshot."""
-
-        class ReplyRacedGitHub(FakeStageGitHub):
-            def post_implementation_thread_replies(
-                self,
-                pr_number: int,
-                *,
-                expected_head_sha: str,
-                threads: list[dict[str, Any]],
-                replies: dict[str, str],
-                batch_nonce: str,
-                progress: object = None,
-                recover_pending_review: bool = False,
-            ) -> ImplementationThreadReplyResult:
-                del (
-                    pr_number,
-                    expected_head_sha,
-                    threads,
-                    replies,
-                    batch_nonce,
-                    progress,
-                    recover_pending_review,
-                )
-                # The reply may already be visible, but a reviewer comment
-                # raced the post-read.  This is a factual stale handoff, not
-                # a transport ambiguity that can be replayed.
-                return ImplementationThreadReplyResult(blocked_thread_ids=("thread-1",))
-
-        stage = PrReviewStage()
-        ctx = make_ctx(github=ReplyRacedGitHub())
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        snapshot = {
-            "id": "thread-1",
-            "path": "a.py",
-            "line": 3,
-            "side": "RIGHT",
-            "body": "fix this",
-            "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix this"}],
-        }
-        item.payload.update(
-            {
-                "remediation_threads": [{"thread_id": "thread-1", "body": "fix this"}],
-                "remediation_thread_snapshots": [snapshot],
-                "address_output": {
-                    "addressed": ["thread-1"],
-                    "replies": {"thread-1": "Fixed the guard."},
-                },
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        item.state = "EVAL"
-        assert _complete_github_job(stage, item, ctx) == Continue(next_state="REVIEW_WAIT")
-        assert "pending_implementation_reply_handoff" not in item.payload
-
-    def test_mixed_stale_and_transport_reply_batch_retries_only_ambiguous_thread(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A known-stale thread cannot remain in a later transport retry batch."""
-
-        class MixedReplyOutcomeGitHub(FakeStageGitHub):
-            def __init__(self) -> None:
-                super().__init__()
-                self.reply_batches: list[tuple[str, ...]] = []
-
-            def post_implementation_thread_replies(
-                self,
-                pr_number: int,
-                *,
-                expected_head_sha: str,
-                threads: list[dict[str, Any]],
-                replies: dict[str, str],
-                batch_nonce: str,
-                progress: object = None,
-                recover_pending_review: bool = False,
-            ) -> ImplementationThreadReplyResult:
-                del (
-                    pr_number,
-                    expected_head_sha,
-                    threads,
-                    batch_nonce,
-                    progress,
-                    recover_pending_review,
-                )
-                self.reply_batches.append(tuple(sorted(replies)))
-                return ImplementationThreadReplyResult(
-                    blocked_thread_ids=("stale-thread",),
-                    retryable_thread_ids=("ambiguous-thread",),
-                    retryable=True,
-                )
-
-        stage = PrReviewStage()
-        ctx = make_ctx(github=MixedReplyOutcomeGitHub())
-        item = make_work_item(issue=40, pr=1001, state="PUSH_WAIT")
-        snapshots = [
-            {
-                "id": thread_id,
-                "path": "a.py",
-                "line": 3,
-                "side": "RIGHT",
-                "body": "fix this",
-                "comments": [
-                    {"id": f"comment-{thread_id}", "author": "reviewer", "body": "fix this"}
-                ],
-            }
-            for thread_id in ("stale-thread", "ambiguous-thread")
-        ]
-        item.payload.update(
-            {
-                "remediation_threads": [
-                    {"thread_id": snapshot["id"], "body": "fix this"} for snapshot in snapshots
-                ],
-                "remediation_thread_snapshots": snapshots,
-                "address_output": {
-                    "addressed": ["stale-thread", "ambiguous-thread"],
-                    "replies": {
-                        "stale-thread": "Fixed stale thread.",
-                        "ambiguous-thread": "Fixed ambiguous thread.",
-                    },
-                },
-            }
-        )
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"pushed": True, "head_sha": "a" * 40}),
-            ctx,
-        )
-
-        item.state = "EVAL"
-        assert _complete_github_job(stage, item, ctx) == StageOutcome(
-            Disposition.RETRY, "implementation_reply_handoff_retry"
-        )
-        handoff = item.payload["pending_implementation_reply_handoff"]
-        assert [snapshot["id"] for snapshot in handoff["threads"]] == ["ambiguous-thread"]
-        assert handoff["replies"] == {"ambiguous-thread": "Fixed ambiguous thread."}
-
-        assert ctx.github.reply_batches == [("ambiguous-thread", "stale-thread")]
-
-    def test_first_no_commit_retries_address_with_directive(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The first no-commit turn retries the address once, no round burned."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=41, pr=1001, state="EVAL")
-        threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
-        item.payload["review_audit"] = _valid_audit()
-        item.payload["remediation_threads"] = threads
-        item.payload["push_no_commit"] = True
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, Continue)
-        assert result.next_state == "ADDRESS_WAIT"
-        assert item.payload["unaddressed_findings"] == threads
-        assert item.payload["no_commit_retry_done"] is True
-        assert item.attempts["pr_review_iter"] == 0  # no round burned by the retry
-
-    def test_first_no_commit_retry_uses_live_remediation_threads(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The retry remains grounded in the durable live blocking snapshot."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=45, pr=1001, state="EVAL")
-        raw_threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "reviewer text"}]
-        remediation_threads = [
-            {
-                "thread_id": "live-t1",
-                "path": "y.py",
-                "line": 7,
-                "body": "live GitHub blocker",
-            }
-        ]
-        item.payload["review_audit"] = _valid_audit()
-        item.payload["raw_review_threads"] = raw_threads
-        item.payload["remediation_threads"] = remediation_threads
-        item.payload["push_no_commit"] = True
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, Continue)
-        assert result.next_state == "ADDRESS_WAIT"
-        assert item.payload["unaddressed_findings"] == remediation_threads
-        assert item.payload["no_commit_retry_done"] is True
-        assert item.attempts["pr_review_iter"] == 0
-
-    def test_retry_address_job_carries_the_directive_findings(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A legacy retry state hands its threads to implementation without a write job."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=42, pr=1001, state="ADDRESS_WAIT")
-        item.worktree = "/tmp/wt"
-        item.payload["existing_pr"] = True
-        threads = [{"thread_id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
-        item.payload["remediation_threads"] = threads
-        item.payload["unaddressed_findings"] = threads
-
-        result = stage.step(item, ctx)
-
-        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
-        assert item.payload["implementation_remediation"] is True
-
-    def test_no_commit_retry_address_error_consumes_directive_without_burning_round(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A hard-failed no-commit retry is agent_error, not stale carry."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=45, pr=1001, state="EVAL")
-        threads = [{"id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
-        item.payload["review_audit"] = _valid_audit()
-        item.payload["address_error"] = True
-        item.payload["push_no_commit"] = True
-        item.payload["no_commit_retry_done"] = True
-        item.payload["unaddressed_findings"] = threads
-        item.payload["pr_review_round"] = 2
-        item.attempts["pr_review_iter"] = 2
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FAIL_BACK
-        assert result.note == "agent_error"
-        assert item.payload["agent_error_failback"] is True
-        assert item.payload["pr_review_round"] == 2
-        assert item.attempts["pr_review_iter"] == 2
-        assert "address_error" not in item.payload
-        assert "push_no_commit" not in item.payload
-        assert "no_commit_retry_done" not in item.payload
-        assert "unaddressed_findings" not in item.payload
-        assert github.mutation_log == []
-
-    def test_second_no_commit_counts_as_an_unaddressed_round(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A second consecutive no-commit turn burns its round normally."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(3, 0)])
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=43, pr=1001, state="EVAL")
-        item.payload["review_audit"] = _valid_audit()
-        item.payload["push_no_commit"] = True
-        item.payload["no_commit_retry_done"] = True
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, Continue)
-        assert result.next_state == "REVIEW_WAIT"  # evaluated, not re-retried
-        assert item.attempts["pr_review_iter"] == 1  # the round was burned
-
-    def test_real_commit_clears_the_retry_directive(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A push with a real commit spends/clears the retry directive."""
-        stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(1, 0)])
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=44, pr=1001, state="EVAL")
-        item.payload["review_audit"] = _valid_audit()
-        item.payload["push_no_commit"] = False  # commit_push produced a commit
-        item.payload["no_commit_retry_done"] = True
-        item.payload["unaddressed_findings"] = [{"id": "t1"}]
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, Continue)
-        assert "no_commit_retry_done" not in item.payload
-        assert "unaddressed_findings" not in item.payload
-
 
 class TestAuditPublication:
     """Fresh audit findings and validation reconciliation have separate authority."""
@@ -7829,8 +6770,11 @@ class TestAuditPublication:
 
         result = _complete_github_job(stage, item, ctx)
 
-        assert isinstance(result, Continue)
-        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert github.mutation_log == [
+            ("gh_pr_review_post", (1001, "COMMENT")),
+            ("mark_pr_implementation_no_go", (1001,)),
+        ]
         posted = github.reviews[1001][0]["comments"]
         assert [t["thread_id"] for t in item.payload["raw_review_threads"]] == ["t1", "t2"]
         assert [t.get("thread_id") for t in item.payload["review_threads"]] == ["t1"]
@@ -7854,7 +6798,7 @@ class TestAuditPublication:
                 threads: list[dict[str, Any]],
                 *,
                 expected_head_sha: str,
-                review_diff: str | None = None,
+                review_diff: str,
             ) -> list[dict[str, Any]]:
                 assert pr_number == 1001
                 assert expected_head_sha == "a" * 40
@@ -7976,30 +6920,17 @@ class TestAgentErrorFailbackFlag:
         assert outcome.note == "agent_error"
         assert item.payload["agent_error_failback"] is True
 
-    def test_address_error_failback_sets_the_flag(self, make_ctx: Any, make_work_item: Any) -> None:
-        """The address-failure fail-back marks agent_error_failback."""
-        stage = PrReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=61, pr=1001, state="EVAL")
-        item.payload["address_error"] = True
-
-        outcome = stage.step(item, ctx)
-
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.note == "agent_error"
-        assert item.payload["agent_error_failback"] is True
-
     def test_missing_worktree_for_address_fails_closed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """No worktree: the address job must never run in the shared checkout."""
         stage = PrReviewStage()
         ctx = make_ctx()
-        item = make_work_item(issue=62, pr=1001, state="ADDRESS_WAIT")
+        item = make_work_item(issue=62, pr=1001, state="POST_APPLY")
         item.payload["existing_pr"] = True
         assert item.worktree == ""  # the dangerous configuration
 
-        outcome = stage.step(item, ctx)
+        outcome = stage._handoff_implementation(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.FAIL_BACK
@@ -8020,138 +6951,3 @@ class TestAgentErrorFailbackFlag:
         stage.on_enter(item, ctx)
 
         assert "review_error_retries" not in item.payload
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-def test_existing_pr_compacts_the_stored_writer_session(
-    make_ctx: Any, make_work_item: Any, legacy: bool
-) -> None:
-    """Existing PR work uses the actual writer session for compaction."""
-    stage = PrReviewStage()
-    ctx = make_ctx(config_overrides={"agent": "codex"})
-    item = make_work_item(issue=1, pr=1001, state="COMPACT_WRITER_WAIT")
-    item.worktree = "/tmp/review-worktree"
-    item.payload["existing_pr"] = True
-    key = "address-review" if legacy else "implementer"
-    item.session_ids[key] = "writer-session"
-    result = stage.step(item, ctx)
-    assert isinstance(result, JobRequest)
-    assert isinstance(result.job, CompactJob)
-    assert result.job.session_agent == key
-    assert result.job.session_id == "writer-session"
-
-
-@pytest.mark.parametrize(
-    "grant_state",
-    ["approved", "revoked", "wrong_head", "wrong_manifest", "unrelated_pr", "wrong_platform"],
-)
-def test_pr_3006_linux_bootstrap_reaches_source_review(
-    tmp_path: Path, make_ctx: Any, make_work_item: Any, monkeypatch: Any, grant_state: str
-) -> None:
-    """An authenticated exact grant permits source review without running the candidate."""
-    from hephaestus.automation.host_verification_bootstrap import (
-        BOOTSTRAP_MANIFEST,
-        BOOTSTRAP_MARKER,
-    )
-    from hephaestus.automation.review_journal import IssueComment
-
-    stage = PrReviewStage()
-    ctx = make_ctx(
-        org="HomericIntelligence", config_overrides={"host_verification_bootstrap_comment_id": 123}
-    )
-    item = make_work_item(issue=2701, pr=3006, state=REVIEW_CHECKOUT_WAIT)
-    item.repo = "Hephaestus"
-    item.worktree = _make_hephaestus_checkout(tmp_path)
-    item.payload.update(
-        review_checkout_expected_head="a" * 40,
-        review_checkout_ready=True,
-        reviewed_pr_base_sha="b" * 40,
-        review_status_manifest=BOOTSTRAP_MANIFEST,
-        pr_diff="diff --git a/hephaestus/a.py b/hephaestus/a.py\n",
-    )
-    grant = {
-        "repository": "HomericIntelligence/Hephaestus",
-        "issue": 2701,
-        "pr": 3006,
-        "head_sha": "a" * 40,
-        "base_sha": "b" * 40,
-        "boundary": "linux-pyxis-enroot",
-        "state": "approved",
-        "manifest": [{"status": s, "path": p} for s, p in BOOTSTRAP_MANIFEST],
-    }
-    if grant_state == "revoked":
-        grant["state"] = "revoked"
-    elif grant_state == "wrong_head":
-        grant["head_sha"] = "c" * 40
-    elif grant_state == "wrong_manifest":
-        grant["manifest"] = []
-    elif grant_state == "unrelated_pr":
-        item.pr = 3007
-        item.issue = 3007
-    monkeypatch.setattr(
-        type(ctx.github), "_repo_slug", property(lambda _: "HomericIntelligence/Hephaestus")
-    )
-    ctx.github.issue_comments = lambda _: [
-        IssueComment(
-            body=BOOTSTRAP_MARKER + "\n" + json.dumps(grant),
-            author_login="operator",
-            author_association="MEMBER",
-            viewer_did_author=True,
-            database_id=123,
-        )
-    ]
-    first = stage.step(item, ctx)
-    assert isinstance(first, JobRequest) and isinstance(first.job, BuildTestJob)
-    stage.on_job_done(
-        item,
-        JobResult(
-            ok=False,
-            error="unsupported_host_verification_boundary",
-            value={
-                "head_sha": "a" * 40,
-                "immutable_source": False,
-                "status": "skipped",
-                "platform": "linux" if grant_state != "wrong_platform" else "win32",
-                "failure_kind": "runner",
-            },
-        ),
-        ctx,
-    )
-    item.state = "HOST_VERIFICATION_WAIT"
-    with patch.object(
-        stage,
-        "_route_threads_before_broad_review",
-        return_value=Continue(next_state="SOURCE_REVIEW"),
-    ):
-        result = stage.step(item, ctx)
-    if grant_state == "approved":
-        assert isinstance(result, Continue) and result.next_state == "SOURCE_REVIEW"
-        submitted = stage._submit_review_job(item, ctx)
-        assert isinstance(submitted, JobRequest) and isinstance(submitted.job, AgentJob)
-        assert (
-            json.loads(submitted.job.prompt_kwargs["host_verification_bootstrap_json"])[
-                "local_execution_evidence"
-            ]
-            is False
-        )
-        grant["state"] = "revoked"
-        with patch.object(
-            stage,
-            "_handle_host_verification_failure",
-            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
-        ):
-            rejected = stage._submit_review_job(item, ctx)
-        assert isinstance(rejected, StageOutcome) and rejected.note == "revoked"
-        with patch.object(
-            stage,
-            "_handle_host_verification_failure",
-            return_value=StageOutcome(Disposition.FINISH_FAIL, "revoked"),
-        ):
-            validation_rejected = stage._validate_wait(item, ctx)
-        assert (
-            isinstance(validation_rejected, StageOutcome) and validation_rejected.note == "revoked"
-        )
-
-    else:
-        assert not isinstance(result, Continue) or result.next_state != "SOURCE_REVIEW"
-    assert item.payload["host_verification_receipts"][0]["ok"] is False

@@ -1305,11 +1305,4 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
             if local_result is not None:
                 return local_result
         return JobResult(ok=True)
-    fallback_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
-    fallback_kwargs = dict(job.kwargs)
-    fallback_kwargs.pop("repo_root", None)
-    worktree_manager_type(repo_root=fallback_root).remove_worktree(
-        **fallback_kwargs,
-        timeout=job.timeout_s,
-    )
-    return JobResult(ok=True)
+    return JobResult(ok=False, error="cleanup requires an exact worktree path")

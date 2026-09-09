@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.worktree_snapshot import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX as DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES as DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
@@ -20,13 +21,13 @@ GIT_OPS: frozenset[str] = frozenset(
         "create_worktree",
         "claim_dirty_direct_continuation",
         "publish_dirty_direct_continuation",
+        "finish_dirty_direct_publication",
         "inspect_implementation_worktree",
         "recover_dirty_worktree",
         "verify_pr_review_checkout",
         "remove_worktree",
         "rebase",
         "continue_rebase",
-        "push",
         "commit_push",
         "prepare_remediation_recovery",
         "publish_remediation_recovery",
@@ -59,6 +60,7 @@ class GitJob:
     # transport validates a separate canonical OWNER/REPOSITORY identity.
     expected_repository: str | None = None
     deadline_s: float | None = None
+    workspace: WorkspaceBinding | None = None
 
     def __post_init__(self) -> None:
         """Reject an operation outside the closed Git vocabulary."""

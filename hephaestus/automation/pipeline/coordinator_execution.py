@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import queue as queue_mod
 from dataclasses import replace
+from math import ceil
+from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_types as ct
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import session_selection_error, store_agent_session_result
+from .github_jobs import GitHubJob, RateBudgetRead, ReadRateBudgetRequest
 from .jobs import CompactJob
 from .routing import AUXILIARY_PIPELINE_ORDER
 
@@ -58,9 +61,7 @@ class ExecutionCoordinator(_CoordinatorHost):
     def _release_work_permit(self, item: ct.WorkItem) -> None:
         """Release every lane permit held by an item."""
         if id(item) in self._live_work_permit_ids:
-            discard = getattr(self.pool, "discard_remediation_pretest_successes", None)
-            if callable(discard):
-                discard(self._item_key(item), owner_id=id(item))
+            self.pool.discard_remediation_pretest_successes(self._item_key(item), owner_id=id(item))
         self._live_work_permit_ids.discard(id(item))
         self._learning_work_permit_ids.discard(id(item))
 
@@ -98,15 +99,29 @@ class ExecutionCoordinator(_CoordinatorHost):
 
     def _submit(self, item: ct.WorkItem, request: ct.JobRequest) -> None:
         """Submit a frozen job to its lane and register its ownership."""
+        if isinstance(request.job, AgentJob) and self.config.rate_guard_enabled:
+            item.payload["_pending_agent_request"] = request
+            quota_job = GitHubJob(
+                repo=item.repo,
+                repo_root=Path(self._ctx_for(item).paths.repo_root),
+                request=ReadRateBudgetRequest(self._monotonic() + self.config.gh_timeout),
+                descr="read_rate_budget",
+            )
+            self._submit_ready_job(item, ct.JobRequest(quota_job, "RATE_BUDGET"))
+            return
+        self._submit_ready_job(item, request)
+
+    def _submit_ready_job(self, item: ct.WorkItem, request: ct.JobRequest) -> None:
+        """Submit one job whose admission work is complete."""
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
         job: ct.Any = request.job
         if isinstance(job, AgentJob):
-            ok, delay = self._rate_budget_ok()
-            if not ok:
-                self._timer_park(item, delay)
-                return
             if self.config.phase_timeout_s and self.config.phase_timeout_s > 0:
-                job = replace(job, timeout_s=int(self.config.phase_timeout_s))
+                timeout = min(job.timeout_s, self.config.phase_timeout_s)
+                deadline = self._monotonic() + timeout
+                if job.deadline_s is not None:
+                    deadline = min(deadline, job.deadline_s)
+                job = replace(job, timeout_s=ceil(timeout), deadline_s=deadline)
             job = replace(
                 job,
                 disable_pi_automation=self.config.disable_pi_automation,
@@ -126,8 +141,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             )
         if isinstance(job, (AgentJob, CompactJob)):
             job = replace(job, session_selection_error=session_selection_error(item, job))
-        claims = self._capture_implementation_file_claims(item)
-        auxiliary = self._auxiliary_pool_separate and self._is_auxiliary_stage(item.stage)
+        auxiliary = self._is_auxiliary_stage(item.stage)
         if auxiliary:
             handle = self.auxiliary_pool.submit(job, request.on_done_state)
             self.auxiliary_in_flight[handle] = item
@@ -146,8 +160,6 @@ class ExecutionCoordinator(_CoordinatorHost):
             )
             self.in_flight[handle] = item
             self.inflight_per_repo[item.repo] += 1
-        if claims:
-            self._inflight_implementation_claims[handle] = claims
         self._record_event(
             "submit",
             type(job).__name__,
@@ -156,15 +168,27 @@ class ExecutionCoordinator(_CoordinatorHost):
             {"lane": "auxiliary" if auxiliary else "main"},
         )
 
-    def _rate_budget_ok(self) -> tuple[bool, float]:
-        """Return the non-blocking GitHub rate-budget decision."""
-        from hephaestus.automation.pipeline_github_transport import rate_budget_ok
-
-        return rate_budget_ok(
-            enabled=self.config.rate_guard_enabled,
-            threshold=self.config.rate_guard_threshold,
-            timeout=self.config.gh_timeout,
-        )
+    def _complete_rate_budget(self, item: ct.WorkItem, result: JobResult) -> None:
+        """Apply returned quota facts without another coordinator-side read."""
+        request = item.payload.pop("_pending_agent_request", None)
+        if result.interrupted or self.shutdown.is_set():
+            self._park_resumable(item)
+            return
+        if (
+            not isinstance(request, ct.JobRequest)
+            or not isinstance(request.job, AgentJob)
+            or not result.ok
+            or not isinstance(result.value, RateBudgetRead)
+        ):
+            self._finish(item, passed=False, reason="quota read returned an invalid result")
+            return
+        facts = result.value
+        if facts.remaining is not None and facts.remaining < self.config.rate_guard_threshold:
+            assert facts.reset_epoch is not None  # noqa: S101
+            delay = max(0.0, facts.reset_epoch - self._wall_time() + 5.0)
+            self._timer_park(item, delay)
+            return
+        self._submit_ready_job(item, request)
 
     def _drain_completions(self) -> None:
         """Drain all ready completions from both worker lanes."""
@@ -175,13 +199,12 @@ class ExecutionCoordinator(_CoordinatorHost):
             except queue_mod.Empty:
                 break
             self._handle_completion(handle, result)
-        if self._auxiliary_pool_separate:
-            while True:
-                try:
-                    handle, result = self.auxiliary_completion_q.get_nowait()
-                except queue_mod.Empty:
-                    break
-                self._handle_completion(handle, result, auxiliary=True)
+        while True:
+            try:
+                handle, result = self.auxiliary_completion_q.get_nowait()
+            except queue_mod.Empty:
+                break
+            self._handle_completion(handle, result, auxiliary=True)
         if self._completion_saturation.is_set():
             self._record_event("completion_saturation")
             raise RuntimeError("completion queue saturated")
@@ -199,7 +222,6 @@ class ExecutionCoordinator(_CoordinatorHost):
         self._progress = True
         registry = self.auxiliary_in_flight if auxiliary else self.in_flight
         item = registry.pop(handle, None)
-        self._inflight_implementation_claims.pop(handle, None)
         if item is None:
             self._record_event(
                 "complete_unknown",
@@ -235,13 +257,17 @@ class ExecutionCoordinator(_CoordinatorHost):
                 self._auxiliary_job_failure_count += 1
         self._record_completion_metrics(item, handle, result, auxiliary=auxiliary)
 
+        if isinstance(handle.job, GitHubJob) and isinstance(
+            handle.job.request, ReadRateBudgetRequest
+        ):
+            self._complete_rate_budget(item, result)
+            return
+
         stage = self.stages[item.stage]
         ctx = self._ctx_for(item)
         if result.interrupted:
             if item.stage is ct.StageName.LEARNING and result.error == "interrupted_before_start":
-                cancelled = getattr(stage, "on_cancelled_before_start", None)
-                if callable(cancelled):
-                    cancelled(item, ctx)
+                stage.on_cancelled_before_start(item, ctx)
             self._park_resumable(item)
             return
         if isinstance(handle.job, AgentJob):

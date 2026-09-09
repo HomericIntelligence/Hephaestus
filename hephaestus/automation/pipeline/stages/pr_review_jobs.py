@@ -16,34 +16,22 @@ from hephaestus.automation.prompts.pr_review import (
 )
 from hephaestus.automation.source_worktree import SourceWorkspaceError
 
-from ..coordinator_sessions import agent_session_lifecycle, writer_session_key
+from ..coordinator_sessions import agent_session_lifecycle
 from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     FrozenJson,
     GitHubJob,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
-    ReplyHandoffAttempted,
 )
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
-from .pr_review_bootstrap import (
-    admit_bootstrap_receipt,
-    bootstrap_review_failure,
-    store_host_verification_result,
-)
 from .pr_review_diagnostics import publish_host_verification_failure
-from .pr_review_recovery import (
-    consume_reply_handoff_receipt,
-    empty_diff_outcome,
-    recovery_reply_job,
-    restart_direct_pr_review,
-)
+from .pr_review_gate import PrReviewGate
+from .pr_review_receipts import store_host_verification_result
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 from .pr_review_threads import (
-    _REPLY_HANDOFF_RECEIPT,
-    _REPLY_HANDOFF_RECEIPT_ERROR,
     POST_APPLY,
     _finding_key,
 )
@@ -51,6 +39,19 @@ from .pr_review_threads import (
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
+
+
+def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:
+    """Reject a thread-free review whose cumulative PR diff is empty."""
+    if str(item.payload.get("pr_diff") or "").strip():
+        return None
+    _clear_round_review_state(item)
+    item.payload["empty_diff_reimplementation"] = True
+    logger.warning(
+        "pr_review:%d: empty cumulative diff; failing back to implementation",
+        _issue_number(item),
+    )
+    return StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff")
 
 
 class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
@@ -94,7 +95,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         """
         if item.pr is None:  # guarded by on_enter; keeps type narrowing local
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        entry = PrReviewStage._read_existing_thread_entry(item, ctx)
+        entry = PrReviewJobs._read_existing_thread_entry(item, ctx)
         if entry is None:
             return None
         if isinstance(entry, StageOutcome):
@@ -128,12 +129,12 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload["remediation_threads"] = remediation_threads
         item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
         item.payload["unresolved_threads_before_address"] = len(remediation_threads)
-        no_go_outcome = PrReviewStage._write_no_go(item, ctx)
+        no_go_outcome = PrReviewGate._write_no_go(item, ctx)
         if no_go_outcome is not None:
             if isinstance(no_go_outcome, StageOutcome):
                 return no_go_outcome
             return StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_drift")
-        return PrReviewStage._fail_back_implementation_remediation(item)
+        return PrReviewJobs._fail_back_implementation_remediation(item)
 
     @staticmethod
     def _read_existing_thread_entry(
@@ -158,7 +159,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if not initial_threads:
             item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
             return None
-        bind_outcome = PrReviewStage._bind_current_head_for_negative(item, ctx)
+        bind_outcome = PrReviewGate._bind_current_head_for_negative(item, ctx)
         if bind_outcome is not None:
             return bind_outcome
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
@@ -354,8 +355,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             round_index,
             item.pr,
         )
-        if failure := bootstrap_review_failure(item, ctx, self._handle_host_verification_failure):
-            return failure
         workspace = source_workspace_binding(
             item,
             ctx,
@@ -368,7 +367,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             agent=agent_provider(ctx, "reviewer"),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_bounded_pr_review_analysis_prompt,
-            cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
+            cwd=workspace.cwd,
             timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout),
             workspace=workspace,
             session_agent=AGENT_PR_REVIEWER,
@@ -396,9 +395,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
-                ),
-                "host_verification_bootstrap_json": item.payload.get(
-                    "host_verification_bootstrap_json", ""
                 ),
                 "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
@@ -483,7 +479,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload["remediation_threads"] = remediation_threads
         item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
         item.payload["unresolved_threads_before_address"] = len(remediation_threads)
-        return Continue(next_state=ADDRESS_WAIT)
+        return self._handoff_implementation(item, ctx)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Perform a fresh review of implementation replies before resolution."""
@@ -541,8 +537,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             validation_threads, ensure_ascii=False, sort_keys=True
         )
         logger.info("pr_review:%d: requesting validation job", issue)
-        if failure := bootstrap_review_failure(item, ctx, self._handle_host_verification_failure):
-            return failure
         workspace = source_workspace_binding(
             item,
             ctx,
@@ -555,7 +549,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             agent=agent_provider(ctx, "reviewer"),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_bounded_review_validation_prompt,
-            cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
+            cwd=workspace.cwd,
             timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout),
             workspace=workspace,
             session_agent=AGENT_PR_REVIEWER,
@@ -575,9 +569,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 "diff_text": item.payload.get("pr_diff", ""),
                 "pr_title": pr_title,
                 "pr_description": pr_description,
-                "host_verification_bootstrap_json": item.payload.get(
-                    "host_verification_bootstrap_json", ""
-                ),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
@@ -599,14 +590,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 None,
                 "host_verification_receipt_invalid",
             )
-        try:
-            admitted = admit_bootstrap_receipt(item, ctx, receipts, verifications, reviewed_head)
-        except Exception:
-            return self._handle_host_verification_failure(
-                item, ctx, verifications[0], "host_verification_bootstrap_invalid"
-            )
-        if admitted:
-            return self._route_threads_before_broad_review(item, ctx)
         matched_receipts = cast(list[dict[str, Any]], receipts)
         for verification, receipt in zip(verifications, matched_receipts, strict=False):
             if not _host_verification_receipt_matches(receipt, verification, reviewed_head):
@@ -663,7 +646,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             ),
         }
         item.payload["host_verification_failure"] = diagnostic
-        no_go_outcome = PrReviewStage._write_no_go(item, ctx)
+        no_go_outcome = PrReviewGate._write_no_go(item, ctx)
         if no_go_outcome is not None:
             if isinstance(no_go_outcome, StageOutcome):
                 return self._cleanup_review_worktree_then(item, no_go_outcome)
@@ -695,25 +678,16 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item.payload["unaddressed_findings"] = [
                     {"path": diagnostic["path"], "line": None, "body": detail}
                 ]
-            return Continue(next_state=ADDRESS_WAIT)
+            return self._handoff_implementation(item, ctx)
         return self._cleanup_review_worktree_then(
             item,
             StageOutcome(Disposition.FINISH_FAIL, "host_verification_failed"),
         )
 
-    def _push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Hand an interrupted legacy writer state to implementation safely."""
-        # This legacy state can be resumed after an interrupted older run.
-        # Never let it regain a writer capability in the review stage.
-        return self._cleanup_review_worktree_then(
-            item,
-            self._fail_back_implementation_remediation(item),
-        )
-
     def _compact_reviewer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Compact the reviewer before the next retry continues its session."""
         if not item.worktree:
-            return Continue(next_state=COMPACT_WRITER_WAIT)
+            return Continue(next_state=REVIEW_WAIT)
         job = CompactJob(
             repo=item.repo,
             issue=_issue_number(item),
@@ -730,30 +704,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 SessionLifecycle.RESUME_REQUIRED,
             ),
             session_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
-        )
-        return JobRequest(job, on_done_state=COMPACT_WRITER_WAIT)
-
-    def _compact_writer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Compact the writer before the next retry continues its session."""
-        if not item.worktree:
-            return Continue(next_state=REVIEW_WAIT)
-        session_agent = writer_session_key(item)
-        job = CompactJob(
-            repo=item.repo,
-            issue=_issue_number(item),
-            agent=agent_provider(ctx, "implementer"),
-            session_agent=session_agent,
-            model=stage_model(ctx, "implementer", implementer_model),
-            cwd=_worktree_path(item, ctx),
-            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
-            session_id=item.session_ids.get(session_agent),
-            sandbox="read-only",
-            execution_request=ExecutionRequest(
-                AgentRole.IMPLEMENTER,
-                AgentOperation.COMPACT,
-                SessionLifecycle.RESUME_REQUIRED,
-            ),
-            session_binding=item.session_bindings.get(session_agent),
         )
         return JobRequest(job, on_done_state=REVIEW_WAIT)
 
@@ -863,9 +813,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if item.state == POST:
             self._on_reconciliation_done(item, result)
             return
-        if item.state == RECOVERY_REPLY_WAIT:
-            self._on_reply_handoff_done(item, result)
-            return
         if self._consume_review_worktree_cleanup_result(item, result):
             return
         if self._consume_direct_worktree_result(item, result):
@@ -881,68 +828,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         is_review_result = review_job_pending or item.state == REVIEW_WAIT
         if self._consume_failed_job(item, result, is_review_result):
             return
-        if item.state == PUSH_WAIT:
-            # Real-commit gate (#1575): commit_push reports whether a commit
-            # was actually produced (value/changed True). A no-commit push
-            # means the address turn was a phantom fix — EVAL must NOT treat
-            # the round as addressed.
-            push_receipt = result.value if isinstance(result.value, dict) else {}
-            raw_published_head = push_receipt.get("head_sha")
-            published_head = raw_published_head if isinstance(raw_published_head, str) else ""
-            produced_commit = bool(push_receipt.get("pushed")) and is_full_commit_sha(
-                published_head
-            )
-            if produced_commit:
-                remediation_threads = item.payload.get("remediation_threads")
-                threads = remediation_threads if isinstance(remediation_threads, list) else []
-                snapshots = item.payload.get("remediation_thread_snapshots")
-                thread_snapshots = snapshots if isinstance(snapshots, list) else []
-                replies = _address_replies(item.payload.get("address_output"), threads)
-                reply_contract_failed = bool(threads) and replies is None
-                if reply_contract_failed:
-                    logger.warning(
-                        "pr_review:%s: implementation did not return one reply for every open "
-                        "thread; refusing to accept a partial address pass",
-                        item.issue,
-                    )
-                elif replies and item.pr is not None:
-                    handoff = _implementation_reply_handoff(
-                        published_head,
-                        thread_snapshots,
-                        replies,
-                        secrets.token_hex(16),
-                    )
-                    if handoff is None:
-                        logger.warning(
-                            "pr_review:%s: could not preserve the exact implementation "
-                            "reply handoff; refusing to infer a replacement response",
-                            item.issue,
-                        )
-                    else:
-                        # Keep the exact, already-validated agent output until
-                        # GitHub proves every reply. _clear_round_review_state
-                        # deliberately does not clear this handoff because the
-                        # code commit has already changed the review head.
-                        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
-                        item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-                # The old audit and checkout receipt describe the pre-push
-                # head. Discard the entire round before EVAL can bind the new
-                # head to any implementation-state transition.
-                _clear_round_review_state(item)
-                item.payload["review_refresh_required"] = True
-                if reply_contract_failed:
-                    # The code commit may already be durable, but accepting an
-                    # incomplete agent transcript would let one supplied open
-                    # thread disappear from the implementation handoff. Route
-                    # back through the normal bounded implementation recovery.
-                    item.payload["address_error"] = True
-            else:
-                # Preserve the existing no-commit gate while requiring it to
-                # re-confirm the unchanged remote head before a negative write.
-                item.payload.pop("reviewed_pr_head_sha", None)
-                item.payload.pop("reviewed_pr_node_id", None)
-            item.payload["push_no_commit"] = not produced_commit
-            return
         if is_review_result and result.value is not None:
             valid_review_result = self._store_review_result(item, result.value)
             if (
@@ -955,15 +840,13 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                     record_review_run(item, reason="explicit-review", head_sha=reviewed_head)
         elif item.state == VALIDATE_WAIT and result.value is not None:
             item.payload["validation_result"] = result.value
-        elif item.state == ADDRESS_WAIT and result.value is not None:
-            item.payload["address_output"] = result.value
 
     @staticmethod
     def _consume_direct_worktree_result(item: WorkItem, result: JobResult) -> bool:
         """Store a direct-worktree completion when one is pending."""
         if not item.payload.pop("direct_pr_worktree_pending", None):
             return False
-        PrReviewStage._on_direct_pr_worktree_done(item, result)
+        PrReviewJobs._on_direct_pr_worktree_done(item, result)
         return True
 
     @staticmethod
@@ -990,9 +873,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         review_diff = value.get("diff") if isinstance(value, dict) else None
         review_base = value.get("base") if isinstance(value, dict) else None
         changed_paths = value.get("changed_paths") if isinstance(value, dict) else None
-        item.payload.pop("review_status_manifest", None)
-        if ready and isinstance(value, dict) and isinstance(value.get("status_manifest"), tuple):
-            item.payload["review_status_manifest"] = value["status_manifest"]
         if ready and not isinstance(review_diff, str):
             item.payload["review_checkout_error"] = "checkout job returned no bound diff"
             ready = False
@@ -1058,11 +938,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             if item.worktree and not item.payload["direct_pr_worktree_dirty"]:
                 item.payload["direct_pr_worktree"] = item.worktree
                 item.payload["review_worktree"] = item.worktree
-        elif isinstance(value, str):
-            item.worktree = value
-            if item.worktree:
-                item.payload["direct_pr_worktree"] = item.worktree
-                item.payload["review_worktree"] = item.worktree
         else:
             item.payload["direct_pr_worktree_error"] = "worktree job returned no path"
 
@@ -1074,35 +949,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             # EVAL treats the missing audit as reviewer infrastructure failure;
             # the flag lets VALIDATE_WAIT skip the dead round.
             item.payload["review_failed"] = True
-        elif item.state == PUSH_WAIT:
-            receipt = result.value if isinstance(result.value, dict) else {}
-            if receipt.get("scope_retraction_failure") is True:
-                item.payload["scope_retraction_failure"] = True
-                return
-            failure = receipt.get("detached_push_failure")
-            if failure in {
-                "remote_changed",
-                "remote_changed_unrecorded",
-                "remote_unchanged",
-                "remote_unconfirmed",
-                "retry_checkout_changed",
-                "retry_checkout_unconfirmed",
-            }:
-                item.payload["detached_push_failure"] = failure
-                source_sha = receipt.get("detached_push_head_sha")
-                if is_full_commit_sha(source_sha):
-                    item.payload["detached_push_head_sha"] = source_sha
-                return
-            if item.payload.get("direct_pr_worktree") and item.worktree:
-                # A direct-review checkout may hold an address commit even
-                # when publication setup itself failed before it could return
-                # a classified receipt. Preserve rather than failing back to
-                # an agent re-adoption path that could orphan that commit.
-                item.payload["detached_push_failure"] = "remote_unconfirmed"
-                return
-            item.payload["address_error"] = True
-        elif item.state == ADDRESS_WAIT:
-            item.payload["address_error"] = True
 
     @staticmethod
     def _on_reconciliation_done(item: WorkItem, result: JobResult) -> None:
@@ -1127,8 +973,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload[_PR_REVIEW_RECEIPT] = receipt
 
     def _post_apply(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Apply a correlated immutable reconciliation receipt locally."""
-        del ctx
+        """Apply the matching receipt and hand unresolved work to implementation."""
         error = item.payload.pop(_PR_REVIEW_RECEIPT_ERROR, None)
         if error == "retry":
             item.state = POST
@@ -1197,7 +1042,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         audit = item.payload.get("review_audit")
         if isinstance(audit, ReviewAudit) and audit.scope_expansions:
             return Continue(next_state=EVAL)
-        return Continue(next_state=ADDRESS_WAIT if remediation else EVAL)
+        return self._handoff_implementation(item, ctx) if remediation else Continue(next_state=EVAL)
 
     def _post(  # noqa: C901
         self, item: WorkItem, ctx: StageContext
@@ -1307,7 +1152,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             on_done_state=POST_APPLY,
         )
 
-    def _address(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _handoff_implementation(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Record a NO-GO and hand immutable review findings to the writer.
 
         This stage owns review evidence only.  It never dispatches a writer
@@ -1328,34 +1173,3 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item,
             self._fail_back_implementation_remediation(item),
         )
-
-    @staticmethod
-    def _restart_direct_pr_review(item: WorkItem) -> StageOutcome | None:
-        """Preserve a drifted checkout and route the PR through a fresh review."""
-        reason = restart_direct_pr_review(item)
-        return StageOutcome(Disposition.FINISH_FAIL, reason) if reason is not None else None
-
-    def _recovery_reply_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        return recovery_reply_job(item, ctx, _PENDING_GITHUB_REQUEST)
-
-    @staticmethod
-    def _on_reply_handoff_done(item: WorkItem, result: JobResult) -> None:
-        """Store only an exact request-bearing recovery receipt."""
-        if not result.ok:
-            # A worker failure does not prove that a mutation was never
-            # dispatched. Treat the handoff as blocked and force a fresh
-            # read-only review pass rather than replaying it.
-            item.payload[_REPLY_HANDOFF_RECEIPT_ERROR] = "blocked"
-            return
-        receipt = result.value
-        if not isinstance(receipt, ReplyHandoffAttempted) or receipt.request != item.payload.get(
-            _PENDING_GITHUB_REQUEST
-        ):
-            item.payload[_REPLY_HANDOFF_RECEIPT_ERROR] = "invalid"
-            return
-        item.payload[_REPLY_HANDOFF_RECEIPT] = receipt
-
-    @staticmethod
-    def _consume_reply_handoff_receipt(item: WorkItem) -> str:
-        """Apply a correlated immutable recovery receipt to local payload."""
-        return consume_reply_handoff_receipt(item, _PENDING_GITHUB_REQUEST)

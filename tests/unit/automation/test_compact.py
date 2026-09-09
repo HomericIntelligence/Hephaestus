@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hephaestus.automation.learn import compact_agent_session, compact_session
-from hephaestus.automation.session_naming import AGENT_CI_DRIVER, session_uuid
+from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, session_uuid
 
 
 class TestCompactSession:
@@ -25,7 +25,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            result = compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
         assert result is True
         cmd = mock_run.call_args.args[0]
@@ -42,7 +42,7 @@ class TestCompactSession:
 
             repo = "Hephaestus"
             issue = 842
-            agent = AGENT_CI_DRIVER
+            agent = AGENT_PLAN_REVIEWER
 
             compact_session(repo, issue, agent, tmp_path)
 
@@ -64,7 +64,7 @@ class TestCompactSession:
             compact_session(
                 "Hephaestus",
                 842,
-                AGENT_CI_DRIVER,
+                AGENT_PLAN_REVIEWER,
                 tmp_path,
                 model="claude-sonnet-5:future-effort",
             )
@@ -73,7 +73,7 @@ class TestCompactSession:
         assert command[command.index("--resume") + 1] == session_uuid(
             "Hephaestus",
             842,
-            AGENT_CI_DRIVER,
+            AGENT_PLAN_REVIEWER,
             "claude-sonnet-5",
             cwd=tmp_path,
         )
@@ -84,7 +84,7 @@ class TestCompactSession:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
             test_cwd = tmp_path / "test_workdir"
-            compact_session("test-repo", 42, AGENT_CI_DRIVER, test_cwd)
+            compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, test_cwd)
 
             # Verify cwd is passed as a string
             call_kwargs = mock_run.call_args[1]
@@ -98,7 +98,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
             cmd = mock_run.call_args[0][0]
             assert "--dangerously-skip-permissions" not in cmd
@@ -115,7 +115,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
             assert mock_run.call_args[1]["timeout"] == 1200
 
@@ -127,7 +127,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path, timeout=333)
+            compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path, timeout=333)
 
             assert mock_run.call_args[1]["timeout"] == 333
 
@@ -136,7 +136,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired("claude", 60)
 
-            result = compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
             assert result is False
 
@@ -145,7 +145,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("claude binary not found")
 
-            result = compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
             assert result is False
 
@@ -154,7 +154,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=1, stderr="error: unknown command: /compact")
 
-            result = compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
             assert result is False
 
@@ -163,7 +163,7 @@ class TestCompactSession:
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            result = compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
             assert result is True
 

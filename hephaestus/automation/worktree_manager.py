@@ -2016,10 +2016,12 @@ class WorktreeManager:
         worktree_path: Path,
         *,
         timeout: int | None = None,
+        shutdown: threading.Event | None = None,
     ) -> dict[str, str] | None:
         """Return Git's worktree record for ``worktree_path``, if registered."""
         target = worktree_path.resolve()
-        for wt in self.list_worktrees(raise_on_error=True, timeout=timeout):
+        cancellation: dict[str, Any] = {"shutdown": shutdown} if shutdown is not None else {}
+        for wt in self.list_worktrees(raise_on_error=True, timeout=timeout, **cancellation):
             path = wt.get("path")
             if path and Path(path).resolve() == target:
                 return wt
@@ -2334,11 +2336,15 @@ class WorktreeManager:
         *,
         common_git_dir: Path,
         timeout: int | None = None,
+        shutdown: threading.Event | None = None,
     ) -> str | None:
         """Return a detached worktree's active rebase branch, if present."""
         if not worktree_path.is_dir():
             raise RuntimeError(f"Detached worktree path is unavailable: {worktree_path}")
         discovered: set[str] = set()
+        execution_options = _timeout_kw(timeout)
+        if shutdown is not None:
+            execution_options["shutdown"] = shutdown
         for state_dir in _REBASE_STATE_DIRS:
             result = run(
                 [
@@ -2352,7 +2358,7 @@ class WorktreeManager:
                 capture_output=True,
                 check=False,
                 log_errors=False,
-                **_timeout_kw(timeout),
+                **execution_options,
             )
             raw_path = (result.stdout or "").strip()
             if result.returncode != 0 or not raw_path or "\n" in raw_path:
@@ -2388,6 +2394,7 @@ class WorktreeManager:
         *,
         raise_on_error: bool = False,
         timeout: int | None = None,
+        shutdown: threading.Event | None = None,
     ) -> list[dict[str, str]]:
         """List all git worktrees in the repository.
 
@@ -2400,12 +2407,15 @@ class WorktreeManager:
             List of worktree info dictionaries
 
         """
+        execution_options = _timeout_kw(timeout)
+        if shutdown is not None:
+            execution_options["shutdown"] = shutdown
         try:
             result = run(
                 ["git", "worktree", "list", "--porcelain", "-z"],
                 cwd=self.repo_root,
                 capture_output=True,
-                **_timeout_kw(timeout),
+                **execution_options,
             )
 
             worktrees = []
@@ -2430,6 +2440,8 @@ class WorktreeManager:
 
             return worktrees
 
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as e:
             logger.error("Failed to list worktrees: %s", e)
             if raise_on_error:
