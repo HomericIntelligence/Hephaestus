@@ -765,6 +765,40 @@ def _capture_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
     return captured["config"]
 
 
+def test_main_records_executing_runtime_identity(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Startup identifies the executing package separately from the target checkout."""
+    import sys
+
+    monkeypatch.setattr(loop_runner, "_setup_logging", lambda *args, **kwargs: None)
+    with caplog.at_level("INFO"):
+        _capture_config(["--repos", "Repo", "--dry-run"], monkeypatch)
+    identities = [
+        record.runtime_identity for record in caplog.records if hasattr(record, "runtime_identity")
+    ]
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity["interpreter"] == sys.executable
+    assert identity["package_path"] == str(Path(loop_runner.__file__).resolve().parents[1])
+    assert identity["distribution_version"]
+    assert "installed_commit" in identity
+    assert "launcher" in identity
+
+
+def test_main_rejects_unsupported_runtime_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unsupported host runtime stops before repository or agent work."""
+    monkeypatch.setattr("sys.prefix", str(tmp_path))
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(loop_runner, "_resolve_org_and_repos", lambda args: ("Org", ["Repo"], None))
+    monkeypatch.setattr(loop_runner, "resolve_agent", lambda *args, **kwargs: "claude")
+    with patch.object(loop_runner, "_dispatch_pipeline") as dispatch:
+        assert main(["--repos", "Repo", "--issues", "3110"]) == 1
+    dispatch.assert_not_called()
+
+
 def _capture_main_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
     """Run main with only its coordinator dispatch replaced."""
     from hephaestus.automation.pipeline import coordinator as coordinator_mod

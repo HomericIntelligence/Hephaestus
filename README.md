@@ -377,6 +377,12 @@ For independent tool selection, literal model names, and migration from aliases,
 
 #### Running the automation loop from a source checkout (macOS / Codex)
 
+For recovery from an older installed package, use the
+[fixed-revision runtime procedure](docs/runbooks/automation-runtime-recovery.md).
+Repository synchronization does not update the package that runs the coordinator.
+On macOS, host verification requires a virtual environment. A Conda base
+environment is not supported for this operation.
+
 When `hephaestus-automation-loop` is not installed on `PATH` (fresh source
 checkout) and Claude is not installed, invoke the loop through `uv` and pin
 Codex as the agent:

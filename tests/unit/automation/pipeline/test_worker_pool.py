@@ -2858,6 +2858,35 @@ class TestWorkerPoolSubmitComplete:
 
         assert run.call_count == 4
 
+    def test_verifier_runtime_rejects_base_prefix_before_copy(self, tmp_path: Path) -> None:
+        """A base Python prefix cannot enter runtime snapshot preparation."""
+        runtime = tmp_path / "base"
+        runtime.mkdir()
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.shutil.copytree") as copy,
+            pytest.raises(RuntimeError, match="host_verification_runtime_unsupported"),
+        ):
+            _verifier_owned_runtime_environment(tmp_path)
+        copy.assert_not_called()
+
+    def test_verifier_runtime_retains_copy_failure_category(self, tmp_path: Path) -> None:
+        """A preparation failure retains its step and type without private text."""
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(tmp_path)),
+            patch(f"{_WP}.shutil.copytree", side_effect=PermissionError("private detail")),
+            pytest.raises(RuntimeError) as caught,
+        ):
+            _verifier_owned_runtime_environment(tmp_path)
+        assert "step=copy" in str(caught.value)
+        assert "PermissionError" in str(caught.value)
+        assert "private detail" not in str(caught.value)
+        assert isinstance(caught.value.__cause__, PermissionError)
+
     def test_verifier_runtime_rejects_an_incomplete_cache_entry(self, tmp_path: Path) -> None:
         """A pre-seal runtime cache cannot be reused after an interrupted copy."""
         checkout = tmp_path / "checkout"
