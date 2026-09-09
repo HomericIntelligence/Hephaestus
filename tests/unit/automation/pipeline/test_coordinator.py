@@ -18,13 +18,12 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import ANY, MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
@@ -1562,29 +1561,22 @@ class TestImplementationAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A promoted direct writer reaches the bound implementation agent."""
+        repo, base_revision = _writer_repository(tmp_path)
         coordinator, _pool, _ = make_coordinator(
             tmp_path,
             monkeypatch,
             serialize_file_overlap=False,
         )
-        base_revision = "a" * 40
         nonce = "b" * 32
         branch = f"7-auto-impl-direct-{nonce}"
-        writer_path = tmp_path / "repo-a" / "build" / ".worktrees" / "source" / "auto-7-impl"
-        writer_path.mkdir(parents=True)
-        binding = WorkspaceBinding.source(
-            cwd=writer_path,
-            reusable_root=tmp_path / "repo-a",
-            repository="repo-a",
-            ownership_key="repo-a:7:impl",
-            item_number=7,
-            lane=SourceLane.IMPLEMENTATION,
-            revision=base_revision,
-            generation=2,
-            detached=False,
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        binding = source_manager.prepare_bounded(
+            7, SourceLane.IMPLEMENTATION, base_revision, branch=branch
         )
-        prepare_source = MagicMock(return_value=binding)
-        source_manager = SimpleNamespace(prepare_bounded=prepare_source)
+        writer_path = binding.cwd
+        receipt = source_manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+        prepare_source = MagicMock(wraps=source_manager.prepare_bounded)
+        monkeypatch.setattr(source_manager, "prepare_bounded", prepare_source)
         item = WorkItem(
             repo="repo-a",
             kind=ItemKind.ISSUE,
@@ -1598,12 +1590,21 @@ class TestImplementationAdmission:
                 "issue_body": "Dispatch from the promoted workspace.",
             },
         )
-        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        paths = coordinator._ctx_for(item).paths
+        paths.repo_root = repo
+        paths.source_workspaces = source_manager
         worktree_job = GitJob(
             repo="repo-a",
             op="create_worktree",
             timeout_s=60,
-            kwargs={"issue_number": 7, "branch_name": branch},
+            kwargs={
+                "issue_number": 7,
+                "branch_name": branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": base_revision,
+                "direct_worktree_nonce": nonce,
+            },
         )
         worktree_handle = JobHandle(
             job=worktree_job,
@@ -1621,6 +1622,7 @@ class TestImplementationAdmission:
                     "path": str(writer_path),
                     "impl_source_revision": base_revision,
                     "source_workspace": binding.to_dict(),
+                    "source_receipt": receipt.to_dict(),
                     "direct_scope_reservation": {
                         "branch": branch,
                         "base_sha": base_revision,
@@ -1631,6 +1633,8 @@ class TestImplementationAdmission:
 
         assert item.worktree == str(writer_path)
         assert item.payload["_impl_source_revision"] == base_revision
+        assert item.payload["_impl_source_workspace"] == binding.to_dict()
+        assert item.payload["_impl_source_receipt"] == receipt
         assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == {
             "branch": branch,
             "base_sha": base_revision,
@@ -1653,6 +1657,8 @@ class TestImplementationAdmission:
         advice_handle, advice_result = coordinator.completion_q.get_nowait()
         assert coordinator.in_flight[advice_handle] is item
         assert isinstance(advice_handle.job, AthenaSkillJob)
+        assert advice_handle.job.request.workspace == binding
+        assert advice_handle.job.request.cwd == writer_path
 
         coordinator._handle_completion(advice_handle, advice_result)
 
@@ -1663,14 +1669,9 @@ class TestImplementationAdmission:
         assert implementation_handle.job.cwd == writer_path
         assert implementation_handle.job.workspace == binding
         assert implementation_handle.job.workspace.revision == base_revision
-        expected_prepare = call(
-            7,
-            SourceLane.IMPLEMENTATION,
-            base_revision,
-            branch=branch,
-            deadline=ANY,
-        )
-        assert prepare_source.call_args_list == [expected_prepare, expected_prepare]
+        assert item.payload["_impl_source_receipt"] == receipt
+        assert source_manager._require_receipt(7, SourceLane.IMPLEMENTATION) == receipt
+        prepare_source.assert_not_called()
         assert item.state == "IMPLEMENT_WAIT"
         assert item.result is None
 
@@ -1927,6 +1928,7 @@ class TestImplementationAdmission:
         sibling_pr: int,
     ) -> None:
         """A collision waits for its owner completion, for either shared-head topology."""
+        repo, revision = _writer_repository(tmp_path)
         coordinator, _pool, _ = make_coordinator(
             tmp_path,
             monkeypatch,
@@ -1934,19 +1936,12 @@ class TestImplementationAdmission:
             serialize_file_overlap=False,
         )
         shared_branch = "shared-head"
-        owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "auto-2268-impl"
-        owner_path.mkdir(parents=True)
-        binding = WorkspaceBinding.source(
-            cwd=owner_path,
-            reusable_root=tmp_path / "repo-a",
-            repository="repo-a",
-            ownership_key="repo-a:test:2268:impl",
-            item_number=2268,
-            lane=SourceLane.IMPLEMENTATION,
-            revision="a" * 40,
-            generation=1,
-            detached=False,
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        binding = source_manager.prepare_bounded(
+            2268, SourceLane.IMPLEMENTATION, revision, branch=shared_branch
         )
+        owner_path = binding.cwd
+        receipt = source_manager._require_receipt(2268, SourceLane.IMPLEMENTATION)
         owner = WorkItem(
             repo="repo-a",
             kind=ItemKind.ISSUE,
@@ -1967,6 +1962,10 @@ class TestImplementationAdmission:
             branch=shared_branch,
             payload={"existing_pr": True},
         )
+        for item in (owner, sibling):
+            paths = coordinator._ctx_for(item).paths
+            paths.repo_root = repo
+            paths.source_workspaces = source_manager
         coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
         coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
         owner_lease = coordinator._claim_item(StageName.IMPLEMENTATION)
@@ -2027,6 +2026,7 @@ class TestImplementationAdmission:
                 value={
                     "path": str(owner_path),
                     "source_workspace": binding.to_dict(),
+                    "source_receipt": receipt.to_dict(),
                     "impl_source_revision": binding.revision,
                     "dirty": False,
                     "status": "",

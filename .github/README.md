@@ -4,36 +4,11 @@ This directory contains GitHub-specific configuration files for Hephaestus.
 
 ## Workflows
 
-### Test Workflow (`workflows/test.yml`)
-
-Continuous Integration pipeline that runs on every push and pull request to `main`.
-
-**Matrix:**
-
-- OS: `ubuntu-latest`
-- Python: `3.13`
-- Test types: `unit`, `integration`
-
-**Jobs:**
-
-- **Unit tests**: pytest with the coverage floor defined by
-  [`pyproject.toml [tool.coverage.report]`](../pyproject.toml)
-- **Integration tests**: import and console-entry-point checks
-- **Build**: reproducible wheel/sdist manifests, wheel RECORD integrity, and
-  clean-install, upgrade, and uninstall lifecycle validation
-- **Structure check**: enforces test mirrors source layout
-
-**Status Badge:**
-
-```markdown
-![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)
-```
-
 ### Lint Job (`workflows/_required.yml`)
 
 Runs the full pre-commit hook suite (ruff, mypy, security checks) as the
-required `lint` job on pull requests. Pre-commit does not run pytest. The
-required `unit-tests` and `integration-tests` jobs own full-suite execution.
+required `lint` job on pull requests. Pre-commit runs the shared fast pytest
+selection. Nightly CI owns full unit coverage and the remaining functional tests.
 
 ### Security Workflow (`workflows/security.yml`)
 
@@ -46,22 +21,21 @@ Builds and publishes the package to PyPI on version tag push (`v*`).
 ### Required Checks Workflow (`workflows/_required.yml`)
 
 The consolidated required-status-check gate that runs on every pull request to
-`main` (and on push to `main`). It aggregates lint, `uv-lock-check`,
-shellcheck, the `pr-policy` gate (enforces `Closes #N`, DCO trailers, the
-Conventional Commit PR title used for squash history, and every branch commit
-subject),
-unit/integration/shell tests, reproducible wheel and sdist validation,
-installed-package lifecycle checks, security scans (pip-audit, Gitleaks,
-bandit), workflow-schema validation, and version-sync. Cryptographic commit
-signatures are enforced by the active `homeric-main-baseline` ruleset. The
+`main` (and on push to `main`). It aggregates lint, including the fast
+pre-commit test selection, `uv-lock-check`, shellcheck, and the `pr-policy`
+gate. The policy gate enforces `Closes #N`, DCO trailers, the Conventional
+Commit PR title used for squash history, and every branch commit subject.
+It also aggregates security scans, workflow-schema validation, and version
+sync. `nightly-tests.yml` owns full coverage, remaining functional tests,
+package and installed-CLI checks, shell tests, and Pi conformance. Cryptographic
+commit signatures are enforced by the active `homeric-main-baseline` ruleset. The
 automation loop runs `$athena:pr-review` and owns the
-`state:implementation-go` label. `merge_wait` may then make a bounded sequence
-(default: five) of individual SHA-conditional ordinary REST squash-merge
-requests. Every request has fresh reviewed-head, open-`main`, unarmed, and
-exclusive-label admission; only retryable HTTP 405 readiness and unresolved
-transport ambiguity can timer-park a later request. It never invokes `gh pr
-merge`, arms native auto-merge, manages a merge queue, or uses an administrator
-bypass. The privileged label-event auto-merge workflow remains removed.
+`state:implementation-go` label. `merge_wait` uses exact-head queue admission
+when the effective ruleset requires a merge queue. Direct merge requires strict
+update protection that the actor cannot bypass. Each request requires fresh
+reviewed-head, open-`main`, unarmed, exclusive-label, and required-check evidence.
+The loop does not invoke `gh pr merge`, arm native auto-merge, or use an
+administrator bypass. The privileged label-event auto-merge workflow remains removed.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 

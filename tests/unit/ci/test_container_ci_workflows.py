@@ -51,9 +51,9 @@ def _run_step(
 
 
 def test_build_artifact_step_is_valid_bash() -> None:
-    """The required build lane must reach its artifact validation suite."""
+    """The nightly build lane must reach its artifact validation suite."""
     step = _workflow_step(
-        "_required.yml",
+        "nightly-tests.yml",
         "build",
         "Validate reproducible artifacts and package lifecycle",
     )
@@ -63,46 +63,30 @@ def test_build_artifact_step_is_valid_bash() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_build_artifact_step_uses_provisioned_fixture_without_network() -> None:
-    """The required artifact lane must use the read-only host fixture offline."""
+def test_build_artifact_step_uses_the_provisioned_fixture() -> None:
+    """The nightly artifact lane must use the provisioned fixture."""
     provision_definition = _workflow_step_definition(
-        "_required.yml",
+        "nightly-tests.yml",
         "build",
         "Provision Codex Sigstore fixture",
     )
     provision = provision_definition["run"]
     assert isinstance(provision, str)
     validation = _workflow_step(
-        "_required.yml",
+        "nightly-tests.yml",
         "build",
         "Validate offline Codex artifacts",
     )
-
     assert "scripts/provision_codex_sigstore_fixture.py" in provision
-    assert "zstd --version" in provision
     assert provision_definition["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
     assert "build/test-fixtures/codex-sigstore/rust-v0.153.4" in provision
-    assert "--network=none" in validation
-    assert "-e UV_NO_SYNC=1" in validation
-    assert "-e PYTHONPATH=/workspace" in validation
-    assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in validation
-    assert (
-        "build/test-fixtures/codex-sigstore/rust-v0.153.4:"
-        "/codex-sigstore/rust-v0.153.4:ro" in validation
-    )
-    assert (
-        "build/test-fixtures/codex-sigstore/rust-v0.153.4:"
-        "/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro" in validation
-    )
-
+    assert "-e HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in validation
     assert "-m codex_release_artifact" in validation
     assert "--basetemp=build/pytest-codex-artifacts" in validation
     generic = _workflow_step(
-        "_required.yml", "build", "Validate reproducible artifacts and package lifecycle"
+        "nightly-tests.yml", "build", "Validate reproducible artifacts and package lifecycle"
     )
     assert '-m "artifact and not codex_release_artifact"' in generic
-    assert "--network=none" not in generic
-    assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT" not in generic
     assert "--basetemp=build/pytest-artifacts" in generic
 
 

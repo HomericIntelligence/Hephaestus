@@ -23,7 +23,11 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
-from hephaestus.scripts_lib.check_cli_table_sync import _load_scripts, check_prose_counts
+from hephaestus.scripts_lib.check_cli_table_sync import (
+    _load_scripts,
+    check_prose_counts,
+    has_accepted_adr_status,
+)
 
 EXCLUDED_PREFIXES: tuple[str, ...] = (
     ".git/",
@@ -84,11 +88,6 @@ SOURCE_CONTRACTS: tuple[SourceContract, ...] = (
         selector="jobs",
     ),
     SourceContract(
-        document="docs/ci/required-checks.md",
-        source=".github/workflows/test.yml",
-        selector="jobs",
-    ),
-    SourceContract(
         document="docs/specs/2026-07-16-jinja-prompt-templates-design.md",
         source="hephaestus/prompts/templates/default",
         selector="",
@@ -102,15 +101,6 @@ SOURCE_CONTRACTS: tuple[SourceContract, ...] = (
 
 _EXCLUDED_DOCUMENT_DIRS = ("docs/adr/", "docs/release-notes/")
 _LIVING_RECORD_NAMES = frozenset({"README.md", "index.md"})
-_ADR_STATUS_RE = re.compile(
-    r"^\s*(?:[-*+]\s+)?(?:\*\*Status\*\*\s*:|\*\*Status:\*\*|Status\s*:)"
-    r"\s*(?P<status>.+?)\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-_ACCEPTED_ADR_STATUS_RE = re.compile(
-    r"Accepted(?:\s*\([^\r\n)]+\))?",
-    re.IGNORECASE,
-)
 _MARKDOWN_SECTION_RE = re.compile(r"^##\s+", re.MULTILINE)
 _ROADMAP_UPDATE_SECTION_RE = re.compile(r"^##\s+Updating This Roadmap\s*$", re.MULTILINE)
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
@@ -162,25 +152,14 @@ def _relative_path(path: Path, repo_root: Path) -> str:
     return path.relative_to(repo_root).as_posix()
 
 
-def _is_accepted_adr(file_path: Path) -> bool:
-    """Return whether *file_path* declares an accepted ADR status."""
-    content = file_path.read_text(encoding="utf-8", errors="replace")
-    first_section = _MARKDOWN_SECTION_RE.search(content)
-    metadata = content[: first_section.start()] if first_section else content
-    statuses = [
-        match.group("status").strip().strip("*_` ") for match in _ADR_STATUS_RE.finditer(metadata)
-    ]
-    return bool(statuses) and all(
-        _ACCEPTED_ADR_STATUS_RE.fullmatch(status) is not None for status in statuses
-    )
-
-
 def _is_excluded(relative_path: str, file_path: Path) -> bool:
     """Return whether a repository-relative path is outside the scan boundary."""
     if any(relative_path.startswith(prefix) for prefix in EXCLUDED_PREFIXES):
         return True
     if relative_path.startswith(_EXCLUDED_DOCUMENT_DIRS[0]):
-        return Path(relative_path).name not in _LIVING_RECORD_NAMES and _is_accepted_adr(file_path)
+        return Path(relative_path).name not in _LIVING_RECORD_NAMES and has_accepted_adr_status(
+            file_path.read_text(encoding="utf-8", errors="replace")
+        )
     if relative_path.startswith(_EXCLUDED_DOCUMENT_DIRS[1]):
         return Path(relative_path).name not in _LIVING_RECORD_NAMES
     return False

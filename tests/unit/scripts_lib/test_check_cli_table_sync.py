@@ -91,6 +91,71 @@ def test_docs_reference_to_unknown_command_is_reported(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "current_document",
+    [
+        "README.md",
+        "docs/adr/README.md",
+        "docs/adr/index.md",
+        "docs/runbooks/recovery.md",
+        "docs/specs/current-design.md",
+    ],
+)
+def test_historical_command_does_not_exempt_current_documentation(
+    tmp_path: Path, current_document: str
+) -> None:
+    """An accepted decision can retain a command that current docs must reject."""
+    historical = tmp_path / "docs/adr/0001-retired-command.md"
+    historical.parent.mkdir(parents=True)
+    record = (
+        "# ADR-0001: Former command\n\n"
+        "- Status: Accepted\n\n"
+        "## Decision\n\n"
+        "Use `hephaestus-retired-command`.\n"
+    )
+    historical.write_text(record, encoding="utf-8")
+
+    assert mod.check_docs_command_references(tmp_path, {"hephaestus-current"}) == []
+
+    current = tmp_path / current_document
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text(record, encoding="utf-8")
+
+    assert mod.check_docs_command_references(tmp_path, {"hephaestus-current"}) == [
+        f"{current_document}: references `hephaestus-retired-command` "
+        "which is not in pyproject.toml [project.scripts]"
+    ]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "- Status: Draft",
+        "- Status: Proposed",
+        "- Status: Accepted\n- Status: Draft",
+        "- Date: 2026-09-09",
+    ],
+)
+def test_unaccepted_decision_still_requires_a_registered_command(
+    tmp_path: Path, metadata: str
+) -> None:
+    """Body text cannot turn a current or unclassified decision into history."""
+    decision = tmp_path / "docs/adr/0002-current-command.md"
+    decision.parent.mkdir(parents=True)
+    decision.write_text(
+        f"# ADR-0002: Current command\n\n{metadata}\n\n"
+        "## Decision\n\n"
+        "- Status: Accepted\n\n"
+        "Use `hephaestus-ghost-command`.\n",
+        encoding="utf-8",
+    )
+
+    assert mod.check_docs_command_references(tmp_path, {"hephaestus-current"}) == [
+        "docs/adr/0002-current-command.md: references `hephaestus-ghost-command` "
+        "which is not in pyproject.toml [project.scripts]"
+    ]
+
+
 def test_docs_reference_check_scans_agents_md(tmp_path: Path) -> None:
     """The documentation guard treats AGENTS.md as an authoritative source."""
     (tmp_path / "README.md").write_text("", encoding="utf-8")

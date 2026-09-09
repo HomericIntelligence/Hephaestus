@@ -294,6 +294,27 @@ class TestCollectMismatches:
 class TestScanRepository:
     """Tests for scan_repository() — whole-repo scan API."""
 
+    @pytest.mark.parametrize("excludes", [None, {"build"}])
+    def test_exclusions_apply_only_below_scan_root(
+        self, tmp_path: Path, excludes: set[str] | None
+    ) -> None:
+        """Detect nested checkout findings and exclude only generated files."""
+        repo_root = tmp_path / "build" / "project"
+        docs = repo_root / "docs"
+        generated = repo_root / "build"
+        docs.mkdir(parents=True)
+        generated.mkdir()
+        (docs / "guide.md").write_text("T3/Tooling\n", encoding="utf-8")
+        (generated / "output.md").write_text("T4/Delegation\n", encoding="utf-8")
+
+        findings = scan_repository(repo_root, excludes=excludes)
+
+        assert len(findings) == 1
+        assert findings[0].file == str(Path("docs") / "guide.md")
+        assert findings[0].tier == "T3"
+        assert findings[0].found_name == "Tooling"
+        assert findings[0].expected_name == "Delegation"
+
     def test_clean_repo_returns_empty(self, tmp_path: Path) -> None:
         """A repository with no mismatch returns empty list."""
         (tmp_path / "docs.md").write_text("T3/Delegation\nT2/Tooling\n", encoding="utf-8")

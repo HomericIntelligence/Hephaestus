@@ -7,6 +7,9 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+import yaml
+
 # Repository policy requires generated files to live under build/. Hypothesis
 # consults this environment variable lazily when it first opens its storage,
 # so set the suite-wide location before importing test modules.
@@ -14,8 +17,51 @@ os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(
     Path(__file__).resolve().parents[1] / "build" / ".hypothesis"
 )
 
-import pytest
-import yaml
+_PRECOMMIT_TEST_DIRECTORIES = {
+    "tests/unit/benchmarks",
+    "tests/unit/cli",
+    "tests/unit/config",
+    "tests/unit/constants",
+    "tests/unit/datasets",
+    "tests/unit/discovery",
+    "tests/unit/io",
+    "tests/unit/logging",
+    "tests/unit/markdown",
+    "tests/unit/observability",
+    "tests/unit/prompts",
+    "tests/unit/resilience",
+    "tests/unit/system",
+    "tests/unit/utils",
+    "tests/unit/validation",
+    "tests/unit/version",
+}
+_PRECOMMIT_TEST_FILES = {
+    "tests/unit/agents/test_frontmatter.py",
+    "tests/unit/agents/test_loader.py",
+    "tests/unit/agents/test_model_selection.py",
+    "tests/unit/agents/test_runtime.py",
+    "tests/unit/automation/test_agent_config.py",
+    "tests/unit/automation/test_pipeline_cli.py",
+    "tests/unit/automation/test_protocol.py",
+    "tests/unit/automation/test_state_labels.py",
+    "tests/unit/ci/test_precommit.py",
+    "tests/unit/ci/test_pytest_control_options.py",
+    "tests/unit/ci/test_workflows.py",
+    "tests/integration/test_gh_trace_id_propagation.py",
+    "tests/integration/test_logging_interaction.py",
+    "tests/integration/test_package_import.py",
+}
+
+
+def _is_precommit_test(item: pytest.Item) -> bool:
+    """Return True when an item belongs to the fast smoke selection."""
+    item_path = getattr(item, "path", None)
+    if item_path is None:
+        return False
+    relative_path = item_path.relative_to(Path(__file__).resolve().parents[1]).as_posix()
+    return relative_path in _PRECOMMIT_TEST_FILES or any(
+        relative_path.startswith(f"{directory}/") for directory in _PRECOMMIT_TEST_DIRECTORIES
+    )
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -115,7 +161,11 @@ def require_git_worktree_list_z() -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip contract-marked tests unless the explicit CLI option is enabled."""
+    """Mark fast tests and skip contract tests unless explicitly enabled."""
+    for item in items:
+        if _is_precommit_test(item):
+            item.add_marker(pytest.mark.precommit)
+
     if config.getoption("run_contract_tests"):
         return
 

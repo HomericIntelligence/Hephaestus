@@ -231,9 +231,7 @@ addopts = [
     "-v",
     "--strict-markers",
     "-m",
-    "not performance and not nightly and not codex_release_artifact",
-    "--cov=hephaestus",
-    "--cov-report=term-missing",
+    "precommit",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -242,6 +240,7 @@ markers = [
     "codex_release_artifact: requires the offline read-only Codex release fixture container lane",
     "unit: marks tests as unit tests",
     "performance: bounded capacity, latency, and sustained-concurrency tests",
+    "precommit: deterministic smoke tests run by pre-commit and pull-request CI",
     "nightly: high-cost functional tests run by the scheduled nightly workflow",
     "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
     "contract: opt-in sandboxed contract tests against real gh/agent CLIs; selected with --run-contract-tests",

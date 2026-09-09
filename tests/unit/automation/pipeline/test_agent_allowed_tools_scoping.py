@@ -86,7 +86,7 @@ EXPECTED_SCOPES = {
 EXPECTED_ATHENA_SKILLS = {
     ("stages/planning.py", "step", "advise"),
     ("stages/implementation.py", "_advise_wait", "advise"),
-    ("stages/learning.py", "step", "learn"),
+    ("stages/learning.py", "_prepare_host_job", "learn"),
 }
 
 

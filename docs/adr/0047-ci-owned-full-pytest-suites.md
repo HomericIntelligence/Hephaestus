@@ -1,6 +1,6 @@
 # ADR-0047: CI owns full pytest suite execution
 
-- Status: Accepted
+- Status: Partly superseded by [ADR-0049](0049-fast-pr-nightly-tests.md)
 - Date: 2026-09-08
 - Tracks: #3143
 
@@ -13,6 +13,9 @@ is valid. A successful command that collects no applicable tests is not valid
 evidence.
 
 ## Decision
+
+ADR-0049 replaces the pre-commit exclusion and the full-suite schedule below.
+The focused-test evidence requirement remains in effect.
 
 Do not run pytest from pre-commit. Required CI/CD runs the full unit and
 integration test suites and applies the coverage gate.

@@ -682,7 +682,6 @@ class TestWorktreeManager:
             result,
             "33-auto",
             base_sha=pin,
-            refresh_base=False,
             timeout=None,
         )
 

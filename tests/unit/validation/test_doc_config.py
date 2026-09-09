@@ -31,6 +31,22 @@ def _write_pyproject(tmp_path: Path, content: str) -> Path:
     return p
 
 
+def _write_nightly_coverage_workflow(tmp_path: Path, coverage_path: str) -> Path:
+    """Write the nightly unit-coverage command used as the coverage source."""
+    workflow_path = tmp_path / ".github" / "workflows" / "nightly-tests.yml"
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(
+        """jobs:
+  unit-coverage:
+    steps:
+      - name: Run full unit coverage
+        run: uv run pytest tests/unit --cov="""
+        + coverage_path
+        + "\n"
+    )
+    return workflow_path
+
+
 def _minimal_pyproject(
     fail_under: int = 80,
     addopts: str | None = None,
@@ -78,28 +94,20 @@ class TestLoadCoverageThreshold:
 class TestExtractCovPath:
     """Tests for extract_cov_path()."""
 
-    def test_reads_cov_path(self, tmp_path: Path) -> None:
+    def test_reads_cov_path_from_nightly_workflow(self, tmp_path: Path) -> None:
         _write_pyproject(
             tmp_path,
-            _minimal_pyproject(addopts='addopts = ["--cov=mypackage"]'),
+            _minimal_pyproject(addopts='addopts = ["-m", "precommit"]'),
         )
+        _write_nightly_coverage_workflow(tmp_path, "mypackage")
         assert extract_cov_path(tmp_path) == "mypackage"
 
     def test_missing_cov_flag_exits(self, tmp_path: Path) -> None:
-        _write_pyproject(
-            tmp_path,
-            _minimal_pyproject(addopts='addopts = ["-v"]'),
-        )
+        _write_pyproject(tmp_path, _minimal_pyproject(addopts='addopts = ["-v"]'))
+        _write_nightly_coverage_workflow(tmp_path, "")
         with pytest.raises(SystemExit) as exc:
             extract_cov_path(tmp_path)
         assert exc.value.code == 1
-
-    def test_addopts_as_string(self, tmp_path: Path) -> None:
-        _write_pyproject(
-            tmp_path,
-            _minimal_pyproject(addopts='addopts = "--cov=mypackage -v"'),
-        )
-        assert extract_cov_path(tmp_path) == "mypackage"
 
 
 class TestExtractCovFailUnder:
@@ -292,6 +300,7 @@ class TestCheckDocConfigConsistency:
 
     def _setup_valid_repo(self, tmp_path: Path) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))
+        _write_nightly_coverage_workflow(tmp_path, "hephaestus")
         (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus")
         (tmp_path / "docs").mkdir(exist_ok=True)
@@ -306,6 +315,7 @@ class TestCheckDocConfigConsistency:
 
     def test_threshold_mismatch_fails(self, tmp_path: Path) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=90))
+        _write_nightly_coverage_workflow(tmp_path, "hephaestus")
         (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("")
         result = check_doc_config_consistency(tmp_path, skip_test_count=True)
@@ -347,6 +357,7 @@ class TestMain:
 
     def test_valid_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))
+        _write_nightly_coverage_workflow(tmp_path, "hephaestus")
         (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus")
         (tmp_path / "docs").mkdir(exist_ok=True)
@@ -366,6 +377,7 @@ class TestMain:
 
     def test_mismatch_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=90))
+        _write_nightly_coverage_workflow(tmp_path, "hephaestus")
         (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("")
         monkeypatch.setattr(

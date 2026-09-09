@@ -625,6 +625,7 @@ class TestSeedIssueFetchLayer:
                 ),
             ),
             patch.object(github, "pending_implementation_go_audit", return_value=None),
+            patch.object(github, "read_review_rebase_record", return_value=None),
         ):
             return seed_issue_from_github(issue, github)
 
@@ -785,8 +786,13 @@ class TestSeedIssueFetchLayer:
                 return PendingImplementationGoAudit(
                     pr_number=pr_number,
                     head_sha="a" * 40,
-                    audit=ReviewAudit("A", "clean", (), "", valid=True),
+                    audit=ReviewAudit("A", "clean", (), "", valid=True, verdict="GO"),
                 )
+
+            def read_review_rebase_record(self, pr_number: int) -> None:
+                """Return an explicit absence of retained rebase evidence."""
+                assert pr_number == 44
+                return None
 
         facts = seed_issue_from_github(102, RestartGitHub())
         entry = seed_entry_from_facts(facts)
@@ -835,6 +841,11 @@ class TestSeedIssueFetchLayer:
                         verdict=None,
                     ),
                 )
+
+            def read_review_rebase_record(self, pr_number: int) -> None:
+                """Return an explicit absence of retained rebase evidence."""
+                assert pr_number == 44
+                return None
 
         facts = seed_issue_from_github(102, RestartGitHub())
         entry = seed_entry_from_facts(facts)

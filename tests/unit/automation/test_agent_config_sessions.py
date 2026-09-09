@@ -25,6 +25,21 @@ from hephaestus.automation.agent_config import (
 )
 
 
+@pytest.fixture
+def non_repo_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Prevent Git from finding a checkout above the test directory."""
+    scoped_git_env = agent_config._repo_scoped_git_env
+
+    def isolated_git_env() -> dict[str, str]:
+        return {
+            **scoped_git_env(),
+            "GIT_CEILING_DIRECTORIES": str(tmp_path.parent.resolve()),
+        }
+
+    monkeypatch.setattr(agent_config, "_repo_scoped_git_env", isolated_git_env)
+    return tmp_path
+
+
 class TestReviewerAgent:
     """Per-iteration reviewer session tokens (fresh session each loop round)."""
 
@@ -111,6 +126,24 @@ class TestSessionUUID:
 
     def test_different_issue_different_uuid(self) -> None:
         assert session_uuid("R", 1, AGENT_PLANNER) != session_uuid("R", 2, AGENT_PLANNER)
+
+    def test_non_repository_paths_have_distinct_session_keys(self, non_repo_path: Path) -> None:
+        """A parent checkout cannot merge identities for unrelated source paths."""
+        other = non_repo_path / "other"
+        other.mkdir()
+
+        assert session_uuid("R", 1, AGENT_PLANNER, cwd=non_repo_path) != session_uuid(
+            "R", 1, AGENT_PLANNER, cwd=other
+        )
+
+    def test_non_repository_session_ignores_outer_git_dir(
+        self, non_repo_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An inherited Git directory cannot change a path's session identity."""
+        expected = session_uuid("R", 1, AGENT_PLANNER, cwd=non_repo_path)
+        monkeypatch.setenv("GIT_DIR", str(Path.cwd() / ".git"))
+
+        assert session_uuid("R", 1, AGENT_PLANNER, cwd=non_repo_path) == expected
 
     def test_different_model_different_uuid(self) -> None:
         """#1166: the model is part of the key so sessions never cross models."""

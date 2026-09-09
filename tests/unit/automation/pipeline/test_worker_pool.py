@@ -241,6 +241,27 @@ def _rebase_gate_command_result(
     raise AssertionError(f"Unexpected rebase fixture command: {command!r}")
 
 
+def _continue_rebase_command_result(
+    command: list[str], *, ancestor: bool, raw_commit: str = "", **_kwargs: Any
+) -> subprocess.CompletedProcess[str]:
+    """Return command-specific state for a completed rebase and its metadata gates."""
+    results = {
+        ("git", "diff", "--name-only", "-z"): (0, "x.py\0"),
+        ("git", "ls-files", "--others", "--exclude-standard", "-z"): (0, ""),
+        ("git", "add", "--", "x.py"): (0, ""),
+        ("git", "diff", "--cached", "--check"): (0, ""),
+        ("git", "rebase", "--continue"): (0, ""),
+        ("git", "rev-parse", "HEAD"): (0, "d" * 40),
+        ("git", "merge-base", "--is-ancestor", "b" * 40, "HEAD"): (0 if ancestor else 1, ""),
+        ("git", "rev-list", "--reverse", f"{'b' * 40}..HEAD"): (0, "d" * 40),
+        ("git", "cat-file", "-p", "d" * 40): (0, raw_commit),
+    }
+    if tuple(command) not in results:
+        raise AssertionError(f"Unexpected continuation fixture command: {command!r}")
+    returncode, stdout = results[tuple(command)]
+    return subprocess.CompletedProcess(command, returncode, stdout, "")
+
+
 def _writer_creation_managers(
     tmp_path: Path, *, repository: str
 ) -> tuple[Path, str, MagicMock, MagicMock]:
@@ -11166,23 +11187,22 @@ class TestGitOps:
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
         }
+        record_source = Mock()
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
-            run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=1, stdout=""),
-            ]
-            result = pool._git_continue_rebase(job, record_source=Mock())
+            run.side_effect = lambda command, **kwargs: _continue_rebase_command_result(
+                command, ancestor=False, raw_commit="", **kwargs
+            )
+            result = pool._git_continue_rebase(job, record_source=record_source)
 
+        record_source.assert_called_once_with("d" * 40)
+        push.assert_not_called()
         assert result.ok is False
         assert result.error == "completed rebase lacks captured base ancestry"
 
@@ -11205,25 +11225,22 @@ class TestGitOps:
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
         }
+        record_source = Mock()
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
-            run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout="c" * 40),
-                MagicMock(returncode=0, stdout=raw_commit),
-            ]
-            result = pool._git_continue_rebase(job, record_source=Mock())
+            run.side_effect = lambda command, **kwargs: _continue_rebase_command_result(
+                command, ancestor=True, raw_commit=raw_commit, **kwargs
+            )
+            result = pool._git_continue_rebase(job, record_source=record_source)
 
+        record_source.assert_called_once_with("d" * 40)
+        push.assert_not_called()
         assert result.ok is False
         assert result.error == "completed rebase commit metadata invalid"
 

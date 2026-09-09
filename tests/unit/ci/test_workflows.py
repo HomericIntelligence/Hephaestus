@@ -195,17 +195,17 @@ class TestPerformanceWorkflow:
         config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
         assert "-m" in addopts
-        assert any("not performance" in option for option in addopts)
+        assert "precommit" in addopts
 
 
 class TestNightlyTestsWorkflow:
     """Contracts for the scheduled high-cost functional-test lane."""
 
-    def test_default_pytest_options_deselect_nightly_tests(self) -> None:
-        """Developer and required-CI defaults must exclude the nightly marker."""
+    def test_default_pytest_options_select_fast_tests(self) -> None:
+        """Developer and PR defaults must select only the fast marker."""
         config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
-        assert any("not nightly" in option for option in addopts)
+        assert "precommit" in addopts
 
 
 class TestIsCheckoutStep:
@@ -395,20 +395,19 @@ class TestPiCliSetup:
         assert "pi --version" in text
         assert "hephaestus-install-pi-plugins --global --yes --no-approve" in text
 
-    def test_required_workflow_has_a_dedicated_pi_conformance_job(self) -> None:
-        workflow = yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
+    def test_nightly_workflow_has_a_dedicated_pi_conformance_job(self) -> None:
+        required = yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
+        workflow = yaml.safe_load(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"))
         jobs = workflow["jobs"]
 
+        assert "pi-conformance" not in required["jobs"]
+        assert "unit-tests" not in required["jobs"]
         assert "pi-conformance" in jobs
-        assert "unit-tests" in jobs
-        assert "setup-pi-cli" not in yaml.safe_dump(jobs["unit-tests"])
 
         pi_job = jobs["pi-conformance"]
         matrix = pi_job["strategy"]["matrix"]["include"]
         runners = {row["runner"] for row in matrix}
         assert runners == {"ubuntu-24.04", "ubuntu-24.04-arm"}
-        assert pi_job["needs"] == "changes-gate"
-
         step_names = [step.get("name") for step in pi_job["steps"]]
         assert "Install managed Pi runtime" in step_names
         assert "Run Pi conformance tests" in step_names

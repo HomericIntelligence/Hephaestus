@@ -93,9 +93,10 @@ add another state owner. These alternatives were rejected.
 
 Retained capabilities have one implementation path. Tests use the same pool,
 lease, and result contracts as production. New and changed behavior tests run
-natively on supported hosts. Required CI runs the full suites and coverage
-gate, as specified in ADR-0047. Independent review covers the complete
-migration diff before completion.
+natively on supported hosts. Required PR checks run the fast selection.
+The nightly workflow runs the full suites and coverage gate, as specified
+in ADR-0049. Run both CI tiers for this migration before completion.
+Independent review covers the complete migration diff before completion.
 
 This is a breaking migration. Operators must change removed commands and
 flags. Uncertain historical effects require inspection; they are not replayed
