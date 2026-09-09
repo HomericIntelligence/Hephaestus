@@ -22,12 +22,14 @@ from hephaestus.automation.commit_runtime import (
     commit_changes as _commit_changes,
 )
 from hephaestus.constants import agent_git_timeout
+from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
 COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s --allow-empty"
+_PUSH_DIAGNOSTIC_LIMIT = 4000
 
 # Keep the historical patchable/public names while making their compatibility
 # re-export role explicit to static analyzers and type checkers.
@@ -45,6 +47,34 @@ remaining_operation_timeout = _git_runtime.remaining_operation_timeout
 class DetachedHeadPushError(RuntimeError):
     """Base error for a failed lease-protected detached-head publication."""
 
+    def __init__(
+        self,
+        message: str = "Detached-head publication failed",
+        *,
+        stdout_tail: str = "",
+        stderr_tail: str = "",
+    ) -> None:
+        """Store bounded, redacted output from the failed publication command."""
+        super().__init__(message)
+        self.stdout_tail = bounded_git_diagnostic(stdout_tail, limit=_PUSH_DIAGNOSTIC_LIMIT)
+        self.stderr_tail = bounded_git_diagnostic(stderr_tail, limit=_PUSH_DIAGNOSTIC_LIMIT)
+
+
+class GitPushError(RuntimeError):
+    """A branch publication failed after Git returned command diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stdout_tail: str = "",
+        stderr_tail: str = "",
+    ) -> None:
+        """Store bounded, redacted output from the failed publication command."""
+        super().__init__(message)
+        self.stdout_tail = bounded_git_diagnostic(stdout_tail, limit=_PUSH_DIAGNOSTIC_LIMIT)
+        self.stderr_tail = bounded_git_diagnostic(stderr_tail, limit=_PUSH_DIAGNOSTIC_LIMIT)
+
 
 class DetachedHeadPushRemoteHeadChangedError(DetachedHeadPushError):
     """The remote branch changed after the reviewed-head proof was obtained."""
@@ -54,9 +84,11 @@ class DetachedHeadPushRemoteHeadChangedError(DetachedHeadPushError):
         message: str = "Detached review push observed a different remote head",
         *,
         failure_kind: str = "remote_head_changed",
+        stdout_tail: str = "",
+        stderr_tail: str = "",
     ) -> None:
         """Retain the safe post-failure ownership classification."""
-        super().__init__(message)
+        super().__init__(message, stdout_tail=stdout_tail, stderr_tail=stderr_tail)
         self.failure_kind = failure_kind
 
 
@@ -68,9 +100,11 @@ class DetachedHeadPushRemoteHeadUnchangedError(DetachedHeadPushError):
         message: str = "Detached review push failed while the remote head remained unchanged",
         *,
         failure_kind: str = "remote_head_unchanged",
+        stdout_tail: str = "",
+        stderr_tail: str = "",
     ) -> None:
         """Retain the safe local publication-failure classification."""
-        super().__init__(message)
+        super().__init__(message, stdout_tail=stdout_tail, stderr_tail=stderr_tail)
         self.failure_kind = failure_kind
 
 
@@ -82,10 +116,24 @@ class DetachedHeadPushRemoteProbeError(DetachedHeadPushError):
         message: str = "Detached review push failed and the remote head could not be verified",
         *,
         failure_kind: str = "remote_probe_failed",
+        stdout_tail: str = "",
+        stderr_tail: str = "",
     ) -> None:
         """Retain whether the authoritative probe failed by timeout or transport."""
-        super().__init__(message)
+        super().__init__(message, stdout_tail=stdout_tail, stderr_tail=stderr_tail)
         self.failure_kind = failure_kind
+
+
+def _push_failure_diagnostics(exc: BaseException) -> tuple[str, str]:
+    """Return bounded, redacted stdout and stderr from a failed Git command."""
+    stdout = getattr(exc, "stdout", None)
+    if stdout is None:
+        stdout = getattr(exc, "output", None)
+    stderr = getattr(exc, "stderr", None)
+    return (
+        bounded_git_diagnostic(stdout, limit=_PUSH_DIAGNOSTIC_LIMIT),
+        bounded_git_diagnostic(stderr, limit=_PUSH_DIAGNOSTIC_LIMIT),
+    )
 
 
 class DirectBranchReservationCollisionError(RuntimeError):
@@ -319,7 +367,12 @@ def push_branch(
         )
         logger.info("Pushed branch %s to origin", branch_name)
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
+        stdout_tail, stderr_tail = _push_failure_diagnostics(e)
+        raise GitPushError(
+            f"Failed to push branch {branch_name}: {e}",
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+        ) from e
 
 
 def reserve_remote_branch_if_absent(
@@ -484,7 +537,12 @@ def push_branch_if_remote_matches(
             **run_kwargs,
         )
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"Failed to publish direct-scope branch {branch_name}: {exc}") from exc
+        stdout_tail, stderr_tail = _push_failure_diagnostics(exc)
+        raise GitPushError(
+            f"Failed to publish direct-scope branch {branch_name}: {exc}",
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+        ) from exc
 
 
 def delete_reserved_branch_if_unchanged(
@@ -651,6 +709,7 @@ def push_head_to_branch(
         )
         logger.info("Published detached HEAD to the trusted remote branch %s", branch_name)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stdout_tail, stderr_tail = _push_failure_diagnostics(exc)
         # The rejected push can be a local pre-push-hook failure, transport
         # failure, or a server-side lease rejection.  Never infer which from
         # git's stderr: hook output is untrusted diagnostic content and may
@@ -679,6 +738,8 @@ def push_head_to_branch(
                 failure_kind=(
                     "timeout" if isinstance(probe_exc, subprocess.TimeoutExpired) else "transport"
                 ),
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
             ) from probe_exc
         if source_sha is not None and observed and observed[0] == source_sha:
             # A transport error can arrive after receive-pack accepted this
@@ -691,6 +752,8 @@ def push_head_to_branch(
             raise DetachedHeadPushRemoteHeadChangedError(
                 "Detached review push observed a different remote head",
                 failure_kind="lease_drift",
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
             ) from exc
         if isinstance(exc, subprocess.TimeoutExpired):
             failure_kind = "timeout"
@@ -708,6 +771,8 @@ def push_head_to_branch(
         raise DetachedHeadPushRemoteHeadUnchangedError(
             "Detached review push failed while the remote head remained unchanged",
             failure_kind=failure_kind,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
         ) from exc
 
 

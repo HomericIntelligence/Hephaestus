@@ -444,11 +444,25 @@ class TestPushBranch:
             cwd=tmp_path,
         )
 
-    def test_push_failure_raises_runtime_error(self, git_utils_mocks: Any, tmp_path: Path) -> None:
-        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(1, ["git", "push"])
+    def test_push_failure_preserves_safe_diagnostics(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A branch push keeps bounded, redacted hook output for its caller."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            stderr=("x" * 5000) + f"\npre-push hook token={github_token}",
+        )
 
-        with pytest.raises(RuntimeError, match="Failed to push branch 123-auto-impl"):
+        with pytest.raises(
+            git_utils.GitPushError, match="Failed to push branch 123-auto-impl"
+        ) as exc_info:
             push_branch("123-auto-impl", tmp_path)
+
+        assert github_token not in exc_info.value.stderr_tail
+        assert "redacted" in exc_info.value.stderr_tail
+        assert len(exc_info.value.stderr_tail) <= 4000
 
     def test_push_branch_threads_timeout(self, git_utils_mocks: Any, tmp_path: Path) -> None:
         """push_branch bounds its git push with the caller's timeout."""
@@ -596,6 +610,28 @@ class TestDirectScopeBranchReservation:
         assert git_utils_mocks.run.call_args_list[1].args[0][-1] == (
             f"{source_sha}:refs/heads/2452-auto-impl"
         )
+
+    def test_strict_publish_failure_preserves_safe_diagnostics(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A strict branch push keeps bounded, redacted hook output."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        git_utils_mocks.run.side_effect = [
+            Mock(returncode=0),
+            subprocess.CalledProcessError(
+                1,
+                ["git", "push"],
+                stderr=("x" * 5000) + f"\npre-push hook token={github_token}",
+            ),
+        ]
+
+        with pytest.raises(git_utils.GitPushError) as exc_info:
+            push_branch_if_remote_matches("2452-auto-impl", "a" * 40, tmp_path)
+
+        stderr_tail = exc_info.value.stderr_tail
+        assert github_token not in stderr_tail
+        assert "redacted" in stderr_tail
+        assert len(stderr_tail) <= 4000
 
     def test_release_requires_the_original_reservation_sha(
         self, git_utils_mocks: Any, tmp_path: Path
@@ -865,11 +901,12 @@ class TestPushDetachedHead:
     ) -> None:
         """A failed local hook remains retryable when the remote is unchanged."""
         pin = "a" * 40
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
         git_utils_mocks.run.side_effect = [
             subprocess.CalledProcessError(
                 1,
                 ["git", "push"],
-                stderr="sensitive pre-push hook output must not escape",
+                stderr=("x" * 5000) + f"\npre-push hook token={github_token}",
             ),
             Mock(stdout=pin + "\trefs/heads/123-auto-impl\n"),
         ]
@@ -878,6 +915,11 @@ class TestPushDetachedHead:
             push_head_to_branch("123-auto-impl", pin, tmp_path)
 
         assert "sensitive" not in str(exc_info.value)
+        stderr_tail = getattr(exc_info.value, "stderr_tail", "")
+        assert stderr_tail
+        assert github_token not in stderr_tail
+        assert "redacted" in stderr_tail
+        assert len(stderr_tail) <= 4000
 
     @pytest.mark.parametrize(
         ("push_failure", "failure_kind"),

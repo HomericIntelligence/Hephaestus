@@ -10860,6 +10860,47 @@ class TestGitOps:
         assert result.stdout_tail == "rebase output"
         assert "cannot run gpg" in result.stderr_tail
 
+    def test_continue_rebase_conflict_preserves_command_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A follow-up conflict keeps the failed continuation output."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        failure = subprocess.CalledProcessError(
+            1,
+            ["git", "rebase", "--continue"],
+            output=f"conflict output token={github_token}",
+            stderr=f"pre-push token={github_token}",
+        )
+        receipt = {"conflict_paths": ("x.py",)}
+        with (
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[MagicMock(), MagicMock(), failure],
+            ),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+        ):
+            result = pool._continue_rebase_process(
+                tmp_path,
+                remote="origin",
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                paths=("x.py",),
+                timeout=60,
+            )
+
+        assert result is not None and result.ok is False
+        assert result.error == "rebase conflict resolution required: additional conflicts found"
+        assert github_token not in result.stdout_tail
+        assert github_token not in result.stderr_tail
+        value = result.value if isinstance(result.value, dict) else {}
+        assert value.get("failure_kind") == "continuation"
+        assert value.get("phase") == "rebase_continue"
+        assert value.get("returncode") == 1
+        assert value.get("receipt_error") == ""
+        assert value.get("stdout_tail") == result.stdout_tail
+        assert value.get("stderr_tail") == result.stderr_tail
+
     def test_continue_rebase_rejects_missing_captured_base_ancestry(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -11564,6 +11605,37 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == error
         assert result.value == {"failure_kind": failure_kind}
+
+    def test_push_dispatch_preserves_detached_publish_diagnostics(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A detached publication failure keeps its bounded command output."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        push_error = git_utils.DetachedHeadPushRemoteHeadUnchangedError(
+            failure_kind="unknown",
+            stdout_tail=f"hook stdout token={github_token}",
+            stderr_tail=f"hook stderr token={github_token}",
+        )
+        job = GitJob(
+            repo="test/repo",
+            op="push",
+            timeout_s=60,
+            kwargs={"cwd": Path("/tmp/wt"), "branch": "7-auto"},
+        )
+        with patch(
+            "hephaestus.automation.git_utils.push_current_branch_with_lease_on_divergence",
+            side_effect=push_error,
+        ):
+            pool.submit(job, StageName.MERGE_WAIT)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert github_token not in result.stdout_tail
+        assert github_token not in result.stderr_tail
+        assert "redacted" in result.stdout_tail
+        assert "redacted" in result.stderr_tail
 
     def test_release_branch_reservation_dispatches_conditional_delete(
         self,
@@ -13411,6 +13483,49 @@ class TestGitOps:
             remote_config=ANY,
         )
         normal_push.assert_not_called()
+
+    def test_commit_push_preserves_branch_publication_diagnostics(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A branch publication failure keeps bounded safe command output."""
+        github_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "agent": "claude",
+            },
+        )
+        push_error = git_utils.GitPushError(
+            "Failed to push branch 5-auto",
+            stdout_tail=f"hook stdout token={github_token}",
+            stderr_tail=f"hook stderr token={github_token}",
+        )
+        with (
+            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch(
+                "hephaestus.automation.git_utils.push_branch",
+                side_effect=push_error,
+            ),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "Failed to push branch 5-auto"
+        assert github_token not in result.stdout_tail
+        assert github_token not in result.stderr_tail
+        assert "redacted" in result.stdout_tail
+        assert "redacted" in result.stderr_tail
 
     def test_direct_scope_no_commit_releases_unchanged_reservation(
         self,
