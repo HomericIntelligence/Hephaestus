@@ -419,8 +419,10 @@ grades, and decision-shaped output are audit evidence, not authorization.
 and fresh live GitHub facts confirm the reviewed open, unarmed head, complete
 thread state, and an exclusive label transition by readback. That GitHub label
 is automated implementation eligibility. Before each server merge request,
-`merge_wait` requires the current-process reviewed-head proof and complete
-passing required status evidence for that exact head. It reads the effective
+`merge_wait` requires the current-process reviewed-head proof or a verified
+retained rebase proof. It requires complete passing status evidence for the
+merge head. A retained proof keeps the original review identity and binds a
+separate resulting commit after host verification. It reads the effective
 classic and ruleset policy. A required merge queue uses exact-head GraphQL
 admission. A direct SHA-conditional merge is available only when one policy
 source applies strict-update protection that the current actor cannot bypass.
@@ -630,9 +632,10 @@ may write `state:implementation-go`; review prose, grades, and decision-shaped
 output do not authorize it. Normal review may collect CI/CD evidence as
 context, but the loop does not change CI/CD and no workflow, status, artifact,
 or lease independently authorizes it. `merge_wait` additionally requires
-complete passing required status evidence for the exact reviewed head before
-the server merge request. It uses exact-head queue admission when the effective
-ruleset requires a merge queue. Otherwise, direct merge requires strict-update
+complete passing required status evidence for the merge head before the
+server merge request. A host-verified rebase can supply a separate merge head
+while the original reviewed head remains unchanged. It uses exact-head queue
+admission when the effective ruleset requires a merge queue. Otherwise, direct merge requires strict-update
 protection from a source that the current actor cannot bypass. No queue stage
 mutates native auto-merge.
 
@@ -641,8 +644,8 @@ host creates one deterministic child issue and keeps the source PR in the
 exclusive implementation-NO-GO state. The host reconciles that child before a
 later review checkout. An open child parks the source PR without review-budget
 cost. A closed child without merged implementation needs operator action. A
-merged child causes a host-only source-branch synchronization and then a fresh
-broad review. No agent receives the expansion as source-branch implementation
+merged child that is absent from the source branch requires a manual rebase.
+The source PR then needs a fresh broad review. No agent receives the expansion as source-branch implementation
 work. In a mixed audit, only a validated scope retraction can go to the writer
 before the source PR parks.
 

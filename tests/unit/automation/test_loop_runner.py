@@ -1197,3 +1197,44 @@ def test_review_scope_still_admits_both_writer_and_reviewer(
             ["--phases", "drive-green", "--agent", "codex", f"--{role}-agent", "pi"], monkeypatch
         )
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize("scope", ["--issues", "--prs"])
+def test_manual_rebase_requires_and_retains_explicit_scope(scope: str) -> None:
+    """The manual rebase option needs an explicit item selection."""
+    args = loop_runner._parse_args(["--rebase", scope, "8"])
+    assert args.rebase is True
+    assert loop_runner._parse_args([]).rebase is False
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--rebase"])
+
+
+def test_manual_rebase_reaches_pipeline_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop passes the manual request to the coordinator."""
+    cfg = _capture_config(["--rebase", "--prs", "8"], monkeypatch)
+    assert isinstance(cfg, PipelineConfig)
+    assert cfg.rebase is True
+
+
+def test_manual_rebase_requires_the_implementation_phase() -> None:
+    """A manual writer job needs the implementation stage in the selected scope."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--rebase", "--issues", "8", "--phases", "plan"])
+
+
+def test_update_plan_reaches_pipeline_without_global_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plan update changes only the selected issues."""
+    cfg = _capture_config(["--update-plan", "--issues", "8"], monkeypatch)
+    assert isinstance(cfg, PipelineConfig)
+    assert cfg.update_plan is True
+    assert cfg.force is False
+
+
+@pytest.mark.parametrize("args", [[], ["--prs", "8"], ["--issues", "8", "--phases", "implement"]])
+def test_update_plan_rejects_missing_issue_or_planning_scope(
+    args: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A plan update needs explicit issues and the plan phase."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--update-plan", *args])
+    assert "--update-plan requires" in capsys.readouterr().err

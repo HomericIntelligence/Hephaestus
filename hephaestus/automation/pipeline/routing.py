@@ -109,6 +109,9 @@ ROUTES: dict[StageName, Route] = {
         fail_routes={
             "plan_not_go": StageName.PLAN_REVIEW,
             "already_implementation_go_pr": StageName.MERGE_WAIT,
+            "review_retained_after_rebase": StageName.MERGE_WAIT,
+            "manual_rebase_complete_planning": StageName.PLANNING,
+            "manual_rebase_complete_plan_review": StageName.PLAN_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={
@@ -124,7 +127,6 @@ ROUTES: dict[StageName, Route] = {
             "agent_error": StageName.IMPLEMENTATION,
             "empty_pr_diff": StageName.IMPLEMENTATION,
             "implementation_remediation": StageName.IMPLEMENTATION,
-            "scope_dependency_sync_required": StageName.IMPLEMENTATION,
             "scope_retraction_before_scope_block": StageName.IMPLEMENTATION,
             "exhaustion": StageName.FINISHED,
             "*": StageName.PR_REVIEW,
@@ -143,7 +145,6 @@ ROUTES: dict[StageName, Route] = {
             "reviewed_head_missing": StageName.PR_REVIEW,
             "reviewed_head_drift": StageName.PR_REVIEW,
             "merge_conflicting": StageName.IMPLEMENTATION,
-            "post_review_rebase_required": StageName.IMPLEMENTATION,
             "*": StageName.FINISHED,
         },
         budgets={"merge": DEFAULT_DRIVE_GREEN_LOOPS},

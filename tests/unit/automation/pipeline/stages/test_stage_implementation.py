@@ -759,7 +759,7 @@ class TestGate:
     def test_scope_dependency_sync_requires_exact_ancestor_and_aborts_conflict(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Child synchronization is host-only and proves the child merge SHA."""
+        """An old dependency-sync state does not authorize a rebase."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
@@ -775,20 +775,7 @@ class TestGate:
 
         request = stage.step(item, ctx)
 
-        assert isinstance(request, JobRequest)
-        assert isinstance(request.job, GitJob)
-        assert request.job.kwargs["abort_on_conflict"] is True
-        assert request.job.kwargs["required_ancestor_shas"] == ("b" * 40,)
-
-        stage.on_job_done(
-            item,
-            JobResult(ok=False, error="mechanical rebase hit conflicts; aborted"),
-            ctx,
-        )
-
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "scope_dependency_sync_failed"
-        )
+        assert request == StageOutcome(Disposition.FINISH_FAIL, "rebase_reason_unavailable")
         assert item.payload.get("rebase_conflict") is not True
 
     def test_gate_existing_fork_with_impl_go_routes_to_merge_wait(
@@ -985,7 +972,7 @@ class TestGate:
     def test_adopted_clean_worktree_advances_to_pr_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A clean adopted worktree is rebased before review."""
+        """A clean adopted worktree goes directly to review."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
@@ -994,7 +981,7 @@ class TestGate:
         result = stage.step(item, ctx)
 
         assert isinstance(result, Continue)
-        assert result.next_state == "REBASE_WAIT"
+        assert result.next_state == "ADOPTED"
 
         item.state = "ADOPTED"
         outcome = stage.step(item, ctx)
@@ -1037,6 +1024,7 @@ class TestGate:
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload["rebase_reason"] = "manual"
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/implementation-writer"
 
@@ -1045,7 +1033,7 @@ class TestGate:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.op == "rebase"
-        assert result.job.descr == "rebase_writer_before_review"
+        assert result.job.descr == "rebase_implementation_writer"
         assert result.job.kwargs == {
             "cwd": Path("/tmp/implementation-writer"),
             "base_branch": "main",
@@ -1053,6 +1041,10 @@ class TestGate:
             "publish_rebased_head": True,
             "branch": "1-auto-impl",
             "expected_remote_sha": "a" * 40,
+            "rebase_reason": "manual",
+            "issue_number": 1,
+            "repo_root": "/tmp/repo",
+            "pr_number": 1001,
         }
 
         stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), ctx)
@@ -1130,6 +1122,7 @@ class TestGate:
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload["rebase_reason"] = "manual"
         result = JobResult(
             ok=False,
             value={
@@ -2023,6 +2016,7 @@ class TestWorktreeAndAdvise:
             "refresh_base": True,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
+            "record_initial_creation": True,
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
@@ -2152,6 +2146,7 @@ class TestWorktreeAndAdvise:
         item.payload.update(
             {
                 "post_review_rebase_required": True,
+                "rebase_reason": "manual",
                 "implementation_writer_restored": True,
             }
         )
@@ -2599,6 +2594,7 @@ class TestWorktreeAndAdvise:
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload["rebase_reason"] = "manual"
         item.payload.update(
             {
                 "post_review_rebase_required": True,
@@ -2646,6 +2642,7 @@ class TestWorktreeAndAdvise:
             "refresh_base": False,
             "repo_root": "/tmp/repo",
             "source_lane": "impl",
+            "record_initial_creation": True,
             "base_sha": "a" * 40,
         }
 
@@ -2899,7 +2896,7 @@ class TestWorktreeAndAdvise:
         assert "git_error" not in item.payload
         assert "_direct_scope_reservation" not in item.payload
         item.state = "DIRTY_DECISION_WAIT"
-        assert stage.step(item, ctx) == Continue(next_state="REBASE_WAIT")
+        assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
     def test_worktree_string_result_stores_path(self, make_ctx: Any, make_work_item: Any) -> None:
         """A plain string worktree result is the worktree path."""
@@ -3025,7 +3022,7 @@ class TestWorktreeAndAdvise:
         result = stage.step(item, ctx)
 
         assert isinstance(result, Continue)
-        assert result.next_state == "ADVISE_WAIT"
+        assert result.next_state == "REBASE_WAIT"
 
     def test_dirty_worktree_requests_decision_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """A dirty reused worktree submits the COMMIT/STASH decision job."""
@@ -6301,7 +6298,11 @@ class TestFullWalks:
 
         pool = FakeWorkerPool()
         pool.script(
-            JobResult(ok=True, value={"path": "/tmp/wt5", "dirty": False}),  # worktree
+            JobResult(
+                ok=True,
+                value={"path": "/tmp/wt5", "dirty": False, "impl_source_revision": "a" * 40},
+            ),
+            JobResult(ok=True, value={"head_sha": "a" * 40}),  # worktree
             JobResult(ok=True, value="prior learnings"),  # advise
             JobResult(ok=True, value="Implemented the widget."),  # implement
             JobResult(ok=True, value=0),  # pre-PR tests green
@@ -6314,6 +6315,7 @@ class TestFullWalks:
         assert outcome.disposition == Disposition.ADVANCE
         assert [h.job.descr for h in pool.submitted] == [
             "create_worktree",
+            "rebase_implementation_writer",
             "advise",
             "implement",
             "pre_pr_tests",
@@ -6337,7 +6339,11 @@ class TestFullWalks:
 
         pool = FakeWorkerPool()
         pool.script(
-            JobResult(ok=True, value={"path": "/tmp/wt6", "dirty": False}),  # worktree
+            JobResult(
+                ok=True,
+                value={"path": "/tmp/wt6", "dirty": False, "impl_source_revision": "a" * 40},
+            ),
+            JobResult(ok=True, value={"head_sha": "a" * 40}),  # worktree
             JobResult(ok=True, value="done"),  # implement
             JobResult(ok=False, value=1, stdout_tail="FAILED test_z"),  # tests red
             JobResult(ok=True, value="fixed"),  # test_fix resume
@@ -6351,6 +6357,7 @@ class TestFullWalks:
         assert outcome.disposition == Disposition.ADVANCE
         assert [h.job.descr for h in pool.submitted] == [
             "create_worktree",
+            "rebase_implementation_writer",
             "implement",
             "pre_pr_tests",
             "test_fix",
@@ -6377,7 +6384,11 @@ class TestFullWalks:
         item.payload.update({"issue_title": "Repair publication", "issue_body": ""})
         pool = FakeWorkerPool()
         pool.script(
-            JobResult(ok=True, value={"path": "/tmp/wt7", "dirty": False}),
+            JobResult(
+                ok=True,
+                value={"path": "/tmp/wt7", "dirty": False, "impl_source_revision": "a" * 40},
+            ),
+            JobResult(ok=True, value={"head_sha": "a" * 40}),
             JobResult(ok=True, value="implemented"),
             JobResult(
                 ok=False,
@@ -6398,14 +6409,15 @@ class TestFullWalks:
         assert outcome.disposition == Disposition.ADVANCE
         assert [handle.job.descr for handle in pool.submitted] == [
             "create_worktree",
+            "rebase_implementation_writer",
             "implement",
             "pre_pr_tests",
             "pre_pr_tests_native_fallback",
             "commit_push",
         ]
-        assert pool.submitted[2].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
-        assert pool.submitted[2].job.verified_runner_source_revision == ""
-        assert pool.submitted[3].job.argv == PRE_PR_TEST_ARGV
+        assert pool.submitted[3].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[3].job.verified_runner_source_revision == "a" * 40
+        assert pool.submitted[4].job.argv == PRE_PR_TEST_ARGV
         assert item.pr == 1001
         assert (
             "`uv run pytest tests -q --tb=short` — passed "
@@ -6427,10 +6439,13 @@ class TestFullWalks:
 
         for expected_attempts in (1, 2):
             pool = FakeWorkerPool()
-            pool.script(
-                JobResult(ok=True, value={"path": "/tmp/wt8"}),  # worktree
-                JobResult(ok=False, error="529 overload"),  # implement crash
-            )
+            results = [
+                JobResult(ok=True, value={"path": "/tmp/wt8", "impl_source_revision": "a" * 40})
+            ]
+            if expected_attempts == 1:
+                results.append(JobResult(ok=True, value={"head_sha": "a" * 40}))
+            results.append(JobResult(ok=False, error="529 overload"))
+            pool.script(*results)
             outcome = _drive(stage, item, ctx, pool)
             assert isinstance(outcome, StageOutcome)
             assert outcome.disposition == Disposition.RETRY

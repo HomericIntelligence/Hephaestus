@@ -2,7 +2,7 @@
 
 Extracted from loop_runner.py (refs #1360 / umbrella #1179). This module
 owns the cluster of functions that interact with GitHub's repo list API,
-local git operations (clone, fetch, rebase), and open-issue/failing-PR
+local Git operations (clone and fetch), and open-issue/failing-PR
 counting. GitHub CLI calls go through ``hephaestus.github.client.gh_call``;
 local git operations shell out directly. Their
 pure-function helpers are unit-tested in
@@ -19,10 +19,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
 from hephaestus.automation.github_api import gh_call
 from hephaestus.config.child_environments import build_git_signing_env
-from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 LOG = logging.getLogger(__name__)
@@ -436,163 +434,3 @@ def _clone_missing_repos(org: str, repos: list[str], projects_dir: Path) -> None
             _ensure_clone(org, repo, dest)
         except Exception as exc:
             LOG.error("[%s] clone failed: %s — repo will be marked failed", repo, exc)
-
-
-def _detect_remote_base_ref(repo: str, repo_dir: Path) -> str:
-    """Return the remote default branch ref for ``repo_dir``."""
-    try:
-        symbolic = subprocess.run(
-            ["git", "-C", str(repo_dir), "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=METADATA_TIMEOUT,
-            env=build_git_signing_env(),
-        )
-        detected = symbolic.stdout.strip()
-        if symbolic.returncode == 0 and detected:
-            return detected
-    except subprocess.TimeoutExpired:
-        LOG.warning("[%s] default-branch detection timed out; trying fallback refs", repo)
-
-    for candidate in ("origin/main", "origin/master"):
-        try:
-            verified = subprocess.run(
-                ["git", "-C", str(repo_dir), "rev-parse", "--verify", candidate],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=METADATA_TIMEOUT,
-                env=build_git_signing_env(),
-            )
-        except subprocess.TimeoutExpired:
-            continue
-        if verified.returncode == 0:
-            LOG.warning("[%s] using fallback base ref %s", repo, candidate)
-            return candidate
-    LOG.warning("[%s] could not detect base ref; falling back to origin/main", repo)
-    return "origin/main"
-
-
-def _local_ahead_count(repo: str, repo_dir: Path, base_ref: str) -> int:
-    """Return the number of commits on HEAD that are not in ``base_ref``."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_dir), "rev-list", "--count", f"{base_ref}..HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=METADATA_TIMEOUT,
-            env=build_git_signing_env(),
-        )
-    except subprocess.TimeoutExpired:
-        LOG.warning("[%s] timed out checking local commits ahead of %s", repo, base_ref)
-        return 0
-    if result.returncode != 0:
-        LOG.warning("[%s] could not check local commits ahead of %s", repo, base_ref)
-        return 0
-    try:
-        return int(result.stdout.strip() or "0")
-    except ValueError:
-        LOG.warning("[%s] invalid ahead count for %s: %r", repo, base_ref, result.stdout)
-        return 0
-
-
-def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
-    """Fetch + rebase the remote default branch.
-
-    Returns ``(short_sha, fetch_ok)`` — a 7-char SHA and a flag indicating
-    whether the network refresh succeeded. When ``fetch_ok`` is False the
-    rebase ran against whatever the local clone already had; callers should
-    surface the staleness in operator-facing logs but the SHA value itself
-    remains a clean git hash (no suffix) because it is propagated through
-    typed phase configuration and used for session naming
-    (``hephaestus/automation/session_naming.py:181``). Adding a suffix
-    would propagate the "stale" marker into every child session label and
-    would also break any future caller that consumed the env var as a git
-    ref. The staleness is conveyed via the second return value instead.
-
-    If the local checkout is ahead of the detected base ref, the rebase uses a
-    per-commit exec hook that re-signs and DCO-signs replayed commits so repo
-    preparation cannot silently create PR-policy-invalid history.
-    """
-    fetch_ok = True
-    try:
-        fetch_result = resilient_call(
-            subprocess.run,
-            ["git", "-C", str(repo_dir), "fetch", "origin", "--quiet"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=NETWORK_TIMEOUT,
-            env=build_git_signing_env(),
-            circuit_breaker_name="git-fetch",
-        )
-    except subprocess.TimeoutExpired:
-        LOG.warning("[%s] git fetch timed out; rebasing against stale remote base", repo)
-        fetch_ok = False
-    else:
-        # subprocess.run(check=False) does NOT raise on non-zero rc. macOS
-        # sandbox denials surface here as rc=1 with stderr "cannot open
-        # .git/FETCH_HEAD: Operation not permitted" (#993). Without this
-        # inspection the loop logs the resulting trunk SHA as if the refresh
-        # succeeded, masking the permission problem.
-        rc = getattr(fetch_result, "returncode", 0)
-        if rc != 0:
-            stderr = (getattr(fetch_result, "stderr", "") or "").strip()
-            LOG.warning(
-                "[%s] git fetch failed (rc=%s); rebasing against stale remote base: %s",
-                repo,
-                rc,
-                stderr or "<no stderr>",
-            )
-            fetch_ok = False
-    base_ref = _detect_remote_base_ref(repo, repo_dir)
-    local_ahead = _local_ahead_count(repo, repo_dir, base_ref)
-    rebase_cmd = ["git", "-C", str(repo_dir), "rebase", "--empty=drop", base_ref]
-    if local_ahead > 0:
-        rebase_cmd.extend(["--exec", COMMIT_POLICY_REWRITE_EXEC])
-    rebase_cmd.append("--quiet")
-    rb = subprocess.run(
-        rebase_cmd,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=METADATA_TIMEOUT,
-        env=build_git_signing_env(),
-    )
-    if rb.returncode != 0:
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "rebase", "--abort"],
-            capture_output=True,
-            check=False,
-            timeout=METADATA_TIMEOUT,
-            env=build_git_signing_env(),
-        )
-        if local_ahead > 0:
-            LOG.warning(
-                "[%s] rebase failed with %s local commit(s) ahead of %s; preserving HEAD",
-                repo,
-                local_ahead,
-                base_ref,
-            )
-        else:
-            # No local commits are at risk, so restore a clean remote-base trunk
-            # and keep the loop moving.
-            LOG.warning("[%s] rebase failed, hard-resetting to %s", repo, base_ref)
-            subprocess.run(
-                ["git", "-C", str(repo_dir), "reset", "--hard", base_ref, "--quiet"],
-                capture_output=True,
-                check=False,
-                timeout=METADATA_TIMEOUT,
-                env=build_git_signing_env(),
-            )
-    sha = subprocess.run(
-        ["git", "-C", str(repo_dir), "rev-parse", "--short=7", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=METADATA_TIMEOUT,
-        env=build_git_signing_env(),
-    )
-    return (sha.stdout.strip() or "unknown", fetch_ok)

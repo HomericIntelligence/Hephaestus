@@ -274,6 +274,12 @@ class SourceCoordinator(_CoordinatorHost):
             if defer_if_full:
                 return False
             raise OverflowError("StageQueue is full")
+        if item.payload.get("update_plan_required") and item.issue is not None:
+            self._plan_updates_selected.add((item.repo, item.issue))
+        if item.payload.get("manual_rebase_required"):
+            self._manual_rebase_selected.update(
+                item.payload.get("manual_rebase_selection_keys", ())
+            )
         self._clear_implementation_file_claims_on_exit(item, stage)
         item.stage = stage
         if enter:
@@ -611,37 +617,37 @@ class SourceCoordinator(_CoordinatorHost):
         stage: ct.StageName | None,
         reason: str,
         scope_stages: frozenset[ct.StageName] | None,
+        *,
+        repo: str = "",
     ) -> tuple[ct.StageName | None, str, bool]:
-        """Reconcile a classified entry stage with the run's pipeline scope.
+        """Apply explicit plan updates and the selected stage scope.
 
-        Full-pipeline runs (``scope_stages is None``) pass the classification
-        through unchanged. Under a partial scope (e.g. the planner CLI's
-        planning -> plan_review scope) an issue can classify PAST the scope —
-        an at-or-past ``state:plan-go`` issue seeds to IMPLEMENTATION, which is
-        out of scope. Two reconciliations:
-
-        - ``--force``: re-route any in-pipeline (non-excluded) stage that is not
-          already the scope's entry stage back to the scope's FIRST stage so
-          the work is redone (for the planner scope, re-plan from PLANNING).
-        - default: an issue that classifies past the scope has already
-          completed the scoped work, so clamp it to FINISHED (pass) rather than
-          push it into an out-of-scope stage the trimmed route table has no row
-          for. In-scope classifications (e.g. PLANNING/PLAN_REVIEW) are kept.
-
-        Exclusions (``stage is None``: ``state:skip``) are never
-        overridden — force is a re-plan knob, not a skip bypass.
+        A selected plan update routes to planning once per repository and issue.
+        Excluded and terminal items keep their existing result. A full pipeline
+        otherwise keeps its classification. A partial scope with ``force``
+        returns eligible work to its first stage. Without force, work past the
+        selected scope finishes, and work before the scope waits.
 
         Args:
-            issue: The issue number (for the reason string).
-            stage: The classified entry stage (or None when excluded).
-            reason: The classification reason.
-            scope_stages: The scope's stage set, or None for a full run.
+            issue: Issue number.
+            stage: Classified entry stage, or None for an excluded item.
+            reason: Classification reason.
+            scope_stages: Selected stages, or None for the full pipeline.
+            repo: Repository key for per-invocation plan-update tracking.
 
         Returns:
-            The reconciled ``(stage, reason, passed)``. ``passed`` is used when
-            the stage is clamped directly to ``FINISHED``.
+            The stage, reason, and pass status for direct admission.
 
         """
+        selected_repo = repo or (self.config.repos[0] if len(self.config.repos) == 1 else "")
+        if (
+            self.config.update_plan
+            and selected_repo
+            and issue in self.config.issues
+            and (selected_repo, issue) not in self._plan_updates_selected
+            and stage not in (None, ct.StageName.REPO, ct.StageName.FINISHED, ct.StageName.LEARNING)
+        ):
+            return ct.StageName.PLANNING, f"#{issue} plan update ({reason})", True
         if stage is None or scope_stages is None:
             return stage, reason, True
 
@@ -743,17 +749,18 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
-            if pending_audit is not None or has_go:
-                stage_name = (
-                    ct.StageName.PR_REVIEW if pending_audit is not None else ct.StageName.MERGE_WAIT
-                )
+            rebase_record = _seeding.read_review_rebase_record(github, pr)
+            if rebase_record is not None and rebase_record.issue_number != issue_number:
+                raise _seeding.IssueClassificationError("rebase review issue does not match")
+            if pending_audit is not None or has_go or rebase_record is not None:
+                stage_name = _seeding.pending_review_entry_stage(pending_audit, rebase_record)
                 reason = (
                     f"PR #{pr} has a pending implementation-go audit"
                     if pending_audit is not None
                     else f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}"
                 )
                 stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier, stage_name, reason, scope_stages
+                    scope_identifier, stage_name, reason, scope_stages, repo=repo
                 )
                 entries.append(
                     _seeding.SeedEntry(
@@ -765,6 +772,7 @@ class SourceCoordinator(_CoordinatorHost):
                         issue_number=issue_number,
                         passed=passed,
                         pending_implementation_go_audit=pending_audit,
+                        pending_review_rebase_record=rebase_record,
                         pending_implementation_go_label_confirmed=has_go,
                     )
                 )
@@ -796,6 +804,7 @@ class SourceCoordinator(_CoordinatorHost):
                     ct.StageName.PR_REVIEW,
                     f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
                     scope_stages,
+                    repo=repo,
                 )
                 entries.append(
                     _seeding.SeedEntry(
@@ -878,6 +887,8 @@ class SourceCoordinator(_CoordinatorHost):
                 item.payload["pending_implementation_go_label_confirmed"] = (
                     entry.pending_implementation_go_label_confirmed
                 )
+        if entry.pending_review_rebase_record is not None:
+            item.payload["pending_review_rebase_record"] = entry.pending_review_rebase_record
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
         return item

@@ -43,7 +43,7 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # their stage rather than retry it consume no retry budget: plan_not_go
 # (implementation -> plan_review), already_implementation_go_pr (-> merge_wait),
 # not_implementation_go / reviewed_head_missing / reviewed_head_drift
-# (merge_wait -> pr_review), merge_conflicting / post_review_rebase_required
+# (merge_wait -> pr_review), merge_conflicting
 # (merge_wait -> implementation),
 # missing_worktree (-> implementation),
 # no_pr (-> finished), and merge-wait re-review routes all
@@ -54,11 +54,13 @@ _REASON_BUDGET: dict[str, str | None] = {
     "plan_cycles_exhausted": "plan_cycles",
     "plan_not_go": None,
     "already_implementation_go_pr": None,
+    "review_retained_after_rebase": None,
     "head_changed": None,
     "agent_error": None,
     "empty_pr_diff": None,
     "implementation_remediation": None,
-    "scope_dependency_sync_required": None,
+    "manual_rebase_complete_planning": None,
+    "manual_rebase_complete_plan_review": None,
     "scope_retraction_before_scope_block": None,
     "exhaustion": None,
     "fix_exhausted": None,
@@ -66,7 +68,6 @@ _REASON_BUDGET: dict[str, str | None] = {
     "reviewed_head_missing": None,
     "reviewed_head_drift": None,
     "merge_conflicting": None,
-    "post_review_rebase_required": None,
     "resume_implementation": None,
     "resume_plan_review": None,
     "missing_worktree": None,

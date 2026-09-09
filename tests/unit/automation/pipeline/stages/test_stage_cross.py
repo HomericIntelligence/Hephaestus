@@ -35,10 +35,7 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 # Sanity anchors: the reasons this composition exercises are ROUTES rows.
 assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLEMENTATION
 assert ROUTES[StageName.IMPLEMENTATION].next == StageName.PR_REVIEW
-assert (
-    ROUTES[StageName.MERGE_WAIT].fail_routes["post_review_rebase_required"]
-    == StageName.IMPLEMENTATION
-)
+assert ROUTES[StageName.MERGE_WAIT].fail_routes["merge_conflicting"] == StageName.IMPLEMENTATION
 
 _LABEL_MUTATIONS = {
     "gh_issue_add_labels",
@@ -452,11 +449,11 @@ class TestPostReviewRebaseReusesRestoredWriter:
 
         rebase_failback = MergeWaitStage._post_review_rebase(
             item,
-            "post_review_rebase_required",
+            "merge_conflicting",
         )
         assert rebase_failback == StageOutcome(
             Disposition.FAIL_BACK,
-            "post_review_rebase_required",
+            "merge_conflicting",
         )
 
         item.stage = ROUTES[StageName.MERGE_WAIT].fail_routes[rebase_failback.note]

@@ -142,58 +142,18 @@ def test_hephaestus_policy_rejects_readme_index_drift(tmp_path: Path) -> None:
     assert "README index out of sync" in (result.error or "")
 
 
-def test_ordinary_rebase_does_not_select_a_conflict_policy(tmp_path: Path) -> None:
-    """An ordinary rebase does not select a conflict-only policy."""
+@pytest.mark.parametrize("publish", [False, True])
+def test_manual_rebase_without_conflicts_does_not_run_repository_policy(
+    tmp_path: Path, publish: bool
+) -> None:
+    """A successful manual replay does not run conflict-only validation."""
     pool = WorkerPool(
         size=1,
         shutdown=threading.Event(),
         completion_q=queue.Queue(),
         lock_dir=tmp_path / "locks",
     )
-    job = GitJob(
-        repo="Hephaestus",
-        op="rebase",
-        timeout_s=60,
-        kwargs={"cwd": tmp_path, "base_branch": "main"},
-    )
-    try:
-        with (
-            patch.object(pool, "_authenticated_remote_revalidator", return_value=lambda: ({}, ())),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool._required_git_signing_env",
-                return_value={},
-            ),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.git_utils.rebase_worktree_onto",
-                return_value=True,
-            ),
-            patch.object(pool, "_select_rebase_policy", return_value=None) as select,
-        ):
-            result = pool._git_rebase(job)
-    finally:
-        pool.shutdown(mark_interrupted=False)
-
-    assert result == JobResult(ok=True, value=True)
-    select.assert_not_called()
-
-
-def test_published_ordinary_rebase_does_not_run_repository_policy(tmp_path: Path) -> None:
-    """An ordinary published rebase does not run conflict-only policy."""
-    pool = WorkerPool(
-        size=1,
-        shutdown=threading.Event(),
-        completion_q=queue.Queue(),
-        lock_dir=tmp_path / "locks",
-        rebase_policy_selector=lambda _repo: RebaseValidationPolicy(
-            name="hephaestus-adr-v1",
-            semantic_validator=lambda _cwd: JobResult(
-                ok=False,
-                value={"failure_kind": "semantic_validation"},
-                error="policy must not run",
-            ),
-            structural_test_argv=("tests/unit/docs/test_adr_records.py",),
-        ),
-    )
+    head, base, rewritten = "a" * 40, "b" * 40, "c" * 40
     job = GitJob(
         repo="Hephaestus",
         expected_repository="HomericIntelligence/Hephaestus",
@@ -201,74 +161,65 @@ def test_published_ordinary_rebase_does_not_run_repository_policy(tmp_path: Path
         timeout_s=60,
         kwargs={
             "cwd": tmp_path,
-            "base_branch": "main",
-            "remote": "origin",
-            "publish_rebased_head": True,
+            "rebase_reason": "manual",
+            "publish_rebased_head": publish,
             "branch": "7-auto-impl",
-            "expected_remote_sha": "a" * 40,
+            "expected_remote_sha": head,
+            "expected_head_sha": head,
         },
     )
     try:
         with (
+            patch.object(pool, "_sync_writer_to_expected_remote_head", return_value=None),
+            patch.object(pool, "_authenticated_remote_revalidator", return_value=lambda: ({}, ())),
             patch.object(
-                pool,
-                "_authenticated_remote_git_configuration",
-                return_value=({"AUTH": "fresh"}, ()),
+                pool, "_git_fetch_main", return_value=JobResult(ok=True, value={"head_sha": base})
             ),
-            patch.object(
-                pool,
-                "_authenticated_remote_revalidator",
-                return_value=lambda: ({"AUTH": "initial"}, ()),
+            patch.object(pool, "_read_publish_head", side_effect=[head, head, rewritten]),
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.git_utils.is_clean_working_tree",
+                return_value=True,
+            ),
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.git_utils.run",
+                return_value=MagicMock(returncode=1),
             ),
             patch(
                 "hephaestus.automation.pipeline.worker_pool._required_git_signing_env",
-                return_value={"SIGNING": "required"},
-            ) as signing,
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.git_utils.run",
-                side_effect=(MagicMock(returncode=0), MagicMock(returncode=1)),
+                return_value={},
             ),
             patch(
                 "hephaestus.automation.pipeline.worker_pool.git_utils.rebase_worktree_onto",
                 return_value=True,
             ) as rebase,
-            patch.object(pool, "_select_rebase_policy", wraps=pool._select_rebase_policy) as select,
-            patch.object(pool, "_run_rebase_structural_validation") as structural,
-            patch.object(pool, "_validate_rebased_tree") as semantic,
-            patch.object(pool, "_read_publish_head", return_value="b" * 40),
             patch(
                 "hephaestus.automation.pipeline.worker_pool.git_utils.push_head_to_branch"
             ) as push,
+            patch.object(pool, "_select_rebase_policy") as select,
+            patch.object(pool, "_run_rebase_structural_validation") as structural,
+            patch.object(pool, "_validate_rebased_tree") as semantic,
         ):
-            result = pool._git_rebase(job)
+            result = pool._git_rebase_once(job)
     finally:
         pool.shutdown(mark_interrupted=False)
 
     assert result == JobResult(
-        ok=True,
-        value={"rebased": True, "published": True, "head_sha": "b" * 40},
+        ok=True, value={"rebased": True, "published": publish, "head_sha": rewritten}
     )
-    signing.assert_called_once_with(tmp_path, timeout=60)
     select.assert_not_called()
     structural.assert_not_called()
     semantic.assert_not_called()
-    rebase.assert_called_once_with(
-        cwd=tmp_path,
-        base_branch="main",
-        remote="origin",
-        preserve_conflicts=True,
-        timeout=60,
-        env={"SIGNING": "required"},
-        fetch_env={"AUTH": "initial"},
-        fetch_config=(),
-    )
-    push.assert_called_once_with(
-        "7-auto-impl",
-        "a" * 40,
-        tmp_path,
-        source_sha="b" * 40,
-        timeout=60,
-        env={"AUTH": "fresh"},
-        remote_config=(),
-        revalidate_remote=ANY,
-    )
+    assert rebase.call_args.kwargs["base_sha"] == base
+    assert rebase.call_args.kwargs["preserve_conflicts"] is False
+    assert push.call_count == int(publish)
+    if publish:
+        push.assert_called_once_with(
+            "7-auto-impl",
+            head,
+            tmp_path,
+            source_sha=rewritten,
+            timeout=60,
+            env={},
+            remote_config=(),
+            revalidate_remote=ANY,
+        )

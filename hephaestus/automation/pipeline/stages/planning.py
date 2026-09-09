@@ -123,6 +123,7 @@ from ..plan_journal import (
     reconcile_plan_journal,
 )
 from .base import (
+    GIT_JOB_TIMEOUT_S,
     SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S,
     AgentJob,
     AthenaSkillJob,
@@ -130,6 +131,7 @@ from .base import (
     AthenaSkillResult,
     Continue,
     Disposition,
+    GitJob,
     JobRequest,
     JobResult,
     Stage,
@@ -948,9 +950,9 @@ def _pending_force_after_semantic_clear(
     source_digest: object,
 ) -> StageOutcome | None:
     """Return through entry when a false semantic candidate preceded force."""
-    force_pending = bool(getattr(ctx.config, "force", False)) and not bool(
-        item.payload.get("forced_planning_epoch_started")
-    )
+    force_pending = (
+        bool(getattr(ctx.config, "force", False)) or bool(item.payload.get("update_plan_required"))
+    ) and not bool(item.payload.get("forced_planning_epoch_started"))
     if not force_pending:
         return None
     if isinstance(source_digest, str):
@@ -1833,6 +1835,29 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     return StageOutcome(Disposition.FINISH_FAIL, f"plan not found after {budget} attempts")
 
 
+def _planning_main_refresh_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
+    """Check the issue and fetch main before a new plan update."""
+    if not item.issue:
+        return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+    if item.payload.get("planning_main_refresh_error"):
+        return StageOutcome(Disposition.FINISH_FAIL, "planning main fetch failed")
+    if item.state == "ENTER" and item.payload.get("planning_main_refresh_pending"):
+        return Continue(next_state="FETCH_MAIN_WAIT")
+    if item.state == "FETCH_MAIN_WAIT":
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="fetch_main",
+                timeout_s=GIT_JOB_TIMEOUT_S,
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={"cwd": ctx.paths.repo_root},
+                descr="fetch main for plan update",
+            ),
+            on_done_state="ENTER",
+        )
+    return None
+
+
 class PlanningStage(Stage):
     """Stage for planning an issue: advise -> plan -> verify.
 
@@ -1890,9 +1915,10 @@ class PlanningStage(Stage):
             labels = _require_issue_labels(item, ctx)
         except RuntimeError as exc:
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-        force_replan = bool(getattr(ctx.config, "force", False)) and not bool(
-            item.payload.get("forced_planning_epoch_started")
-        )
+        force_replan = (
+            bool(getattr(ctx.config, "force", False))
+            or bool(item.payload.get("update_plan_required"))
+        ) and not bool(item.payload.get("forced_planning_epoch_started"))
 
         if pending_intent := _pending_wave_non_code_intent(item):
             return _resume_wave_non_code_intent(item, ctx, pending_intent)
@@ -2077,6 +2103,7 @@ class PlanningStage(Stage):
             ):
                 force_replan = False
                 item.payload["forced_planning_epoch_started"] = True
+                item.payload.pop("update_plan_required", None)
             else:
                 # The journal remains durable history, but none of its current
                 # epoch may fast-forward or seed the forced planner invocation.
@@ -2099,7 +2126,9 @@ class PlanningStage(Stage):
                 "exclusive planning entry label was not confirmed",
             )
         if force_replan:
+            item.payload["planning_main_refresh_pending"] = True
             item.payload["forced_planning_epoch_started"] = True
+            item.payload.pop("update_plan_required", None)
             item.payload.pop("requirements_semantic_clear_digest", None)
 
         history = _planning_history(comments)
@@ -2130,8 +2159,9 @@ class PlanningStage(Stage):
             Continue, JobRequest, or StageOutcome.
 
         """
-        if not item.issue:
-            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if refresh_step := _planning_main_refresh_step(item, ctx):
+            return refresh_step
+        assert item.issue is not None  # noqa: S101 - the refresh helper rejects a missing issue
 
         if item.state == "ENTER":
             if item.payload.get("requirements_recovery_required"):
@@ -2231,6 +2261,19 @@ class PlanningStage(Stage):
             ctx: Stage context.
 
         """
+        if item.state == "FETCH_MAIN_WAIT":
+            revision = result.value.get("head_sha") if isinstance(result.value, dict) else None
+            if (
+                not result.ok
+                or not isinstance(revision, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", revision)
+            ):
+                item.payload["planning_main_refresh_error"] = True
+                return
+            item.payload["_synced_default_branch_sha"] = revision
+            item.payload.pop("planning_main_refresh_pending", None)
+            return
+
         if item.state == "ADVISE_WAIT" and not result.ok:
             item.payload["athena_advise_error"] = result.error or "advise failed"
             logger.warning("planning:%s: advise failed: %s", item.issue, result.error)

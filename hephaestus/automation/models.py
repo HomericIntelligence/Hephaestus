@@ -278,11 +278,6 @@ class CIDriverOptions(VerboseParallelWorkerOptionsBase):
     # enumerate unrelated open PRs; explicit `--issues` / `--prs` scopes are
     # resolved regardless of author.
     include_all_authors: bool = False
-    # When True (default), _drive_issue first attempts a mechanical ``git
-    # rebase`` onto the base branch for PRs that are behind/conflicting, pushing
-    # the result with --force-with-lease — no agent spend. Only PRs whose rebase
-    # hits real conflicts fall through to the Claude/Codex agent (#871).
-    enable_mechanical_rebase: bool = True
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
     advise_timeout: int = DEFAULT_AGENT_TIMEOUT
     learn_timeout: int = DEFAULT_AGENT_TIMEOUT

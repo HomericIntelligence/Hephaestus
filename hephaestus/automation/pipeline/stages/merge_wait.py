@@ -22,6 +22,7 @@ The implemented mini-state graph is:
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from pathlib import Path
 
 from hephaestus.automation.arming_state import LearningJournalStore
@@ -31,12 +32,15 @@ from hephaestus.automation.issue_waves import (
     IssueWaveStore,
     WaveLease,
 )
+from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
+from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 
 from ..github_jobs import (
     GitHubJob,
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
+from ..rebase_review import REBASE_REVIEW_PROOF_KEY, RebaseReviewProof
 from ..work_item import LearningIntent
 from .base import (
     Continue,
@@ -50,6 +54,7 @@ from .base import (
     StepResult,
     WorkItem,
 )
+from .rebase_review_recovery import receive_rebase_review, recover_rebase_review
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,35 @@ _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
 _QUEUE_ADMITTED_HEAD = "merge_queue_admitted_head_sha"
 _QUEUE_ADMITTED_PROOF_GENERATION = "merge_queue_admitted_proof_generation"
+
+
+def _merge_head(item: WorkItem) -> object:
+    """Keep readiness state bound to the resulting head."""
+    proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
+    return (
+        proof.resulting_head_sha
+        if isinstance(proof, RebaseReviewProof)
+        else item.payload.get("reviewed_pr_head_sha")
+    )
+
+
+def _bound_rebase_record(item: WorkItem, ctx: StageContext) -> RebaseReviewRecord | None:
+    """Bind the initial audit and host proof for one merge cycle."""
+    proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
+    if proof is None:
+        return None
+    if (
+        not isinstance(proof, RebaseReviewProof)
+        or proof.repository != f"{ctx.org}/{item.repo}"
+        or proof.pr_number != item.pr
+        or proof.issue_number != item.issue
+        or proof.reviewed_head_sha != item.payload.get("reviewed_pr_head_sha")
+    ):
+        raise ValueError("rebase review proof is invalid")
+    audit = item.payload.get("review_audit")
+    if not isinstance(audit, ReviewAudit) or not is_clean_go_review(audit):
+        raise ValueError("rebase review audit is invalid")
+    return RebaseReviewRecord(**asdict(proof), audit=audit)
 
 
 class MergeWaitStage(Stage):
@@ -102,6 +136,14 @@ class MergeWaitStage(Stage):
 
     def _merge(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Freeze one exact proof and dispatch the complete GitHub cycle."""
+        recovery = recover_rebase_review(item, ctx)
+        if recovery is not None:
+            return recovery
+        try:
+            record = _bound_rebase_record(item, ctx)
+        except ValueError:
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_proof_invalid")
+        proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         if item.attempts["merge"] >= ctx.budget("merge"):
@@ -137,12 +179,14 @@ class MergeWaitStage(Stage):
                 pr_number=item.pr,
                 bootstrap_proof=item.payload.get("host_verification_bootstrap_proof"),
                 reviewed_head_sha=reviewed_head,
+                rebase_proof=proof,
+                rebase_record=record,
                 proof_generation=proof_generation,
                 declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),
                 deadline_s=operation_deadline,
                 cancellation=ctx.cancellation,
                 queue_admitted=(
-                    item.payload.get(_QUEUE_ADMITTED_HEAD) == reviewed_head
+                    item.payload.get(_QUEUE_ADMITTED_HEAD) == _merge_head(item)
                     and item.payload.get(_QUEUE_ADMITTED_PROOF_GENERATION) == proof_generation
                 ),
             )
@@ -199,7 +243,7 @@ class MergeWaitStage(Stage):
                         lease,
                         issue_number=item.issue,
                         pr_number=item.pr,
-                        reviewed_head_sha=receipt.request.reviewed_head_sha,
+                        reviewed_head_sha=receipt.request.merge_head_sha,
                         merge_sha=receipt.merge_sha,
                     )
                 except IssueWaveError as exc:
@@ -214,7 +258,7 @@ class MergeWaitStage(Stage):
         if outcome == "required_checks_not_green":
             return StageOutcome(Disposition.BLOCKED, outcome)
         if outcome == "merge_queued":
-            item.payload[_QUEUE_ADMITTED_HEAD] = receipt.request.reviewed_head_sha
+            item.payload[_QUEUE_ADMITTED_HEAD] = receipt.request.merge_head_sha
             item.payload[_QUEUE_ADMITTED_PROOF_GENERATION] = receipt.request.proof_generation
             item.state = MERGE
             return self._park_for_readiness(item, ctx)
@@ -223,7 +267,7 @@ class MergeWaitStage(Stage):
             return self._park_for_readiness(item, ctx)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
-        if outcome in {"merge_conflicting", "post_review_rebase_required"}:
+        if outcome == "merge_conflicting":
             return self._post_review_rebase(item, outcome)
         if outcome == "readiness_wait":
             if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
@@ -245,8 +289,9 @@ class MergeWaitStage(Stage):
 
     @staticmethod
     def _post_review_rebase(item: WorkItem, reason: str) -> StageOutcome:
-        """Send a reviewed stale/conflicting head to implementation ownership."""
+        """Send an exact-head review conflict to the implementation stage."""
         item.payload["post_review_rebase_required"] = True
+        item.payload["rebase_reason"] = "review_conflict"
         return StageOutcome(Disposition.FAIL_BACK, reason)
 
     @staticmethod
@@ -254,7 +299,7 @@ class MergeWaitStage(Stage):
         item: WorkItem, ctx: StageContext
     ) -> StageOutcome | None:
         """Fail closed when an existing matching readiness wait has already expired."""
-        reviewed_head = item.payload.get("reviewed_pr_head_sha")
+        reviewed_head = _merge_head(item)
         if not isinstance(reviewed_head, str) or not reviewed_head:
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
         proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
@@ -279,7 +324,7 @@ class MergeWaitStage(Stage):
     @staticmethod
     def _park_for_readiness(item: WorkItem, ctx: StageContext) -> StageOutcome:
         """Record one bounded non-mutating readiness wait on the timer heap."""
-        reviewed_head = item.payload.get("reviewed_pr_head_sha")
+        reviewed_head = _merge_head(item)
         if not isinstance(reviewed_head, str) or not reviewed_head:
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
         proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
@@ -366,6 +411,8 @@ class MergeWaitStage(Stage):
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store one immutable merge-cycle receipt."""
+        if receive_rebase_review(item, result):
+            return
         if item.state == MERGE:
             if not result.ok:
                 item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = result.error or "merge cycle failed"

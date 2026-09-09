@@ -164,7 +164,8 @@ def test_fresh_plan_read_requires_owned_matching_approval(failure: str | None) -
             _dirty_plan_from_read(receipt)
 
 
-def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("started", [False, True])
+def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path, started: bool) -> None:
     """A dirty restart claims its owned branch without another reservation."""
     import queue
     import threading
@@ -204,6 +205,25 @@ def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path) -> Non
         issue_labels=("state:plan-go",),
     )
     pool = WorkerPool(1, threading.Event(), queue.Queue(), github_job_runner=runner)
+    if started:
+        from hephaestus.automation.pipeline.jobs import JobResult
+
+        start_job = GitJob(
+            repo="project",
+            op="rebase",
+            timeout_s=30,
+            expected_repository="example/project",
+            kwargs={
+                "repo_root": str(repo),
+                "cwd": original.cwd,
+                "issue_number": 12,
+                "branch": branch,
+            },
+        )
+        path, identity = pool._initial_start_identity(start_job)
+        pool._record_initial_start(
+            start_job, JobResult(ok=True, value={"head_sha": head}), path, identity
+        )
     try:
         with patch.object(pool, "_read_remote_branch_head", return_value=head):
             result = pool._run_git(
@@ -216,6 +236,7 @@ def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path) -> Non
                 )
             )
         assert result.ok, result.error
+        assert result.value["implementation_started"] is started
         assert result.value["branch"] == branch
         assert result.value["source_workspace"]["schema_version"] == 2
         assert manager._require_receipt(12, SourceLane.IMPLEMENTATION).dirty_claim is not None

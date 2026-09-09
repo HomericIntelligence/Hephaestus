@@ -71,6 +71,8 @@ if TYPE_CHECKING:
         _repo_issue_sources: deque[_ActiveRepoIssueSource]
         _live_work_permit_ids: set[int]
         _seen_item_ids: set[int]
+        _manual_rebase_selected: set[tuple[str, str, int]]
+        _plan_updates_selected: set[tuple[str, int]]
         _routes: dict[StageName, Route]
         _terminal_summary: TerminalSummary
         _ctx_cache: OrderedDict[str, StageContext]
