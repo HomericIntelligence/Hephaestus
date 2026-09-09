@@ -37,9 +37,11 @@ protection from a source that the current actor cannot bypass.
 
 ## Queue pre-PR source checks
 
-Developer pre-commit hooks do not run pytest. Before a developer creates a PR,
-the developer runs each new or changed test and verifies collection and success.
-The required CI/CD test jobs are the full-suite authority.
+Developer pre-commit hooks and required PR lint run the shared fast pytest
+selection. Before creating a PR, run each new or changed test and verify
+collection and success. Use `--override-ini="addopts="` for focused tests outside
+the fast selection. Nightly CI owns full unit coverage and the remaining
+functional tests, as specified in [ADR-0049](../adr/0049-fast-pr-nightly-tests.md).
 
 Before publishing a Hephaestus implementation, the queue runs the fixed command
 `bash scripts/run_ci_local.sh all --rebuild`. Rebuilding the
@@ -59,15 +61,15 @@ and read-only candidate tree from `HEAD` plus every non-ignored working-tree
 change. This includes untracked source bytes without mutating the implementer's
 real index; pre-commit reads the alternate index, while Gitleaks scans both Git
 history and that exact candidate tree. The entry point mirrors the locally
-executable source-validation jobs in `_required.yml`, including lint, unit and
-integration tests, installed-CLI tests, artifact lifecycle validation,
-security scans, schema and version checks, license policy, shell checks, and
-repository structure checks. A failure returns to the bounded implementation
+executable pull-request jobs in `_required.yml`, including lint, security
+scans, schema and version checks, license policy, shell checks, and repository
+structure checks. The lint job runs the shared fast test hook. Nightly CI runs
+full tests, package checks, and coverage checks. A failure returns to the bounded implementation
 test-fix loop instead of publishing a knowingly red branch.
 
-The host must supply `python3` and `zstd` on `PATH`. The build subset checks
-`zstd` before it provisions the fixed Codex artifact. It stops before a network
-request when the decompressor is not available.
+The host must supply `python3` on `PATH`. The nightly artifact job provisions
+the fixed Codex artifact and checks the decompressor before it makes a network
+request.
 
 For each platform, the shell reports an approved runner-initialization failure.
 Approved failures are an absent engine, an unavailable engine, and a failed
@@ -86,10 +88,9 @@ candidate marker cannot grant native-fallback authority.
 
 This queue-specific pass is not a developer pre-commit hook. It cannot run
 checks whose inputs do not exist until GitHub creates the PR. `pr-policy` still
-validates the live PR body, title, commit subjects,
-and DCO trailers in Actions. The classic matrix contexts and
-`required-checks-gate` also remain authoritative merge requirements. The local
-run is early failure feedback only; it does not grant
+validates the live PR body, title, commit subjects, and DCO trailers in Actions.
+The direct ruleset contexts and `required-checks-gate` remain authoritative
+merge requirements. The local run is early failure feedback only; it does not grant
 `state:implementation-go` and does not replace GitHub's exact-head checks.
 
 ## Linux PR-review host verification
@@ -189,19 +190,14 @@ Classic branch protection requires:
 | Required context | Source |
 |------------------|--------|
 | `required-checks-gate` | `.github/workflows/_required.yml` |
-| `test (ubuntu-latest, 3.13, unit)` | `.github/workflows/test.yml` |
-| `test (ubuntu-latest, 3.13, integration)` | `.github/workflows/test.yml` |
 
 The active ruleset requires these direct contexts:
 
 | Required context | Source |
 |------------------|--------|
 | `lint` | `.github/workflows/_required.yml` |
-| `unit-tests` | `.github/workflows/_required.yml` |
-| `integration-tests` | `.github/workflows/_required.yml` |
 | `security/dependency-scan` | `.github/workflows/_required.yml` |
 | `security/secrets-scan` | `.github/workflows/_required.yml` |
-| `build` | `.github/workflows/_required.yml` |
 | `schema-validation` | `.github/workflows/_required.yml` |
 | `deps/version-sync` | `.github/workflows/_required.yml` |
 | `pr-policy` | `.github/workflows/_required.yml` |
@@ -212,12 +208,10 @@ not a duplicate GitHub Actions context.
 
 ## Merge queue execution
 
-Both workflow sources of required contexts, `_required.yml` and `test.yml`,
-run on `merge_group: checks_requested`. GitHub therefore evaluates the full
-required suite against each synthetic `gh-readonly-queue/...` commit, including
-the aggregate `required-checks-gate`, every direct ruleset context, and the two
-classic matrix-test contexts. A separate smoke workflow cannot replace those
-required names and is not part of the queue contract. Because the live queue's
+The `_required.yml` workflow runs on `merge_group: checks_requested`. GitHub
+therefore evaluates the required pull-request suite against each synthetic
+`gh-readonly-queue/...` commit, including the aggregate
+`required-checks-gate` and every direct ruleset context. Because the live queue's
 `HEADGREEN` grouping strategy evaluates the synthetic group head, the
 merge-group `pr-policy` job binds the queue ref to the live GraphQL merge-queue
 entry and exact synthetic group head, enumerates every source PR represented by
@@ -230,15 +224,13 @@ or incomplete source-PR evidence fails closed.
 
 - **Owner:** The `.github/` owner in
   [CODEOWNERS](../../.github/CODEOWNERS).
-- **Versioned sources:** Maintain this document from the `jobs` mappings in
-  [`_required.yml`](../../.github/workflows/_required.yml) and
-  [`test.yml`](../../.github/workflows/test.yml); the latter defines the classic
-  matrix-test contexts listed above.
+- **Versioned source:** Maintain this document from the `jobs` mapping in
+  [`_required.yml`](../../.github/workflows/_required.yml).
 - **External source:** The live branch-protection and ruleset output collected
   by the commands under [Live audit](#live-audit).
-- **Trigger:** Reconcile this document whenever either workflow's jobs, matrix,
-  or context names change (including a `test.yml` test-job rename), whenever a
-  branch-protection rule or ruleset changes, and during the pre-release review.
+- **Trigger:** Reconcile this document when the workflow job or context names
+  change, when a branch-protection rule or ruleset changes, and during the
+  pre-release review.
 
 ## Aggregate workflow coverage
 
@@ -262,7 +254,7 @@ auto-merge event triggers. The automation loop handles review labels and
 merge-state actions.
 
 The gate fans in the `_required.yml` code-validation jobs: `lint`, `pr-policy`,
-`unit-tests`, `build`, the `security/*` scans (including `security/workflow-scan`,
+the `security/*` scans (including `security/workflow-scan`,
 the zizmor GitHub Actions SAST gate added for issue #2151), `license-scan`, and
 more. Enumerating each one individually in branch protection is brittle: renaming
 a job, adding a job, or splitting one silently changes what's required, and nobody

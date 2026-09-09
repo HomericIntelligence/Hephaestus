@@ -21,9 +21,13 @@ bootstrap:
     uv sync
     uv run pre-commit install
 
-# Run all tests (unit + integration)
+# Run the shared local-commit and pull-request test selection.
 test:
-    uv run pytest {{ test_dir }}
+    bash scripts/run_fast_tests.sh
+
+# Run the full nightly test selection.
+test-nightly:
+    uv run pytest {{ test_dir }} --override-ini="addopts=" -v --strict-markers -m "not precommit and not performance and not contract and not artifact and not codex_release_artifact"
 
 # Run unit tests only
 test-unit:

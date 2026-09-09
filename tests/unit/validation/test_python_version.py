@@ -49,6 +49,11 @@ def test_ci_matrix_parser_returns_all_configured_versions() -> None:
     assert extract_ci_matrix_python_versions('python-version: ["3.13"]') == ["3.13"]
 
 
+def test_ci_matrix_parser_reads_a_scalar_python_version() -> None:
+    """The CI guard also accepts a non-matrix workflow value."""
+    assert extract_ci_matrix_python_versions('python-version: "3.13"') == ["3.13"]
+
+
 def test_ci_matrix_must_cover_declared_classifiers(tmp_path: Path) -> None:
     """A classifier missing from CI makes the repository contract fail."""
     missing_classifier = PYPROJECT.replace(
@@ -57,7 +62,7 @@ def test_ci_matrix_must_cover_declared_classifiers(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(missing_classifier)
     workflow = tmp_path / ".github" / "workflows"
     workflow.mkdir(parents=True)
-    (workflow / "test.yml").write_text('python-version: ["3.13"]')
+    (workflow / "_required.yml").write_text('python-version: ["3.13"]')
     assert check_ci_matrix_coverage(tmp_path) is False
 
 

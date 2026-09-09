@@ -15,7 +15,7 @@ links to the full section below.
    uv, then `just bootstrap` (one command: deps + editable install + pre-commit
    hooks).
 2. **Confirm the toolchain works** — run `just check` (lint + format-check +
-   typecheck). A successful result means that your local quality tools are ready.
+   typecheck) and `just test`. Green here means your machine is ready.
 3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
    GitHub issue, then branch as `<issue-number>-description`.
 4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
@@ -105,8 +105,7 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
    `just bootstrap` wraps `uv sync` and `uv run pre-commit install`. If you do
    not have [`just`](https://just.systems/) installed, run those two commands
    manually instead.
-4. Run project commands through the managed environment, for example
-   `uv run pytest tests/unit`.
+4. Run project commands through the managed environment, for example `just test`.
 5. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
@@ -202,12 +201,13 @@ the pytest summary to make sure that the command collected those tests. For
 example:
 
 ```bash
-uv run pytest tests/unit/path/test_changed_behavior.py -v
+uv run pytest --override-ini="addopts=" tests/unit/utils/test_general_utils.py -v
 ```
 
-Do not configure pytest as a pre-commit hook. The required CI/CD jobs run the
-full unit and integration suites and apply the coverage gate. You can run a full
-suite locally for diagnosis, but it is not a prerequisite for PR creation.
+The override clears the default fast selection so the named tests can run.
+Use the paths for your changed tests. `just test` runs the fast selection used by pre-commit and pull-request
+CI. Nightly CI runs the remaining functional, package, shell, and coverage
+tests.
 
 ### Test environment requirements
 

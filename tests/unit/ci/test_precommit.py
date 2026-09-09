@@ -127,3 +127,29 @@ def test_doc_config_hook_skips_pytest_collection() -> None:
 
     assert hook is not None
     assert "--skip-test-count" in hook["entry"].split()
+
+
+def test_fast_test_hook_uses_the_shared_test_command() -> None:
+    """The commit hook runs the same fast test contract as PR lint."""
+    repositories = load_precommit_config(REPO_ROOT / ".pre-commit-config.yaml")
+    hooks: list[dict[str, object]] = []
+    for repository in repositories:
+        configured_hooks = repository.get("hooks")
+        if not isinstance(configured_hooks, list):
+            continue
+        hooks.extend(
+            hook
+            for hook in configured_hooks
+            if isinstance(hook, dict) and hook.get("id") == "fast-tests"
+        )
+
+    assert hooks == [
+        {
+            "id": "fast-tests",
+            "name": "Fast tests",
+            "entry": "bash scripts/run_fast_tests.sh",
+            "language": "system",
+            "pass_filenames": False,
+            "always_run": True,
+        }
+    ]

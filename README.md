@@ -1,6 +1,6 @@
 # Hephaestus
 
-[![Test](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/test.yml)
+[![Required Checks](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/_required.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/_required.yml)
 [![Security](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/security.yml)
 [![Release](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/release.yml)
 [![Auto Tag](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml/badge.svg)](https://github.com/HomericIntelligence/Hephaestus/actions/workflows/auto-tag.yml)
@@ -181,11 +181,13 @@ just bootstrap
 ### Running Tests
 
 ```bash
-# Run all tests (unit + integration)
+# Run the fast pre-commit and pull-request test selection
 just test
-uv run pytest
 
-# Run only unit tests (coverage-gated in CI)
+# Run the full nightly normal-test complement
+just test-nightly
+
+# Run the fast unit selection
 just test-unit
 uv run pytest tests/unit
 

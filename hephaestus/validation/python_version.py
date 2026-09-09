@@ -13,7 +13,7 @@ tomllib = import_tomllib()
 
 _CLASSIFIER_VERSION_RE = re.compile(r"Programming Language :: Python :: (\d+\.\d+)$")
 _DOCKERFILE_FROM_RE = re.compile(r"^\s*FROM\s+python:(\d+\.\d+)", re.IGNORECASE | re.MULTILINE)
-_CI_MATRIX_PYTHON_RE = re.compile(r"python-version:\s*\[([^\]]+)\]")
+_CI_MATRIX_PYTHON_RE = re.compile(r"python-version:\s*(?:\[([^\]]+)\]|[\"']?(\d+\.\d+)[\"']?)")
 
 
 def extract_pyproject_versions(pyproject_path: Path) -> dict[str, str]:
@@ -79,13 +79,15 @@ def extract_ci_matrix_python_versions(content: str) -> list[str]:
     match = _CI_MATRIX_PYTHON_RE.search(content)
     if not match:
         return []
+    if match.group(2):
+        return [match.group(2)]
     return sorted(set(re.findall(r'["\']?(\d+\.\d+)["\']?', match.group(1))))
 
 
 def check_ci_matrix_coverage(repo_root: Path) -> bool:
     """Verify CI tests every Python version advertised by project classifiers."""
     pyproject_path = repo_root / "pyproject.toml"
-    workflow_path = repo_root / ".github" / "workflows" / "test.yml"
+    workflow_path = repo_root / ".github" / "workflows" / "_required.yml"
     if not pyproject_path.is_file() or not workflow_path.is_file():
         return True
     advertised = extract_classifiers_python_versions(pyproject_path.read_text(encoding="utf-8"))

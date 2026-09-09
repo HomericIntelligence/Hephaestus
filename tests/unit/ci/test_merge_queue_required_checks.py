@@ -15,22 +15,13 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
-TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
-CLASSIC_REQUIRED_CONTEXTS = {
-    "required-checks-gate",
-    "test (ubuntu-latest, 3.13, integration)",
-    "test (ubuntu-latest, 3.13, unit)",
-}
 RULESET_REQUIRED_CONTEXTS = {
-    "build",
     "deps/version-sync",
-    "integration-tests",
     "lint",
     "pr-policy",
     "schema-validation",
     "security/dependency-scan",
     "security/secrets-scan",
-    "unit-tests",
 }
 EXPECTED_SKIP_POLICY = {
     "pull_request": [],
@@ -119,10 +110,9 @@ def _assert_required_gate_contract(workflow: dict[str, Any]) -> None:
 
 def test_every_required_context_workflow_runs_for_merge_groups() -> None:
     """Synthetic queue commits must emit the same required contexts as PR heads."""
-    for path in (REQUIRED_WORKFLOW, TEST_WORKFLOW):
-        workflow = _load_workflow(path)
+    workflow = _load_workflow(REQUIRED_WORKFLOW)
 
-        assert workflow["on"]["merge_group"]["types"] == ["checks_requested"], path.name
+    assert workflow["on"]["merge_group"]["types"] == ["checks_requested"]
 
 
 def test_required_context_names_and_aggregate_membership_are_exact() -> None:
@@ -134,16 +124,6 @@ def test_required_context_names_and_aggregate_membership_are_exact() -> None:
     assert names_to_ids.keys() >= RULESET_REQUIRED_CONTEXTS
     assert names_to_ids["required-checks-gate"] == "required-checks-gate"
     assert set(jobs["required-checks-gate"]["needs"]) == set(jobs) - {"required-checks-gate"}
-
-    test = _load_workflow(TEST_WORKFLOW)["jobs"]["test"]
-    matrix = test["strategy"]["matrix"]
-    expanded = {
-        f"test ({os_name}, {python}, {test_type})"
-        for os_name in matrix["os"]
-        for python in matrix["python-version"]
-        for test_type in matrix["test-type"]
-    }
-    assert expanded == CLASSIC_REQUIRED_CONTEXTS - {"required-checks-gate"}
 
 
 def test_required_gate_policy_matches_the_complete_job_graph() -> None:
@@ -721,17 +701,12 @@ def test_merge_group_policy_rejects_duplicate_commit_identity(tmp_path: Path) ->
     assert result.returncode != 0
 
 
-def test_shell_jobs_use_the_same_versioned_ci_image_as_local_checks() -> None:
-    """Bats and ShellCheck must not drift between Ubuntu and the local image."""
+def test_shellcheck_uses_the_same_versioned_ci_image_as_local_checks() -> None:
+    """ShellCheck must use the same image as local pull-request checks."""
     required = _load_workflow(REQUIRED_WORKFLOW)
     shellcheck = str(required["jobs"]["shellcheck"]["steps"])
-    shell_tests = str(required["jobs"]["shell-tests"]["steps"])
 
     assert "apt-get" not in shellcheck
-    assert "apt-get" not in shell_tests
     assert "hephaestus-ci:local" in shellcheck
-    assert "hephaestus-ci:local" in shell_tests
     assert "scripts/run_ci_local.sh shellcheck" in shellcheck
-    assert "scripts/run_ci_local.sh shell-tests" in shell_tests
     assert "CONTAINER_ENGINE" in shellcheck
-    assert "CONTAINER_ENGINE" in shell_tests

@@ -38,6 +38,12 @@ repos:
         files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]
         pass_filenames: false
+      - id: fast-tests
+        name: Fast tests
+        entry: bash scripts/run_fast_tests.sh
+        language: system
+        pass_filenames: false
+        always_run: true
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
