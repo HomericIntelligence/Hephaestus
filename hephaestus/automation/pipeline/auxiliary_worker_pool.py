@@ -6,12 +6,13 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 
 from .athena_skill_jobs import AthenaSkillExecutor, AthenaSkillJob
 from .git_jobs import GitJob
 from .job_results import JobHandle, JobResult
+from .worker_completion import resolve_worker_future
 
 AuxiliaryJob = AthenaSkillJob | GitJob
 CleanupRunner = Callable[[GitJob], JobResult]
@@ -98,18 +99,22 @@ class AuxiliaryWorkerPool:
         )
 
     def _publish(self, handle: JobHandle, future: Future[JobResult]) -> None:
-        try:
-            result = future.result()
-        except CancelledError:
-            result = JobResult(
+        result = resolve_worker_future(
+            future,
+            crash_result=lambda error: JobResult(
+                ok=False,
+                error=f"worker_crash: {type(error).__name__}: {error}",
+            ),
+            cancelled_result=JobResult(
                 ok=False,
                 interrupted=True,
                 error="interrupted_before_start",
-            )
-        except Exception as exc:
-            result = JobResult(ok=False, error=f"worker_crash: {type(exc).__name__}: {exc}")
+            ),
+        )
         with self._futures_guard:
             self._futures.discard(future)
+        if result is None:
+            raise RuntimeError("auxiliary completion has no result")
         try:
             self._completion_q.put_nowait((handle, result))
         except queue.Full:

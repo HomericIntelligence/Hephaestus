@@ -724,6 +724,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             final_stage=item.stage,
         )
         self._record_terminal_result(item)
+        self._release_work_permit(item)
         item.add_history_event(item.stage, item.state, note="interrupted; resumable")
         self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(

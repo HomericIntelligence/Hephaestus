@@ -244,6 +244,7 @@ from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 from .jobs import _writer_publication_matches_refresh
+from .worker_completion import resolve_worker_future
 
 logger = logging.getLogger(__name__)
 
@@ -3771,32 +3772,24 @@ class WorkerPool:
         thread where a re-raise would only print a traceback, not stop the
         process.
         """
-        if future.cancelled():
-            return  # cancel_futures synthesizes NO completion
         worker_id = threading.current_thread().name
-        try:
-            result = future.result()
-        except KeyboardInterrupt as exc:
-            logger.warning("Worker future interrupted; converting to worker_crash result")
-            result = JobResult(
+
+        def crash_result(error: BaseException) -> JobResult:
+            if isinstance(error, KeyboardInterrupt):
+                logger.warning("Worker future was interrupted")
+            elif isinstance(error, (SystemExit, GeneratorExit)):
+                logger.info("Worker future exited during shutdown")
+            else:
+                logger.exception("Worker future failed")
+            return JobResult(
                 ok=False,
-                error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+                error=f"worker_crash: {type(error).__name__}: {error!s}"[:_ERR_MAX],
                 worker_id=worker_id,
             )
-        except (SystemExit, GeneratorExit) as exc:
-            logger.info("Worker future exited during shutdown; converting to worker_crash result")
-            result = JobResult(
-                ok=False,
-                error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-                worker_id=worker_id,
-            )
-        except Exception as exc:
-            logger.exception("Worker future raised; converting to worker_crash result")
-            result = JobResult(
-                ok=False,
-                error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-                worker_id=worker_id,
-            )
+
+        result = resolve_worker_future(future, crash_result=crash_result)
+        if result is None:
+            return
         try:
             self._completion_q.put_nowait((handle, result))
         except queue_mod.Full:
