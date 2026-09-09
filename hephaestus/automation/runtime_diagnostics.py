@@ -28,6 +28,7 @@ def runtime_identity() -> dict[str, str | None]:
         if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40,64}", candidate):
             commit = candidate
     except (PackageNotFoundError, OSError, ValueError):
+        # Optional metadata must not stop startup. Keep explicit unknown values.
         pass
     return {
         "launcher": str(Path(sys.argv[0]).absolute()),
