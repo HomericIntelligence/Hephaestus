@@ -82,7 +82,7 @@ class MemoryHost(PipelineGitHub):
         self.bodies = bodies
 
     def _repo_issue_comments(self, number: int) -> list[dict[str, object]]:
-        return [{"body": body} for body in self.bodies]
+        return [{"body": body, "databaseId": index + 1} for index, body in enumerate(self.bodies)]
 
     def _comment_owned_by_viewer(self, comment: dict[str, object]) -> bool:
         return True
@@ -92,6 +92,11 @@ class MemoryHost(PipelineGitHub):
     ) -> None:
         """Replace the comment with the selected marker."""
         self.bodies = [prior for prior in self.bodies if not prior.startswith(marker)] + [body]
+
+    def _patch_issue_comment(
+        self, comment_id: int, body: str, *, repo: tuple[str, str] | None = None
+    ) -> None:
+        self.bodies[comment_id - 1] = body
 
 
 def test_publication_requires_original_owned_audit() -> None:
@@ -328,3 +333,134 @@ def test_inspection_requires_fresh_evidence_without_writes(
     assert result.request == request
     assert result.verified is (problem is None)
     assert host.bodies == []
+
+
+def test_fresh_review_clears_old_process_rebase_proof() -> None:
+    """Discard a prior rebase proof when a new source review begins."""
+    from hephaestus.automation.pipeline.stages.pr_review_threads import _clear_round_review_state
+    from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+
+    item = WorkItem(repo="comet", kind=ItemKind.PR, pr=7, issue=3)
+    prior = record()
+    item.payload.update(
+        {
+            "retained_rebase_review_proof": object(),
+            "pending_review_rebase_record": prior,
+            "reviewed_pr_head_sha": prior.reviewed_head_sha,
+        }
+    )
+    _clear_round_review_state(item)
+    assert "retained_rebase_review_proof" not in item.payload
+    assert "pending_review_rebase_record" not in item.payload
+
+
+def test_new_clean_go_supersedes_record_and_preserves_original_audit() -> None:
+    """A new source review replaces active rebase recovery without deleting history."""
+    value = record()
+    new_head = "f" * 40
+
+    class Host(MemoryHost):
+        def gh_pr_state(self, number: int) -> dict[str, object]:
+            return {
+                "state": "OPEN",
+                "headRefOid": new_head,
+                "baseRefName": "main",
+                "autoMergeRequest": None,
+            }
+
+        def pr_has_implementation_state_label(self, number: int) -> tuple[bool, bool]:
+            return True, False
+
+    _, original_body = render_implementation_go_audit(
+        value.audit, pr_number=7, head_sha=value.reviewed_head_sha
+    )
+    _, rebase_body = render_review_rebase_record(value)
+    host = Host([original_body, rebase_body])
+    host.publish_implementation_go_audit(7, new_head, value.audit)
+    assert host.read_review_rebase_record(7) is None
+    assert original_body in host.bodies
+    retained = [parse_review_rebase_record(body) for body in host.bodies]
+    superseded = next(item for item in retained if item is not None)
+    assert superseded.state == "superseded"
+    assert superseded.superseded_by_head_sha == new_head
+
+
+def test_new_pending_go_precedes_old_rebase_recovery() -> None:
+    """Complete fresh GO publication after a crash before retiring old rebase facts."""
+    from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
+    from hephaestus.automation.pipeline.routing import StageName
+    from hephaestus.automation.pipeline.seeding import IssueFacts, seed_entry_from_facts
+
+    value = record()
+    pending = PendingImplementationGoAudit(7, "f" * 40, value.audit)
+    entry = seed_entry_from_facts(
+        IssueFacts(
+            number=3,
+            title="Task",
+            is_epic=False,
+            labels={"state:plan-go"},
+            pr_number=7,
+            pr_is_open=True,
+            pr_is_merged=False,
+            pr_has_implementation_go=True,
+            pending_review_rebase_record=value,
+            pending_implementation_go_audit=pending,
+        )
+    )
+    assert entry.stage is StageName.PR_REVIEW
+
+
+@pytest.mark.parametrize("problem", ["missing_audit", "duplicate_audit", "revoked"])
+def test_supersession_requires_authentic_new_review(problem: str) -> None:
+    """Keep explicit revocation and missing supersession evidence closed."""
+    value = record()
+    new_head = "f" * 40
+    retired = replace(value, state="superseded", superseded_by_head_sha=new_head)
+    if problem == "revoked":
+        retired = replace(value, state="revoked")
+    _, old_body = render_implementation_go_audit(
+        value.audit, pr_number=7, head_sha=value.reviewed_head_sha
+    )
+    _, new_body = render_implementation_go_audit(value.audit, pr_number=7, head_sha=new_head)
+    _, retained_body = render_review_rebase_record(retired)
+    bodies = [old_body, retained_body]
+    if problem == "duplicate_audit":
+        bodies.extend([new_body, new_body])
+    if problem == "revoked":
+        bodies.append(new_body)
+    with pytest.raises(RuntimeError):
+        MemoryHost(bodies).read_review_rebase_record(7)
+
+
+def test_superseded_record_roundtrip_retains_both_review_identities() -> None:
+    """Keep prior evidence while a fresh clean GO replaces recovery eligibility."""
+    value = replace(record(), state="superseded", superseded_by_head_sha="f" * 40)
+    _, body = render_review_rebase_record(value)
+    assert parse_review_rebase_record(body) == value
+
+
+def test_interrupted_supersession_preserves_pending_new_review() -> None:
+    """Recover new review publication after the supersession write fails."""
+    from hephaestus.automation.implementation_go_audit_receipt import (
+        render_pending_implementation_go_audit,
+    )
+
+    value = record()
+    new_head = "f" * 40
+
+    class Host(MemoryHost):
+        def _supersede_review_rebase_record(self, pr_number: int, head_sha: str) -> None:
+            raise RuntimeError("supersession transport unavailable")
+
+    _, original = render_implementation_go_audit(
+        value.audit, pr_number=7, head_sha=value.reviewed_head_sha
+    )
+    _, retained = render_review_rebase_record(value)
+    _, pending = render_pending_implementation_go_audit(7, new_head, value.audit)
+    host = Host([original, retained, pending])
+    with pytest.raises(RuntimeError, match="transport unavailable"):
+        host.publish_implementation_go_audit(7, new_head, value.audit)
+    restored = host.pending_implementation_go_audit(7)
+    assert restored is not None
+    assert restored.head_sha == new_head
+    assert original in host.bodies

@@ -22,6 +22,7 @@ The implemented mini-state graph is:
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from pathlib import Path
 
 from hephaestus.automation.arming_state import LearningJournalStore
@@ -31,6 +32,8 @@ from hephaestus.automation.issue_waves import (
     IssueWaveStore,
     WaveLease,
 )
+from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
+from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 
 from ..github_jobs import (
     GitHubJob,
@@ -84,6 +87,25 @@ def _merge_head(item: WorkItem) -> object:
     )
 
 
+def _bound_rebase_record(item: WorkItem, ctx: StageContext) -> RebaseReviewRecord | None:
+    """Bind the initial audit and host proof for one merge cycle."""
+    proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
+    if proof is None:
+        return None
+    if (
+        not isinstance(proof, RebaseReviewProof)
+        or proof.repository != f"{ctx.org}/{item.repo}"
+        or proof.pr_number != item.pr
+        or proof.issue_number != item.issue
+        or proof.reviewed_head_sha != item.payload.get("reviewed_pr_head_sha")
+    ):
+        raise ValueError("rebase review proof is invalid")
+    audit = item.payload.get("review_audit")
+    if not isinstance(audit, ReviewAudit) or not is_clean_go_review(audit):
+        raise ValueError("rebase review audit is invalid")
+    return RebaseReviewRecord(**asdict(proof), audit=audit)
+
+
 class MergeWaitStage(Stage):
     """Attempt a bounded SHA-conditional merge after final live admission."""
 
@@ -117,15 +139,11 @@ class MergeWaitStage(Stage):
         recovery = recover_rebase_review(item, ctx)
         if recovery is not None:
             return recovery
-        proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
-        if proof is not None and (
-            not isinstance(proof, RebaseReviewProof)
-            or proof.repository != f"{ctx.org}/{item.repo}"
-            or proof.pr_number != item.pr
-            or proof.issue_number != item.issue
-            or proof.reviewed_head_sha != item.payload.get("reviewed_pr_head_sha")
-        ):
+        try:
+            record = _bound_rebase_record(item, ctx)
+        except ValueError:
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_proof_invalid")
+        proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         if item.attempts["merge"] >= ctx.budget("merge"):
@@ -162,6 +180,7 @@ class MergeWaitStage(Stage):
                 bootstrap_proof=item.payload.get("host_verification_bootstrap_proof"),
                 reviewed_head_sha=reviewed_head,
                 rebase_proof=proof,
+                rebase_record=record,
                 proof_generation=proof_generation,
                 declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),
                 deadline_s=operation_deadline,

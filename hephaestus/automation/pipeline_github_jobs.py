@@ -1110,6 +1110,16 @@ class PipelineGitHubJobRunner:
                 return "merge_cycle_cancelled"
             return None
 
+        def rebase_record_outcome() -> str | None:
+            """Reject a changed record or initial audit before merge admission."""
+            if request.rebase_record is None:
+                return None
+            try:
+                live_record = github.read_review_rebase_record(request.pr_number)
+            except Exception:
+                return "rebase_review_record_changed"
+            return None if live_record == request.rebase_record else "rebase_review_record_changed"
+
         def bootstrap_outcome() -> str | None:
             if request.bootstrap_proof is None or read_fresh_bootstrap_proof(
                 request.bootstrap_proof, github
@@ -1228,6 +1238,9 @@ class PipelineGitHubJobRunner:
         admitted = admit()
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
+        record_status = rebase_record_outcome()
+        if record_status is not None:
+            return complete(record_status)
         bootstrap_status = bootstrap_outcome()
         if bootstrap_status is not None:
             return complete(bootstrap_status)
@@ -1293,6 +1306,9 @@ class PipelineGitHubJobRunner:
         if unsafe is not None:
             return complete(unsafe)
 
+        record_status = rebase_record_outcome()
+        if record_status is not None:
+            return complete(record_status)
         boundary = operation_boundary()
         if boundary is not None:
             return complete(boundary)

@@ -31,8 +31,10 @@ _IDENTITY_FIELDS = (
 )
 
 
-def recover_rebase_review(item: WorkItem, ctx: StageContext) -> StepResult | None:
-    """Verify a retained record before the stage can submit merge checks."""
+def recover_rebase_review(
+    item: WorkItem, ctx: StageContext, *, on_done_state: str = "MERGE"
+) -> StepResult | None:
+    """Verify a retained record before the stage submits the next job."""
     if _ERROR in item.payload:
         return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_recovery_failed")
     if _RECORD not in item.payload:
@@ -59,7 +61,7 @@ def recover_rebase_review(item: WorkItem, ctx: StageContext) -> StepResult | Non
             kwargs={"record": record, "repo_root": str(ctx.paths.repo_root)},
             descr="restore_rebase_review",
         ),
-        on_done_state="MERGE",
+        on_done_state=on_done_state,
     )
 
 
@@ -80,6 +82,7 @@ def receive_rebase_review(item: WorkItem, result: JobResult) -> bool:
         return True
     item.payload["retained_rebase_review_proof"] = proof
     item.payload["reviewed_pr_head_sha"] = record.reviewed_head_sha
+    item.payload["reviewed_pr_base_sha"] = record.reviewed_base_sha
     item.payload["review_audit"] = record.audit
     item.payload["reviewed_pr_proof_generation"] = 1
     for key in (

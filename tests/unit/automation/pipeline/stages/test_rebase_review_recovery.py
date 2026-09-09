@@ -110,6 +110,7 @@ def test_restart_verifies_retained_record_before_merge_checks(
     assert not checks.job.request.queue_admitted
     assert item.payload["review_audit"] == record.audit
     assert item.payload["reviewed_pr_head_sha"] == record.reviewed_head_sha
+    assert item.payload["reviewed_pr_base_sha"] == record.reviewed_base_sha
     assert "merge_readiness_deadline_s" not in item.payload
 
 

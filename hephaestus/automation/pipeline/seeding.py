@@ -50,6 +50,7 @@ from hephaestus.automation.requirements_recovery import (
     is_semantic_disposition_candidate,
     verified_finalized_plan,
 )
+from hephaestus.automation.review_audit import is_clean_go_review
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
     STATE_BLOCKED,
@@ -114,6 +115,19 @@ def read_review_rebase_record(github: Any, pr_number: int) -> RebaseReviewRecord
     ):
         raise IssueClassificationError("rebase review record is invalid")
     return record
+
+
+def pending_review_supersedes_rebase(
+    audit: PendingImplementationGoAudit | None, record: RebaseReviewRecord | None
+) -> bool:
+    """Resume fresh clean GO publication before retiring old rebase facts."""
+    return (
+        audit is not None
+        and record is not None
+        and audit.pr_number == record.pr_number
+        and audit.head_sha != record.reviewed_head_sha
+        and is_clean_go_review(audit.audit)
+    )
 
 
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
@@ -356,6 +370,10 @@ def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classificat
     # unarmed PR before returning to review; a matching current-process
     # proof attempts one ordinary conditional merge. No queue stage
     # creates, disables, adopts, or polls automatic merge.
+    if pending_review_supersedes_rebase(
+        facts.pending_implementation_go_audit, facts.pending_review_rebase_record
+    ):
+        return StageName.PR_REVIEW, f"#{facts.number} fresh review supersedes rebase recovery"
     if facts.pending_review_rebase_record is not None:
         return StageName.MERGE_WAIT, f"#{facts.number} retained rebase requires host verification"
     if facts.pending_implementation_go_audit is not None:
@@ -713,7 +731,9 @@ def seed_from_cli(
             rebase_record = read_review_rebase_record(github, pr)
         else:
             has_go = is_implementation_go(gh_pr_label_names(pr))
-        if rebase_record is not None:
+        if rebase_record is not None and not pending_review_supersedes_rebase(
+            pending_audit, rebase_record
+        ):
             entries.append(
                 SeedEntry(
                     kind="pr",

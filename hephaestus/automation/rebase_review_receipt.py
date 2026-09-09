@@ -50,6 +50,7 @@ class RebaseReviewRecord:
     original_audit_id: str
     audit: ReviewAudit
     state: str = "active"
+    superseded_by_head_sha: str = ""
 
     def __post_init__(self) -> None:
         """Reject incomplete identities and invalid audit records."""
@@ -67,10 +68,19 @@ class RebaseReviewRecord:
                 value = getattr(self, name)
                 if not isinstance(value, str) or _SHA.fullmatch(value) is None:
                     raise ValueError("rebase record commit is invalid")
-        if self.state not in {"active", "revoked"} or self.original_audit_id != (
+        if self.state not in {"active", "revoked", "superseded"} or self.original_audit_id != (
             original_audit_identity(self.pr_number, self.reviewed_head_sha)
         ):
             raise ValueError("rebase record audit identity is invalid")
+        if self.state == "superseded":
+            if (
+                not isinstance(self.superseded_by_head_sha, str)
+                or _SHA.fullmatch(self.superseded_by_head_sha) is None
+                or self.superseded_by_head_sha == self.reviewed_head_sha
+            ):
+                raise ValueError("rebase supersession head is invalid")
+        elif self.superseded_by_head_sha != "":
+            raise ValueError("active or revoked rebase record cannot claim supersession")
         render_pending_implementation_go_audit(self.pr_number, self.reviewed_head_sha, self.audit)
 
 
@@ -82,6 +92,8 @@ def render_review_rebase_record(record: RebaseReviewRecord) -> tuple[str, str]:
     )
     payload = {name: getattr(record, name) for name in _FIELDS}
     payload["audit"] = audit_body
+    if record.state == "superseded":
+        payload["superseded_by_head_sha"] = record.superseded_by_head_sha
     return marker, marker + "\n" + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -102,7 +114,10 @@ def parse_review_rebase_record(body: str) -> RebaseReviewRecord | None:
     if not separator or len(body) > 24000:
         raise ValueError("rebase record is malformed")
     payload = json.loads(raw, object_pairs_hook=_unique_object)
-    if not isinstance(payload, dict) or set(payload) != {*_FIELDS, "audit"}:
+    if not isinstance(payload, dict) or set(payload) not in (
+        {*_FIELDS, "audit"},
+        {*_FIELDS, "audit", "superseded_by_head_sha"},
+    ):
         raise ValueError("rebase record fields are invalid")
     audit_body = payload.pop("audit")
     if not isinstance(audit_body, str):

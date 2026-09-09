@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from hephaestus.automation.implementation_go_audit_receipt import (
@@ -64,10 +65,13 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
         if (
             record.repository != f"{self.org}/{self.repo}"
             or record.pr_number != pr_number
-            or record.state != "active"
+            or record.state == "revoked"
         ):
             raise RuntimeError("rebase record is revoked or does not match")
         self._require_original_rebase_audit(record, owned)
+        if record.state == "superseded":
+            self._require_superseding_audit(record, owned)
+            return None
         return record
 
     @staticmethod
@@ -81,6 +85,51 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
         ]
         if matching_audits != [audit_body]:
             raise RuntimeError("original rebase review audit is absent or changed")
+
+    @staticmethod
+    def _require_superseding_audit(record: RebaseReviewRecord, owned: list[str]) -> None:
+        """Require one owned clean GO audit for the superseding source commit."""
+        matches = [
+            audit
+            for body in owned
+            if (audit := parse_published_implementation_go_audit(body)) is not None
+            and audit.pr_number == record.pr_number
+            and audit.head_sha == record.superseded_by_head_sha
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("superseding review audit is absent or ambiguous")
+
+    def _supersede_review_rebase_record(self, pr_number: int, head_sha: str) -> None:
+        """Retire old recovery facts only after a new clean GO publication."""
+        record = self.read_review_rebase_record(pr_number)
+        if record is None or record.reviewed_head_sha == head_sha:
+            return
+        state = self.gh_pr_state(pr_number)
+        if not isinstance(state, dict) or (
+            state.get("state") != "OPEN"
+            or state.get("headRefOid") != head_sha
+            or state.get("baseRefName") != "main"
+            or "autoMergeRequest" not in state
+            or state["autoMergeRequest"] is not None
+            or self.pr_has_implementation_state_label(pr_number) != (True, False)
+        ):
+            raise RuntimeError("superseding review head is not exclusive GO")
+        retired = replace(record, state="superseded", superseded_by_head_sha=head_sha)
+        owned = [
+            str(comment.get("body", ""))
+            for comment in self._repo_issue_comments(pr_number)
+            if self._comment_owned_by_viewer(comment)
+        ]
+        self._require_superseding_audit(retired, owned)
+        marker, body = render_review_rebase_record(retired)
+        self.upsert_issue_comment(pr_number, marker, body)
+        visible = [
+            comment
+            for comment in self._repo_issue_comments(pr_number)
+            if self._comment_owned_by_viewer(comment) and str(comment.get("body", "")) == body
+        ]
+        if len(visible) != 1 or self.read_review_rebase_record(pr_number) is not None:
+            raise RuntimeError("rebase supersession readback failed")
 
     def persist_pending_implementation_go_audit(
         self, pr_number: int, head_sha: str, audit: ReviewAudit
@@ -204,6 +253,12 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
         comments = self._converge_implementation_go_audits(
             pr_number, marker=marker, body=body, comments=comments
         )
+        if any(
+            self._comment_owned_by_viewer(comment)
+            and str(comment.get("body", "")).startswith(REBASE_REVIEW_PREFIX)
+            for comment in comments
+        ):
+            self._supersede_review_rebase_record(pr_number, head_sha)
         for comment in comments:
             if not self._comment_owned_by_viewer(comment):
                 continue
@@ -261,7 +316,12 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
             if self._comment_owned_by_viewer(comment)
             and str(comment.get("body", "")) == pending_body
         ]
-        if pending:
+        has_rebase_history = any(
+            self._comment_owned_by_viewer(comment)
+            and str(comment.get("body", "")).startswith(REBASE_REVIEW_PREFIX)
+            for comment in comments
+        )
+        if pending and not has_rebase_history:
             pending_id = pending[-1].get("databaseId")
             if pending_id is None:
                 raise RuntimeError("pending implementation-go audit has no database id")

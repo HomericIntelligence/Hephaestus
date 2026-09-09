@@ -361,6 +361,8 @@ def _clear_round_review_state(item: WorkItem) -> None:
     """Discard review evidence that cannot survive a head-changing commit."""
     for key in _ROUND_PAYLOAD_KEYS:
         item.payload.pop(key, None)
+    item.payload.pop("retained_rebase_review_proof", None)
+    item.payload.pop("pending_review_rebase_record", None)
     item.payload.pop("reviewed_pr_head_sha", None)
     item.payload.pop("reviewed_pr_node_id", None)
     item.payload.pop("pr_node_id", None)

@@ -215,6 +215,7 @@ from .base import (
     stage_model,
     stage_timeout,
 )
+from .rebase_review_recovery import receive_rebase_review, recover_rebase_review
 from .repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
     DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
@@ -2190,6 +2191,9 @@ class ImplementationStage(Stage):
 
     def _rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Rebase only for initial implementation, a reviewed conflict, or a manual request."""
+        recovery = recover_rebase_review(item, ctx, on_done_state=REBASE_WAIT)
+        if recovery is not None:
+            return recovery
         reason = item.payload.get("rebase_reason")
         if reason not in {"implementation_start", "review_conflict", "manual"}:
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_reason_unavailable")
@@ -2245,12 +2249,15 @@ class ImplementationStage(Stage):
             "pr_number": item.pr,
             "repo_root": str(ctx.paths.repo_root),
         }
-        kwargs.update(
-            reviewed_head_sha=item.payload.get("reviewed_pr_head_sha"),
-            reviewed_base_sha=item.payload.get("reviewed_pr_base_sha"),
-            review_audit=item.payload.get("review_audit"),
-            host_verification_bootstrap_proof=item.payload.get("host_verification_bootstrap_proof"),
-        )
+        review_kwargs = {
+            "reviewed_head_sha": item.payload.get("reviewed_pr_head_sha"),
+            "reviewed_base_sha": item.payload.get("reviewed_pr_base_sha"),
+            "review_audit": item.payload.get("review_audit"),
+            "host_verification_bootstrap_proof": item.payload.get(
+                "host_verification_bootstrap_proof"
+            ),
+        }
+        kwargs.update({key: value for key, value in review_kwargs.items() if value is not None})
         if reason == "implementation_start" and DIRECT_SCOPE_RESERVATION_KEY in item.payload:
             kwargs["direct_scope_reservation"] = item.payload[DIRECT_SCOPE_RESERVATION_KEY]
         kwargs["expected_remote_sha" if item.pr is not None else "expected_head_sha"] = (
@@ -3202,6 +3209,8 @@ class ImplementationStage(Stage):
             ctx: Stage context.
 
         """
+        if receive_rebase_review(item, result):
+            return
         if item.payload.pop("dirty_direct_claim_inflight", False):
             item.payload["dirty_direct_claim_result"] = {"ok": result.ok, "value": result.value}
             return

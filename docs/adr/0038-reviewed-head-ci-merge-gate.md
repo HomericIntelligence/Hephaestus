@@ -97,7 +97,10 @@ an actor-owned receipt that binds the original GO audit and the resulting
 commit. After a restart, the host authenticates that audit and verifies the
 rebase again before it restores merge eligibility. Receipt data alone cannot
 restore authority. Missing, malformed, revoked, or mismatched retained evidence
-stops recovery without another review attempt.
+stops recovery without another review attempt. Each merge cycle checks the
+same record and audit before its final head admission. A fresh clean review
+for a different commit can supersede an active record while it keeps both
+audit identities. Explicit revocation remains a stop condition.
 
 The merge head is the reviewed head for an ordinary review. For a verified
 rebase, it is the recorded resulting head. Required CI/CD, queue admission, and
@@ -106,6 +109,8 @@ resets readiness deadlines and queue admission evidence.
 
 The ADR-0046 bootstrap proof remains process-local and bound to its original
 head. This exception cannot transfer through a rebase receipt. An unverified
-rebase stops with an evidence gap. Substantive corrections require review.
+rebase stops with an evidence gap. The host keeps conflict corrections
+unpublished when it cannot prove the same change. These corrections require
+a separate source decision and fresh implementation review before merge.
 Scope-expansion publication uses a generic stable review-list query. No
 queue-owned operator-authorization implementation remains.

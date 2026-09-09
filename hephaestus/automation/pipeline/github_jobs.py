@@ -370,14 +370,27 @@ class RunMergeWaitCycleRequest:
     queue_admitted: bool = False
     bootstrap_proof: BootstrapProof | None = None
     rebase_proof: RebaseReviewProof | None = None
+    rebase_record: RebaseReviewRecord | None = None
 
     @property
     def merge_head_sha(self) -> str:
         """Return the head that requires fresh checks and conditional merge."""
         return self.rebase_proof.resulting_head_sha if self.rebase_proof else self.reviewed_head_sha
 
-    def __post_init__(self) -> None:
-        """Validate the exact-head merge proof and readiness fingerprint."""
+    def _validate_rebase_evidence(self) -> None:
+        """Keep the initial audit and complete record with the host proof."""
+        if (self.rebase_proof is None) != (self.rebase_record is None):
+            raise ValueError("rebase proof and initial record must both be present")
+        if self.rebase_record is not None and (
+            not isinstance(self.rebase_record, RebaseReviewRecord)
+            or not isinstance(self.rebase_proof, RebaseReviewProof)
+            or self.rebase_record.state != "active"
+            or any(
+                getattr(self.rebase_record, name) != getattr(self.rebase_proof, name)
+                for name in RebaseReviewProof.__dataclass_fields__
+            )
+        ):
+            raise ValueError("rebase record must match the host proof")
         if self.rebase_proof is not None and (
             not isinstance(self.rebase_proof, RebaseReviewProof)
             or self.rebase_proof.pr_number != self.pr_number
@@ -386,6 +399,10 @@ class RunMergeWaitCycleRequest:
             or self.bootstrap_proof is not None
         ):
             raise ValueError("rebase proof must match the original review and merge target")
+
+    def __post_init__(self) -> None:
+        """Validate the exact-head merge proof and readiness fingerprint."""
+        self._validate_rebase_evidence()
         if self.bootstrap_proof is not None and (
             not is_process_bootstrap_proof(self.bootstrap_proof)
             or self.bootstrap_proof.pr != self.pr_number

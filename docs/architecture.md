@@ -1508,7 +1508,9 @@ Architectural contract:
   from the previous merge head.
 - A rebase cannot transfer an ADR-0046 bootstrap exception. Unverified rebase
   evidence stops the continuation. A rebase alone does not require another
-  source review.
+  source review. If conflict corrections prevent proof of the same change,
+  the host keeps the corrected source unpublished. A separate source decision
+  and fresh implementation review are required before merge.
 - Existing external merge ownership is preserved.
 - Missing ordinary review proof returns approval to PR review with zero label
   writes. Invalid retained rebase evidence stops recovery without a review retry.
@@ -1730,6 +1732,14 @@ retained rebase record supplies recovery inputs, not a review proof. The host
 must authenticate the original published GO audit and verify the complete
 rebase tree again. Only the new host result can restore merge eligibility.
 The original reviewed commit stays unchanged in the restored record.
+Manual rebase requests must complete this recovery before they can change
+the branch. Each merge cycle checks the same record and audit again before
+its final head admission.
+
+A fresh clean review for a different commit can supersede the old rebase
+record. This transition keeps both audit identities. The pending fresh review
+stays available until the durable transition completes. An explicitly revoked
+record cannot use this recovery path.
 
 Malformed, revoked, foreign, mismatched, or incomplete retained evidence stops
 recovery. It does not start another review. The implementation-GO label alone
