@@ -1344,8 +1344,9 @@ Architectural contract:
 - `--rebase` requires explicit `--issues` or `--prs` and the `implement` phase.
   It applies once to each selected item in one invocation, then normal work
   continues. A linked issue
-  and PR share one request. A published head must pass a new review. The option
-  does not bypass closed-PR, external auto-merge, or writer-ownership checks.
+  and PR share one request. A published head requires a new review unless
+  the host proves the same change under ADR-0038. The option does not bypass
+  closed-PR, external auto-merge, or writer-ownership checks.
   Selected PRs require a linked issue for implementation-writer ownership.
 - A branch that is only behind main waits. Normal PR adoption and review
   corrections do not rebase. Fleet-sync and tidy keep their separate policies.

@@ -28,8 +28,10 @@ The loop permits a rebase only in these conditions:
 
 Each replay uses an exact commit from `origin/main`. The host owns Git,
 signing, and publication. Conflict agents edit only the allowed files.
-Publication keeps its exact remote-head lease. A changed published head must
-pass a new review before merge.
+Publication keeps its exact remote-head lease. A changed published head
+requires a new review unless the host proves the same change under
+[ADR-0038](0038-reviewed-head-ci-merge-gate.md). That exception keeps the
+initial review identity and requires fresh CI/CD for the resulting head.
 
 The loop's `--update-plan` option updates selected issue plans once per
 invocation. Plan updates use the latest fetched `origin/main` in a detached
