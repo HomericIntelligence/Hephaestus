@@ -54,6 +54,21 @@ def _git_test_env() -> dict[str, str]:
     return env
 
 
+@pytest.fixture
+def non_repo_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Prevent Git from finding a checkout above the test directory."""
+    scoped_git_env = agent_config._repo_scoped_git_env
+
+    def isolated_git_env() -> dict[str, str]:
+        return {
+            **scoped_git_env(),
+            "GIT_CEILING_DIRECTORIES": str(tmp_path.parent.resolve()),
+        }
+
+    monkeypatch.setattr(agent_config, "_repo_scoped_git_env", isolated_git_env)
+    return tmp_path
+
+
 class TestReviewerAgent:
     """Per-iteration reviewer session tokens (fresh session each loop round)."""
 
@@ -269,14 +284,14 @@ class TestShortGithash:
         assert h != "unknown"
         assert all(c in "0123456789abcdef" for c in h)
 
-    def test_missing_repo_returns_unknown(self, tmp_path: Path) -> None:
-        assert short_githash(tmp_path) == "unknown"
+    def test_missing_repo_returns_unknown(self, non_repo_path: Path) -> None:
+        assert short_githash(non_repo_path) == "unknown"
 
     def test_ignores_outer_git_dir_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, non_repo_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("GIT_DIR", str(Path.cwd() / ".git"))
-        assert short_githash(tmp_path) == "unknown"
+        assert short_githash(non_repo_path) == "unknown"
 
 
 class TestSessionJsonlPath:
@@ -550,17 +565,17 @@ class TestCurrentTrunkGithash:
         assert h != "unknown"
 
     def test_no_env_no_repo_returns_unknown(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, non_repo_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("HEPH_TRUNK_GITHASH", raising=False)
-        assert current_trunk_githash(tmp_path) == "unknown"
+        assert current_trunk_githash(non_repo_path) == "unknown"
 
     def test_empty_env_var_falls_back(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, non_repo_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An empty HEPH_TRUNK_GITHASH must fall back, not propagate ``""``."""
         monkeypatch.setenv("HEPH_TRUNK_GITHASH", "")
-        assert current_trunk_githash(tmp_path) == "unknown"
+        assert current_trunk_githash(non_repo_path) == "unknown"
 
 
 def test_distinct_literal_models_have_distinct_session_keys() -> None:

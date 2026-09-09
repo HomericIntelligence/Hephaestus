@@ -116,7 +116,11 @@ def _collect_markdown_files(repo_root: Path) -> list[Path]:
 
     """
     exclude = {".venv", "build", "dist", ".git", "worktrees"}
-    return [p for p in repo_root.rglob("*.md") if not any(part in exclude for part in p.parts)]
+    return [
+        p
+        for p in repo_root.rglob("*.md")
+        if not any(part in exclude for part in p.relative_to(repo_root).parent.parts)
+    ]
 
 
 def validate_anchors(

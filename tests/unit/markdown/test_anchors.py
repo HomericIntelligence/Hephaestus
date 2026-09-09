@@ -152,6 +152,22 @@ class TestValidateAnchors:
 class TestCollectMarkdownFiles:
     """Tests for _collect_markdown_files()."""
 
+    @pytest.mark.parametrize("ancestor", ["build", "dist", ".venv", ".git", "worktrees"])
+    def test_exclusions_apply_only_below_scan_root(self, tmp_path: Path, ancestor: str) -> None:
+        """Scan a nested checkout and exclude only its generated directories."""
+        repo_root = tmp_path / ancestor / "project"
+        docs = repo_root / "docs"
+        generated = repo_root / "build"
+        docs.mkdir(parents=True)
+        generated.mkdir()
+        readme = repo_root / "README.md"
+        guide = docs / "guide.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        guide.write_text("# Guide\n", encoding="utf-8")
+        (generated / "output.md").write_text("# Output\n", encoding="utf-8")
+
+        assert set(_collect_markdown_files(repo_root)) == {readme, guide}
+
     def test_finds_md_files(self, tmp_path: Path) -> None:
         (tmp_path / "README.md").write_text("# Test")
         (tmp_path / "docs").mkdir()
