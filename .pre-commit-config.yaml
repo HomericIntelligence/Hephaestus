@@ -3,6 +3,8 @@
 # Run manually: uv run pre-commit run --all-files
 #
 # Python tool versions are declared in pyproject.toml and locked in uv.lock.
+# Pytest is intentionally not a pre-commit hook. CI runs the full test suites.
+# Before a PR, run each new or changed test as specified in ADR-0047.
 
 # Ensure `pre-commit install` (documented in CONTRIBUTING.md / README.md) wires
 # BOTH the pre-commit and commit-msg stages, so the conventional-commit-msg hook
@@ -171,7 +173,7 @@ repos:
       - id: check-doc-config
         name: Check doc/config consistency
         description: Reject drift between normative docs and pyproject.toml config (e.g. coverage thresholds)
-        entry: uv run hephaestus-check-doc-config --repo-root .
+        entry: uv run hephaestus-check-doc-config --repo-root . --skip-test-count
         language: system
         pass_filenames: false
         files: ^(AGENTS\.md|CLAUDE\.md|docs/DEFINITION_OF_DONE\.md|pyproject\.toml)$

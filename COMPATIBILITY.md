@@ -123,7 +123,7 @@ bypass a misfiring hook locally use
 | `hephaestus-download-dataset` | Provisional | Dataset URL/layout not contracted |
 | `hephaestus-check-python-version` | Internal | Repo CI pre-commit hook |
 | `hephaestus-check-test-structure` | Internal | Repo CI pre-commit hook |
-| `hephaestus-check-coverage` | Internal | Repo CI pre-commit hook |
+| `hephaestus-check-coverage` | Internal | Repo CI coverage validator |
 | `hephaestus-check-complexity` | Internal | Repo CI pre-commit hook |
 | `hephaestus-filter-audit` | Provisional | Audit-output filter; useful externally |
 | `hephaestus-validate-schemas` | Provisional | JSON-Schema validator |

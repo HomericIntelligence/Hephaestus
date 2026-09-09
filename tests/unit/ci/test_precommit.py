@@ -108,3 +108,22 @@ def test_mypy_hook_checks_the_configured_source_tree() -> None:
     assert hook is not None
     assert hook["entry"] == "uv run mypy hephaestus/ scripts/ tests/"
     assert hook["pass_filenames"] is False
+
+
+def test_doc_config_hook_skips_pytest_collection() -> None:
+    """The documentation hook does not start pytest during pre-commit."""
+    repositories = load_precommit_config(REPO_ROOT / ".pre-commit-config.yaml")
+    hook = None
+    for repository in repositories:
+        hooks = repository.get("hooks")
+        if not isinstance(hooks, list):
+            continue
+        for candidate in hooks:
+            if isinstance(candidate, dict) and candidate.get("id") == "check-doc-config":
+                hook = candidate
+                break
+        if hook is not None:
+            break
+
+    assert hook is not None
+    assert "--skip-test-count" in hook["entry"].split()

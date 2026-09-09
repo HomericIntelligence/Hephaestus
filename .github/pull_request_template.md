@@ -33,10 +33,10 @@ Closes #
 
 ## Testing
 
-<!-- Describe the testing you've done -->
+<!-- Describe the tests that you ran before PR creation. CI runs the full suites. -->
 
-- [ ] All existing tests pass
-- [ ] New tests added to cover changes
+- [ ] Pytest collected and passed each new or changed test before PR creation
+- [ ] New tests cover the change
 - [ ] Manual testing performed
 
 ## Checklist

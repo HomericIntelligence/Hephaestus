@@ -1960,6 +1960,11 @@ worktree's shared Git metadata is mounted read-only at its original absolute
 path so hatch-vcs, tests, and scanners resolve the candidate commit without
 granting container write access to repository metadata.
 
+This automation-loop gate is separate from developer pre-commit. Developer
+pre-commit does not run pytest. Required GitHub CI/CD remains the full-suite
+authority. Before PR creation, a contributor must also run each new or changed
+test and verify that pytest collects it and reports success.
+
 The implementation stage submits only the fixed command and the source
 revision in a `BuildTestJob`. The closed worker resolves the system
 executables and starts the host launcher. The launcher opens the runner and

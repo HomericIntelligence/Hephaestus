@@ -15,12 +15,12 @@ links to the full section below.
    uv, then `just bootstrap` (one command: deps + editable install + pre-commit
    hooks).
 2. **Confirm the toolchain works** — run `just check` (lint + format-check +
-   typecheck) and `uv run pytest tests/unit`. Green here means your machine is
-   ready.
+   typecheck). A successful result means that your local quality tools are ready.
 3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
    GitHub issue, then branch as `<issue-number>-description`.
 4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
-   make it pass, and keep coverage at the configured floor in
+   make it pass, and run each new or changed test before you create the PR. Keep
+   coverage at the configured floor in
    [`pyproject.toml`](pyproject.toml) while working toward the target in
    [`AGENTS.md`](AGENTS.md).
 5. **Open the PR** ([Pull Request Process](#pull-request-process)) — use a
@@ -91,8 +91,9 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 2. Create a feature branch named `<issue-number>-description`.
 3. Make your changes.
 4. Write/update tests.
-5. Update documentation.
-6. Submit a pull request — see [Pull Request Process](#pull-request-process) below.
+5. Run each new or changed test and make sure that it passes.
+6. Update documentation.
+7. Submit a pull request — see [Pull Request Process](#pull-request-process) below.
 
 ## Development Setup
 
@@ -195,11 +196,18 @@ All contributions must include appropriate tests:
 - Integration tests for complex features
 - Maintain or improve code coverage
 
-Run tests with:
+Before you create a pull request, run each new or changed test. Use the narrowest
+pytest command that collects all tests that your change adds or revises. Check
+the pytest summary to make sure that the command collected those tests. For
+example:
 
 ```bash
-uv run pytest
+uv run pytest tests/unit/path/test_changed_behavior.py -v
 ```
+
+Do not configure pytest as a pre-commit hook. The required CI/CD jobs run the
+full unit and integration suites and apply the coverage gate. You can run a full
+suite locally for diagnosis, but it is not a prerequisite for PR creation.
 
 ### Test environment requirements
 
@@ -317,9 +325,11 @@ collect CI/CD evidence as context, but the loop does not change CI/CD. Required
 CI/CD checks are the merge contract and do not independently authorize the
 loop-owned approval transition.
 
-Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
-[conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
-pre-commit hooks with `--no-verify`.
+Before you create the PR, run each new or changed test and verify that pytest
+collects it and reports success. Keep commits to logical units with
+[conventional commit](https://www.conventionalcommits.org/) messages. Never
+bypass pre-commit hooks with `--no-verify`. The pre-commit suite does not run
+pytest; required CI/CD runs the full test suites.
 
 ## Developer Certificate of Origin (DCO)
 

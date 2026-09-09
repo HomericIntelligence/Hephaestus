@@ -32,7 +32,8 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 ### Lint Job (`workflows/_required.yml`)
 
 Runs the full pre-commit hook suite (ruff, mypy, security checks) as the
-required `lint` job on pull requests.
+required `lint` job on pull requests. Pre-commit does not run pytest. The
+required `unit-tests` and `integration-tests` jobs own full-suite execution.
 
 ### Security Workflow (`workflows/security.yml`)
 

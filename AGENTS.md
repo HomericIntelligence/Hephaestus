@@ -475,6 +475,11 @@ All utility functions must include comprehensive test coverage:
 3. **Edge Cases**: Test boundary conditions and error scenarios
 4. **Cross-platform**: Ensure compatibility across supported environments
 
+Before an agent creates a pull request, it MUST run each new or changed test.
+The command MUST collect those tests and report success. Do not require a full
+local pytest suite before PR creation. Required CI/CD runs the full unit and
+integration suites and applies the coverage gate.
+
 ```bash
 # Run all unit tests
 uv run pytest tests/unit -v
@@ -528,7 +533,8 @@ uv run mypy hephaestus/ scripts/ tests/
 
 ### Pre-commit Hooks
 
-Pre-commit hooks automatically check code quality:
+Pre-commit hooks automatically check code quality. They MUST NOT run pytest.
+Required CI/CD owns full-suite test execution.
 
 ```bash
 # Install pre-commit hooks (one-time setup)
