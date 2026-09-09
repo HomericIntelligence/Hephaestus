@@ -22,7 +22,10 @@ from hephaestus.automation.pipeline_github_check_policy import (
     RequiredCheck,
 )
 from hephaestus.automation.pipeline_github_ref_patterns import pathname_pattern_matches
-from hephaestus.automation.pipeline_github_ruleset_conditions import ruleset_applies
+from hephaestus.automation.pipeline_github_ruleset_conditions import (
+    required_app_id,
+    ruleset_applies,
+)
 
 _STATUS_EVIDENCE_NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
 
@@ -570,6 +573,237 @@ def test_ref_character_classes_propagate_through_ruleset_conditions(
     ruleset["conditions"] = {"ref_name": {"include": include, "exclude": exclude}}
 
     assert ruleset_applies(ruleset, "main", "main") is applies
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, None), (-1, None), (1, 1), (15368, 15368)],
+)
+def test_required_app_id_normalizes_documented_bindings(
+    value: object, expected: int | None
+) -> None:
+    """Documented GitHub App bindings normalize without changing identity."""
+    assert required_app_id(value) == expected
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -2, "1", 1.0, [], {}])
+def test_required_app_id_rejects_malformed_bindings(value: object) -> None:
+    """Malformed GitHub App bindings fail before policy can use them."""
+    with pytest.raises(ValueError, match="App ID is malformed"):
+        required_app_id(value)
+
+
+def _scoped_ruleset(source_type: str, selectors: dict[str, object]) -> dict[str, object]:
+    """Return one ruleset with caller-selected parent scope conditions."""
+    ruleset = _ruleset()
+    ruleset["source_type"] = source_type
+    ruleset["conditions"] = {
+        "ref_name": {"include": ["refs/heads/main"], "exclude": []},
+        **selectors,
+    }
+    return ruleset
+
+
+@pytest.mark.parametrize(
+    ("source_type", "selectors"),
+    [
+        (
+            "Organization",
+            {"repository_name": {"include": ["repo"], "exclude": [], "protected": False}},
+        ),
+        ("Organization", {"repository_id": {"repository_ids": [1, 2]}}),
+        (
+            "Organization",
+            {
+                "repository_property": {
+                    "include": [
+                        {
+                            "name": "service",
+                            "property_values": ["api"],
+                            "source": "custom",
+                        }
+                    ],
+                    "exclude": [],
+                }
+            },
+        ),
+        (
+            "Enterprise",
+            {
+                "repository_name": {"include": ["repo"], "exclude": []},
+                "organization_name": {"include": ["org"], "exclude": []},
+            },
+        ),
+        (
+            "Enterprise",
+            {
+                "repository_id": {"repository_ids": [1]},
+                "organization_id": {"organization_ids": [2]},
+            },
+        ),
+        (
+            "Enterprise",
+            {
+                "repository_property": {
+                    "include": [
+                        {
+                            "name": "visibility",
+                            "property_values": ["private"],
+                            "source": "system",
+                        }
+                    ]
+                },
+                "organization_property": {
+                    "include": [{"name": "region", "property_values": ["us"]}]
+                },
+            },
+        ),
+    ],
+    ids=(
+        "organization-name",
+        "organization-repository-id",
+        "organization-property",
+        "enterprise-names",
+        "enterprise-ids",
+        "enterprise-properties",
+    ),
+)
+def test_parent_ruleset_selectors_accept_documented_shapes(
+    source_type: str, selectors: dict[str, object]
+) -> None:
+    """Repository-selected parent selectors accept each documented selector family."""
+    assert ruleset_applies(_scoped_ruleset(source_type, selectors), "main", "main") is True
+
+
+@pytest.mark.parametrize(
+    ("source_type", "selectors", "message"),
+    [
+        ("Repository", {"repository_name": {}}, "parent-only"),
+        ("Unknown", {}, "source type"),
+        ("Organization", {}, "repository selector"),
+        (
+            "Organization",
+            {
+                "repository_name": {"include": ["repo"]},
+                "repository_id": {"repository_ids": [1]},
+            },
+            "repository selector",
+        ),
+        (
+            "Organization",
+            {"organization_name": {"include": ["org"]}},
+            "repository selector",
+        ),
+        (
+            "Enterprise",
+            {"repository_name": {"include": ["repo"]}},
+            "enterprise ruleset selectors",
+        ),
+        (
+            "Enterprise",
+            {
+                "repository_name": {"include": ["repo"]},
+                "organization_name": {"include": ["org"]},
+                "organization_id": {"organization_ids": [1]},
+            },
+            "enterprise ruleset selectors",
+        ),
+    ],
+)
+def test_parent_ruleset_scope_rejects_ambiguous_selector_sets(
+    source_type: str,
+    selectors: dict[str, object],
+    message: str,
+) -> None:
+    """A parent ruleset needs exactly one selector for each required scope."""
+    with pytest.raises(ValueError, match=message):
+        ruleset_applies(_scoped_ruleset(source_type, selectors), "main", "main")
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        None,
+        {},
+        {"include": ["repo"], "extra": []},
+        {"include": "repo"},
+        {"include": [""]},
+        {"include": ["repo"], "exclude": "other"},
+        {"include": ["repo"], "protected": "false"},
+    ],
+)
+def test_ruleset_name_selector_rejects_malformed_shapes(selector: object) -> None:
+    """A repository-name selector needs valid lists and an optional Boolean flag."""
+    ruleset = _scoped_ruleset("Organization", {"repository_name": selector})
+    with pytest.raises(ValueError, match="selector is malformed"):
+        ruleset_applies(ruleset, "main", "main")
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        None,
+        {},
+        {"repository_ids": []},
+        {"repository_ids": "1"},
+        {"repository_ids": [True]},
+        {"repository_ids": [0]},
+        {"repository_ids": [1], "extra": []},
+    ],
+)
+def test_ruleset_id_selector_rejects_malformed_shapes(selector: object) -> None:
+    """A repository-ID selector needs a nonempty list of positive integer IDs."""
+    ruleset = _scoped_ruleset("Organization", {"repository_id": selector})
+    with pytest.raises(ValueError, match="ID selector is malformed"):
+        ruleset_applies(ruleset, "main", "main")
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        None,
+        {},
+        {"include": [], "extra": []},
+        {"include": "record"},
+        {"include": [None]},
+        {"include": [{"name": "kind"}]},
+        {"include": [{"name": "kind", "property_values": [], "extra": "x"}]},
+        {"include": [{"name": "", "property_values": ["api"]}]},
+        {"include": [{"name": "kind", "property_values": "api"}]},
+        {"include": [{"name": "kind", "property_values": [""]}]},
+        {"include": [{"name": "kind", "property_values": ["api"], "source": "other"}]},
+        {"include": [], "exclude": "record"},
+    ],
+)
+def test_ruleset_property_selector_rejects_malformed_shapes(selector: object) -> None:
+    """A property selector rejects unknown fields and malformed records."""
+    ruleset = _scoped_ruleset("Organization", {"repository_property": selector})
+    with pytest.raises(ValueError, match="property selector is malformed"):
+        ruleset_applies(ruleset, "main", "main")
+
+
+@pytest.mark.parametrize(
+    "conditions",
+    [
+        None,
+        {},
+        {"ref_name": None},
+        {"ref_name": {}},
+        {"ref_name": {"include": [], "exclude": [], "extra": []}},
+        {"ref_name": {"include": "main", "exclude": []}},
+        {"ref_name": {"include": [], "exclude": "main"}},
+        {"ref_name": {"include": [""], "exclude": []}},
+        {"ref_name": {"include": [], "exclude": [1]}},
+    ],
+)
+def test_ruleset_ref_conditions_reject_malformed_shapes(conditions: object) -> None:
+    """Branch conditions require complete nonempty string pattern lists."""
+    ruleset = _ruleset()
+    ruleset["conditions"] = conditions
+    with pytest.raises(
+        ValueError, match=r"conditions are malformed|patterns? (?:are|is) malformed"
+    ):
+        ruleset_applies(ruleset, "main", "main")
 
 
 def test_ruleset_only_policy_accepts_unambiguous_absent_classic_protection(

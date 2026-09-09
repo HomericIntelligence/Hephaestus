@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from .catalog import PromptCatalog
+from hephaestus.prompts import PromptCatalog
 
 _DEFAULT_PLUGIN_SKILLS_SUBPATH = Path(".claude/plugins/marketplaces/Hephaestus/skills")
 _PR_REVIEW_SKILL_NAME = "pr-review"

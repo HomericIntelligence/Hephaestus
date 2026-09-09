@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import agent_config
-from hephaestus.automation.session_naming import (
+from hephaestus.automation.agent_config import (
     AGENT_COMMIT_MESSAGE,
     AGENT_IMPLEMENTER,
     AGENT_PLAN_REVIEWER,
@@ -159,16 +159,12 @@ class TestSessionUUID:
             == session_jsonl_path(dashed_sid, dashed).parent
         )
 
-    def test_omitting_model_preserves_legacy_key(self) -> None:
-        """Backward compat: no model reproduces the historical (repo, issue, agent) id."""
-        from hephaestus.automation.session_naming import session_name
-
+    def test_omitting_model_uses_the_artifact_session_name(self) -> None:
+        """An omitted model keeps the repository, issue, and agent name."""
         assert session_name("R", 1, AGENT_PLANNER) == "R_1_planner"
         assert session_name("R", 1, AGENT_PLANNER, None) == "R_1_planner"
 
     def test_model_token_sanitized_into_key(self) -> None:
-        from hephaestus.automation.session_naming import session_name
-
         # Slashes/colons in a model id are normalized to a name-safe token.
         name = session_name("R", 1, AGENT_PLANNER, "us.anthropic/opus:4-8")
         assert "/" not in name and ":" not in name

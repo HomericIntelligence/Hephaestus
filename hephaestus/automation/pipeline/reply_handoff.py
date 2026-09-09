@@ -1479,6 +1479,7 @@ def retry_pending_implementation_reply_handoff(  # noqa: C901
             )
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             if bool(getattr(result, "outcome_unknown", False)) or bool(
                 getattr(result, "blocked_thread_ids", ())
             ):
@@ -1515,6 +1516,7 @@ def retry_pending_implementation_reply_handoff(  # noqa: C901
             # fall through to the ordinary mutation retry path.
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             logger.warning(
                 "reply_handoff:%s: reconciliation could not prove the armed reply (%s)",
                 issue_number,
@@ -1528,6 +1530,7 @@ def retry_pending_implementation_reply_handoff(  # noqa: C901
         )
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
         return "blocked"
 
     return _consume_reply_post_result(

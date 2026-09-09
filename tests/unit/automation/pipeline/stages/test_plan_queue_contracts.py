@@ -11,7 +11,6 @@ from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stage_results import Continue
-from hephaestus.automation.pipeline.stages.learning import LearningStage
 from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
 from hephaestus.automation.plan_review_session import PlanReviewSessionStore
@@ -151,7 +150,7 @@ def test_plan_change_during_publication_cannot_advance(
     change_at: str,
     enable_learn: bool,
 ) -> None:
-    """A changed plan cannot advance or supply an approved learning job."""
+    """A changed plan cannot advance or create a learning intent."""
 
     class ConcurrentPlan(FakeStageGitHub):
         changed = False
@@ -199,20 +198,8 @@ def test_plan_change_during_publication_cannot_advance(
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.FAIL_BACK
     assert github.labels[508] == {STATE_NEEDS_PLAN}
-    if enable_learn and change_at == "label":
-        assert len(item.learning_intents) == 1
-        intent = item.learning_intents[0]
-        item.state = "CLAIM"
-        learning = LearningStage()
-        assert learning.on_enter(item, ctx) is None
-        assert learning.step(item, ctx) == Continue(next_state="CLAIM")
-        record = journal.load(intent.key)
-        assert record is not None
-        assert record["status"] == "failed"
-        assert record["error"] == "plan_state_changed"
-        assert learning.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "resume_plan_review")
-    else:
-        assert item.learning_intents == []
+    assert item.learning_intents == []
+    assert list(tmp_path.glob("learning-intent-*.json")) == []
 
 
 def test_session_replacement_preserves_completed_rounds(

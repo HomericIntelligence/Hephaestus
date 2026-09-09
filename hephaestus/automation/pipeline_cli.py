@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -410,6 +411,16 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
     if profile in {"full", "planning"}:
         parser.add_argument("--force", action="store_true", help="Plan the selected issues again.")
     parser.add_argument(
+        "--update-plan",
+        action="store_true",
+        help="Update each selected issue plan from current origin/main, then continue the queue.",
+    )
+    parser.add_argument(
+        "--rebase",
+        action="store_true",
+        help="Rebase each selected worktree against origin/main, then continue the queue.",
+    )
+    parser.add_argument(
         "--reset-plan-review-session",
         action="store_true",
         help="Reset the reviewer conversation for explicit issues.",
@@ -551,6 +562,14 @@ def parse_args(argv: list[str] | None = None, *, profile: str = "full") -> argpa
     args = parser.parse_args(argv)
     if args.issue_limit is not None and (args.issues is not None or args.prs is not None):
         parser.error("--issue-limit cannot be combined with --issues or --prs")
+    if args.update_plan and not args.issues:
+        parser.error("--update-plan requires explicit --issues")
+    if args.update_plan and StageName.PLANNING not in args.stages:
+        parser.error("--update-plan requires the planning stage")
+    if args.rebase and not (args.issues or args.prs):
+        parser.error("--rebase requires explicit --issues or --prs")
+    if args.rebase and StageName.IMPLEMENTATION not in args.stages:
+        parser.error("--rebase requires the implementation stage")
     if args.reset_plan_review_session and not args.issues:
         parser.error("--reset-plan-review-session requires explicit --issues")
     return args
@@ -614,6 +633,8 @@ def build_config(
         "metrics_port",
         "evidence_receipt_dir",
         "force",
+        "rebase",
+        "update_plan",
         "issue_limit",
         "host_verification_pyxis_sha256",
         "host_verification_pyxis_authority",
@@ -667,7 +688,23 @@ def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
     args = parse_args(argv, profile=profile)
     configure_github_throttle_from_args(args)
     _setup_logging(args.verbose, args.log_format, quiet=args.quiet, log_file=args.log_file)
+    from hephaestus.automation.runtime_diagnostics import (
+        require_virtual_environment,
+        runtime_identity,
+    )
+
+    identity = runtime_identity()
+    LOG.info("Runtime identity: %s", identity, extra={"runtime_identity": identity})
     selected = set(args.stages)
+    if (
+        not args.dry_run
+        and sys.platform == "darwin"
+        and selected.intersection({StageName.IMPLEMENTATION, StageName.MERGE_WAIT})
+    ):
+        try:
+            require_virtual_environment(Path(sys.prefix))
+        except RuntimeError as exc:
+            return _error_exit(args, str(exc))
     active_roles = tuple(
         role
         for role, needed in (

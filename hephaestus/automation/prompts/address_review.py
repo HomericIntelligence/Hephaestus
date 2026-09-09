@@ -3,8 +3,9 @@
 import json
 from typing import Any
 
+from hephaestus.prompts import PromptCatalog
+
 from ._shared import _fence_untrusted, fence_content, get_terse_output_directive
-from .catalog import PromptCatalog
 
 
 def build_scope_retraction_directive(paths: tuple[str, ...], nonce: str) -> str:

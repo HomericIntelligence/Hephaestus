@@ -8,15 +8,57 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.pipeline.jobs import GitJob
-from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome
+from hephaestus.automation.pipeline.github_jobs import (
+    CurrentPlanScopeRead,
+    GitHubJob,
+    ReadCurrentPlanScopeRequest,
+)
+from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+from hephaestus.automation.pipeline.stages import JobRequest, StageContext, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import (
+    ImplementationStage,
     _capture_codex_publication_scope,
     _codex_isolation_job_kwargs,
     _codex_publication_kwargs,
     _remediation_prepare_request,
 )
+from hephaestus.automation.pipeline.work_item import WorkItem
+from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.review_journal import PlanDiscoveryResult
+
+
+def _queue_scope_read(item: WorkItem, ctx: StageContext) -> JobRequest:
+    """Request plan facts without a live read in the coordinator."""
+    with patch.object(ctx.github, "discover_plan") as discover_plan:
+        request = _capture_codex_publication_scope(item, ctx)
+    discover_plan.assert_not_called()
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitHubJob)
+    assert isinstance(request.job.request, ReadCurrentPlanScopeRequest)
+    assert request.on_done_state == item.state
+    return request
+
+
+def _read_scope_job(request: JobRequest, ctx: StageContext, plan: str) -> CurrentPlanScopeRead:
+    """Parse fixture plan facts through the typed GitHub runner."""
+    assert isinstance(request.job, GitHubJob)
+    assert isinstance(request.job.request, ReadCurrentPlanScopeRequest)
+    with (
+        patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)),
+        patch("hephaestus.automation.pipeline_github_jobs.PipelineGitHub", return_value=ctx.github),
+    ):
+        receipt = PipelineGitHubJobRunner(ctx.org, dry_run=ctx.dry_run).run(request.job)
+    assert isinstance(receipt, CurrentPlanScopeRead)
+    assert receipt.request == request.job.request
+    return receipt
+
+
+def _complete_publication_scope(item: WorkItem, ctx: StageContext, plan: str) -> None:
+    """Accept the correlated worker receipt before freezing publication paths."""
+    request = _queue_scope_read(item, ctx)
+    receipt = _read_scope_job(request, ctx, plan)
+    ImplementationStage().on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+    assert _capture_codex_publication_scope(item, ctx) is None
 
 
 def test_coordinator_claims_do_not_authorize_publication(
@@ -42,8 +84,7 @@ def test_coordinator_claims_do_not_authorize_publication(
         }
     )
     plan = "## Files to Modify\n- `hephaestus/example.py`\n- `pyproject.toml`\n"
-    with patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)):
-        assert _capture_codex_publication_scope(item, ctx) is None
+    _complete_publication_scope(item, ctx, plan)
 
     scope = _codex_publication_kwargs(item, ctx, "b" * 40)
     assert isinstance(scope, dict)
@@ -103,11 +144,17 @@ def test_invalid_plan_path_rejects_the_complete_publication_scope(
     )
     item = make_work_item()
     plan = f"## Files to Modify\n- `hephaestus/example.py`\n- `{invalid_path}`\n"
-    with patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)):
-        outcome = _capture_codex_publication_scope(item, ctx)
+    request = _queue_scope_read(item, ctx)
+    with pytest.raises(ValueError, match="paths must contain sorted unique source paths") as error:
+        _read_scope_job(request, ctx, plan)
+    ImplementationStage().on_job_done(item, JobResult(ok=False, error=str(error.value)), ctx)
+    outcome = _capture_codex_publication_scope(item, ctx)
     assert isinstance(outcome, StageOutcome)
-    assert outcome.note == "codex_publication_scope_claims_invalid"
+    assert outcome.note == "implementation_plan_scope_unavailable"
     assert "_codex_publication_scope" not in item.payload
+    publication = _codex_publication_kwargs(item, ctx, "b" * 40)
+    assert isinstance(publication, StageOutcome)
+    assert publication.note == "codex_publication_scope_claims_invalid"
 
 
 def test_publication_scope_preserves_hidden_and_extensionless_paths(
@@ -124,8 +171,7 @@ def test_publication_scope_preserves_hidden_and_extensionless_paths(
     )
     item = make_work_item()
     plan = "## Files to Modify\n- `.github/workflows/ci.yml`\n- `justfile`\n"
-    with patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)):
-        assert _capture_codex_publication_scope(item, ctx) is None
+    _complete_publication_scope(item, ctx, plan)
     scope = _codex_publication_kwargs(item, ctx, "b" * 40)
     assert isinstance(scope, dict)
     assert scope["allowed_paths"] == (".github/workflows/ci.yml", "justfile")
@@ -147,8 +193,7 @@ def test_codex_implementation_role_retains_isolation_and_publication_scope(
     item = make_work_item()
     plan = "## Files to Modify\n- `src/writer.py`\n"
     assert _codex_isolation_job_kwargs(ctx) == isolation
-    with patch.object(ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)):
-        assert _capture_codex_publication_scope(item, ctx) is None
+    _complete_publication_scope(item, ctx, plan)
     assert _codex_publication_kwargs(item, ctx, "b" * 40) == {
         "allowed_paths": ("src/writer.py",),
         "scope_history_base_sha": "b" * 40,

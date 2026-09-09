@@ -397,6 +397,17 @@ def test_learning_options_have_visible_help(profile: str, flag: str) -> None:
     assert str(action.help).strip()
 
 
+@pytest.mark.parametrize("profile", ["full", "planning", "implementation", "review"])
+@pytest.mark.parametrize("flag", ["--update-plan", "--rebase"])
+def test_manual_request_options_have_explicit_defaults_and_help(profile: str, flag: str) -> None:
+    """Every queue command exposes the same manual request controls."""
+    action = pipeline_cli.build_parser(profile=profile)._option_string_actions[flag]
+    assert isinstance(action, argparse._StoreTrueAction)
+    assert action.default is False
+    assert action.help not in (None, argparse.SUPPRESS)
+    assert str(action.help).strip()
+
+
 def test_pre_pr_tests_help_describes_the_test_gate() -> None:
     """The help text explains when the optional test gate applies."""
     action = pipeline_cli.build_parser()._option_string_actions["--run-pre-pr-tests"]

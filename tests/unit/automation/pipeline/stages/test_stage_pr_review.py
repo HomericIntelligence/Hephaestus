@@ -1585,10 +1585,10 @@ class TestPrReviewStageStep:
         assert item.attempts.get("pr_review_hard", 0) == 0
         assert "direct_pr_worktree_pending" not in item.payload
 
-    def test_merged_scope_dependency_routes_exact_host_sync(
+    def test_merged_scope_dependency_waits_for_manual_rebase(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A missing child merge routes host synchronization with its exact SHA."""
+        """A missing child merge cannot authorize an automatic rebase."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="ENTER")
@@ -1612,10 +1612,10 @@ class TestPrReviewStageStep:
         item.state = request.on_done_state
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FAIL_BACK, "scope_dependency_sync_required"
+            Disposition.BLOCKED, "scope_dependency_manual_rebase_required"
         )
         assert item.payload["scope_dependency_merge_shas"] == ["b" * 40]
-        assert item.payload["post_review_rebase_required"] is True
+        assert "post_review_rebase_required" not in item.payload
 
     def test_synchronized_dependency_adopts_detached_reviewer_checkout(
         self, make_ctx: Any, make_work_item: Any

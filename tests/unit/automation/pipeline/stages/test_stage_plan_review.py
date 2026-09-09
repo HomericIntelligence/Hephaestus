@@ -13,17 +13,12 @@ from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.agents.model_selection import AgentModelSelection
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.learning_journal import LearningJournalStore
-from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
-from hephaestus.automation.mnemosyne_learning_preparation import (
-    MnemosyneLearningPreparationService,
-)
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.plan_journal import publish_plan_revision
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
     JobRequest,
-    LearningStage,
     StageOutcome,
     plan_review,
 )
@@ -32,7 +27,6 @@ from hephaestus.automation.pipeline.stages.plan_review import (
     PlanReviewStage,
     build_amend_prompt,
 )
-from hephaestus.automation.pipeline.work_item import LearningIntent
 from hephaestus.automation.plan_review_session import PlanReviewSessionStore
 from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
@@ -970,13 +964,10 @@ class TestPlanReviewStageStep:
         assert result.disposition == Disposition.RETRY
         assert github.labels[205] == {initial_label, target_label}
 
-    def test_go_emits_approved_plan_intent_without_job(
+    def test_go_keeps_plan_knowledge_without_learning_intent(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """GO records learning work and releases the main stage at once."""
-        from hephaestus.automation.learning_journal import LearningJournalStore
-        from hephaestus.automation.review_journal import plan_fingerprint
-
+        """GO keeps the approved plan on the source issue."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         journal = LearningJournalStore(lambda: tmp_path)
@@ -991,74 +982,9 @@ class TestPlanReviewStageStep:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
-        assert item.learning_intents == [
-            LearningIntent.approved_plan(
-                repo=item.repo,
-                issue=3,
-                plan_revision=8,
-                plan_fingerprint=plan_fingerprint(item.payload["plan_text"]),
-            )
-        ]
-        record = journal.load(item.learning_intents[0].key)
-        assert record is not None and record["status"] == "pending"
+        assert item.learning_intents == []
+        assert list(tmp_path.glob("learning-intent-*.json")) == []
         assert STATE_PLAN_GO in github.labels[3]
-
-    def test_short_repo_plan_approval_starts_host_preparation_with_qualified_repo(
-        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Plan approval qualifies its source only when host preparation starts."""
-
-        class PreparationStartedError(Exception):
-            """Stop after the host parser and source-reader boundary."""
-
-        seen: list[LearningIntent] = []
-
-        class Reader:
-            def read(self, intent: LearningIntent) -> None:
-                seen.append(intent)
-                raise PreparationStartedError
-
-        github = FakeStageGitHub()
-        journal = LearningJournalStore(lambda: tmp_path / "journal")
-        ctx = make_ctx(org="LLM360", github=github, learning_journal=journal)
-        item = _review_item(make_work_item, github, repo="comet", issue=813, state="EVAL")
-        item.payload["plan_text"] = "# Approved plan\n\nImplement the queue."
-        item.payload["plan_revision"] = 4
-        github.comments[item.issue] = [render_current_plan(item.payload["plan_text"], revision=4)]
-        item.payload["review_verdict"] = _verdict("GO")
-        github.comments[813] = [render_current_plan(item.payload["plan_text"], revision=4)]
-
-        outcome = PlanReviewStage().step(item, ctx)
-
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition == Disposition.ADVANCE
-        durable_key = item.learning_intents[0].key
-        assert item.learning_intents[0].repo == "comet"
-        item.state = "ENTER"
-        learning = LearningStage()
-        assert learning.on_enter(item, ctx) is None
-        item.state = "CLAIM"
-        request = learning.step(item, ctx)
-        assert isinstance(request, JobRequest)
-        binding = MnemosyneBindingReceipt(
-            root=str(tmp_path / "mnemosyne"),
-            repository="HomericIntelligence/Mnemosyne",
-            default_branch="main",
-            version="3.0.0",
-            commit_sha="b" * 40,
-            sync_status="updated",
-            trust_basis="test",
-            athena_contract={},
-        )
-
-        with pytest.raises(PreparationStartedError):
-            MnemosyneLearningPreparationService(source_reader=Reader()).prepare(
-                request.job.request.payload["learning_intent"],
-                binding,
-            )
-
-        assert seen[0].repo == "LLM360/comet"
-        assert seen[0].key == durable_key
 
     def test_eval_nogo_within_budget_amends(self, make_ctx: Any, make_work_item: Any) -> None:
         """NOGO within budget is labeled before the amendment is requested."""
@@ -1332,7 +1258,7 @@ class TestPlanReviewStageStep:
     def test_plan_review_never_submits_learning_job(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The main plan-review stage records intent but does not run learning."""
+        """The plan-review stage does not create a learning job."""
         stage = PlanReviewStage()
         ctx = make_ctx(github=FakeStageGitHub())
         item = _review_item(make_work_item, ctx.github, issue=11, state="EVAL")
@@ -1787,10 +1713,10 @@ class TestDurableWriteOrdering:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
 
-    def test_learning_intent_is_durable_before_plan_go_label(
+    def test_plan_go_does_not_write_a_learning_journal(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A crash after plan-GO cannot lose its approved-plan learning intent."""
+        """Plan approval changes labels without a learning journal write."""
         events: list[str] = []
 
         class OrderedJournal(LearningJournalStore):
@@ -1818,7 +1744,7 @@ class TestDurableWriteOrdering:
 
         result = PlanReviewStage().step(item, ctx)
 
-        assert events == ["journal", "label"]
+        assert events == ["label"]
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
 

@@ -28,6 +28,11 @@ READ_ONLY_SCOPES = frozenset({READ_ONLY, PR_REVIEW})
 # required by the normal review workflow; it does not grant write tools.
 EXPECTED_SCOPES = {
     (
+        "stages/implementation.py",
+        "_prepare_rebase_agent",
+        "build_rebase_preparation_prompt",
+    ): READ_ONLY,
+    (
         "stages/planning.py",
         "_requirements_recovery_step",
         "build_recovery_prompt",

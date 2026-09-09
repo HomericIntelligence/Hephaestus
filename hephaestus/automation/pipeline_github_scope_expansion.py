@@ -8,6 +8,7 @@ import subprocess
 from typing import Any
 from urllib.parse import urlsplit
 
+from hephaestus.automation.agent_config import issue_auto_impl_branch_name
 from hephaestus.automation.github_api import (
     _body_file as github_body_file,
     scope_expansion_issue_owner_query,
@@ -17,7 +18,6 @@ from hephaestus.automation.github_api import (
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *  # noqa: F403
 from .review_journal import has_exact_leading_marker
-from .session_naming import issue_auto_impl_branch_name
 
 
 class PipelineGitHubScopeExpansion(_PipelineGitHubHost):

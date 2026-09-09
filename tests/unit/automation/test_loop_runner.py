@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
@@ -637,6 +638,79 @@ def _capture_main_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> ob
     return captured["config"]
 
 
+def test_main_records_executing_runtime_identity(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Startup identifies the executing package and interpreter."""
+    monkeypatch.setattr(loop_runner, "_setup_logging", lambda *args, **kwargs: None)
+    with caplog.at_level("INFO"):
+        _capture_config(["--repos", "Repo", "--dry-run"], monkeypatch)
+    identities = [
+        record.runtime_identity for record in caplog.records if hasattr(record, "runtime_identity")
+    ]
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity["interpreter"] == sys.executable
+    assert identity["package_path"] == str(Path(loop_runner.__file__).resolve().parents[1])
+    assert identity["distribution_version"]
+    assert "installed_commit" in identity
+    assert "launcher" in identity
+
+
+@pytest.mark.parametrize("stages", ["implementation", "merge_wait"])
+def test_main_rejects_unsupported_runtime_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stages: str
+) -> None:
+    """An unsupported macOS runtime stops before provider or repository work."""
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with (
+        patch.object(loop_runner, "resolve_agent") as resolve_agent,
+        patch.object(loop_runner, "_resolve_org_and_repos") as resolve_scope,
+        patch("hephaestus.automation.pipeline.coordinator.run_pipeline") as dispatch,
+    ):
+        assert main(["--repos", "Repo", "--issues", "3110", "--stages", stages]) == 1
+    resolve_agent.assert_not_called()
+    resolve_scope.assert_not_called()
+    dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("platform", "profile", "options"),
+    [
+        ("darwin", "full", ["--dry-run"]),
+        ("darwin", "planning", []),
+        ("darwin", "review", []),
+        ("linux", "full", []),
+    ],
+)
+def test_runtime_environment_guard_applies_only_to_supported_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    profile: str,
+    options: list[str],
+) -> None:
+    """Preview, planning, review, and Linux retain their runtime contracts."""
+    monkeypatch.setattr(sys, "platform", platform)
+    with patch("hephaestus.automation.runtime_diagnostics.require_virtual_environment") as guard:
+        _capture_config(["--agent", "claude", *options], monkeypatch, profile=profile)
+    guard.assert_not_called()
+
+
+@pytest.mark.parametrize("profile", ["full", "implementation"])
+def test_macos_writer_runtime_uses_the_executing_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str
+) -> None:
+    """A writer run checks its executing environment before dispatch."""
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "pyvenv.cfg").write_text("home = fixture\n")
+    monkeypatch.setattr(sys, "prefix", str(runtime))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    config = _capture_config(["--agent", "claude"], monkeypatch, profile=profile)
+    assert isinstance(config, PipelineConfig)
+
+
 def test_main_applies_default_phase_timeout_when_flag_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1075,3 +1149,76 @@ def test_review_scope_requires_reviewer_admission(
             monkeypatch,
         )
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize("profile", ["full", "implementation"])
+@pytest.mark.parametrize("scope", ["--issues", "--prs"])
+def test_manual_rebase_requires_and_retains_explicit_scope(profile: str, scope: str) -> None:
+    """The rebase request needs an explicit item selection."""
+    args = loop_runner.parse_args(["--rebase", scope, "8"], profile=profile)
+    assert args.rebase is True
+    assert getattr(args, scope.removeprefix("--")) == [8]
+    assert loop_runner.parse_args([], profile=profile).rebase is False
+    with pytest.raises(SystemExit):
+        loop_runner.parse_args(["--rebase"], profile=profile)
+
+
+@pytest.mark.parametrize("profile", ["full", "implementation"])
+def test_manual_rebase_reaches_pipeline_config(
+    monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    """The shared command passes the request to the coordinator."""
+    cfg = _capture_config(["--rebase", "--prs", "8"], monkeypatch, profile=profile)
+    assert isinstance(cfg, PipelineConfig)
+    assert cfg.rebase is True
+    assert cfg.prs == [8]
+
+
+@pytest.mark.parametrize(
+    ("profile", "options"),
+    [
+        ("full", ["--stages", "planning,plan_review"]),
+        ("planning", []),
+        ("review", []),
+    ],
+)
+def test_manual_rebase_requires_the_implementation_stage(
+    profile: str, options: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A manual writer job needs implementation in the selected queue scope."""
+    with pytest.raises(SystemExit):
+        loop_runner.parse_args(["--rebase", "--issues", "8", *options], profile=profile)
+    assert "--rebase requires the implementation stage" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("profile", ["full", "planning"])
+def test_update_plan_reaches_pipeline_without_global_force(
+    monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    """A plan update changes only the selected issues."""
+    cfg = _capture_config(["--update-plan", "--issues", "8"], monkeypatch, profile=profile)
+    assert isinstance(cfg, PipelineConfig)
+    assert cfg.update_plan is True
+    assert cfg.issues == [8]
+    assert cfg.force is False
+    assert loop_runner.parse_args([], profile=profile).update_plan is False
+
+
+@pytest.mark.parametrize(
+    ("profile", "options"),
+    [
+        ("full", []),
+        ("full", ["--prs", "8"]),
+        ("full", ["--issues", "8", "--stages", "implementation"]),
+        ("planning", []),
+        ("implementation", ["--issues", "8"]),
+        ("review", ["--issues", "8"]),
+    ],
+)
+def test_update_plan_rejects_missing_issue_or_planning_scope(
+    profile: str, options: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A plan update needs explicit issues and the planning stage."""
+    with pytest.raises(SystemExit):
+        loop_runner.parse_args(["--update-plan", *options], profile=profile)
+    assert "--update-plan requires" in capsys.readouterr().err

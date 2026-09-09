@@ -15,7 +15,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from hephaestus.agents.workspace import (
     DirtyDirectClaim,
@@ -1841,9 +1841,19 @@ class SourceWorkspaceManager:
         expected_revision: str | None = None,
         expected_detached: bool | None = None,
         physical_cleanup: Callable[[], None] | None = None,
+        deadline: _PreparationDeadline | None = None,
     ) -> None:
         """Remove one clean terminal lane and its receipt under the lane lock."""
-        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+        if deadline is None:
+            deadline = _PreparationDeadline(
+                time.monotonic() + cast(float, remaining_operation_timeout(45.0)),
+                time.monotonic,
+                current_operation_shutdown(),
+            )
+        with (
+            self._acquire_lane(item_number, lane, deadline),
+            operation_deadline(deadline.expires_at, shutdown=deadline.shutdown),
+        ):
             receipt = self._read_receipt(item_number, lane)
             if receipt is None:
                 if physical_cleanup is None:
@@ -1866,20 +1876,26 @@ class SourceWorkspaceManager:
                 raise SourceWorkspaceError("source workspace receipt checkout changed")
             if receipt.obligations:
                 raise SourceWorkspaceError("source workspace still has active obligations")
-            if receipt.path.exists() and self._is_dirty(receipt.path):
+            if receipt.path.exists() and self._is_dirty(receipt.path, deadline=deadline):
                 raise SourceWorkspaceError(
                     f"source workspace is dirty and preserved: {receipt.path}"
                 )
             if physical_cleanup is not None:
                 physical_cleanup()
             else:
-                with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+                with file_lock(
+                    WorktreeManager.git_metadata_lock_path(self.repo_root),
+                    blocking=False,
+                    require_exclusive=True,
+                ):
+                    deadline.remaining()
                     result = _git(
                         self.repo_root,
                         "worktree",
                         "remove",
                         str(receipt.path),
                         check=False,
+                        deadline=deadline,
                     )
                     if result.returncode and receipt.path.exists():
                         raise SourceWorkspaceError(

@@ -5,66 +5,98 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
-import queue
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
     AthenaSkillRequest,
     AthenaSkillResult,
 )
 from hephaestus.automation.pipeline.jobs import AgentJob
+from hephaestus.automation.pipeline.queues import CompletionQueue
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from tests.unit.automation.test_source_worktree import _repository
 
 
 class _Host:
+    def __init__(self) -> None:
+        """Record host execution and cancellation."""
+        self.started = threading.Event()
+        self.cancelled = threading.Event()
+        self.calls: list[AthenaSkillRequest] = []
+
     def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+        """Return the identity of the actual host worker."""
+        self.started.set()
+        self.calls.append(request)
         return AthenaSkillResult(
-            kind=str(request.kind), receipt={"worker": threading.current_thread().name}
+            kind=request.kind, receipt={"worker": threading.current_thread().name}
         )
 
+    def cancel(self) -> None:
+        """Record the pool's cancellation request."""
+        self.cancelled.set()
 
-def test_learning_workers_are_distinct_and_reject_generic_agents(tmp_path: Path) -> None:
+
+@pytest.fixture
+def learning_request(tmp_path: Path) -> AthenaSkillRequest:
+    """Bind host work to a real prepared source workspace."""
+    root, revision, _second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(root, repository="HomericIntelligence/Hephaestus")
+    binding = manager.prepare_bounded(1, SourceLane.IMPLEMENTATION, revision)
+    return AthenaSkillRequest(
+        kind="learn",
+        repo="HomericIntelligence/Hephaestus",
+        issue=1,
+        agent="codex",
+        model="",
+        cwd=binding.cwd,
+        timeout_s=10,
+        workspace=binding,
+    )
+
+
+def test_learning_workers_are_distinct_and_reject_generic_agents(
+    tmp_path: Path, learning_request: AthenaSkillRequest
+) -> None:
     """The lane has distinct workers and no generic agent dispatch surface."""
     assert (
         importlib.util.find_spec("hephaestus.automation.pipeline.auxiliary_worker_pool") is not None
     )
     auxiliary = importlib.import_module("hephaestus.automation.pipeline.auxiliary_worker_pool")
-    completions: queue.Queue = queue.Queue(maxsize=1)
+    completions = CompletionQueue(maxsize=1)
+    host = _Host()
     pool = auxiliary.AuxiliaryWorkerPool(
         size=1,
         shutdown=threading.Event(),
         completion_q=completions,
-        athena_skill_executor=_Host(),
+        athena_skill_executor=host,
     )
-    request = AthenaSkillRequest(
-        kind="learn",
-        repo="Hephaestus",
-        issue=2705,
-        agent="codex",
-        model="",
-        cwd=tmp_path,
-        timeout_s=10,
-    )
-    handle = pool.submit(AthenaSkillJob(request=request), "DONE")
-    done, result = completions.get(timeout=2)
+    try:
+        handle = pool.submit(AthenaSkillJob(request=learning_request), "DONE")
+        done, result = completions.get(timeout=2)
 
-    assert done is handle
-    assert result.ok
-    learning_worker = result.value.receipt["worker"]
-    assert learning_worker.startswith("hephaestus-learning-worker-")
-    with ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="hephaestus-pipeline-worker-"
-    ) as main:
-        main_worker = main.submit(lambda: threading.current_thread().name).result()
-    assert learning_worker != main_worker
-    with pytest.raises(TypeError, match="does not accept"):
-        pool.submit(AgentJob("r", 1, "codex", "", lambda: "", tmp_path, 1), "DONE")
-    pool.shutdown(mark_interrupted=False)
+        assert done is handle
+        assert result.ok
+        assert host.started.is_set()
+        assert host.calls[0].workspace == learning_request.workspace
+        learning_worker = result.value.receipt["worker"]
+        assert learning_worker.startswith("hephaestus-learning-worker-")
+        with ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="hephaestus-pipeline-worker-"
+        ) as main:
+            main_worker = main.submit(lambda: threading.current_thread().name).result(timeout=1)
+        assert learning_worker != main_worker
+        with pytest.raises(TypeError, match="does not accept"):
+            pool.submit(AgentJob("r", 1, "codex", "", lambda: "", tmp_path, 1), "DONE")
+    finally:
+        pool.shutdown(mark_interrupted=False)
+    assert host.cancelled.is_set()
 
 
 def test_learning_dependency_graph_excludes_agent_runtime_and_pi() -> None:
@@ -90,78 +122,80 @@ def test_learning_dependency_graph_excludes_agent_runtime_and_pi() -> None:
     assert not any("agents.runtime" in name or "pi_" in name for name in imported)
 
 
-def test_graceful_coordinator_signal_does_not_rewrite_completed_result(tmp_path: Path) -> None:
+def test_graceful_coordinator_signal_does_not_rewrite_completed_result(
+    learning_request: AthenaSkillRequest,
+) -> None:
     """A graceful stop lets active host work publish its real result."""
     auxiliary = importlib.import_module("hephaestus.automation.pipeline.auxiliary_worker_pool")
     graceful = threading.Event()
     forced = threading.Event()
-    completions: queue.Queue = queue.Queue(maxsize=1)
+    completions = CompletionQueue(maxsize=1)
 
     class BlockingHost(_Host):
         def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
-            graceful.wait(timeout=1)
-            time.sleep(0.01)
+            self.started.set()
+            assert graceful.wait(timeout=2)
             return super().execute(request)
 
+    host = BlockingHost()
     pool = auxiliary.AuxiliaryWorkerPool(
         size=1,
         shutdown=forced,
         completion_q=completions,
-        athena_skill_executor=BlockingHost(),
+        athena_skill_executor=host,
     )
-    request = AthenaSkillRequest(
-        kind="learn",
-        repo="Hephaestus",
-        issue=1,
-        agent="codex",
-        model="",
-        cwd=tmp_path,
-        timeout_s=10,
-    )
-    pool.submit(AthenaSkillJob(request=request), "DONE")
-    graceful.set()
-    _handle, result = completions.get(timeout=2)
+    try:
+        pool.submit(AthenaSkillJob(request=learning_request), "DONE")
+        assert host.started.wait(timeout=1)
+        graceful.set()
+        _handle, result = completions.get(timeout=2)
 
-    assert result.ok
-    assert not result.interrupted
-    pool.shutdown(mark_interrupted=False)
+        assert result.ok
+        assert not result.interrupted
+        assert len(host.calls) == 1
+        assert host.calls[0].workspace == learning_request.workspace
+    finally:
+        graceful.set()
+        pool.shutdown(mark_interrupted=False)
 
 
-def test_forced_shutdown_publishes_cancelled_queued_job(tmp_path: Path) -> None:
+def test_forced_shutdown_publishes_cancelled_queued_job(
+    learning_request: AthenaSkillRequest,
+) -> None:
     """A queued host job becomes an explicit resumable completion."""
     auxiliary = importlib.import_module("hephaestus.automation.pipeline.auxiliary_worker_pool")
     forced = threading.Event()
-    completions: queue.Queue = queue.Queue(maxsize=2)
+    completions = CompletionQueue(maxsize=2)
 
     class BlockingHost(_Host):
         def __init__(self) -> None:
-            self.started = threading.Event()
+            super().__init__()
             self.release = threading.Event()
 
         def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
             self.started.set()
-            self.release.wait(timeout=2)
+            assert self.release.wait(timeout=2)
             return super().execute(request)
 
     host = BlockingHost()
     pool = auxiliary.AuxiliaryWorkerPool(
         size=1, shutdown=forced, completion_q=completions, athena_skill_executor=host
     )
-    request = AthenaSkillRequest(
-        kind="learn",
-        repo="Hephaestus",
-        issue=1,
-        agent="codex",
-        model="",
-        cwd=tmp_path,
-        timeout_s=10,
-    )
-    pool.submit(AthenaSkillJob(request=request), "DONE")
-    pool.submit(AthenaSkillJob(request=request), "DONE")
-    assert host.started.wait(timeout=1)
+    try:
+        running = pool.submit(AthenaSkillJob(request=learning_request), "DONE")
+        assert host.started.wait(timeout=1)
+        queued = pool.submit(AthenaSkillJob(request=learning_request), "DONE")
+        pool.shutdown()
+        host.release.set()
+        results = dict(completions.get(timeout=2) for _ in range(2))
 
-    pool.shutdown()
-    host.release.set()
-    results = [completions.get(timeout=2)[1], completions.get(timeout=2)[1]]
-
-    assert any(result.error == "interrupted_before_start" for result in results)
+        assert set(results) == {running, queued}
+        assert all(result.interrupted and not result.ok for result in results.values())
+        assert results[queued].error == "interrupted_before_start"
+        assert len(host.calls) == 1
+        assert host.calls[0].workspace == learning_request.workspace
+        assert host.cancelled.is_set()
+        assert completions.empty()
+    finally:
+        host.release.set()
+        pool.shutdown()

@@ -41,10 +41,6 @@ def test_worker_completion_keeps_the_cancellation_origin(
         main_pool._on_future_done(handle, future)
         main_pool.shutdown(mark_interrupted=False)
 
-    if cancelled_before_start and not auxiliary:
-        # The coordinator owns main-lane cancellation before execution.
-        assert completions.empty()
-        return
     returned_handle, result = completions.get_nowait()
     assert returned_handle is handle
     assert not result.ok

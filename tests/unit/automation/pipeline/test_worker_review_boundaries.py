@@ -49,6 +49,10 @@ def test_source_rebase_metadata_does_not_reach_the_git_helper(
             command, 1 if command[1:3] == ["merge-base", "--is-ancestor"] else 0, "", ""
         ),
     )
+    monkeypatch.setattr(pool, "_read_publish_head", lambda *_args, **_kwargs: revision)
+    monkeypatch.setattr(
+        pool, "_git_fetch_main", lambda _job: JobResult(ok=True, value={"head_sha": revision})
+    )
     job = GitJob(
         "repo",
         "rebase",
@@ -59,15 +63,14 @@ def test_source_rebase_metadata_does_not_reach_the_git_helper(
             "repo_root": str(root),
             "issue_number": 42,
             "branch": "writer",
-            "expected_remote_sha": revision,
-            "publish_rebased_head": True,
-            "abort_on_conflict": True,
+            "expected_head_sha": revision,
+            "rebase_reason": "manual",
         },
     )
     try:
         result = pool._run_git(job)
         assert not result.ok
-        assert result.error == "mechanical rebase hit conflicts; aborted"
+        assert result.error == "rebase conflict restart required"
         rebase.assert_called_once()
     finally:
         pool.shutdown(mark_interrupted=False)
@@ -156,7 +159,6 @@ def test_publication_timeout_keeps_the_recorded_local_head(
         raise subprocess.TimeoutExpired("git push", 30)
 
     monkeypatch.setattr(pool, "_commit_if_changes_with_controlled_signing", commit)
-    monkeypatch.setattr(pool, "_rebase_publication_writer", commit)
     push_mock = Mock(side_effect=push)
     monkeypatch.setattr(git_utils, "push_branch", push_mock)
     monkeypatch.setattr(git_utils, "push_head_to_branch", push_mock)
@@ -168,9 +170,14 @@ def test_publication_timeout_keeps_the_recorded_local_head(
         "branch": "writer",
     }
     if refresh:
+        with manager.implementation_local_commit(
+            42, branch="writer", path=binding.cwd, expected_binding=binding
+        ) as record:
+            commit()
+            binding = record(local_heads[-1])
         kwargs["writer_refresh"] = {
-            "phase": "rebase",
-            "source_sha": revision,
+            "phase": "publish",
+            "source_sha": binding.revision,
             "expected_remote_sha": revision,
         }
     try:

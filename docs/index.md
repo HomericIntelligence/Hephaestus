@@ -39,7 +39,7 @@ Auto-generated API documentation is published to GitHub Pages on every release:
 
 The published reference covers full function signatures, docstrings, and type
 annotations for documented first-level subpackages, excluding the
-`hephaestus.automation` product layer and the package's CLI entry points,
+`hephaestus.automation` product layer and the package's 54 CLI entry points,
 regenerated from the released package via [pdoc](https://pdoc.dev/).
 
 CLI usage and option details are available
@@ -56,7 +56,7 @@ just docs        # outputs to docs/api/
 See the [README](../README.md) for installation and development setup instructions.
 
 - [Queue Architecture](architecture.md) — Stage ownership, source proof, journals, and bounded recovery
-- [Queue Cutover](adr/0048-queue-owned-automation-cutover.md) — Current commands and stopped-owner migration
+- [Queue Cutover](adr/0050-queue-owned-automation-cutover.md) — Current commands and stopped-owner migration
 - [MCP Integration Posture](mcp.md) — Capability boundary, alternative integration contracts, and project-scoped `.mcp.json` change control
 - [NATS JetStream Configuration](nats.md) — TLS defaults, certificate file paths, local plaintext exceptions, and the at-most-once failed-message retention policy for `hephaestus.nats`
 - [Observability: metrics, alerts, and SLOs](observability.md) — Automation pipeline metric catalog, alert ownership, and SLOs

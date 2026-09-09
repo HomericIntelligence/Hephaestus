@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from hephaestus.automation.agent_config import AGENT_PLAN_REVIEWER, session_uuid
 from hephaestus.automation.learn import compact_agent_session, compact_session
-from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, session_uuid
 
 
 class TestCompactSession:

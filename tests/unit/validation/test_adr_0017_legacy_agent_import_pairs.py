@@ -8,7 +8,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _AUTOMATION_ROOT = _REPO_ROOT / "hephaestus" / "automation"
-_LEGACY_MODULES = frozenset({"claude_invoke", "claude_models", "claude_timeouts"})
+_LEGACY_MODULES = frozenset({"claude_invoke", "claude_models", "claude_timeouts", "session_naming"})
 
 _APPROVED_DIRECT_IMPORTS: frozenset[tuple[str, str]] = frozenset(
     {("pipeline/worker_pool.py", "claude_invoke")}
@@ -54,6 +54,7 @@ def test_relative_imports_resolve_legacy_modules() -> None:
     cases = (
         (Path("example.py"), "from . import claude_invoke", {"claude_invoke"}),
         (Path("example.py"), "from .claude_models import reviewer_model", {"claude_models"}),
+        (Path("example.py"), "from .session_naming import session_name", {"session_naming"}),
         (
             Path("pipeline/example.py"),
             "from ...automation import claude_invoke",

@@ -10,9 +10,10 @@ import base64
 import hashlib
 import json
 
+from hephaestus.prompts import PromptCatalog
+
 from ._review_rubric import get_pr_review_rubric
 from ._shared import FencedContent, fence_content, get_terse_output_directive
-from .catalog import PromptCatalog
 
 #: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
 #: ``minor``/``nitpick`` are advisory — a clean audit must not

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBindingError
 from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
-from hephaestus.automation.mnemosyne_learning_preparation import approved_plan_learning_snapshot
-from hephaestus.automation.review_journal import plan_fingerprint
-from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
+from hephaestus.automation.source_worktree import SourceWorkspaceError
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..job_results import JobResult
@@ -37,6 +34,9 @@ class LearningStage:
         """Persist all in-memory intents before any host call."""
         journal = self._journal(ctx)
         for intent in item.learning_intents:
+            record = journal.load(intent.key)
+            if record is not None and record["status"] in {"succeeded", "failed", "deferred"}:
+                continue
             journal.ensure_pending(
                 intent.key,
                 kind=intent.kind.value,
@@ -86,6 +86,16 @@ class LearningStage:
             record_summary_action(item, error)
             return Continue(next_state=CLAIM)
 
+        return self._prepare_host_job(item, ctx, intent, delivery_payload)
+
+    def _prepare_host_job(
+        self,
+        item: WorkItem,
+        ctx: Any,
+        intent: LearningIntent,
+        delivery_payload: dict[str, object],
+    ) -> StepResult:
+        """Prepare one claimed host job or release its known failed claim."""
         payload: dict[str, object] = {
             "issue_number": intent.issue,
             "learning_intent": delivery_payload,
@@ -97,13 +107,24 @@ class LearningStage:
             or item.payload.get("_direct_scope_base_sha")
             or ""
         )
-        workspace = source_workspace_binding(
-            item,
-            ctx,
-            SourceLane.IMPLEMENTATION,
-            revision=revision or None,
-            branch=item.branch or None,
-        )
+        try:
+            workspace = source_workspace_binding(
+                item,
+                ctx,
+                SourceLane.IMPLEMENTATION,
+                revision=revision or None,
+                branch=item.branch or None,
+            )
+        except InterruptedError:
+            self.on_cancelled_before_start(item, ctx)
+            return StageOutcome(Disposition.RETRY, "learning preparation interrupted")
+        except (WorkspaceBindingError, SourceWorkspaceError) as exc:
+            self.on_job_done(
+                item,
+                JobResult(ok=False, error=f"learning source preparation failed: {exc}"),
+                ctx,
+            )
+            return Continue(next_state=CLAIM)
         return JobRequest(
             AthenaSkillJob(
                 request=AthenaSkillRequest(
@@ -116,11 +137,7 @@ class LearningStage:
                         or getattr(ctx.config, "model", "")
                         or learn_model()
                     ),
-                    cwd=(
-                        workspace.cwd
-                        if workspace
-                        else Path(item.worktree or str(ctx.paths.worktree))
-                    ),
+                    cwd=workspace.cwd,
                     timeout_s=stage_timeout(ctx, "learn", learn_claude_timeout),
                     workspace=workspace,
                     payload=payload,
@@ -144,6 +161,13 @@ class LearningStage:
         error = "" if succeeded else (result.error or "invalid Athena learn result")
         receipt = result.value.delivery_receipt if succeeded else None
         journal = self._journal(ctx)
+        if not succeeded and error.startswith("learning_deferred:"):
+            journal.defer(intent.key, error=error)
+            item.payload.setdefault("learning_deferred", []).append(
+                {"key": intent.key, "reason": error}
+            )
+            record_summary_action(item, error)
+            return
         record = journal.load(intent.key)
         attempts = int(record.get("attempts", 0)) if record is not None else 0
         if not succeeded and attempts < ctx.budget("learn"):
@@ -184,7 +208,7 @@ class LearningStage:
             if intent.key in external_claims:
                 continue
             record = journal.load(intent.key)
-            if record is None or record["status"] not in {"succeeded", "failed"}:
+            if record is None or record["status"] not in {"succeeded", "failed", "deferred"}:
                 return intent
         return None
 
@@ -203,7 +227,7 @@ class LearningStage:
         journal: LearningJournalStore,
         ctx: Any,
     ) -> Continue | StageOutcome | None:
-        """Handle terminal, ambiguous, and stale-plan records before claim."""
+        """Handle terminal records, active claims, and rejected plan intents."""
         if record["status"] == "claimed":
             if journal.claim_is_active(intent.key):
                 return StageOutcome(
@@ -221,41 +245,13 @@ class LearningStage:
                     {"key": intent.key, "error": "outcome_unknown"}
                 )
             return Continue(next_state=CLAIM)
-        if record["status"] in {"succeeded", "failed"}:
+        if record["status"] in {"succeeded", "failed", "deferred"}:
             return Continue(next_state=CLAIM)
         if intent.kind.value != "approved_plan":
             return None
-        plan_state = self._approved_plan_state(intent, ctx)
-        if plan_state is True:
-            return None
-        error = "plan_state_changed" if plan_state is False else "plan_state_unverified"
+        error = "plan_only_learning_rejected"
         if journal.claim(intent.key):
             journal.finish(intent.key, succeeded=False, error=error)
-        if plan_state is False:
-            item.learning_resume_stage = StageName.PLAN_REVIEW
         item.payload.setdefault("learning_failures", []).append({"key": intent.key, "error": error})
+        record_summary_action(item, error)
         return Continue(next_state=CLAIM)
-
-    @staticmethod
-    def _approved_plan_state(intent: LearningIntent, ctx: Any) -> bool | None:
-        """Return live approval, confirmed change, or an unavailable read."""
-        try:
-            issue = ctx.github.gh_issue_json(intent.issue)
-        except Exception:
-            return None
-        labels = [
-            str(label.get("name", ""))
-            for label in issue.get("labels", [])
-            if isinstance(label, dict)
-        ]
-        if not is_exclusive_plan_state(labels, STATE_PLAN_GO):
-            return False
-        try:
-            snapshot = approved_plan_learning_snapshot(ctx.github.issue_comments(intent.issue))
-        except Exception:
-            return None
-        return bool(
-            snapshot.current_plan
-            and snapshot.revision == intent.plan_revision
-            and plan_fingerprint(snapshot.current_plan) == intent.plan_fingerprint
-        )

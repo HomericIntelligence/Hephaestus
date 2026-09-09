@@ -36,7 +36,7 @@ and their local evidence. Do not run old and new owners against the same state
 directory. Before rollback, stop the current coordinator and inspect all
 possible effects produced after cutover. Restoring code does not prove that
 replay is safe. See
-[ADR-0048](docs/adr/0048-queue-owned-automation-cutover.md).
+[ADR-0050](docs/adr/0050-queue-owned-automation-cutover.md).
 
 ## Agent Provider Compatibility
 
@@ -91,7 +91,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-The console scripts registered in `[project.scripts]` are classified into one
+The 54 console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
 The installed script inventory is `[project.scripts]` in `pyproject.toml`.
@@ -293,7 +293,6 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `add_json_arg` | 0.6.0 | Add a `--json` output flag to a parser |
 | `add_learn_timeout_arg` | 0.9.8 | Add a `--learn-timeout` flag to a parser |
 | `add_logging_args` | 0.1.0 | Add `--verbose`/`--quiet` logging flags |
-| `add_pipeline_runtime_args` | TBD | Add explicit model, path, rate-guard, and scoped timeout options to a pipeline wrapper |
 | `add_role_agent_args` | TBD | Add tool overrides for planning, implementation, and review |
 | `add_poll_max_wait_arg` | 0.9.8 | Add a `--poll-max-wait` flag to a parser |
 | `add_version_arg` | 0.1.0 | Add a `--version` flag to a parser |

@@ -481,6 +481,7 @@ class FinishedStage(Stage):
                 "succeeded",
                 "failed",
                 "disabled",
+                "deferred",
             }:
                 return False
         return True

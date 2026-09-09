@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hephaestus.automation import protocol
 
 
@@ -26,3 +28,11 @@ class TestProtocolConstants:
     def test_markers_are_non_empty(self) -> None:
         assert protocol.PLAN_COMMENT_MARKER
         assert protocol.PLAN_REVIEW_PREFIX
+
+
+def test_retired_reviewer_protocol_is_unavailable() -> None:
+    """Queue stages do not expose the removed standalone reviewer interface."""
+    removed_name = "ReviewerProtocol"
+    assert removed_name not in protocol.__all__
+    with pytest.raises(AttributeError):
+        getattr(protocol, removed_name)

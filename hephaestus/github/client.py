@@ -138,8 +138,8 @@ def _is_service_failure(exc: BaseException) -> bool:
 
 
 def _breaker_should_ignore(exc: BaseException) -> bool:
-    """Circuit-breaker predicate: exceptions that prove the service is UP (#2048)."""
-    return isinstance(exc, CancelledError) or not _is_service_failure(exc)
+    """Keep cancellation and target errors neutral to service availability."""
+    return isinstance(exc, (CancelledError, InterruptedError)) or not _is_service_failure(exc)
 
 
 _GH_THROTTLE = threading.local()

@@ -1,13 +1,8 @@
 """Agent configuration for the automation pipeline.
 
-Merges the formerly-separate ``claude_models``, ``claude_timeouts``, and
-``session_naming`` modules (#1441): model selection, subprocess timeouts, and
-deterministic Claude-session naming all answer one question — "how is an
-agent invocation configured?" ``claude_invoke.py`` (subprocess logic) stays
-separate and imports session naming from here.
-
-The three original module paths are retained as thin re-export shims so
-existing callers keep working unchanged.
+Model selection, timeout defaults, and deterministic session identities share
+one configuration owner. Claude subprocess execution remains in
+``claude_invoke.py``.
 
 Model selection
 ---------------
@@ -26,12 +21,8 @@ and its default effort.
 
 Timeouts
 --------
-Timeouts are typed CLI/configuration values. The compatibility accessors below
-return deterministic defaults and never inspect process-global state.
-
-If an env var is set but not an integer, the default is used and a warning is
-logged on first read; we never crash on a malformed timeout because the cost
-of a runtime startup error is higher than the cost of falling back.
+Timeouts are typed CLI/configuration values. The default accessors return
+fixed values and do not read process environment variables.
 
 Session naming
 --------------

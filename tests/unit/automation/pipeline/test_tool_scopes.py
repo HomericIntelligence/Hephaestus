@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import pytest
 
+from hephaestus.automation.agent_config import (
+    AGENT_IMPLEMENTER,
+    AGENT_PLAN_REVIEWER,
+    AGENT_PLANNER,
+    AGENT_PR_REVIEWER,
+)
 from hephaestus.automation.pipeline.tool_scopes import (
     AGENT_TOOL_SCOPES,
     DEFAULT_TOOL_SCOPE,
     ToolScope,
     tool_scope_for,
-)
-from hephaestus.automation.session_naming import (
-    AGENT_IMPLEMENTER,
-    AGENT_PLAN_REVIEWER,
-    AGENT_PLANNER,
-    AGENT_PR_REVIEWER,
 )
 
 # Every distinct session_agent= constant used at the pipeline stage call sites.

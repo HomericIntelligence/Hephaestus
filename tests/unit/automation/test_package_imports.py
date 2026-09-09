@@ -153,8 +153,6 @@ def test_production_modules_import_timeout_config_from_agent_config() -> None:
     """Production automation modules must not depend on the timeout shim."""
     offenders = []
     for path in _AUTOMATION_ROOT.rglob("*.py"):
-        if path.name == "claude_timeouts.py":
-            continue
         text = path.read_text(encoding="utf-8")
         if (
             "from .claude_timeouts import" in text

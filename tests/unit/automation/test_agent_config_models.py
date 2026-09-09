@@ -1,4 +1,4 @@
-"""Tests for hephaestus.automation.claude_models phase-to-model routing."""
+"""Test model selection in the canonical agent configuration."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import importlib
 
 import pytest
 
-from hephaestus.automation import agent_config as claude_models
+from hephaestus.automation import agent_config
 
 
 class TestDefaults:
@@ -14,20 +14,20 @@ class TestDefaults:
 
     def test_planner_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPH_PLANNER_MODEL", raising=False)
-        assert claude_models.planner_model() == ""
+        assert agent_config.planner_model() == ""
 
     def test_implementer_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPH_IMPLEMENTER_MODEL", raising=False)
-        assert claude_models.implementer_model() == ""
+        assert agent_config.implementer_model() == ""
 
     def test_reviewer_uses_tool_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPH_REVIEWER_MODEL", raising=False)
-        assert claude_models.reviewer_model() == ""
+        assert agent_config.reviewer_model() == ""
 
     def test_fallback_requires_explicit_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The fallback requires an explicit model."""
         monkeypatch.delenv("HEPH_FALLBACK_MODEL", raising=False)
-        assert claude_models.fallback_model() == ""
+        assert agent_config.fallback_model() == ""
 
 
 class TestExplicitOverride:
@@ -39,13 +39,13 @@ class TestExplicitOverride:
     """
 
     def test_planner_override(self) -> None:
-        assert claude_models.planner_model("claude-haiku-4-5") == "claude-haiku-4-5"
+        assert agent_config.planner_model("claude-haiku-4-5") == "claude-haiku-4-5"
 
     def test_implementer_override(self) -> None:
-        assert claude_models.implementer_model("claude-opus-4-7") == "claude-opus-4-7"
+        assert agent_config.implementer_model("claude-opus-4-7") == "claude-opus-4-7"
 
     def test_fallback_override(self) -> None:
-        assert claude_models.fallback_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
+        assert agent_config.fallback_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
 
     def test_fallback_unknown_override_returns_value_without_warning(
         self, caplog: pytest.LogCaptureFixture
@@ -53,7 +53,7 @@ class TestExplicitOverride:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.fallback_model("claude-preview-99-99")
+            result = agent_config.fallback_model("claude-preview-99-99")
         assert result == "claude-preview-99-99"
         assert not caplog.records
 
@@ -67,15 +67,15 @@ class TestModuleStable:
 
     def test_reimport_idempotent(self) -> None:
         expected = (
-            claude_models.planner_model(),
-            claude_models.implementer_model(),
-            claude_models.reviewer_model(),
+            agent_config.planner_model(),
+            agent_config.implementer_model(),
+            agent_config.reviewer_model(),
         )
-        importlib.reload(claude_models)
+        importlib.reload(agent_config)
         assert expected == (
-            claude_models.planner_model(),
-            claude_models.implementer_model(),
-            claude_models.reviewer_model(),
+            agent_config.planner_model(),
+            agent_config.implementer_model(),
+            agent_config.reviewer_model(),
         )
 
 
@@ -89,7 +89,7 @@ class TestExplicitValueValidation:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.planner_model("MyPrivateModel")
+            result = agent_config.planner_model("MyPrivateModel")
         assert result == "MyPrivateModel"
         assert not caplog.records
 
@@ -100,7 +100,7 @@ class TestExplicitValueValidation:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.implementer_model("claude-preview-99-99")
+            result = agent_config.implementer_model("claude-preview-99-99")
         assert result == "claude-preview-99-99"
         assert not caplog.records
 
@@ -109,11 +109,11 @@ class TestExplicitValueValidation:
     ) -> None:
         """All phase functions accept overrides without raising (A5-04)."""
         model_id = "claude-experimental-0-0"
-        assert claude_models.planner_model(model_id) == model_id
-        assert claude_models.implementer_model(model_id) == model_id
-        assert claude_models.reviewer_model(model_id) == model_id
-        assert claude_models.advise_model(model_id) == model_id
-        assert claude_models.learn_model(model_id) == model_id
+        assert agent_config.planner_model(model_id) == model_id
+        assert agent_config.implementer_model(model_id) == model_id
+        assert agent_config.reviewer_model(model_id) == model_id
+        assert agent_config.advise_model(model_id) == model_id
+        assert agent_config.learn_model(model_id) == model_id
 
 
 class TestNewerModelsRecognized:
@@ -140,7 +140,7 @@ class TestNewerModelsRecognized:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.reviewer_model(raw_model)
+            result = agent_config.reviewer_model(raw_model)
         assert result == expected_model
         assert not caplog.records
 
@@ -157,7 +157,7 @@ class TestNewerModelsRecognized:
         ],
     )
     def test_normalize_claude_model(self, raw_model: str, expected_model: str) -> None:
-        assert claude_models.normalize_claude_model(raw_model) == expected_model
+        assert agent_config.normalize_claude_model(raw_model) == expected_model
 
     def test_genuinely_unknown_model_does_not_warn(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -166,6 +166,6 @@ class TestNewerModelsRecognized:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.reviewer_model("claude-fbale-5")  # typo
+            result = agent_config.reviewer_model("claude-fbale-5")  # typo
         assert result == "claude-fbale-5"
         assert not caplog.records

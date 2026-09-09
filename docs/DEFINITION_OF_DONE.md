@@ -20,7 +20,7 @@ A piece of work is **done** when every item below is true.
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
 | 8 | `uv run mypy hephaestus/ scripts/ tests/` returns `Success: no issues found in N source files` | CI job `lint` |
 | 9 | Full unit suite passes: `uv run pytest tests/unit` | CI jobs `unit-tests` and `test (ubuntu-latest, 3.13, unit)` |
-| 10 | Coverage gate satisfied: `--cov-fail-under=80` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | CI job `unit-tests` |
+| 10 | Coverage gate satisfied: `--cov-fail-under=85` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | CI job `unit-tests` |
 | 11 | No new warnings introduced (pytest, deprecation, ruff) | PR reviewer |
 | 12 | Integration tests pass: `uv run pytest tests/integration` | CI job `integration-tests` |
 | 13 | Shell tests pass: `just test-shell` | CI job `shell-tests` |
@@ -76,7 +76,7 @@ In addition to the universal checklist:
 | # | Requirement | Enforced by |
 |---|-------------|-------------|
 | F1 | Public functions have Google-style docstrings | Convention (PR reviewer) |
-| F2 | New `main()` entry points have at least smoke tests (one happy-path, one error-path) | Coverage gate (rejects untested code if it drops total under 80%) |
+| F2 | New `main()` entry points have at least smoke tests (one happy-path, one error-path) | Coverage gate (rejects untested code if it drops total under 85%) |
 | F3 | New CLI scripts use `add_json_arg(parser)` and emit `emit_json_status(...)` on exit | CI integration test `TestCLIJsonFlag` in `tests/integration/test_cli_entry_points.py` |
 | F4 | New CLI scripts appear in `pyproject.toml [project.scripts]` AND in the CLI table of `README.md` | CI gate via `hephaestus.scripts_lib.check_cli_table_sync` |
 | F5 | If the work touches deprecated APIs, update `COMPATIBILITY.md` | PR reviewer |

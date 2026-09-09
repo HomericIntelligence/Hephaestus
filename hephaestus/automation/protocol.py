@@ -18,7 +18,7 @@ here per issue #801 (tracking #708).
 
 from __future__ import annotations
 
-from typing import Any, Final, Protocol, runtime_checkable
+from typing import Final
 
 PLAN_COMMENT_MARKER: Final[str] = "# Implementation Plan"
 """Human-readable heading in the planner's canonical plan comment."""
@@ -87,18 +87,6 @@ def comment_marker_aliases(marker: str) -> tuple[str, ...]:
     return (marker,)
 
 
-@runtime_checkable
-class ReviewerProtocol(Protocol):
-    """Structural contract satisfied by reviewer entry points.
-
-    Verified: AuditReviewer.run (audit_reviewer.py:197) and
-              PlanReviewer.run (plan_reviewer.py:99).
-    """
-
-    def run(self) -> Any:
-        """Execute the reviewer and return its result."""
-
-
 __all__ = [
     "FINALIZED_PLAN_PREFIX",
     "FINALIZED_PLAN_PREFIXES",
@@ -112,6 +100,5 @@ __all__ = [
     "PLAN_REVIEW_CANONICAL_MARKER",
     "PLAN_REVIEW_CANONICAL_MARKERS",
     "PLAN_REVIEW_PREFIX",
-    "ReviewerProtocol",
     "comment_marker_aliases",
 ]

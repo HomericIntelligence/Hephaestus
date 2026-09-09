@@ -688,3 +688,15 @@ class TestEmitJsonStatus:
         with pytest.raises(TypeError):
             emit_json_status(0, **{"exit_code": "conflict"})
         assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("module_name", ["hephaestus.cli", "hephaestus.cli.utils"])
+def test_retired_pipeline_wrapper_parser_is_unavailable(module_name: str) -> None:
+    """Current queue commands use the shared pipeline parser."""
+    import importlib
+
+    module = importlib.import_module(module_name)
+    removed_name = "add_pipeline_runtime_args"
+    assert removed_name not in module.__all__
+    with pytest.raises(AttributeError):
+        getattr(module, removed_name)

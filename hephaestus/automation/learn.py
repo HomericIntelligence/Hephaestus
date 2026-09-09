@@ -10,10 +10,11 @@ from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.runtime import agent_compaction_resume, resolve_agent, resume_agent_session
+from hephaestus.automation.agent_config import (
+    learn_claude_timeout,
+    session_uuid,
+)
 from hephaestus.config.child_environments import build_claude_child_env
-
-from .agent_config import learn_claude_timeout
-from .session_naming import session_uuid
 
 logger = logging.getLogger(__name__)
 

@@ -29,7 +29,7 @@ numbered, and listed here.
 | [0014](0014-conditional-normal-merge.md) | Conditional normal merge after loop-owned review | Accepted (historical; superseded by 0015) |
 | [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
 | [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted (merge-authorization boundary superseded by 0024) |
-| [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Superseded by 0048 (historical) |
+| [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Superseded by 0050 (historical) |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
 | [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Partly superseded by ADR-0025, ADR-0035, and ADR-0036 |
@@ -58,6 +58,7 @@ numbered, and listed here.
 | [0043](0043-optional-codex-adapter-until-production-ready.md) | Optional Codex adapter until production readiness | Accepted |
 | [0044](0044-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |
 | [0045](0045-one-use-dirty-direct-writer-continuation.md) | One-use dirty direct-writer continuation | Draft |
-| [0046](0046-review-host-verification-bootstrap.md) | Target-specific source-review bootstrap | Superseded by 0048 (historical) |
+| [0046](0046-review-host-verification-bootstrap.md) | Target-specific source-review bootstrap | Superseded by 0050 (historical) |
 | [0047](0047-ci-owned-full-pytest-suites.md) | CI owns full pytest suite execution | Accepted |
-| [0048](0048-queue-owned-automation-cutover.md) | Queue-owned automation cutover | Accepted |
+| [0048](0048-automation-rebase-triggers.md) | Automation rebase triggers | Accepted |
+| [0050](0050-queue-owned-automation-cutover.md) | Queue-owned automation cutover | Accepted |

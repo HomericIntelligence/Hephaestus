@@ -22,7 +22,7 @@ from hephaestus.automation.issue_waves import (
     IssueWaveStore,
 )
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
-from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stage_results import Continue, JobRequest
 from hephaestus.automation.pipeline.stages.planning import (
@@ -770,6 +770,56 @@ class TestPlanningStageEnter:
         assert "plan_text" not in item.payload
         assert "issue_history" not in item.payload
 
+    @pytest.mark.parametrize("item_update", [False, True])
+    def test_force_fetches_main_once_before_planning(
+        self, make_ctx: Any, make_work_item: Any, item_update: bool
+    ) -> None:
+        """A new plan update captures main before it starts source work."""
+        stage = PlanningStage()
+        ctx = make_ctx(config=SimpleNamespace(force=not item_update, enable_advise=False))
+        item = make_work_item(issue=40, state="ENTER")
+        item.payload["update_plan_required"] = item_update
+        assert stage.on_enter(item, ctx) is None
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        assert transition.next_state == "FETCH_MAIN_WAIT"
+        item.state = transition.next_state
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.op == "fetch_main"
+        assert request.job.kwargs["cwd"] == ctx.paths.repo_root
+        revision = "a" * 40
+        stage.on_job_done(item, JobResult(ok=True, value={"head_sha": revision}), ctx)
+        item.state = request.on_done_state
+        assert item.payload["_synced_default_branch_sha"] == revision
+        assert stage.on_enter(item, ctx) is None
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        assert transition.next_state == "PLAN_WAIT"
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            JobResult(ok=False, error="fetch failed"),
+            JobResult(ok=True, value={"head_sha": "invalid"}),
+        ],
+    )
+    def test_force_fetch_failure_stops_source_work(
+        self, result: JobResult, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed fetch cannot use the old planning source."""
+        stage = PlanningStage()
+        ctx = make_ctx(config=SimpleNamespace(force=True, enable_advise=False))
+        item = make_work_item(issue=40, state="ENTER")
+        assert stage.on_enter(item, ctx) is None
+        item.state = "FETCH_MAIN_WAIT"
+        stage.on_job_done(item, result, ctx)
+        item.state = "ENTER"
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+
     @pytest.mark.parametrize(
         "legacy_label",
         [STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO],
@@ -1301,10 +1351,25 @@ class TestPlanningSourceWorkspacePreparation:
             "_direct_scope_base_sha": first_revision,
         }
         item = make_work_item(issue=2998, state="ADVISE_WAIT", payload=payload)
-        ctx = make_ctx(paths=paths)
+        ctx = make_ctx(paths=paths, config=replace(make_ctx().config, force=True))
+        stage = PlanningStage()
+        item.state = "ENTER"
+        item.payload["_synced_default_branch_sha"] = first_revision
+        assert stage.on_enter(item, ctx) is None
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        assert transition.next_state == "FETCH_MAIN_WAIT"
+        item.state = transition.next_state
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(item, JobResult(ok=True, value={"head_sha": default_revision}), ctx)
+        item.state = request.on_done_state
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
 
         try:
-            result = PlanningStage().step(item, ctx)
+            result = stage.step(item, ctx)
         except SourceWorkspaceError:
             result = None
 

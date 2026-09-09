@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from hephaestus.automation.session_naming import (
+from hephaestus.automation.agent_config import (
     AGENT_IMPLEMENTER,
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,

@@ -13,10 +13,12 @@ written along the dead cycle.
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     ReconcileScopeExpansionDependenciesRequest,
@@ -28,6 +30,7 @@ from hephaestus.automation.pipeline.stages.implementation import ImplementationS
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -35,10 +38,7 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 # Sanity anchors: the reasons this composition exercises are ROUTES rows.
 assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLEMENTATION
 assert ROUTES[StageName.IMPLEMENTATION].next == StageName.PR_REVIEW
-assert (
-    ROUTES[StageName.MERGE_WAIT].fail_routes["post_review_rebase_required"]
-    == StageName.IMPLEMENTATION
-)
+assert ROUTES[StageName.MERGE_WAIT].fail_routes["merge_conflicting"] == StageName.IMPLEMENTATION
 
 _LABEL_MUTATIONS = {
     "gh_issue_add_labels",
@@ -47,6 +47,29 @@ _LABEL_MUTATIONS = {
     "mark_pr_implementation_no_go",
     "arm_auto_merge",
 }
+
+
+def _adopted_writer_result(item: Any) -> dict[str, object]:
+    """Return the current source receipt for the adopted test writer."""
+    receipt = SourceWorkspaceReceipt(
+        repository=item.repo,
+        repository_identity=item.repo + ":test",
+        ownership_key=f"{item.repo}:test:{item.issue}:impl",
+        item_number=item.issue,
+        lane=SourceLane.IMPLEMENTATION,
+        path=Path("/tmp/adopted-pr"),
+        revision="a" * 40,
+        generation=1,
+        detached=False,
+        branch=item.branch,
+    )
+    return {
+        "path": str(receipt.path),
+        "source_workspace": receipt.to_binding(Path("/tmp/repo")).to_dict(),
+        "source_receipt": receipt.to_dict(),
+        "impl_source_revision": receipt.revision,
+        "dirty": False,
+    }
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
@@ -154,9 +177,7 @@ class TestAgentErrorPingPongTerminates:
         # the implement budget; the adopted worktree leg runs and ADVANCEs.
         item.state = "ENTER"
         implementation_pool = FakeWorkerPool()
-        implementation_pool.queue_result(
-            JobResult(ok=True, value={"path": "/tmp/adopted-pr", "dirty": False})
-        )
+        implementation_pool.queue_result(JobResult(ok=True, value=_adopted_writer_result(item)))
         outcome = _drive(impl_stage, item, ctx, implementation_pool)
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
@@ -179,26 +200,26 @@ class TestAgentErrorPingPongTerminates:
         label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
         assert label_writes == []
 
-    def test_address_error_path_is_bounded_the_same_way(
+    def test_missing_pr_error_path_is_bounded_the_same_way(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The address-failure fail-back consumes the same GATE budget."""
+        """A missing PR consumes the same budget when implementation finds it."""
         impl_stage = ImplementationStage()
         pr_stage = PrReviewStage()
         github = FakeStageGitHub(
             labels=[STATE_PLAN_GO], open_pr=1001, pr_head_branch="1-real-branch"
         )
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=2, pr=1001, state="EVAL")
+        item = make_work_item(issue=2, pr=None, state="ENTER")
         item.branch = "1-real-branch"
         item.attempts["implement"] = 1  # one prior trip already consumed
 
         assert pr_stage.on_enter(item, ctx) is None
-        item.state = "EVAL"
-        item.payload["address_error"] = True
         outcome = pr_stage.step(item, ctx)
         assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FAIL_BACK
         assert outcome.note == "agent_error"
+        assert item.payload["agent_error_failback"] is True
 
         item.state = "ENTER"
         final = _drive(impl_stage, item, ctx, FakeWorkerPool())
@@ -452,11 +473,11 @@ class TestPostReviewRebaseReusesRestoredWriter:
 
         rebase_failback = MergeWaitStage._post_review_rebase(
             item,
-            "post_review_rebase_required",
+            "merge_conflicting",
         )
         assert rebase_failback == StageOutcome(
             Disposition.FAIL_BACK,
-            "post_review_rebase_required",
+            "merge_conflicting",
         )
 
         item.stage = ROUTES[StageName.MERGE_WAIT].fail_routes[rebase_failback.note]

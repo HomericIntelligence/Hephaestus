@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.prompts.catalog import PromptCatalog
+from hephaestus.prompts import PromptCatalog
 from hephaestus.utils.git import git_config_get
 
 from .commit_paths import (

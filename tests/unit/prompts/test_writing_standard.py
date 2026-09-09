@@ -12,7 +12,6 @@ from hephaestus.automation import commit_runtime
 from hephaestus.automation.pipeline.stages.planning import build_plan_prompt
 from hephaestus.automation.prompts import (
     get_address_review_prompt,
-    get_advise_prompt,
     get_plan_prompt,
 )
 from hephaestus.automation.requirements_recovery import (
@@ -52,17 +51,12 @@ ENDORSEMENT_REQUIREMENT = (
 COMPLETE_AGENT_PROMPTS = (
     "address_review/address_review.j2",
     "address_review/reply_recovery.j2",
-    "advise/advise.j2",
-    "advise/direct.j2",
-    "advise/json_retry.j2",
-    "agent_stage/skill_prefix.j2",
     "fleet_sync/conflict_resolution.j2",
     "implementation/dirty_worktree.j2",
     "implementation/dirty_direct_continuation.j2",
     "implementation/implementation.j2",
     "implementation/loop_review.j2",
     "implementation/resume_feedback.j2",
-    "learn/learn.j2",
     "planning/context.j2",
     "planning/plan.j2",
     "planning/plan_loop_review.j2",
@@ -108,10 +102,6 @@ NON_AGENT_DIRECTION_TEMPLATES = (
 
 DIRECT_PROMPTS: tuple[tuple[str, dict[str, Any]], ...] = (
     (
-        "agent_stage/skill_prefix.j2",
-        {"stage": "review", "skill_text": "Review the change.", "prompt": "Start."},
-    ),
-    (
         "fleet_sync/conflict_resolution.j2",
         {"_UNTRUSTED_NOTICE": "Untrusted data follows.", "metadata": "{}"},
     ),
@@ -135,7 +125,6 @@ DIRECT_PROMPTS: tuple[tuple[str, dict[str, Any]], ...] = (
             "diff_block": "diff",
         },
     ),
-    ("learn/learn.j2", {"suffix": ""}),
     (
         "pr_management/commit_message.j2",
         {
@@ -240,11 +229,8 @@ def test_prompt_overlay_cannot_remove_writing_standard(template_name: str, tmp_p
 
     assert WRITING_STANDARD_SENTINEL in rendered
     assert "HARNESS DIRECTION" in rendered
-    if template_name == "learn/learn.j2":
-        assert rendered.index("HARNESS DIRECTION") < rendered.index(WRITING_STANDARD_SENTINEL)
-    else:
-        assert rendered.startswith("## Writing standard\n\n")
-        assert rendered.index(WRITING_STANDARD_SENTINEL) < rendered.index("HARNESS DIRECTION")
+    assert rendered.startswith("## Writing standard\n\n")
+    assert rendered.index(WRITING_STANDARD_SENTINEL) < rendered.index("HARNESS DIRECTION")
 
 
 def test_overlay_text_cannot_impersonate_the_immutable_wrapper(tmp_path: Path) -> None:
@@ -275,11 +261,8 @@ def test_shared_directive_overlay_cannot_replace_packaged_policy(tmp_path: Path)
 def test_composed_prompts_include_one_immutable_wrapper() -> None:
     """Nested complete prompts do not repeat the writing policy."""
     plan = build_plan_prompt(2, issue_title="Title", issue_body="Body")
-    advise = get_advise_prompt(2, "Title", "Body", "/marketplace.json")
-    retry = PromptCatalog().render("advise/json_retry.j2", advise_prompt=advise)
 
     assert plan.count(WRITING_STANDARD_SENTINEL) == 1
-    assert retry.count(WRITING_STANDARD_SENTINEL) == 1
 
 
 def test_production_prompt_builders_keep_the_writing_standard(tmp_path: Path) -> None:
@@ -292,7 +275,6 @@ def test_production_prompt_builders_keep_the_writing_standard(tmp_path: Path) ->
             changed_files="M file.py",
             diff_stat="1 file changed",
         ),
-        PromptCatalog().render("learn/learn.j2", suffix=" Capture the result."),
         tidy._make_agent_prompt("2-change", "main", tmp_path, "owner/repo"),
         build_recovery_prompt(
             issue_number=2,
@@ -340,3 +322,16 @@ def test_fleet_conflict_builder_keeps_the_writing_standard(tmp_path: Path) -> No
     )
 
     assert WRITING_STANDARD_SENTINEL in rendered
+
+
+def test_slash_command_overlay_keeps_the_command_before_the_writing_policy(tmp_path: Path) -> None:
+    """A current template can retain a leading provider command."""
+    template = tmp_path / "planning" / "plan.j2"
+    template.parent.mkdir()
+    template.write_text("/athena:plan-issue 2\n", encoding="utf-8")
+
+    rendered = PromptCatalog(override_root=tmp_path).render("planning/plan.j2")
+
+    assert rendered.startswith("/athena:plan-issue 2\n")
+    assert rendered.count(WRITING_STANDARD_SENTINEL) == 1
+    assert rendered.index("/athena:plan-issue") < rendered.index(WRITING_STANDARD_SENTINEL)

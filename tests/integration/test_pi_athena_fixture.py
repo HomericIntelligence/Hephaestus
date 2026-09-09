@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
@@ -16,8 +16,10 @@ from hephaestus.automation.mnemosyne_delivery import (
     LearnDeliveryService,
 )
 from hephaestus.automation.mnemosyne_learning_preparation import (
-    ApprovedPlanLearningSource,
+    MnemosyneLearningBuilder,
     MnemosyneLearningPreparationService,
+    PostMergeLearningSource,
+    PreparedLearningChange,
     PreparedLearningWorkspace,
 )
 from hephaestus.automation.mnemosyne_skill_host import (
@@ -128,14 +130,18 @@ def test_successful_advise_fixture(tmp_path: Path) -> None:
     assert result.receipt["binding"]["trust_basis"] == "canonical upstream"
 
 
+class FixtureLearningBuilder(MnemosyneLearningBuilder):
+    def build(self, requested: LearningIntent, source: object) -> PreparedLearningChange:
+        return PreparedLearningChange(
+            PurePosixPath("skills/host-learning.md"),
+            "---\nname: host-learning\n---\n# Host learning\n",
+            "Host learning",
+        )
+
+
 def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
     """Production preparation and delivery succeed without any agent harness."""
-    intent = LearningIntent.approved_plan(
-        repo="HomericIntelligence/Hephaestus",
-        issue=9,
-        plan_revision=2,
-        plan_fingerprint="f" * 64,
-    )
+    intent = LearningIntent.post_merge(repo="HomericIntelligence/Hephaestus", issue=9, pr=10)
     binding = MnemosyneBindingReceipt(
         root=str(tmp_path / "knowledge"),
         repository="HomericIntelligence/Mnemosyne",
@@ -154,19 +160,18 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
             return binding
 
     class SourceReader:
-        def read(self, requested: LearningIntent) -> ApprovedPlanLearningSource:
-            assert requested == intent
-            return ApprovedPlanLearningSource(
+        def read(self, requested: LearningIntent) -> PostMergeLearningSource:
+            return PostMergeLearningSource(
                 repository=requested.repo,
                 issue=requested.issue,
-                revision=2,
-                fingerprint="f" * 64,
-                comment_database_id=2,
-                source_date="2026-08-14",
-                objective="Prepare the learning delivery.",
-                approach="Use the production host boundary.",
-                implementation_order="Prepare, validate, and deliver.",
-                verification="Fail every provider entry point.",
+                pr=10,
+                title="Host learning boundary",
+                body="Closes #9",
+                merged_at="2026-08-14T00:00:00Z",
+                merge_commit_sha="c" * 40,
+                url="https://github.com/org/repo/pull/10",
+                verified_head="d" * 40,
+                verification_evidence=("tests: fixture",),
             )
 
     class Workspace:
@@ -223,6 +228,7 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
     binding_receipt = binding
     preparation = MnemosyneLearningPreparationService(
         source_reader=SourceReader(),
+        builder=FixtureLearningBuilder(),
         workspace=Workspace(),
         validator=Validator(),
     )
@@ -239,6 +245,10 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
     request.payload["learning_intent"] = intent.to_payload()
 
     with (
+        patch(
+            "hephaestus.automation.mnemosyne_corpus_reader.DefaultCorpusReader.read",
+            return_value=MnemosyneCorpusResult(context="", blocks=(), evidence={}),
+        ),
         patch(
             "hephaestus.agents.pi_plugins.preflight_pi_environment",
             side_effect=AssertionError("learning must not preflight Pi"),

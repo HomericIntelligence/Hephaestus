@@ -142,14 +142,6 @@ AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "opencode": (("opencode", "providers", "list"),),
 }
 
-_PI_AGENT_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLifecycle]] = {
-    "plan": (AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW),
-    "plan-review": (AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT),
-    "implement": (AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW),
-    "pr-review": (AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT),
-    "learn": (AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW),
-}
-
 
 @dataclass(frozen=True)
 class PiAliasConfig:
@@ -278,17 +270,6 @@ class PiIsolationAdapter(Protocol):
     ) -> AgentRunResult:
         """Start Pi with external constraints and host-owned process tracking."""
         raise NotImplementedError
-
-
-def agent_stage_execution_request(agent: str, stage: str) -> ExecutionRequest | None:
-    """Return the provider policy request for a generic direct stage."""
-    if not is_pi(agent):
-        return None
-    try:
-        role, operation, lifecycle = _PI_AGENT_STAGE_REQUESTS[stage]
-    except KeyError as exc:
-        raise ValueError(f"Pi agent-stage operation is unsupported: {stage!r}") from exc
-    return ExecutionRequest(role, operation, lifecycle)
 
 
 def agent_compaction_resume(

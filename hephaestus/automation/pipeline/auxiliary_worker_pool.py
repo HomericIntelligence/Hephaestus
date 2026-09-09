@@ -125,8 +125,6 @@ class AuxiliaryWorkerPool:
         )
         with self._futures_guard:
             self._futures.discard(future)
-        if result is None:
-            raise RuntimeError("auxiliary completion has no result")
         try:
             self._completion_q.put_nowait((handle, result))
         except queue.Full:

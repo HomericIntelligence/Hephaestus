@@ -53,7 +53,7 @@ Optimization"), file paths are repo-relative.
 
 ### Goals
 
-[ADR-0048](adr/0048-queue-owned-automation-cutover.md) defines the current
+[ADR-0050](adr/0050-queue-owned-automation-cutover.md) defines the current
 queue-only cutover. Historical ADRs retain their original text. Current
 runtime ownership and recovery follow this document and the live source.
 
@@ -65,12 +65,12 @@ runtime ownership and recovery follow this document and the live source.
  records only immutable selected issue identifiers, pending or retired
  reviewed non-code intents, terminal outcomes, merge receipts, and verified
  main revisions. Restart reconstruction reads only the current supported
- records; it does not convert historical formats. Queue reconstruction reads the journal
-([`coordinator._seed_pass`](../hephaestus/automation/pipeline/coordinator.py),
-[`seed_from_cli`](../hephaestus/automation/pipeline/seeding.py)) — distinct from
-the per-repo seed-side [`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py)
-in §5.1. Both paths classify tracker labels as semantic-review candidates;
-neither writes `state:skip` during seeding.
+ records; it does not convert historical formats. Bounded source cursors in
+[`coordinator_sources`](../hephaestus/automation/pipeline/coordinator_sources.py)
+restore work through the shared
+[`issue classifier`](../hephaestus/automation/pipeline/seeding.py).
+Repository and direct intake use the same row boundary. Intake does not write
+`state:skip`.
 - **Interrupt = resumable, never failed.** A SIGINT/SIGTERM/SIGHUP during a
  run parks the touched item with `ItemResult(passed=False,
  reason="resumable at <stage>", …)`. A subsequent restart seeds it back
@@ -174,8 +174,7 @@ flowchart LR
     plan_review --> implementation["4. Implementation"]
     implementation --> pr_review["5. PR review"]
     pr_review --> merge_wait["6. Merge wait"]
-    plan_review -. "approved-plan intent" .-> learning["7. Learning"]
-    merge_wait -. "post-merge intent" .-> learning
+    merge_wait -. "post-merge intent" .-> learning["7. Learning"]
     learning --> implementation
     learning --> finished["8. Finished"]
 
@@ -184,6 +183,9 @@ flowchart LR
     pr_review -. "agent_error / empty_pr_diff / implementation_remediation" .-> implementation
     implementation -. "already_implementation_go_pr" .-> merge_wait
 ```
+
+Learning requires [implementation evidence and a reviewed candidate](learning-evidence.md).
+Plan approval does not publish a skill.
 
 Every back-edge in the diagram is **named** in
 [`ROUTES`](../hephaestus/automation/pipeline/routing.py) and is the "fail-route
@@ -728,8 +730,7 @@ flowchart LR
     V --> I["4. Implementation"]
     I --> Q["5. PR review"]
     Q --> M["6. Merge wait"]
-    V -. "approved-plan intent" .-> L["7. Learning"]
-    M -. "post-merge intent" .-> L
+    M -. "post-merge intent" .-> L["7. Learning"]
     L --> I
     L --> F["8. Finished"]
 
@@ -1348,15 +1349,31 @@ Architectural contract:
   the writer transcript. A missing, invalid, partial, or exhausted mapping
   fails before publication; a pushed branch cannot return to review without
   the valid mapping.
-- The implementation stage rebases and lease-publishes the writer branch before
-  review; a rebase is never performed by a reviewer checkout.
-- When that host rebase conflicts, it remains paused under the captured base and
-  PR-head lease. A separately budgeted edit-only agent may modify only the
-  host-reported conflict paths and has no shell/Git tool. The host rejects a
-  no-op, unresolved markers, index mutation, remote-head drift, missing captured
-  base ancestry, or unsigned/non-DCO replayed commits. Only the host stages the
-  resolution, continues the policy-signing rebase, and exact-lease-publishes the
-  rewritten head; the result always returns to a fresh PR review.
+- The automation loop rebases a writer only before the first implementation,
+  for an exact-head GO PR with a merge conflict, or after an explicit `--rebase`
+  request. It always fetches `origin/main` and uses the captured commit. A
+  durable host record prevents another initial rebase after a restart. A new
+  branch with no commits can need no replay. A dirty initial source waits until
+  its worktree is clean. An old writer without valid first-start evidence needs
+  an explicit `--rebase` request. A restart can resume a dirty writer when the
+  host confirms that its first start is complete. For a new direct issue, the
+  host also advances its empty remote reservation to the prepared base with
+  an exact-head lease before the implementation agent starts.
+- A GO conflict starts a rebase agent. The host checks the current head, GO,
+  and conflict state before replay. An agent can edit only the conflict paths;
+  the host owns Git, signing, and publication. A manual rebase first tries a
+  mechanical replay. On a conflict, it aborts, starts the agent, and retries
+  against the same captured base. A changed base stops that retry.
+- `--rebase` requires explicit `--issues` or `--prs` and the `implementation` stage.
+  It applies once to each selected item in one invocation, then normal work
+  continues. A linked issue
+  and PR share one request. A published head requires a new review unless
+  the host proves the same change under ADR-0038. The option does not bypass
+  closed-PR, external auto-merge, or writer-ownership checks.
+  Selected PRs require a linked issue for implementation-writer ownership.
+- A branch that is only behind main waits. Normal PR adoption and review
+  corrections do not rebase. Fleet-sync and tidy keep their separate policies.
+  See [ADR-0048](adr/0048-automation-rebase-triggers.md).
 - A post-push implementation-reply handoff is an exact, bounded host-only
   retry of one immutable response batch. A failed or partial PR-state read,
   including a per-thread read that temporarily lags the just-pushed head,
@@ -1444,8 +1461,10 @@ in-memory reviewed-head proof before each request. It may issue a bounded
 sequence (default: five) of policy-selected server merge requests. Admission
 for every request requires an open
 `main` PR, an explicitly unarmed record, an exclusive implementation-GO
-label, the current-process reviewed-head proof, no unresolved review threads,
-and complete passing required status evidence for that head. A read-only
+label, the current-process reviewed-head proof or a verified retained rebase
+proof, no unresolved review threads, and complete passing required status
+evidence for the merge head. The merge head is the original reviewed commit
+or the separate resulting commit in a host-verified rebase proof. A read-only
 readiness wait may park for the `--poll-max-wait` period before a request. Its
 default is 1,200 seconds (20 minutes) for each reviewed head. The wait does not
 consume the merge budget or authorize a merge. After status evidence
@@ -1514,8 +1533,19 @@ stateDiagram-v2
 Architectural contract:
 
 - A current-process review proof is bound to the reviewed head commit.
+- A retained rebase proof keeps that original review identity and binds a
+  separate resulting commit. The host compares the complete resulting tree
+  with the original reviewed change applied to the recorded new base.
+- CI/CD, merge queue admission, and conditional merge requests use the resulting
+  commit after a verified rebase. Readiness and queue state cannot transfer
+  from the previous merge head.
+- Unverified rebase evidence stops the continuation. A rebase alone does not require another
+  source review. If conflict corrections prevent proof of the same change,
+  the host keeps the corrected source unpublished. A separate source decision
+  and fresh implementation review are required before merge.
 - Existing external merge ownership is preserved.
-- Missing or drifted proof returns approval to PR review with zero label writes.
+- Missing ordinary review proof returns approval to PR review with zero label
+  writes. Invalid retained rebase evidence stops recovery without a review retry.
 - A matching eligibility label, current-process proof, and passing exact-head
   required status evidence can submit a bounded sequence of policy-selected
   server merge requests, each only after fresh admission.
@@ -1532,23 +1562,24 @@ Architectural contract:
 
 ### 5.7 `learning`
 
-Learning is an implicit auxiliary stage for every main-stage scope. Plan review
-stores an approved-plan intent before the label transition. The learning
-consumer requires the current plan identity and confirmed label before it
-executes the intent. Merge wait
-emits a post-merge intent only after merge confirmation. The stage writes the
-intent journal before dispatch, claims one deterministic key, and submits only
-a host-owned `AthenaSkillJob`. The job contains a closed `learning_intent`, not
-provider instructions or a fabricated delivery receipt. The host validates the
-intent against the actor-owned approved plan or merged closing PR, creates one
-bounded `skills/*.md` change in an isolated Mnemosyne worktree, runs the fixed
-offline validator, and hands the resulting `LearnDeliveryRequest` to the
-signed PR-delivery service. Known failures retry within the `learn` budget.
-An ambiguous crash-left claim becomes terminal `failed` with
-`outcome_unknown`; it is not submitted twice. Learning failure is ancillary
-and cannot change a confirmed main result. Restart restores only incomplete
-current `LearningJournalStore` records. Historical merges and retired arming
-records cannot create missing learning intents.
+Learning is an implicit auxiliary stage for every main-stage scope. Merge
+wait emits an intent only after merge confirmation. Plan approval does not
+create an intent. The stage records current intent before dispatch, claims
+one deterministic key, and submits a host-owned `AthenaSkillJob`.
+
+The host requires verified implementation evidence and a reviewed candidate.
+It validates the merged closing PR and matching corpus evidence, prepares one
+bounded skill change in an isolated Mnemosyne worktree, and runs the fixed
+offline validator. It then sends the closed `LearnDeliveryRequest` to the
+signed PR-delivery service. Missing evidence or a required candidate produces
+a durable deferred record. A deferred record requires new evidence before
+another attempt. See [learning evidence](learning-evidence.md).
+
+Known execution failures retry within the `learn` budget. An inactive claim
+with an unknown outcome becomes terminal `failed`; it is not submitted twice.
+Learning failure cannot change a confirmed main result. Restart restores only
+incomplete current `LearningJournalStore` records. Historical merges and
+retired arming records cannot create missing learning intents.
 
 Dependency preparation runs frozen synchronization and package checks in a
 private source export. The final sandbox command runs the prepared
@@ -1570,9 +1601,8 @@ the claim, the main result, and the cleanup obligation. A terminal learning
 record stays recoverable until `finished` records a bounded cleanup result.
 
 Main and learning permits are separate. Handoffs reserve the bounded
-destination before they release the source. Approved-plan work returns to the
-scope-trimmed main destination. Post-merge work continues to `finished` only
-after all intents are terminal.
+destination before they release the source. Post-merge work continues to
+`finished` after all intents have a success, failure, or deferred result.
 
 ### 5.8 `finished`
 
@@ -1732,17 +1762,27 @@ continues.
 
 ### Merge-wait restart semantics
 
-The queue is in-memory. A restart re-seeds normally through the ordinary
-[`classifier`](../hephaestus/automation/pipeline/seeding.py) and does not recover
-the process-local reviewed-head proof. The implementation-GO label and native
-review records survive the restart only as non-authoritative context. The loop
-requires a fresh automated review to recreate the process-local proof before
-merge admission. A direct PR seed or restart therefore cannot use a durable
-implementation-GO label by itself. Merge wait first requires a
-confirmed-unarmed read, then returns the PR to review without mutating its
-labels. Other-run auto-merge requests are
-[blocked without adoption or mutation](../hephaestus/automation/pipeline/stages/merge_wait.py)
-and require operator handling.
+The queue is in-memory. A restart re-seeds through the ordinary
+[`classifier`](../hephaestus/automation/pipeline/seeding.py). An actor-owned
+retained rebase record supplies recovery inputs, not a review proof. The host
+must authenticate the original published GO audit and verify the complete
+rebase tree again. Only the new host result can restore merge eligibility.
+The original reviewed commit stays unchanged in the restored record.
+Manual rebase requests must complete this recovery before they can change
+the branch. Each merge cycle checks the same record and audit again before
+its final head admission.
+
+A fresh clean review for a different commit can supersede the old rebase
+record. This transition keeps both audit identities. The pending fresh review
+stays available until the durable transition completes. An explicitly revoked
+record cannot use this recovery path.
+
+Malformed, revoked, foreign, mismatched, or incomplete retained evidence stops
+recovery. It does not start another review. The implementation-GO label alone
+cannot restore authority. Without a retained rebase record, the existing
+review recovery rules remain applicable. Every merge still requires fresh
+head, label, thread, CI/CD, and repository-policy checks. Other-run auto-merge
+requests remain blocked without adoption or mutation.
 
 ---
 
@@ -2340,16 +2380,12 @@ Exit-code priority is:
   the result. A remote head equal to the local source proves publication
   (`remote_at_source`). An unchanged remote or failed probe permits the existing
   bounded transient retry without using the implementation budget. A first
-  confirmed remote change permits one signed rebase onto that exact remote
-  head, followed by an exact-lease push. The host checks the original edit
-  scope before rebase and the same allowed paths against the accepted remote
-  base after rebase. Later transient retries publish only the same rewritten
-  commit. A conflict or second remote change stops the item before PR creation
-  and preserves the failed writer. The source-lane receipt records controlled
-  local commits under its ownership lock, including commits whose publication
-  failed. This local ownership record does not prove remote publication.
-  Receipt uncertainty stops retry. Direct-scope reservation publication retains
-  its existing ownership pin and does not use this refresh path.
+  confirmed remote change stops publication and preserves the writer. It does
+  not cause a rebase. The operator can select the item with `--rebase`. The
+  source-lane receipt records controlled local commits under its ownership
+  lock, including commits whose publication failed. This record does not prove
+  remote publication. Direct-scope reservation publication retains its
+  existing ownership pin.
 
 - **Review-thread GO gate** — every unresolved review thread, regardless of
  severity marker, prevents a `pr_review` round from advancing. Severity
@@ -2361,9 +2397,8 @@ Exit-code priority is:
   comments before it creates a checkout or spends a review budget. An open
   child parks the source PR. A closed child without a verified merged PR needs
   operator action. A child merge must be on `main` and in the source head.
-  When it is missing from the source head, `implementation` performs a
-  host-only, lease-bound rebase. The rebase aborts on a conflict and verifies
-  the child merge SHA as an ancestor before it pushes. When all child merges
+  When it is missing from the source head, the PR waits for a manual rebase.
+  A merged child does not authorize an automatic rebase. When all child merges
   are in the source head, `pr_review` performs one fresh broad review. A stale
   audit cannot write the GO label.
 - **Mixed scope-control gate** — before the review worker posts an inline
@@ -2393,3 +2428,16 @@ Network capability does not authorize forge publication or imply domain
 filtering. The agent returns its audit; the host retains label and protected
 merge authority. Detached-source and head guards remain in force. This repair
 does not add the full Git-family boundary proposed in issue #2315.
+
+### Plan update source
+
+The loop's `--update-plan` option requires explicit `--issues` and the `planning`
+stage. It starts one plan update per selected issue in each invocation, then
+normal work continues. With `--rebase`, manual rebasing completes first.
+
+Each new plan-update epoch fetches `origin/main` before it uses source files.
+It captures the commit and uses a detached planning checkout through plan
+review. Retries retain that commit. A failed fetch stops source work. The plan
+update preserves the implementation branch and its uncommitted changes. A
+recovered journal continues its existing epoch. The standalone planner's
+`--force` option uses the same source refresh.

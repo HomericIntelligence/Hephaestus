@@ -126,7 +126,7 @@ permit the queue to infer one from a historical merge.
 
 ## See also
 
-- [Queue cutover decision](../adr/0048-queue-owned-automation-cutover.md)
+- [Queue cutover decision](../adr/0050-queue-owned-automation-cutover.md)
 - [Automation loop crashed mid-issue](automation-loop-crash.md)
 - [Queue architecture](../architecture.md)
 - [PR and state-label policy](../../AGENTS.md)

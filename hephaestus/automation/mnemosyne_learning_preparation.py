@@ -10,75 +10,42 @@ from __future__ import annotations
 import json
 import platform
 import re
+import shutil
 import subprocess
 import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-import hephaestus.automation.github_api as github_api
-from hephaestus.automation.comment_identity import (
-    CommentAliasConflictError,
-    validate_planning_comment_identities,
-)
+import yaml
+
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDeliveryRequest
+from hephaestus.automation.mnemosyne_node_runtime import node_runtime_files
 from hephaestus.automation.mnemosyne_validator_dependencies import (
     prepare_dependencies,
     run_learning_subprocess,
 )
 from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
 from hephaestus.automation.remote_git import TrustedRemoteGit
-from hephaestus.automation.review_journal import (
-    IssueComment,
-    JournalSnapshot,
-    comment_revision,
-    is_plan_comment,
-    journal_snapshot,
-    plan_fingerprint,
-)
-from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
 from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.io.utils import write_secure
-from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess, slugify
+from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
 MAX_ARTIFACT_BYTES = 65_536
 MAX_SOURCE_FIELD_CHARS = 16_384
 VALIDATOR_SCRIPT = "scripts/validate_plugins.py"
 VALIDATOR_TIMEOUT_S = 120
-_REQUIRED_PLAN_SECTIONS = (
-    "Objective",
-    "Approach",
-    "Implementation Order",
-    "Verification",
-)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class LearningSource(Protocol):
     """Marker protocol for typed immutable learning sources."""
-
-
-@dataclass(frozen=True)
-class ApprovedPlanLearningSource:
-    """Validated canonical approved-plan source fields."""
-
-    repository: str
-    issue: int
-    revision: int
-    fingerprint: str
-    comment_database_id: int
-    source_date: str
-    objective: str
-    approach: str
-    implementation_order: str
-    verification: str
-    changes_from_review: str = ""
 
 
 @dataclass(frozen=True)
@@ -93,6 +60,8 @@ class PostMergeLearningSource:
     merged_at: str
     merge_commit_sha: str
     url: str
+    verified_head: str = ""
+    verification_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,14 +91,11 @@ class LearningSourceReader(Protocol):
 class LearningGitHubFacts(Protocol):
     """Closed read-only GitHub facts required by source validation."""
 
-    def issue(self, repository: str, issue: int) -> dict[str, object]:
-        """Read one issue's identity, state, and labels."""
-
-    def comments(self, repository: str, issue: int) -> list[IssueComment]:
-        """Read all issue comments with actor ownership metadata."""
-
     def pull_request(self, repository: str, pr: int) -> dict[str, object]:
         """Read one pull request's immutable merge facts."""
+
+    def verification(self, repository: str, pr: int, head: str) -> tuple[str, ...]:
+        """Read passing required checks bound to the merged source head."""
 
 
 class LearningWorkspace(Protocol):
@@ -150,50 +116,6 @@ class LearningValidator(Protocol):
         """Return bounded validation evidence or raise."""
 
 
-def approved_plan_learning_snapshot(comments: list[IssueComment]) -> JournalSnapshot:
-    """Read a learning source while retaining only safe superseded plans.
-
-    Normal planning operations reject more than one plan marker. Learning can
-    read a retained plan sequence only when every actor-owned plan is valid and
-    its revision advances in comment order. The current plan remains subject to
-    the normal journal check with every non-superseded comment.
-    """
-    owned_plan_comments = [
-        (index, comment)
-        for index, comment in enumerate(comments)
-        if comment.viewer_did_author and is_plan_comment(comment.body)
-    ]
-    try:
-        if len(owned_plan_comments) > 1:
-            previous_revision: int | None = None
-            for _index, comment in owned_plan_comments:
-                validate_planning_comment_identities(
-                    (comment,),
-                    body_of=lambda candidate: candidate.body,
-                    owned_of=lambda candidate: candidate.viewer_did_author,
-                )
-                revision = comment_revision(comment.body)
-                if revision is None or (
-                    previous_revision is not None and revision <= previous_revision
-                ):
-                    raise CommentAliasConflictError(
-                        "superseded plan revisions are not strictly increasing; "
-                        "manual recovery is required"
-                    )
-                previous_revision = revision
-
-            current_plan_index = owned_plan_comments[-1][0]
-            comments = [
-                comment
-                for index, comment in enumerate(comments)
-                if index == current_plan_index
-                or not (comment.viewer_did_author and is_plan_comment(comment.body))
-            ]
-        return journal_snapshot(comments)
-    except CommentAliasConflictError as exc:
-        raise LearnDeliveryError("approved plan canonical comment is absent or ambiguous") from exc
-
-
 def _normalized_text(value: str, *, field: str) -> str:
     """Normalize untrusted text while preserving its literal meaning."""
     text = unicodedata.normalize("NFC", value).replace("\r\n", "\n").replace("\r", "\n")
@@ -205,48 +127,12 @@ def _normalized_text(value: str, *, field: str) -> str:
     return text
 
 
-def _indented(value: str) -> str:
-    return "\n".join(f"    {line}" if line else "    " for line in value.splitlines())
-
-
-def _yaml_string(value: str) -> str:
-    """Return a JSON-quoted scalar, which is also a safe YAML scalar."""
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _source_date(value: str) -> str:
-    """Return the immutable source's calendar date or reject it."""
-    date = value[:10]
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) is None:
-        raise LearnDeliveryError("learning source lacks a valid immutable date")
-    return date
-
-
-def _plan_sections(plan: str) -> dict[str, str]:
-    """Parse exact level-two sections from a canonical implementation plan."""
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in plan.splitlines():
-        match = re.fullmatch(r"## ([^#].*?)\s*", line)
-        if match:
-            current = match.group(1).strip()
-            sections.setdefault(current, [])
-        elif current is not None:
-            sections[current].append(line)
-    parsed = {name: "\n".join(lines).strip() for name, lines in sections.items()}
-    missing = [name for name in _REQUIRED_PLAN_SECTIONS if not parsed.get(name)]
-    if missing:
-        raise LearnDeliveryError("approved plan lacks required sections: " + ", ".join(missing))
-    return parsed
-
-
 class GitHubLearningSourceAdapter:
     """Repo-scoped, read-only GitHub facts used by preparation."""
 
     def __init__(self, gh: Callable[..., Any] = gh_call) -> None:
         """Initialize the adapter with the shared GitHub command boundary."""
         self._gh = gh
-        self._viewer_login: str | None = None
 
     @staticmethod
     def _split_repository(repository: str) -> tuple[str, str]:
@@ -254,50 +140,6 @@ class GitHubLearningSourceAdapter:
         if len(parts) != 2 or any(not part for part in parts):
             raise LearnDeliveryError("learning intent repository must be owner/name")
         return parts[0], parts[1]
-
-    def issue(self, repository: str, issue: int) -> dict[str, object]:
-        """Read repo-scoped issue labels and identity."""
-        result = self._gh(
-            [
-                "issue",
-                "view",
-                str(issue),
-                "--repo",
-                repository,
-                "--json",
-                "number,state,labels",
-            ],
-            check=False,
-            track_process_group=True,
-        )
-        return self._json_object(result, "issue source")
-
-    def comments(self, repository: str, issue: int) -> list[IssueComment]:
-        """Read every issue comment in chronological order with actor ownership."""
-        owner, name = self._split_repository(repository)
-        raw = github_api._fetch_issue_comments_paginated(
-            issue,
-            owner=owner,
-            name=name,
-            call=lambda argv: self._gh(argv, check=False, track_process_group=True),
-        )
-        login = self._current_login()
-        return [
-            IssueComment(
-                body=str(comment.get("body", "")),
-                author_login=str((comment.get("user") or {}).get("login", "")),
-                author_association=str(comment.get("author_association", "")),
-                created_at=str(comment.get("created_at", "")),
-                updated_at=str(comment.get("updated_at", "")),
-                viewer_did_author=str((comment.get("user") or {}).get("login", "")).lower()
-                == login.lower(),
-                database_id=(
-                    int(comment["databaseId"]) if comment.get("databaseId") is not None else None
-                ),
-                url=str(comment.get("html_url", "")),
-            )
-            for comment in raw
-        ]
 
     def pull_request(self, repository: str, pr: int) -> dict[str, object]:
         """Read immutable merged-PR proof and closing-issue references."""
@@ -309,24 +151,51 @@ class GitHubLearningSourceAdapter:
                 "--repo",
                 repository,
                 "--json",
-                "number,state,title,body,url,mergedAt,mergeCommit,closingIssuesReferences",
+                "number,state,title,body,url,mergedAt,mergeCommit,closingIssuesReferences,headRefOid",
             ],
             check=False,
             track_process_group=True,
         )
         return self._json_object(result, "merged PR source")
 
-    def _current_login(self) -> str:
-        if self._viewer_login is None:
-            result = self._gh(
-                ["api", "user", "--jq", ".login"],
-                check=False,
-                track_process_group=True,
+    def verification(self, repository: str, pr: int, head: str) -> tuple[str, ...]:
+        """Read required checks and confirm their source head after the read."""
+        result = self._gh(
+            [
+                "pr",
+                "checks",
+                str(pr),
+                "--repo",
+                repository,
+                "--required",
+                "--json",
+                "name,bucket,link",
+            ],
+            check=False,
+            track_process_group=True,
+        )
+        try:
+            checks = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            raise LearnDeliveryError("post-merge required checks returned invalid JSON") from None
+        if (
+            result.returncode != 0
+            or not isinstance(checks, list)
+            or not checks
+            or any(
+                not isinstance(check, dict)
+                or check.get("bucket") != "pass"
+                or not check.get("name")
+                for check in checks
             )
-            if result.returncode != 0 or not (result.stdout or "").strip():
-                raise LearnDeliveryError("cannot verify canonical plan actor ownership")
-            self._viewer_login = (result.stdout or "").strip()
-        return self._viewer_login
+        ):
+            raise LearnDeliveryError(
+                "learning_deferred:post-merge source lacks passing required checks"
+            )
+        current = self.pull_request(repository, pr)
+        if current.get("state") != "MERGED" or current.get("headRefOid") != head:
+            raise LearnDeliveryError("post-merge checked head changed")
+        return tuple(f"{check['name']}: {check.get('link', '')}" for check in checks)
 
     @staticmethod
     def _json_object(result: Any, label: str) -> dict[str, object]:
@@ -352,64 +221,8 @@ class GitHubLearningSourceReader:
     def read(self, intent: LearningIntent) -> LearningSource:
         """Read the source selected by ``intent.kind`` and verify exact identity."""
         if intent.kind is LearningIntentKind.APPROVED_PLAN:
-            return self._approved_plan(intent)
+            raise LearnDeliveryError("plan_only_learning_rejected")
         return self._post_merge(intent)
-
-    def _approved_plan(self, intent: LearningIntent) -> ApprovedPlanLearningSource:
-        issue = self._adapter.issue(intent.repo, intent.issue)
-        if issue.get("number") != intent.issue or issue.get("state") != "OPEN":
-            raise LearnDeliveryError("approved plan issue identity or state changed")
-        raw_labels = issue.get("labels")
-        if not isinstance(raw_labels, list):
-            raise LearnDeliveryError("approved plan issue lacks labels")
-        labels = [str(label.get("name", "")) for label in raw_labels if isinstance(label, dict)]
-        if not is_exclusive_plan_state(labels, STATE_PLAN_GO):
-            raise LearnDeliveryError("approved plan no longer has exclusive state:plan-go")
-        comments = self._adapter.comments(intent.repo, intent.issue)
-        snapshot = approved_plan_learning_snapshot(comments)
-        current_owned_plans = [
-            comment
-            for comment in comments
-            if (
-                comment.viewer_did_author
-                and is_plan_comment(comment.body)
-                and comment_revision(comment.body) == snapshot.revision
-            )
-        ]
-        if (
-            len(current_owned_plans) != 1
-            or current_owned_plans[0].database_id is None
-            or current_owned_plans[0].database_id <= 0
-            or not snapshot.current_plan
-            or plan_fingerprint(current_owned_plans[0].body)
-            != plan_fingerprint(snapshot.current_plan)
-        ):
-            raise LearnDeliveryError("approved plan canonical comment is absent or ambiguous")
-        if (
-            snapshot.revision != intent.plan_revision
-            or plan_fingerprint(snapshot.current_plan) != intent.plan_fingerprint
-        ):
-            raise LearnDeliveryError("approved plan revision or fingerprint changed")
-        sections = _plan_sections(snapshot.current_plan)
-        return ApprovedPlanLearningSource(
-            repository=intent.repo,
-            issue=intent.issue,
-            revision=snapshot.revision,
-            fingerprint=plan_fingerprint(snapshot.current_plan),
-            comment_database_id=current_owned_plans[0].database_id,
-            source_date=_source_date(current_owned_plans[0].created_at),
-            objective=_normalized_text(sections["Objective"], field="Objective"),
-            approach=_normalized_text(sections["Approach"], field="Approach"),
-            implementation_order=_normalized_text(
-                sections["Implementation Order"], field="Implementation Order"
-            ),
-            verification=_normalized_text(sections["Verification"], field="Verification"),
-            changes_from_review=(
-                _normalized_text(sections["Changes from Review"], field="Changes from Review")
-                if sections.get("Changes from Review")
-                else ""
-            ),
-        )
 
     def _post_merge(self, intent: LearningIntent) -> PostMergeLearningSource:
         if intent.pr is None:
@@ -429,7 +242,19 @@ class GitHubLearningSourceReader:
             or _SHA_RE.fullmatch(merge_sha) is None
             or intent.issue not in closing_numbers
         ):
-            raise LearnDeliveryError("post-merge source lacks exact merged closing proof")
+            raise LearnDeliveryError(
+                "learning_deferred:post-merge source lacks exact merged closing proof"
+            )
+        head = data.get("headRefOid")
+        if not isinstance(head, str) or _SHA_RE.fullmatch(head) is None:
+            raise LearnDeliveryError(
+                "learning_deferred:post-merge source lacks passing required checks"
+            )
+        evidence = self._adapter.verification(intent.repo, intent.pr, head)
+        if not evidence:
+            raise LearnDeliveryError(
+                "learning_deferred:post-merge source lacks passing required checks"
+            )
         return PostMergeLearningSource(
             repository=intent.repo,
             issue=intent.issue,
@@ -439,97 +264,23 @@ class GitHubLearningSourceReader:
             merged_at=str(data["mergedAt"]),
             merge_commit_sha=merge_sha,
             url=_normalized_text(str(data.get("url", "")), field="PR URL"),
+            verified_head=head,
+            verification_evidence=evidence,
         )
 
 
 class MnemosyneLearningBuilder:
-    """Render one deterministic, structurally safe Mnemosyne skill artifact."""
+    """Require a reviewed candidate before a learning artifact is built."""
 
     def build(
         self,
         intent: LearningIntent,
         source: LearningSource,
     ) -> PreparedLearningChange:
-        """Build one flat ``skills/*.md`` change for a validated source."""
-        digest = intent.key.rsplit(":", 1)[-1]
-        base_slug = slugify(f"{intent.kind.value}-{intent.repo.rsplit('/', 1)[-1]}-{intent.issue}")
-        name = f"{base_slug}-{digest[:12]}"
-        path = PurePosixPath("skills", f"{name}.md")
-        if isinstance(source, ApprovedPlanLearningSource):
-            title = f"Approved implementation plan learning for #{source.issue}"
-            workflow = (
-                "### Objective\n\n"
-                f"{_indented(source.objective)}\n\n"
-                "### Approach\n\n"
-                f"{_indented(source.approach)}\n\n"
-                "### Implementation Order\n\n"
-                f"{_indented(source.implementation_order)}\n\n"
-                "### Verification\n\n"
-                f"{_indented(source.verification)}"
-            )
-            if source.changes_from_review:
-                workflow += (
-                    f"\n\n### Changes from Review\n\n{_indented(source.changes_from_review)}"
-                )
-            provenance = (
-                f"- Source repository: `{source.repository}`\n"
-                f"- Issue: `#{source.issue}`\n"
-                f"- Canonical plan revision: `{source.revision}`\n"
-                f"- Canonical comment database ID: `{source.comment_database_id}`\n"
-                f"- Plan fingerprint: `{source.fingerprint}`"
-            )
-            date = _source_date(source.source_date)
-            description = (
-                f"Use when implementing the approved plan from {source.repository}#{source.issue}."
-            )
-        elif isinstance(source, PostMergeLearningSource):
-            title = f"Merged implementation learning for PR #{source.pr}"
-            workflow = (
-                "### Merged change\n\n"
-                f"{_indented(source.title)}\n\n"
-                "### Pull request context\n\n"
-                f"{_indented(source.body)}"
-            )
-            provenance = (
-                f"- Source repository: `{source.repository}`\n"
-                f"- Closing issue: `#{source.issue}`\n"
-                f"- Pull request: `{source.url}`\n"
-                f"- Merged at: `{source.merged_at}`\n"
-                f"- Merge commit: `{source.merge_commit_sha}`"
-            )
-            date = _source_date(source.merged_at)
-            description = (
-                f"Use when applying lessons from merged PR {source.repository}#{source.pr}."
-            )
-        else:
-            raise LearnDeliveryError("unsupported learning source type")
-        content = (
-            "---\n"
-            f"name: {_yaml_string(name)}\n"
-            f"description: {_yaml_string(description)}\n"
-            'category: "tooling"\n'
-            f"date: {_yaml_string(date)}\n"
-            'version: "1.0.0"\n'
-            "user-invocable: false\n"
-            'verification: "production-host"\n'
-            "tags: [automation, learning, mnemosyne]\n"
-            "---\n\n"
-            f"# {title}\n\n"
-            "## Overview\n\n"
-            f"{description}\n\n"
-            "## When to Use\n\n"
-            "Use this learning when the same repository workflow, constraint, "
-            "or failure mode recurs.\n\n"
-            "## Verified Workflow\n\n"
-            f"{workflow}\n\n"
-            "## Failed Attempts\n\n"
-            "No failed attempt is asserted beyond the bounded source material above.\n\n"
-            "## Results & Parameters\n\n"
-            f"{provenance}\n\n"
-            "## Verified On\n\n"
-            "Prepared by the provider-neutral Mnemosyne host boundary.\n"
-        )
-        return PreparedLearningChange(relative_path=path, content=content, title=title)
+        """Defer until an application supplies a reviewed candidate builder."""
+        if intent.kind is LearningIntentKind.APPROVED_PLAN:
+            raise LearnDeliveryError("plan_only_learning_rejected")
+        raise LearnDeliveryError("learning_deferred:candidate_required")
 
 
 GitRunner = Callable[[Path, tuple[str, ...], int], subprocess.CompletedProcess[str]]
@@ -601,6 +352,8 @@ class BoundLearningWorkspace:
                 raise LearnDeliveryError(
                     "learning worktree preserved because publication outcome is ambiguous"
                 )
+            if existing_pr is None:
+                raise LearnDeliveryError("learning candidate requires recovery")
             _git_success(
                 self._git(root, ("worktree", "remove", "--force", str(path)), self._timeout_s),
                 "stale learning worktree removal",
@@ -802,7 +555,51 @@ class MnemosynePluginValidator:
                 if result.returncode != 0:
                     raise LearnDeliveryError("learning plugin validation failed")
                 prepared.verify(path)
-        return (" ".join(argv),)
+                node_value = shutil.which("node")
+                cli_value = shutil.which("markdownlint-cli2")
+                if not node_value or not cli_value:
+                    raise LearnDeliveryError("learning markdownlint is unavailable")
+                node, cli = Path(node_value).resolve(), Path(cli_value).resolve()
+                runtime_files = node_runtime_files(node)
+                executables = tuple(
+                    (target, sha256(target.read_bytes()).hexdigest())
+                    for target in (*runtime_files, cli)
+                )
+                lint_reads = (
+                    " ".join(f"(literal {json.dumps(str(target))})" for target in runtime_files)
+                    + f" (subpath {json.dumps(str(cli.parent))})"
+                )
+                lint_profile = profile + f"(allow file-read* {lint_reads})"
+                # Offline lint does not use the host TLS configuration.
+                env["OPENSSL_CONF"] = "/dev/null"
+                lint_argv = [
+                    str(node),
+                    str(cli),
+                    "--config",
+                    str(path / ".markdownlint.yaml"),
+                    "skills/*.md",
+                ]
+                try:
+                    lint = self._runner(
+                        [str(sandbox), "-p", lint_profile, *lint_argv],
+                        cwd=path,
+                        timeout=VALIDATOR_TIMEOUT_S,
+                        check=False,
+                        log_on_error=False,
+                        env=env,
+                        track_process_group=True,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    raise LearnDeliveryError("learning markdownlint runner failed") from None
+                if lint.returncode != 0:
+                    raise LearnDeliveryError("learning markdownlint failed")
+                if any(
+                    sha256(target.read_bytes()).hexdigest() != digest
+                    for target, digest in executables
+                ):
+                    raise LearnDeliveryError("learning markdownlint executable changed")
+                prepared.verify(path)
+        return (" ".join(argv), " ".join(lint_argv))
 
 
 class MnemosyneLearningPreparationService:
@@ -823,6 +620,75 @@ class MnemosyneLearningPreparationService:
         self._workspace = workspace or BoundLearningWorkspace(gh_extra_path_root=gh_extra_path_root)
         self._validator = validator or MnemosynePluginValidator()
 
+    @staticmethod
+    def _check_corpus_candidate(
+        intent: LearningIntent,
+        source: LearningSource,
+        change: PreparedLearningChange,
+        binding: MnemosyneBindingReceipt,
+    ) -> None:
+        """Require review when a supplied candidate could duplicate an entry."""
+        from hephaestus.automation.athena_contract import load_athena_contract_receipt
+        from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
+        from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest
+
+        if not isinstance(source, PostMergeLearningSource) or not source.verification_evidence:
+            raise LearnDeliveryError("learning_deferred:implementation_evidence_required")
+        request = AthenaSkillRequest(
+            kind="advise",
+            repo=intent.repo,
+            issue=intent.issue,
+            agent="",
+            model="",
+            cwd=Path(binding.root),
+            timeout_s=NETWORK_TIMEOUT,
+            payload={"issue_title": source.title, "issue_body": source.body},
+        )
+        corpus = DefaultCorpusReader().read(request, binding, load_athena_contract_receipt())
+        matches = {block.source for block in corpus.blocks}
+        if matches and (len(matches) != 1 or change.relative_path.as_posix() not in matches):
+            raise LearnDeliveryError("learning_deferred:corpus_match_requires_review")
+
+    @staticmethod
+    def _bind_candidate_evidence(
+        source: LearningSource, change: PreparedLearningChange
+    ) -> PreparedLearningChange:
+        """Set candidate verification from checked implementation evidence."""
+        if not isinstance(source, PostMergeLearningSource):
+            raise LearnDeliveryError("learning_deferred:implementation_evidence_required")
+        parts = change.content.split("---", 2)
+        if len(parts) != 3 or parts[0].strip():
+            raise LearnDeliveryError("learning candidate lacks YAML frontmatter")
+        try:
+            metadata = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            raise LearnDeliveryError("learning candidate has invalid YAML frontmatter") from None
+        if not isinstance(metadata, dict):
+            raise LearnDeliveryError("learning candidate frontmatter must be a mapping")
+        metadata["verification"] = "verified-ci"
+        evidence = json.dumps(
+            {
+                "repository": source.repository,
+                "pr": source.pr,
+                "merge_commit": source.merge_commit_sha,
+                "checked_head": source.verified_head,
+                "required_checks": source.verification_evidence,
+            },
+            indent=2,
+        )
+        content = (
+            "---\n"
+            + yaml.safe_dump(metadata, sort_keys=False)
+            + "---"
+            + parts[2].rstrip()
+            + "\n\n## Implementation evidence\n\n```json\n"
+            + evidence
+            + "\n```\n"
+        )
+        if len(content.encode("utf-8")) > MAX_ARTIFACT_BYTES:
+            raise LearnDeliveryError("learning candidate with evidence exceeds size limit")
+        return replace(change, content=content)
+
     def prepare(
         self,
         payload: Mapping[str, object],
@@ -830,11 +696,15 @@ class MnemosyneLearningPreparationService:
     ) -> LearnDeliveryRequest:
         """Prepare, validate, and return a binding-complete delivery request."""
         intent = LearningIntent.from_payload(dict(payload))
+        if intent.kind is LearningIntentKind.APPROVED_PLAN:
+            raise LearnDeliveryError("plan_only_learning_rejected")
         source = self._source_reader.read(intent)
         change = self._builder.build(intent, source)
+        self._check_corpus_candidate(intent, source, change, binding)
         content_bytes = change.content.encode("utf-8")
         if len(content_bytes) > MAX_ARTIFACT_BYTES:
             raise ValueError(f"learning artifact exceeds {MAX_ARTIFACT_BYTES} bytes")
+        change = self._bind_candidate_evidence(source, change)
         if (
             change.relative_path.is_absolute()
             or len(change.relative_path.parts) != 2

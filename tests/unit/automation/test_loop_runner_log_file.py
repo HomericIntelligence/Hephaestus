@@ -103,9 +103,13 @@ def test_main_file_logging_preserves_formats(
     path = tmp_path / "loop.log"
     run_main(monkeypatch, path, "--log-format", format_name)
     lines = path.read_text().splitlines()
-    assert "loop-record-20" in lines[0]
     if format_name == "json":
-        assert json.loads(lines[0])["message"] == "loop-record-20"
+        messages = [json.loads(line)["message"] for line in lines]
+        assert "loop-record-20" in messages
+        assert any(message.startswith("Runtime identity:") for message in messages)
+    else:
+        assert any("loop-record-20" in line for line in lines)
+        assert any("Runtime identity:" in line for line in lines)
 
 
 @pytest.mark.parametrize(

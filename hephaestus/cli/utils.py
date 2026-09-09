@@ -41,7 +41,6 @@ __all__ = [
     "add_json_arg",
     "add_learn_timeout_arg",
     "add_logging_args",
-    "add_pipeline_runtime_args",
     "add_poll_max_wait_arg",
     "add_role_agent_args",
     "add_version_arg",
@@ -704,59 +703,6 @@ def add_role_agent_args(parser: argparse.ArgumentParser) -> None:
             choices=AGENT_CHOICES,
             default=None,
             help=f"Tool for the {role} role. Uses --agent when omitted.",
-        )
-
-
-def add_pipeline_runtime_args(
-    parser: argparse.ArgumentParser,
-    *,
-    role: str,
-    timeouts: Sequence[str] = (),
-    plugin_skills: bool = False,
-) -> None:
-    """Add shared explicit configuration for a standalone pipeline wrapper."""
-    add_role_agent_args(parser)
-    for flag in ("model", f"{role}-model", "fallback-model"):
-        parser.add_argument(
-            f"--{flag}",
-            default="",
-            metavar="MODEL[:EFFORT]",
-            help=MODEL_REFERENCE_HELP,
-        )
-    for extra_role in ("planner", "implementer", "reviewer"):
-        flag = f"--{extra_role}-model"
-        if flag not in parser._option_string_actions:
-            parser.add_argument(
-                flag, default="", metavar="MODEL[:EFFORT]", help=MODEL_REFERENCE_HELP
-            )
-    add_host_verification_pyxis_image_arg(parser)
-    parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
-    parser.add_argument(
-        "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True
-    )
-    parser.add_argument("--no-rate-guard", action="store_false", dest="rate_guard_enabled")
-    parser.add_argument("--rate-guard-threshold", type=_positive_int, default=200, metavar="N")
-    if plugin_skills:
-        parser.add_argument("--plugin-skills-dir", type=Path, default=None, metavar="PATH")
-    timeout_defaults = {
-        "clone": 120,
-        "network": 120,
-        "gh": 120,
-        "metadata": 10,
-        "rebase": 2400,
-        "diff-collect": 60,
-        # Keep this unset by default so the implementation stage can select
-        # its repository-specific fallback.
-        "pre-pr-test": None,
-    }
-    for name in timeouts:
-        default = timeout_defaults[name]
-        parser.add_argument(
-            f"--{name}-timeout",
-            dest=f"{name.replace('-', '_')}_timeout",
-            type=_positive_int,
-            default=default,
-            metavar="SECONDS",
         )
 
 

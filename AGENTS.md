@@ -205,7 +205,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
 - Comprehensive error handling
-- Comprehensive test coverage (unit tests) — 80%+ test coverage enforced by the CI gate (`fail_under = 80`); target 90%
+- Comprehensive test coverage (unit tests) — 85%+ test coverage enforced by the CI gate (`fail_under = 85`); target 90%
 - Follow PEP 8 style guidelines
 
 ## Key Development Principles
@@ -297,9 +297,12 @@ follow the task prompt.
 
 ### Delegated Verification
 
-The main agent must not run local verification commands. It must start one
-test-only subagent for each verification task and wait for its report. Use
-`gpt-5.6-luna` with `xhigh` reasoning by default for this subagent.
+The main agent must not run local verification commands. It must use one or
+more test-only subagents for verification and wait for their reports. One
+subagent can run multiple related verification commands. The main agent can
+use more subagents when separate verification work benefits from parallel
+execution. Use `gpt-5.6-luna`
+with `xhigh` reasoning by default for these subagents.
 
 Verification includes unit, integration, and shell tests; lint checks;
 formatter checks; and type checks. Give the subagent the exact commands that
@@ -420,8 +423,10 @@ grades, and decision-shaped output are audit evidence, not authorization.
 and fresh live GitHub facts confirm the reviewed open, unarmed head, complete
 thread state, and an exclusive label transition by readback. That GitHub label
 is automated implementation eligibility. Before each server merge request,
-`merge_wait` requires the current-process reviewed-head proof and complete
-passing required status evidence for that exact head. It reads the effective
+`merge_wait` requires the current-process reviewed-head proof or a verified
+retained rebase proof. It requires complete passing status evidence for the
+merge head. A retained proof keeps the original review identity and binds a
+separate resulting commit after host verification. It reads the effective
 classic and ruleset policy. A required merge queue uses exact-head GraphQL
 admission. A direct SHA-conditional merge is available only when one policy
 source applies strict-update protection that the current actor cannot bypass.
@@ -628,9 +633,10 @@ may write `state:implementation-go`; review prose, grades, and decision-shaped
 output do not authorize it. Normal review may collect CI/CD evidence as
 context, but the loop does not change CI/CD and no workflow, status, artifact,
 or lease independently authorizes it. `merge_wait` additionally requires
-complete passing required status evidence for the exact reviewed head before
-the server merge request. It uses exact-head queue admission when the effective
-ruleset requires a merge queue. Otherwise, direct merge requires strict-update
+complete passing required status evidence for the merge head before the
+server merge request. A host-verified rebase can supply a separate merge head
+while the original reviewed head remains unchanged. It uses exact-head queue
+admission when the effective ruleset requires a merge queue. Otherwise, direct merge requires strict-update
 protection from a source that the current actor cannot bypass. No queue stage
 mutates native auto-merge.
 
@@ -639,8 +645,8 @@ host creates one deterministic child issue and keeps the source PR in the
 exclusive implementation-NO-GO state. The host reconciles that child before a
 later review checkout. An open child parks the source PR without review-budget
 cost. A closed child without merged implementation needs operator action. A
-merged child causes a host-only source-branch synchronization and then a fresh
-broad review. No agent receives the expansion as source-branch implementation
+merged child that is absent from the source branch requires a manual rebase.
+The source PR then needs a fresh broad review. No agent receives the expansion as source-branch implementation
 work. In a mixed audit, only a validated scope retraction can go to the writer
 before the source PR parks.
 
@@ -690,7 +696,7 @@ handoffs support armed format 2 and remediation format 3.
 Stop old coordinators before cutover or rollback. Preserve uncertain effects,
 local commits, worktrees, and current journals. Do not run old and new owners
 against the same state directory. See
-[ADR-0048](docs/adr/0048-queue-owned-automation-cutover.md).
+[ADR-0050](docs/adr/0050-queue-owned-automation-cutover.md).
 
 ## Agent runtime
 
@@ -721,9 +727,10 @@ operations. `AthenaSkillJob` routes them only to the Mnemosyne host executor.
 They do not invoke or validate Claude, Codex, Pi, or another harness. Provider
 package, policy, and isolation checks apply only when a job executes through
 that provider. Learning jobs carry a semantic intent; the host rebinds its
-approved-plan or merged-PR source, prepares one bounded validated skill change,
-then delegates the closed request to the signed PR-delivery service. See
-ADR-0025 and ADR-0032.
+verified merged-PR evidence and reviewed candidate, prepares one bounded
+validated skill change, then sends the closed request to the signed PR-delivery
+service. Plan approval does not create learning work. See ADR-0025, ADR-0032,
+and [learning evidence](docs/learning-evidence.md).
 
 `hephaestus.automation.agent_config` supplies model, session, and timeout
 defaults. The common parser exposes role timeout options, `--poll-max-wait`,

@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument
-from hephaestus.automation.prompts.catalog import add_prompt_dir_argument
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
@@ -21,6 +20,7 @@ from hephaestus.cli.utils import (
     add_logging_args,
     add_version_arg,
 )
+from hephaestus.prompts import add_prompt_dir_argument
 
 from .git_utils import issue_auto_impl_branch_name
 from .github_api import _gh_call

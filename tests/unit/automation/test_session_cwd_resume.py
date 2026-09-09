@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation import agent_config
-from hephaestus.automation.session_naming import session_jsonl_path, session_uuid
+from hephaestus.automation.agent_config import session_jsonl_path, session_uuid
 
 
 def test_registered_worktree_resolves_repo_root_transcript(

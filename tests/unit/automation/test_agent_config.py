@@ -1,4 +1,4 @@
-"""#1441: agent_config consolidates models+timeouts+naming; shims re-export it."""
+"""Test canonical model, timeout, and session configuration."""
 
 from __future__ import annotations
 
@@ -177,16 +177,10 @@ def test_canonical_jsonl_path_is_dot_safe() -> None:
     assert "-worktrees-" in str(p)
 
 
-# Parity over EVERY public symbol of each shim — a missing re-export is only an
-# AttributeError at the call site, so assert the full surface here.
-@pytest.mark.parametrize("shim", ["claude_models", "claude_timeouts", "session_naming"])
-def test_shim_reexports_every_public_symbol_identically(shim: str) -> None:
-    """Each shim re-exports the exact same object agent_config defines."""
-    mod = importlib.import_module(f"hephaestus.automation.{shim}")
-    public = [
-        n
-        for n in dir(mod)
-        if not n.startswith("_") and not isinstance(getattr(mod, n), type(importlib))
-    ]
-    for sym in public:
-        assert getattr(mod, sym) is getattr(agent_config, sym), f"{shim}.{sym} drifted"
+@pytest.mark.parametrize("module", ["claude_models", "claude_timeouts", "session_naming"])
+def test_retired_configuration_modules_cannot_be_imported(module: str) -> None:
+    """Callers must use the canonical agent configuration module."""
+    qualified_name = f"hephaestus.automation.{module}"
+    with pytest.raises(ModuleNotFoundError) as error:
+        importlib.import_module(qualified_name)
+    assert error.value.name == qualified_name

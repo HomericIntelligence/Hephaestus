@@ -50,7 +50,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     _grace_deadline: float | None
     _observed_circuit_breaker_states: dict[str, str]
     _observed_inflight_repos: set[str]
-    _auxiliary_job_failure_count: int
     _pool_shut_down: bool
 
     def _default_stages(self) -> dict[ct.StageName, stages_mod.Stage]:
@@ -334,6 +333,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 auxiliary_job_count=self._auxiliary_job_count,
                 auxiliary_job_time_s=self._auxiliary_job_time_s,
                 auxiliary_job_failure_count=self._auxiliary_job_failure_count,
+                auxiliary_job_deferred_count=self._auxiliary_job_deferred_count,
             )
             summary_items = self._effective_items()
             preserved = self._active_preserved_worktrees()
@@ -912,7 +912,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             # A stage absent from this run's (possibly scope-trimmed) route
             # table has no next/fail mapping — routing it would KeyError. This
             # happens when a seeder-created REPO item is poisoned under a
-            # partial ``--phases`` scope whose ``trimmed_routes`` omits REPO
+            # partial ``--stages`` scope whose ``trimmed_routes`` omits REPO
             # (#2294). Fail closed to the sink instead of crashing the whole
             # run, which the poison handler that called us already intends.
             logger.error(

@@ -60,7 +60,6 @@ if TYPE_CHECKING:
         auxiliary_completion_q: CompletionQueue
         auxiliary_in_flight: dict[JobHandle, WorkItem]
         _learning_work_permit_ids: set[int]
-        _auxiliary_job_failure_count: int
         _direct_scope_bootstrap_pending: bool
         _grace_deadline: float | None
         _immediate: bool
@@ -91,6 +90,8 @@ if TYPE_CHECKING:
         _repo_issue_sources: deque[_ActiveRepoIssueSource]
         _live_work_permit_ids: set[int]
         _seen_item_ids: set[int]
+        _manual_rebase_selected: set[tuple[str, str, int]]
+        _plan_updates_selected: set[tuple[str, int]]
         _routes: dict[StageName, Route]
         _terminal_summary: TerminalSummary
         _ctx_cache: OrderedDict[str, StageContext]
@@ -110,6 +111,8 @@ if TYPE_CHECKING:
         _agent_job_time_s: float
         _auxiliary_job_count: int
         _auxiliary_job_time_s: float
+        _auxiliary_job_failure_count: int
+        _auxiliary_job_deferred_count: int
 
         def _direct_issue_identity(
             self, repo: str, issue: int, run_nonce: str
@@ -414,6 +417,8 @@ if TYPE_CHECKING:
             stage: ct.StageName | None,
             reason: str,
             scope_stages: frozenset[ct.StageName] | None,
+            *,
+            repo: str,
         ) -> tuple[ct.StageName | None, str, bool]: ...
 
         def _seed_direct_pr_entry(

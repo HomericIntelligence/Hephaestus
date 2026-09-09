@@ -15,17 +15,17 @@ import pytest
 
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.automation import claude_invoke
+from hephaestus.automation.agent_config import (
+    AGENT_PLAN_REVIEWER,
+    AGENT_PLANNER,
+    session_jsonl_path,
+    session_uuid,
+)
 from hephaestus.automation.claude_invoke import (
     _session_expired,
     invoke_claude_with_session,
     is_model_capped,
     reset_capped_models,
-)
-from hephaestus.automation.session_naming import (
-    AGENT_PLAN_REVIEWER,
-    AGENT_PLANNER,
-    session_jsonl_path,
-    session_uuid,
 )
 
 FALLBACK_MODEL = "claude-opus-4-8"

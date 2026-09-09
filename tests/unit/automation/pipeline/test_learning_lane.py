@@ -29,7 +29,7 @@ from hephaestus.automation.pipeline.jobs import GitJob, JobHandle
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, LearningIntent, WorkItem
-from hephaestus.automation.review_journal import plan_fingerprint, render_current_plan
+from hephaestus.automation.review_journal import render_current_plan
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from hephaestus.utils import subprocess_registry
@@ -826,14 +826,7 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
     learning = WorkItem(
         repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING, state="ENTER"
     )
-    learning.learning_intents.append(
-        LearningIntent.approved_plan(
-            repo="repo",
-            issue=1,
-            plan_revision=1,
-            plan_fingerprint=plan_fingerprint(approved_plan),
-        )
-    )
+    learning.learning_intents.append(LearningIntent.post_merge(repo="repo", issue=1, pr=2))
     learning.payload["_synced_default_branch_sha"] = revision
     coordinator._ctx_for(learning).paths.source_workspaces = SourceWorkspaceManager(
         repo_root, repository="repo"
@@ -1129,3 +1122,22 @@ def test_dual_completion_saturation_drains_results_before_fault(tmp_path: Path) 
     assert coordinator.auxiliary_completion_q.empty()
     assert any(event[0] == "completion_saturation" for event in coordinator.event_log)
     assert coordinator.auxiliary_completion_q.maxsize == 3
+
+
+def test_deferred_learning_has_a_separate_summary_count(tmp_path: Path) -> None:
+    """A missing candidate is separate from a failed learning job."""
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
+        install_signals=False,
+    )
+    _queue_dual_lane_completions(coordinator, tmp_path)
+    handle, _result = coordinator.auxiliary_completion_q.get_nowait()
+    coordinator.auxiliary_completion_q.put(
+        (handle, JobResult(ok=False, error="learning_deferred:candidate_required"))
+    )
+    coordinator.shutdown.set()
+    coordinator._drain_completions()
+    assert coordinator._auxiliary_job_failure_count == 0
+    assert coordinator._auxiliary_job_deferred_count == 1

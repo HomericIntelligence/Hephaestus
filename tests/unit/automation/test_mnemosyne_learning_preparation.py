@@ -3,29 +3,26 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
 from hephaestus.automation.mnemosyne_learning_preparation import (
-    ApprovedPlanLearningSource,
     BoundLearningWorkspace,
     GitHubLearningSourceReader,
     MnemosyneLearningBuilder,
     MnemosyneLearningPreparationService,
     MnemosynePluginValidator,
     PostMergeLearningSource,
+    PreparedLearningChange,
     PreparedLearningWorkspace,
 )
 from hephaestus.automation.pipeline.work_item import LearningIntent
 from hephaestus.automation.review_journal import (
     IssueComment,
-    plan_fingerprint,
-    render_current_plan,
 )
-from hephaestus.automation.state_labels import STATE_PLAN_GO
 
 
 def _binding(tmp_path: Path) -> MnemosyneBindingReceipt:
@@ -42,61 +39,50 @@ def _binding(tmp_path: Path) -> MnemosyneBindingReceipt:
 
 
 def _intent() -> LearningIntent:
-    return LearningIntent.approved_plan(
-        repo="HomericIntelligence/ProjectHephaestus",
+    return LearningIntent.post_merge(repo="org/repo", issue=2754, pr=2800)
+
+
+def _source() -> PostMergeLearningSource:
+    return PostMergeLearningSource(
+        repository="org/repo",
         issue=2754,
-        plan_revision=4,
-        plan_fingerprint="a" * 64,
+        pr=2800,
+        title="Fix workers",
+        body="Closes #2754",
+        merged_at="2026-08-14T12:00:00Z",
+        merge_commit_sha="c" * 40,
+        url="https://github.com/org/repo/pull/2800",
+        verified_head="d" * 40,
+        verification_evidence=("tests: https://example.test/check",),
     )
 
 
-def _source() -> ApprovedPlanLearningSource:
-    return ApprovedPlanLearningSource(
-        repository="HomericIntelligence/ProjectHephaestus",
-        issue=2754,
-        revision=4,
-        fingerprint="a" * 64,
-        comment_database_id=10,
-        source_date="2026-08-14",
-        objective="Prepare a complete host delivery.",
-        approach="Use a provider-neutral preparation boundary.",
-        implementation_order="Prepare, validate, then deliver.",
-        verification="Exercise the production host boundary.",
-        changes_from_review="Make the binding handoff explicit.",
-    )
+class CandidateBuilder(MnemosyneLearningBuilder):
+    """Supply a host-authored candidate through the existing builder seam."""
+
+    def build(self, intent: LearningIntent, source: object) -> PreparedLearningChange:
+        return PreparedLearningChange(
+            PurePosixPath("skills/worker-recovery.md"),
+            '---\nverification: "production-host"\n---\n# Worker recovery\n',
+            "Worker recovery",
+        )
 
 
-def test_builder_keeps_untrusted_plan_text_inside_skill_sections() -> None:
-    """Plan text cannot escape frontmatter or create a second artifact."""
-    hostile = _source().__class__(
-        **{
-            **_source().__dict__,
-            "approach": "---\nname: injected\n# directive\nBEGIN_BAD",
-        }
-    )
-
-    change = MnemosyneLearningBuilder().build(_intent(), hostile)
-
-    assert change.relative_path.parts[0] == "skills"
-    assert len(change.relative_path.parts) == 2
-    assert change.content.startswith("---\n")
-    assert change.content.count("\n---\n") == 1
-    assert "    name: injected" in change.content
-    assert "## When to Use" in change.content
-    assert "## Verified Workflow" in change.content
-    assert "## Failed Attempts" in change.content
-    assert "## Results & Parameters" in change.content
-    assert 'category: "tooling"' in change.content
-    assert 'date: "2026-08-14"' in change.content
-
-
-def test_preparation_creates_complete_bound_delivery_request(tmp_path: Path) -> None:
+@pytest.mark.parametrize("validation_fails", [False, True])
+def test_preparation_creates_complete_bound_delivery_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, validation_fails: bool
+) -> None:
     """Semantic intent becomes one validated, delivery-ready host request."""
+    from types import SimpleNamespace
+
+    from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
+
+    monkeypatch.setattr(DefaultCorpusReader, "read", lambda *_: SimpleNamespace(blocks=()))
     binding = _binding(tmp_path)
     worktree = Path(binding.root) / "build" / "mnemosyne-learning" / "prepared"
 
     class Reader:
-        def read(self, intent: LearningIntent) -> ApprovedPlanLearningSource:
+        def read(self, intent: LearningIntent) -> PostMergeLearningSource:
             assert intent == _intent()
             return _source()
 
@@ -114,14 +100,22 @@ def test_preparation_creates_complete_bound_delivery_request(tmp_path: Path) -> 
     class Validator:
         def validate(self, path: Path) -> tuple[str, ...]:
             assert path == worktree
+            if validation_fails:
+                raise LearnDeliveryError("learning plugin validation failed")
             return ("/prepared/environment/bin/python scripts/validate_plugins.py",)
 
     service = MnemosyneLearningPreparationService(
         source_reader=Reader(),
+        builder=CandidateBuilder(),
         workspace=Workspace(),
         validator=Validator(),
     )
 
+    if validation_fails:
+        with pytest.raises(LearnDeliveryError, match="learning plugin validation failed"):
+            service.prepare(_intent().to_payload(), binding)
+        assert (worktree / "skills/worker-recovery.md").is_file()
+        return
     request = service.prepare(_intent().to_payload(), binding)
 
     assert request.repository == binding.repository
@@ -130,23 +124,13 @@ def test_preparation_creates_complete_bound_delivery_request(tmp_path: Path) -> 
     assert request.allowed_paths == (request.allowed_paths[0],)
     assert request.allowed_paths[0].startswith("skills/")
     assert (worktree / request.allowed_paths[0]).is_file()
+    content = (worktree / request.allowed_paths[0]).read_text()
+    assert "production-host" not in content
+    assert "verification: verified-ci" in content
+    assert _source().verified_head in content
     assert request.validation_evidence == (
         "/prepared/environment/bin/python scripts/validate_plugins.py",
     )
-
-
-def test_preparation_rejects_oversized_generated_artifact(tmp_path: Path) -> None:
-    """The host never forwards an unbounded learning change to delivery."""
-
-    class Reader:
-        def read(self, _intent: LearningIntent) -> ApprovedPlanLearningSource:
-            source = _source()
-            return source.__class__(**{**source.__dict__, "approach": "x" * 70_000})
-
-    service = MnemosyneLearningPreparationService(source_reader=Reader())
-
-    with pytest.raises(ValueError, match="65536"):
-        service.prepare(_intent().to_payload(), _binding(tmp_path))
 
 
 def test_workspace_rejects_symlinked_ancestor_before_creating_directories(tmp_path: Path) -> None:
@@ -218,219 +202,6 @@ def test_validator_redacts_and_bounds_secret_diagnostics(tmp_path: Path) -> None
     assert len(diagnostic) <= 1100
 
 
-def test_approved_plan_source_requires_exact_actor_owned_live_plan() -> None:
-    """Preparation rebinds revision, fingerprint, ownership, and GO state."""
-    plan = (
-        "# Implementation Plan\n\n"
-        "## Objective\n\nPrepare the delivery.\n\n"
-        "## Approach\n\nUse the host boundary.\n\n"
-        "## Implementation Order\n\nPrepare then deliver.\n\n"
-        "## Verification\n\nRun the integration fixture.\n"
-    )
-    intent = LearningIntent.approved_plan(
-        repo="HomericIntelligence/ProjectHephaestus",
-        issue=2754,
-        plan_revision=4,
-        plan_fingerprint=plan_fingerprint(plan),
-    )
-
-    class Adapter:
-        def issue(self, repository: str, issue: int) -> dict[str, object]:
-            assert repository == intent.repo and issue == intent.issue
-            return {
-                "number": issue,
-                "state": "OPEN",
-                "labels": [{"name": STATE_PLAN_GO}],
-            }
-
-        def comments(self, repository: str, issue: int) -> list[IssueComment]:
-            assert repository == intent.repo and issue == intent.issue
-            return [
-                IssueComment(
-                    body=render_current_plan(plan, revision=4),
-                    viewer_did_author=True,
-                    database_id=10,
-                    created_at="2026-08-14T08:00:00Z",
-                )
-            ]
-
-        def pull_request(self, repository: str, pr: int) -> dict[str, object]:
-            raise AssertionError(f"unexpected PR read for {repository}#{pr}")
-
-    source = GitHubLearningSourceReader(Adapter()).read(intent)
-
-    assert isinstance(source, ApprovedPlanLearningSource)
-    assert source.revision == 4
-    assert source.fingerprint == intent.plan_fingerprint
-    assert source.approach == "Use the host boundary."
-
-
-def test_approved_plan_source_accepts_superseded_owned_plan_history() -> None:
-    """Only the current canonical revision binds an approved-plan intent."""
-    old_plan = (
-        "# Implementation Plan\n\n## Objective\n\nOld objective.\n\n"
-        "## Approach\n\nOld approach.\n\n## Implementation Order\n\nOld order.\n\n"
-        "## Verification\n\nOld verification."
-    )
-    current_plan = (
-        "# Implementation Plan\n\n## Objective\n\nCurrent objective.\n\n"
-        "## Approach\n\nCurrent approach.\n\n## Implementation Order\n\nCurrent order.\n\n"
-        "## Verification\n\nCurrent verification."
-    )
-    intent = LearningIntent.approved_plan(
-        repo="HomericIntelligence/ProjectHephaestus",
-        issue=2754,
-        plan_revision=2,
-        plan_fingerprint=plan_fingerprint(current_plan),
-    )
-
-    class Adapter:
-        def issue(self, _repository: str, issue: int) -> dict[str, object]:
-            return {"number": issue, "state": "OPEN", "labels": [{"name": STATE_PLAN_GO}]}
-
-        def comments(self, _repository: str, _issue: int) -> list[IssueComment]:
-            return [
-                IssueComment(
-                    body=render_current_plan(old_plan, revision=1),
-                    viewer_did_author=True,
-                    database_id=10,
-                    created_at="2026-08-14T08:00:00Z",
-                ),
-                IssueComment(
-                    body=render_current_plan(current_plan, revision=2),
-                    viewer_did_author=True,
-                    database_id=11,
-                    created_at="2026-08-14T09:00:00Z",
-                ),
-            ]
-
-        def pull_request(self, _repository: str, _pr: int) -> dict[str, object]:
-            raise AssertionError("unexpected PR read")
-
-    source = GitHubLearningSourceReader(Adapter()).read(intent)
-
-    assert isinstance(source, ApprovedPlanLearningSource)
-    assert source.comment_database_id == 11
-    assert source.revision == 2
-
-
-def test_approved_plan_source_rejects_conflicting_current_canonical_plans() -> None:
-    """Two current-revision owned plans are ambiguous even when one matches."""
-    plan = (
-        "# Implementation Plan\n\n## Objective\n\nCurrent objective.\n\n"
-        "## Approach\n\nCurrent approach.\n\n## Implementation Order\n\nCurrent order.\n\n"
-        "## Verification\n\nCurrent verification."
-    )
-    conflicting_plan = plan.replace("Current approach.", "Conflicting approach.")
-    intent = LearningIntent.approved_plan(
-        repo="HomericIntelligence/ProjectHephaestus",
-        issue=2754,
-        plan_revision=2,
-        plan_fingerprint=plan_fingerprint(plan),
-    )
-
-    class Adapter:
-        def issue(self, _repository: str, issue: int) -> dict[str, object]:
-            return {"number": issue, "state": "OPEN", "labels": [{"name": STATE_PLAN_GO}]}
-
-        def comments(self, _repository: str, _issue: int) -> list[IssueComment]:
-            return [
-                IssueComment(
-                    body=render_current_plan(conflicting_plan, revision=2),
-                    viewer_did_author=True,
-                    database_id=10,
-                ),
-                IssueComment(
-                    body=render_current_plan(plan, revision=2),
-                    viewer_did_author=True,
-                    database_id=11,
-                ),
-            ]
-
-        def pull_request(self, _repository: str, _pr: int) -> dict[str, object]:
-            raise AssertionError("unexpected PR read")
-
-    with pytest.raises(LearnDeliveryError, match="absent or ambiguous"):
-        GitHubLearningSourceReader(Adapter()).read(intent)
-
-
-def test_approved_plan_source_rejects_nonincreasing_owned_plan_history() -> None:
-    """A retained plan history must advance revision numbers in comment order."""
-    old_plan = (
-        "# Implementation Plan\n\n## Objective\n\nOld objective.\n\n"
-        "## Approach\n\nOld approach.\n\n## Implementation Order\n\nOld order.\n\n"
-        "## Verification\n\nOld verification."
-    )
-    current_plan = (
-        "# Implementation Plan\n\n## Objective\n\nCurrent objective.\n\n"
-        "## Approach\n\nCurrent approach.\n\n## Implementation Order\n\nCurrent order.\n\n"
-        "## Verification\n\nCurrent verification."
-    )
-    intent = LearningIntent.approved_plan(
-        repo="HomericIntelligence/ProjectHephaestus",
-        issue=2754,
-        plan_revision=1,
-        plan_fingerprint=plan_fingerprint(current_plan),
-    )
-
-    class Adapter:
-        def issue(self, _repository: str, issue: int) -> dict[str, object]:
-            return {"number": issue, "state": "OPEN", "labels": [{"name": STATE_PLAN_GO}]}
-
-        def comments(self, _repository: str, _issue: int) -> list[IssueComment]:
-            return [
-                IssueComment(
-                    body=render_current_plan(old_plan, revision=2),
-                    viewer_did_author=True,
-                    database_id=10,
-                ),
-                IssueComment(
-                    body=render_current_plan(current_plan, revision=1),
-                    viewer_did_author=True,
-                    database_id=11,
-                ),
-            ]
-
-        def pull_request(self, _repository: str, _pr: int) -> dict[str, object]:
-            raise AssertionError("unexpected PR read")
-
-    with pytest.raises(LearnDeliveryError, match="absent or ambiguous"):
-        GitHubLearningSourceReader(Adapter()).read(intent)
-
-
-def test_approved_plan_source_rejects_changed_fingerprint() -> None:
-    """A journal claim cannot authorize a later edited canonical plan."""
-    intent = _intent()
-
-    class Adapter:
-        def issue(self, _repository: str, issue: int) -> dict[str, object]:
-            return {
-                "number": issue,
-                "state": "OPEN",
-                "labels": [{"name": STATE_PLAN_GO}],
-            }
-
-        def comments(self, _repository: str, _issue: int) -> list[IssueComment]:
-            changed = (
-                "# Implementation Plan\n\n## Objective\nChanged.\n\n## Approach\nA.\n\n"
-                "## Implementation Order\nB.\n\n## Verification\nC."
-            )
-            return [
-                IssueComment(
-                    body=render_current_plan(changed, revision=4),
-                    viewer_did_author=True,
-                    database_id=11,
-                    created_at="2026-08-14T08:00:00Z",
-                )
-            ]
-
-        def pull_request(self, repository: str, pr: int) -> dict[str, object]:
-            raise AssertionError(f"unexpected PR read for {repository}#{pr}")
-
-    with pytest.raises(LearnDeliveryError, match="fingerprint changed"):
-        GitHubLearningSourceReader(Adapter()).read(intent)
-
-
 def test_post_merge_source_requires_merged_closing_pr() -> None:
     """Post-merge preparation binds the exact PR, merge SHA, and issue."""
     intent = LearningIntent.post_merge(
@@ -457,7 +228,12 @@ def test_post_merge_source_requires_merged_closing_pr() -> None:
                 "mergedAt": "2026-08-14T12:00:00Z",
                 "mergeCommit": {"oid": "c" * 40},
                 "closingIssuesReferences": [{"number": 2754}],
+                "headRefOid": "d" * 40,
             }
+
+        def verification(self, repository: str, pr: int, head: str) -> tuple[str, ...]:
+            assert head == "d" * 40
+            return ("tests: https://example.test/check",)
 
     source = GitHubLearningSourceReader(Adapter()).read(intent)
 
@@ -528,6 +304,7 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
 ) -> None:
     """Only successful execution and artifact verification return evidence."""
     import platform
+    import shutil
     from collections.abc import Iterator
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -535,6 +312,12 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
 
     from hephaestus.automation import mnemosyne_learning_preparation as preparation
 
+    node = tmp_path / "node"
+    cli = tmp_path / "markdownlint-cli2"
+    node.write_text("node")
+    cli.write_text("cli")
+    monkeypatch.setattr(shutil, "which", lambda name: str(node if name == "node" else cli))
+    monkeypatch.setattr(preparation, "node_runtime_files", lambda path: (path,))
     verified = Mock()
     if failure == "artifact":
         verified.side_effect = [None, LearnDeliveryError("learning dependency artifact changed")]
@@ -559,7 +342,7 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
 
     def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        if argv[-1] != "/usr/bin/true":
+        if argv[-1] == "scripts/validate_plugins.py":
             assert argv[3:] == [
                 str(tmp_path / "environment/bin/python"),
                 "scripts/validate_plugins.py",
@@ -576,14 +359,15 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
     if failure is None:
         assert validator.validate(tmp_path) == (
             f"{tmp_path / 'environment/bin/python'} scripts/validate_plugins.py",
+            f"{node} {cli} --config {tmp_path / '.markdownlint.yaml'} skills/*.md",
         )
-        assert verified.call_count == 2
+        assert verified.call_count == 3
     else:
         with pytest.raises(LearnDeliveryError) as error:
             validator.validate(tmp_path)
         assert "secret" not in str(error.value)
         assert verified.call_count == (2 if failure == "artifact" else 1)
-    assert len(calls) == 2
+    assert len(calls) == (3 if failure is None else 2)
 
 
 def test_default_preparation_fetch_uses_trusted_transport(tmp_path: Path) -> None:
@@ -628,3 +412,213 @@ def test_default_preparation_fetch_uses_trusted_transport(tmp_path: Path) -> Non
     ]
     assert run.call_args.kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert all(call[0] != "fetch" for call in calls)
+
+
+def test_plan_only_source_is_rejected_before_github_reads() -> None:
+    """Plan approval cannot supply implementation evidence."""
+    with pytest.raises(LearnDeliveryError, match="plan_only_learning_rejected"):
+        GitHubLearningSourceReader(type("Facts", (), {"issue": lambda *_: {}})()).read(
+            LearningIntent.approved_plan(
+                repo="org/repo", issue=1, plan_revision=1, plan_fingerprint="a" * 64
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "checks", [[], [{"name": "tests", "bucket": "fail"}], [{"name": "tests", "bucket": "pending"}]]
+)
+def test_post_merge_rejects_missing_or_failing_checks(checks: list[dict[str, str]]) -> None:
+    """Merged source needs passing required checks."""
+
+    class Adapter:
+        def pull_request(self, repository: str, pr: int) -> dict[str, object]:
+            return {
+                "number": pr,
+                "state": "MERGED",
+                "title": "Fix workers",
+                "body": "Closes #2754",
+                "url": "https://github.com/org/repo/pull/2800",
+                "mergedAt": "2026-08-14T12:00:00Z",
+                "mergeCommit": {"oid": "c" * 40},
+                "headRefOid": "d" * 40,
+                "closingIssuesReferences": [{"number": 2754}],
+            }
+
+        def verification(self, repository: str, pr: int, head: str) -> tuple[str, ...]:
+            return tuple(check["name"] for check in checks if check["bucket"] == "pass")
+
+    intent = LearningIntent.post_merge(repo="org/repo", issue=2754, pr=2800)
+    with pytest.raises(LearnDeliveryError, match="passing required checks"):
+        GitHubLearningSourceReader(Adapter()).read(intent)
+
+
+def test_default_builder_defers_without_a_reviewed_candidate() -> None:
+    """Passing checks do not make PR prose a reusable lesson."""
+    source = PostMergeLearningSource(
+        repository="org/repo",
+        issue=1,
+        pr=2,
+        title="Fix workers",
+        body="Closes #1",
+        merged_at="2026-09-09T00:00:00Z",
+        merge_commit_sha="a" * 40,
+        url="https://github.com/org/repo/pull/2",
+        verified_head="b" * 40,
+        verification_evidence=("tests: https://example.test/check",),
+    )
+    with pytest.raises(LearnDeliveryError, match="learning_deferred:candidate_required"):
+        MnemosyneLearningBuilder().build(
+            LearningIntent.post_merge(repo="org/repo", issue=1, pr=2), source
+        )
+
+
+def test_candidate_duplicate_defers_before_workspace_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A supplied candidate cannot duplicate a selected corpus entry."""
+    from types import SimpleNamespace
+
+    from hephaestus.automation.mnemosyne_corpus import MnemosyneSkillBlock
+    from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
+
+    monkeypatch.setattr(
+        DefaultCorpusReader,
+        "read",
+        lambda *_: SimpleNamespace(
+            blocks=(
+                MnemosyneSkillBlock(
+                    "worker-safety",
+                    "skills/worker-safety.md",
+                    "Worker recovery",
+                    "# Worker safety\n",
+                ),
+            )
+        ),
+    )
+
+    class Reader:
+        def read(self, intent: LearningIntent) -> PostMergeLearningSource:
+            return _source()
+
+    service = MnemosyneLearningPreparationService(
+        source_reader=Reader(), builder=CandidateBuilder()
+    )
+    with pytest.raises(LearnDeliveryError, match="learning_deferred:corpus_match_requires_review"):
+        service.prepare(_intent().to_payload(), _binding(tmp_path))
+    assert not Path(_binding(tmp_path).root).exists()
+
+
+def test_preparation_rejects_legacy_plan_even_with_injected_reader(tmp_path: Path) -> None:
+    """The host rejects a legacy plan before it calls a candidate producer."""
+
+    class Reader:
+        def read(self, intent: LearningIntent) -> PostMergeLearningSource:
+            return _source()
+
+    intent = LearningIntent.approved_plan(
+        repo="org/repo", issue=1, plan_revision=1, plan_fingerprint="a" * 64
+    )
+    service = MnemosyneLearningPreparationService(
+        source_reader=Reader(), builder=CandidateBuilder()
+    )
+    with pytest.raises(LearnDeliveryError, match="plan_only_learning_rejected"):
+        service.prepare(intent.to_payload(), _binding(tmp_path))
+
+
+def test_markdownlint_failure_prevents_validation_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plugin validation alone cannot authorize a malformed candidate."""
+    import platform
+    import shutil
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from hephaestus.automation import mnemosyne_learning_preparation as preparation
+
+    node = tmp_path / "node"
+    cli = tmp_path / "markdownlint-cli2"
+    node.write_text("node")
+    cli.write_text("cli")
+    monkeypatch.setattr(shutil, "which", lambda name: str(node if name == "node" else cli))
+    monkeypatch.setattr(preparation, "node_runtime_files", lambda path: (path,))
+
+    @contextmanager
+    def prepared(_path: Path, _runner: object) -> Iterator[SimpleNamespace]:
+        yield SimpleNamespace(
+            root=tmp_path,
+            runtime=tmp_path,
+            environment=tmp_path / "environment",
+            uv=tmp_path / "uv",
+            verify=lambda _path: None,
+        )
+
+    monkeypatch.setattr(preparation, "prepare_dependencies", prepared)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    original = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: str(path) == "/usr/bin/sandbox-exec" or original(path)
+    )
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1 if str(cli) in argv else 0)
+
+    with pytest.raises(LearnDeliveryError, match="markdownlint"):
+        MnemosynePluginValidator(runner=runner).validate(tmp_path)
+
+
+@pytest.mark.parametrize("bucket", ["pass", "fail", "pending", "cancel", "skipping", "unknown"])
+def test_required_checks_adapter_binds_passing_evidence(bucket: str) -> None:
+    """Only passing required checks at the same merged head supply evidence."""
+    import json
+
+    from hephaestus.automation.mnemosyne_learning_preparation import GitHubLearningSourceAdapter
+
+    def gh(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[1] == "checks":
+            assert "--required" in argv
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    [{"name": "tests", "bucket": bucket, "link": "https://example.test/check"}]
+                ),
+            )
+        return subprocess.CompletedProcess(
+            argv, 0, json.dumps({"state": "MERGED", "headRefOid": "a" * 40})
+        )
+
+    adapter = GitHubLearningSourceAdapter(gh)
+    if bucket == "pass":
+        assert adapter.verification("org/repo", 2, "a" * 40) == (
+            "tests: https://example.test/check",
+        )
+    else:
+        with pytest.raises(LearnDeliveryError, match="passing required checks"):
+            adapter.verification("org/repo", 2, "a" * 40)
+
+
+def test_failed_candidate_worktree_is_preserved_on_retry(tmp_path: Path) -> None:
+    """A retry cannot delete the first candidate and its failure evidence."""
+    from hashlib import sha256
+
+    root = tmp_path / "mnemosyne"
+    branch = "learn/" + "a" * 16
+    candidate = root / "build" / "mnemosyne-learning" / sha256(branch.encode()).hexdigest()[:16]
+    candidate.mkdir(parents=True)
+    artifact = candidate / "candidate.md"
+    artifact.write_text("First candidate")
+    calls: list[tuple[str, ...]] = []
+
+    def git(_cwd: Path, argv: tuple[str, ...], _timeout_s: int) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 2 if argv[0] == "ls-remote" else 0, "")
+
+    def gh(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, "[]")
+
+    with pytest.raises(LearnDeliveryError, match="candidate requires recovery"):
+        BoundLearningWorkspace(git=git, gh=gh).prepare(_binding(tmp_path), branch)
+    assert artifact.read_text() == "First candidate"
+    assert not any(call[:2] == ("worktree", "remove") for call in calls)

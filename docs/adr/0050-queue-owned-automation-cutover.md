@@ -1,4 +1,4 @@
-# ADR-0048: Queue-owned automation cutover
+# ADR-0050: Queue-owned automation cutover
 
 - Status: Accepted
 - Date: 2026-09-09
@@ -44,7 +44,9 @@ Conversation replacement uses the existing bounded error budget.
 Recovered publication records do not grant current-process review authority.
 After restart, the pipeline obtains fresh source, verification, and review
 evidence before merge. Keep exact-head GitHub readbacks and the server merge
-route required by ADR-0039. No queue stage changes native auto-merge.
+route required by ADR-0039. Retained rebase records follow ADR-0048: the
+current host must authenticate the original audit and verify the resulting
+tree before it can restore proof. No queue stage changes native auto-merge.
 
 Expose `PipelineConfig`, `PipelineScope`, `StageName`, and `run_pipeline`
 through lazy package imports. Use one parser and configuration builder for
@@ -54,6 +56,9 @@ Remove standalone automation owners, aliases, and legacy persistence readers.
 Keep current plan pointers, publication repair, wave checkpoints, learning
 intents and claims, source ownership, reply journals, and verification records.
 Keep the authenticated planning-marker identities in the current shared protocol.
+New learning requires verified implementation evidence and a reviewed candidate.
+Plan approval does not create learning work. Current deferred records retain
+their identity and require new evidence before another attempt.
 Historical files and comments remain inert. Do not infer missing learning
 intents from historical merges.
 

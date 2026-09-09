@@ -292,6 +292,7 @@ class Coordinator(
         self._auxiliary_job_count = 0
         self._auxiliary_job_time_s = 0.0
         self._auxiliary_job_failure_count = 0
+        self._auxiliary_job_deferred_count = 0
         self._loops_run = 0
         self._pass_work_count = 0
         self._progress = False
@@ -299,6 +300,8 @@ class Coordinator(
         self._fatal = False
         self._pool_shut_down = False
         self._seen_item_ids: set[int] = set()
+        self._manual_rebase_selected: set[tuple[str, str, int]] = set()
+        self._plan_updates_selected: set[tuple[str, int]] = set()
         # A context contains a GitHub accessor and path configuration but no
         # mutable item state.  At most C items can be live, so an LRU of C is
         # enough for concurrent work and prevents all-org discovery from
@@ -340,6 +343,28 @@ class Coordinator(
             ):
                 item.branch = f"{item.issue}-auto-impl-direct-{run_nonce}"
                 item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = run_nonce
+        if (
+            self.config.update_plan
+            and item.stage is StageName.PLANNING
+            and item.issue in self.config.issues
+            and (repo, item.issue) not in self._plan_updates_selected
+        ):
+            item.payload["update_plan_required"] = True
+        if self.config.rebase and item.stage not in (
+            StageName.REPO,
+            StageName.FINISHED,
+            StageName.LEARNING,
+        ):
+            keys = {
+                (repo, kind, number)
+                for kind, number in (("issue", item.issue), ("pr", item.pr))
+                if number is not None
+            }
+            if keys and not keys.intersection(self._manual_rebase_selected):
+                item.payload["manual_rebase_required"] = True
+                item.payload["manual_rebase_resume_stage"] = item.stage.value
+                item.payload["manual_rebase_selection_keys"] = keys
+                item.stage = StageName.IMPLEMENTATION
         if item.stage not in (StageName.REPO, StageName.FINISHED):
             self._pass_work_count += 1
         if item.stage is StageName.FINISHED and item.result is None:
@@ -358,7 +383,7 @@ class Coordinator(
             github.ensure_blocked_audit(issue)
         entry = _seeding.seed_entry_from_facts(facts)
         stage, reason, passed = self._scope_seed_decision(
-            issue, entry.stage, entry.reason, scope_stages
+            issue, entry.stage, entry.reason, scope_stages, repo=repo
         )
         return replace(entry, stage=stage, reason=reason, passed=passed)
 

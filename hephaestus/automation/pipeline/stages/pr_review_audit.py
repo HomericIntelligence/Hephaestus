@@ -120,6 +120,8 @@ class PrReviewAudit:
             )
             item.state = GO_AUDIT_PUBLISH
             return self._audit_retry(item, reason="implementation_go_audit_retry")
+        item.payload.pop("retained_rebase_review_proof", None)
+        item.payload.pop("pending_review_rebase_record", None)
         item.payload.pop("implementation_go_audit_retries", None)
         item.payload.pop("pending_implementation_go_audit", None)
         item.payload.pop("pending_implementation_go_audit_head", None)

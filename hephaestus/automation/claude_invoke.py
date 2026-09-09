@@ -200,9 +200,9 @@ def invoke_claude_with_session(
     Args:
         repo: Repository slug (e.g. ``"Scylla"``).
         issue: Issue number — leading ``#`` is stripped by
-            :func:`session_naming.session_name`.
+            :func:`agent_config.session_name`.
         agent: One of the ``AGENT_*`` constants in
-            :mod:`hephaestus.automation.session_naming`.
+            :mod:`hephaestus.automation.agent_config`.
         prompt: Prompt text. Passed as a positional argv unless
             ``input_via_stdin`` is True.
         model: ``MODEL[:EFFORT]`` value. Claude uses the base model and its

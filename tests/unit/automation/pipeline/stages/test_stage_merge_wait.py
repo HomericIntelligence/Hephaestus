@@ -1205,10 +1205,8 @@ def test_405_conflicting_or_dirty_readiness_returns_to_implementer(
     assert github.mutation_log == []
 
 
-def test_reviewed_behind_head_returns_to_implementer_for_rebase(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A reviewer does not validate against current main; implementation rebases later."""
+def test_reviewed_behind_head_waits_without_rebase(make_ctx: Any, make_work_item: Any) -> None:
+    """A branch that is only behind main waits without a rebase."""
     github = _ConditionalGitHub(
         readiness={
             **_open_pr(),
@@ -1220,8 +1218,8 @@ def test_reviewed_behind_head_returns_to_implementer_for_rebase(
 
     result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FAIL_BACK, "post_review_rebase_required")
-    assert item.payload["post_review_rebase_required"] is True
+    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert "post_review_rebase_required" not in item.payload
     assert github.merge_attempts == []
 
 
@@ -1492,3 +1490,174 @@ def test_exhausted_merge_budget_does_not_enter_readiness_wait(
 def test_stage_github_exposes_a_conditional_merge_adapter(make_ctx: Any) -> None:
     """The stage contract has an explicit adapter rather than a CLI merge escape hatch."""
     assert callable(getattr(make_ctx().github, "merge_pr_if_head", None))
+
+
+def test_retained_review_checks_the_resulting_rebase_head(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Required checks use the new head while the initial review stays fixed."""
+    item, record = _retained_review_item(make_work_item)
+    github = _ConditionalGitHub(
+        states=[_open_pr("c" * 40)],
+        readiness={**_open_pr("c" * 40), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+        required_checks_green=False,
+    )
+    github.review_rebase_records[item.pr] = record
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github, org="test-org"))
+    assert result == StageOutcome(Disposition.BLOCKED, "required_checks_not_green")
+    assert github.checked_heads == ["c" * 40]
+    assert github.merge_attempts == []
+    assert item.payload["reviewed_pr_head_sha"] == "a" * 40
+
+
+def _retained_review_item(make_work_item: Any) -> tuple[Any, Any]:
+    """Keep the initial audit with the proof used by merge wait."""
+    from dataclasses import asdict
+
+    from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
+    from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
+    from hephaestus.automation.review_audit import ReviewAudit
+
+    item = _reviewed_item(make_work_item)
+    audit = ReviewAudit("A", "Checks passed.", (), "", True, "GO")
+    proof = RebaseReviewProof(
+        repository="test-org/test-repo",
+        issue_number=item.issue,
+        pr_number=item.pr,
+        reviewed_head_sha="a" * 40,
+        reviewed_base_sha="b" * 40,
+        source_head_sha="a" * 40,
+        target_base_sha="b" * 40,
+        resulting_head_sha="c" * 40,
+        resulting_tree_sha="d" * 40,
+        original_audit_id=(
+            f"<!-- hephaestus-implementation-go-audit:pr={item.pr}:head={'a' * 40} -->"
+        ),
+    )
+    record = RebaseReviewRecord(**asdict(proof), audit=audit)
+    item.payload.update(retained_rebase_review_proof=proof, review_audit=audit)
+    return item, record
+
+
+@pytest.mark.parametrize("moment", ["before_cycle", "during_checks"])
+@pytest.mark.parametrize("change", ["missing", "revoked", "record", "audit", "unavailable"])
+@pytest.mark.parametrize("queue_method", [None, "SQUASH"])
+def test_rebase_record_change_blocks_merge_after_host_proof(
+    make_ctx: Any, make_work_item: Any, moment: str, change: str, queue_method: str | None
+) -> None:
+    """A changed record or initial audit cannot use an earlier host proof."""
+    from dataclasses import replace
+
+    item, initial = _retained_review_item(make_work_item)
+
+    class ChangedRecordGitHub(_ConditionalGitHub):
+        def __init__(self) -> None:
+            super().__init__(
+                states=[_open_pr("c" * 40)],
+                readiness={
+                    **_open_pr("c" * 40),
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                },
+                merge_queue_method=queue_method,
+            )
+            self.changed = moment == "before_cycle"
+
+        def read_review_rebase_record(self, pr_number: int) -> Any:
+            assert pr_number == item.pr
+            if not self.changed:
+                return initial
+            if change == "missing":
+                return None
+            if change == "revoked":
+                return replace(initial, state="revoked")
+            if change == "record":
+                return replace(initial, source_head_sha="f" * 40)
+            if change == "audit":
+                return replace(initial, audit=replace(initial.audit, summary="Checks differ."))
+            raise RuntimeError("The record is unavailable.")
+
+        def required_checks_pass_for_head(
+            self,
+            head_sha: str,
+            policy: Any,
+            *,
+            deadline_s: float,
+            cancellation: threading.Event,
+        ) -> bool:
+            result = super().required_checks_pass_for_head(
+                head_sha, policy, deadline_s=deadline_s, cancellation=cancellation
+            )
+            self.changed = True
+            return result
+
+    github = ChangedRecordGitHub()
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github, org="test-org"))
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "rebase_review_record_changed")
+    assert github.merge_attempts == []
+    assert item.payload["review_audit"] == initial.audit
+    assert item.payload["reviewed_pr_head_sha"] == initial.reviewed_head_sha
+
+
+def test_unchanged_rebase_record_is_read_before_final_head_admission(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A record read must not follow the final head check before merge."""
+    item, record = _retained_review_item(make_work_item)
+
+    class OrderedRecordGitHub(_ConditionalGitHub):
+        def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
+            self.events.append("head")
+            return super().gh_pr_state(pr_number)
+
+        def read_review_rebase_record(self, pr_number: int) -> Any:
+            assert pr_number == item.pr
+            self.events.append("record")
+            return record
+
+        def merge_pr_if_head(
+            self, pr_number: int, reviewed_sha: str, **kwargs: Any
+        ) -> ConditionalMergeResult:
+            result = super().merge_pr_if_head(pr_number, reviewed_sha, **kwargs)
+            self._states = [{"state": "MERGED"}]
+            return result
+
+    github = OrderedRecordGitHub(
+        states=[_open_pr("c" * 40)],
+        readiness={**_open_pr("c" * 40), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+    )
+    result = _complete_merge_cycle(
+        MergeWaitStage(),
+        item,
+        make_ctx(
+            github=github,
+            org="test-org",
+            config_overrides={"enable_learn": False},
+        ),
+    )
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    merge_index = github.events.index(f"merge:{'c' * 40}")
+    assert github.events[merge_index - 2 : merge_index] == ["record", "head"]
+    assert github.events.count("record") == 2
+
+
+def test_rebase_record_is_rechecked_after_a_readiness_wait(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A later merge cycle cannot use a record that was deleted during a wait."""
+    item, record = _retained_review_item(make_work_item)
+    github = _ConditionalGitHub(
+        states=[_open_pr("c" * 40)],
+        readiness={**_open_pr("c" * 40), "mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"},
+    )
+    github.review_rebase_records[item.pr] = record
+    ctx = make_ctx(github=github, org="test-org")
+    stage = MergeWaitStage()
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
+    del github.review_rebase_records[item.pr]
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.FINISH_FAIL, "rebase_review_record_changed"
+    )
+    assert github.merge_attempts == []

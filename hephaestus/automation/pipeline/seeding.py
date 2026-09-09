@@ -37,11 +37,14 @@ from typing import Any, Literal
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.requirements_recovery import (
     has_contaminated_issue_body,
     is_semantic_disposition_candidate,
     verified_finalized_plan,
 )
+from hephaestus.automation.review_audit import is_clean_go_review
+from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
     STATE_BLOCKED,
@@ -83,6 +86,45 @@ def read_pending_implementation_go_audit(
     if receipt is not None and not isinstance(receipt, PendingImplementationGoAudit):
         raise IssueClassificationError("pending implementation-go audit receipt has invalid type")
     return receipt
+
+
+def read_review_rebase_record(github: Any, pr_number: int) -> RebaseReviewRecord | None:
+    """Read retained facts without accepting a serialized process proof."""
+    try:
+        record = github.read_review_rebase_record(pr_number)
+    except CommentJournalReadError:
+        raise
+    except (ValueError, RuntimeError) as error:
+        raise IssueClassificationError(f"rebase review recovery blocked: {error}") from error
+    if record is not None and (
+        not isinstance(record, RebaseReviewRecord)
+        or record.pr_number != pr_number
+        or record.state != "active"
+    ):
+        raise IssueClassificationError("rebase review record is invalid")
+    return record
+
+
+def pending_review_supersedes_rebase(
+    audit: PendingImplementationGoAudit | None, record: RebaseReviewRecord | None
+) -> bool:
+    """Resume fresh clean GO publication before retiring old rebase facts."""
+    return (
+        audit is not None
+        and record is not None
+        and audit.pr_number == record.pr_number
+        and audit.head_sha != record.reviewed_head_sha
+        and is_clean_go_review(audit.audit)
+    )
+
+
+def pending_review_entry_stage(
+    audit: PendingImplementationGoAudit | None, record: RebaseReviewRecord | None
+) -> StageName:
+    """Select audit publication or host verification for a pending review."""
+    if audit is not None and (record is None or pending_review_supersedes_rebase(audit, record)):
+        return StageName.PR_REVIEW
+    return StageName.MERGE_WAIT
 
 
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
@@ -135,6 +177,7 @@ class IssueFacts:
     pr_has_implementation_no_go: bool = False
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
+    pending_review_rebase_record: RebaseReviewRecord | None = None
     body: str = ""
     authority_sanitized: bool = False
 
@@ -185,6 +228,7 @@ class SeedEntry:
     passed: bool = True
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
+    pending_review_rebase_record: RebaseReviewRecord | None = None
     non_code: bool = False
     non_code_labels: tuple[str, ...] = ()
     non_code_evidence_digest: str = ""
@@ -314,6 +358,12 @@ def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classificat
     # unarmed PR before returning to review; a matching current-process
     # proof attempts one ordinary conditional merge. No queue stage
     # creates, disables, adopts, or polls automatic merge.
+    if pending_review_supersedes_rebase(
+        facts.pending_implementation_go_audit, facts.pending_review_rebase_record
+    ):
+        return StageName.PR_REVIEW, f"#{facts.number} fresh review supersedes rebase recovery"
+    if facts.pending_review_rebase_record is not None:
+        return StageName.MERGE_WAIT, f"#{facts.number} retained rebase requires host verification"
     if facts.pending_implementation_go_audit is not None:
         return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
     if facts.pr_has_implementation_go:
@@ -445,6 +495,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     pr_has_implementation_go = False
     pr_has_implementation_no_go = False
     pending_implementation_go_audit = None
+    pending_review_rebase_record = None
     pr_number: int | None = github.find_pr_for_issue(issue_number)
     if pr_number is not None:
         pr_is_open = True
@@ -452,6 +503,11 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
             github.pr_has_implementation_state_label(pr_number)
         )
         pending_implementation_go_audit = read_pending_implementation_go_audit(github, pr_number)
+        pending_review_rebase_record = read_review_rebase_record(github, pr_number)
+        if pending_review_rebase_record is not None and (
+            pending_review_rebase_record.issue_number != issue_number
+        ):
+            raise IssueClassificationError("rebase review issue does not match")
     else:
         pr_number = github.find_merged_pr_for_issue(issue_number)
         if pr_number is not None:
@@ -470,6 +526,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         pending_implementation_go_audit=pending_implementation_go_audit,
+        pending_review_rebase_record=pending_review_rebase_record,
         authority_sanitized=issue_data.get("authoritySanitized") is True,
     )
 
@@ -486,6 +543,7 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
         issue_title=facts.title,
         issue_body=facts.body,
         pending_implementation_go_audit=facts.pending_implementation_go_audit,
+        pending_review_rebase_record=facts.pending_review_rebase_record,
         pending_implementation_go_label_confirmed=bool(
             facts.pending_implementation_go_audit is not None and facts.pr_has_implementation_go
         ),

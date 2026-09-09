@@ -245,6 +245,66 @@ def test_current_sdist_clean_install_runs_representative_entry_points(
     _run_representative_entry_points(installed)
 
 
+def test_installed_wheel_accepts_versioned_recovery_markers(
+    controlled_artifacts: ControlledArtifacts, tmp_path: Path
+) -> None:
+    """An installed automation artifact accepts valid recovery provenance offline."""
+    installed = _new_clean_environment(tmp_path / "recovery-wheel", controlled_artifacts.uv)
+    subprocess.run(
+        [
+            controlled_artifacts.uv,
+            "pip",
+            "install",
+            "--python",
+            str(_venv_python(installed)),
+            f"{controlled_artifacts.first_wheel}[automation]",
+        ],
+        cwd=installed.parent / "run",
+        env=_run_env(installed),
+        check=True,
+        capture_output=True,
+    )
+    probe = """
+from pathlib import Path
+import sys
+from hephaestus.automation import pipeline_github_comments as comments
+from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX, render_recovered_requirements,
+)
+
+assert Path(comments.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+
+class OfflineComments(comments.PipelineGitHubIssueComments):
+    def __init__(self) -> None:
+        pass
+
+    def _skip(self, description: str) -> bool:
+        return True
+
+    def _repo_issue_comments(self, number: int) -> list[dict[str, object]]:
+        raise AssertionError("Network access is forbidden")
+
+adapter = OfflineComments()
+for context in ({}, {"issue_title": "Example", "repository_revision": "b" * 40}):
+    body = render_recovered_requirements("Original", "Required behavior", "a" * 64, **context)
+    adapter.upsert_issue_comment(2623, RECOVERY_PROVENANCE_PREFIX, body)
+try:
+    adapter.upsert_issue_comment(2623, RECOVERY_PROVENANCE_PREFIX, "Invalid provenance")
+except (RuntimeError, ValueError):
+    pass
+else:
+    raise AssertionError("Malformed provenance was accepted")
+"""
+    subprocess.run(
+        [str(_venv_python(installed)), "-I", "-c", probe],
+        cwd=installed.parent / "run",
+        env=_run_env(installed),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_wheel_upgrade_and_clean_uninstall(
     controlled_artifacts: ControlledArtifacts,
     tmp_path: Path,

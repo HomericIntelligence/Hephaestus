@@ -315,7 +315,7 @@ remaining narrowly approved runtime variables and the deny-by-default policy.
 
 Run any command with `--help` to see full usage.
 
-The installed console scripts are declared in `[project.scripts]` in
+The 54 console scripts are declared in `[project.scripts]` in
 [`pyproject.toml`](pyproject.toml).
 
 ### Automation
@@ -353,7 +353,7 @@ This queue migration removes old command names, option aliases, and legacy
 record readers. Stop old coordinators before the upgrade. Preserve unresolved
 publication effects, local commits, worktrees, and current journals. Do not
 run old and new owners against the same state directory. See the
-[queue cutover decision](docs/adr/0048-queue-owned-automation-cutover.md) and
+[queue cutover decision](docs/adr/0050-queue-owned-automation-cutover.md) and
 [queue recovery runbook](docs/runbooks/ci-driver-stall.md).
 
 #### Private Pi provider setup
@@ -387,6 +387,12 @@ For independent tool selection, literal model names, and migration from aliases,
 [`docs/ifm-models.md`](docs/ifm-models.md).
 
 #### Running the automation loop from a source checkout (macOS / Codex)
+
+For recovery from an older installed package, use the
+[fixed-revision runtime procedure](docs/runbooks/automation-runtime-recovery.md).
+Repository synchronization does not update the package that runs the coordinator.
+On macOS, host verification requires a virtual environment. A Conda base
+environment is not supported for this operation.
 
 When `hephaestus-automation-loop` is not installed on `PATH` (fresh source
 checkout) and Claude is not installed, invoke the loop through `uv` and pin

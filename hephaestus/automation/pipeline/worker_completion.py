@@ -10,8 +10,8 @@ def resolve_worker_future(
     future: Future[JobResult],
     *,
     crash_result: Callable[[BaseException], JobResult],
-    cancelled_result: JobResult | None = None,
-) -> JobResult | None:
+    cancelled_result: JobResult,
+) -> JobResult:
     """Return the result, or apply the pool's cancellation and crash policies."""
     if future.cancelled():
         return cancelled_result

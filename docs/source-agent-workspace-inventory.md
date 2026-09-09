@@ -19,7 +19,7 @@ not receive source-reading tools.
 | PR review analysis | `AgentJob(pr_reviewer)` | yes | review |
 | PR comment validation | `AgentJob(pr_reviewer)` | yes | review |
 | reviewer / writer compaction | `CompactJob` | no | session-only operation |
-| approved-plan / post-merge learning | `AthenaSkillJob(learn)` | yes | impl |
+| post-merge learning | `AthenaSkillJob(learn)` | yes | impl |
 
 The worker boundary rejects every source-capable raw job aimed at a primary
 checkout (`.git` directory). Typed jobs additionally validate repository

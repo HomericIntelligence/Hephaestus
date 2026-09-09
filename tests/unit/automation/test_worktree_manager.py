@@ -2134,11 +2134,11 @@ class TestCreateWorktreeBranchCollision:
         assert add_calls
         assert add_calls[-1][-1] == "origin/main"
 
-    @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")
-    def test_refresh_base_rebases_existing_local_issue_branch(
+    @patch("hephaestus.automation.git_utils.rebase_worktree_onto")
+    def test_refresh_base_preserves_existing_local_issue_branch(
         self, mock_rebase: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
-        """Issue-major reruns rebase a reused local issue branch before implementation."""
+        """Worktree creation does not rebase a reused local issue branch."""
         worktree_mocks.repo_root.return_value = tmp_path
         worktree_mocks.run.return_value = Mock(returncode=0, stdout="origin/main")
         mock_rebase.return_value = True
@@ -2150,13 +2150,13 @@ class TestCreateWorktreeBranchCollision:
         ):
             manager.create_worktree(1577, "1577-auto-impl", refresh_base=True)
 
-        mock_rebase.assert_called_once_with(manager.base_dir / "issue-1577", "main")
+        mock_rebase.assert_not_called()
 
     @pytest.mark.parametrize(
         ("local_branch_exists", "remote_branch_exists"),
         [(True, False), (False, True)],
     )
-    @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")
+    @patch("hephaestus.automation.git_utils.rebase_worktree_onto")
     def test_refresh_base_rebase_conflict_keeps_reused_issue_branch(
         self,
         mock_rebase: Any,
@@ -2166,7 +2166,7 @@ class TestCreateWorktreeBranchCollision:
         local_branch_exists: bool,
         remote_branch_exists: bool,
     ) -> None:
-        """Rebase conflicts proceed with reused local and origin-restored branches."""
+        """Worktree creation preserves reused branches without a rebase."""
         worktree_mocks.repo_root.return_value = tmp_path
         worktree_mocks.run.return_value = Mock(returncode=0, stdout="origin/main")
         mock_rebase.return_value = False
@@ -2183,7 +2183,7 @@ class TestCreateWorktreeBranchCollision:
 
         assert result == worktree_path
         assert manager.worktrees[1577] == worktree_path
-        mock_rebase.assert_called_once_with(worktree_path, "main")
+        mock_rebase.assert_not_called()
         add_calls = [
             call.args[0]
             for call in worktree_mocks.run.call_args_list
@@ -2202,13 +2202,13 @@ class TestCreateWorktreeBranchCollision:
                 str(worktree_path),
                 "origin/1577-auto-impl",
             ]
-        assert "proceeding with current branch head" in caplog.text
+        assert "proceeding with current branch head" not in caplog.text
 
-    @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")
-    def test_refresh_base_rebases_existing_remote_issue_branch(
+    @patch("hephaestus.automation.git_utils.rebase_worktree_onto")
+    def test_refresh_base_preserves_existing_remote_issue_branch(
         self, mock_rebase: Any, worktree_mocks: Any, tmp_path: Any
     ) -> None:
-        """Issue-major reruns rebase a reused remote issue branch before implementation."""
+        """Worktree creation does not rebase a reused remote issue branch."""
         worktree_mocks.repo_root.return_value = tmp_path
         worktree_mocks.run.return_value = Mock(returncode=0, stdout="origin/main")
         mock_rebase.return_value = True
@@ -2221,7 +2221,7 @@ class TestCreateWorktreeBranchCollision:
         ):
             manager.create_worktree(1580, "1580-auto-impl", refresh_base=True)
 
-        mock_rebase.assert_called_once_with(manager.base_dir / "issue-1580", "main")
+        mock_rebase.assert_not_called()
 
     def test_create_worktree_removes_partial_worktree_after_add_failure(
         self, worktree_mocks: Any, tmp_path: Any

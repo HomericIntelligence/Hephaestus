@@ -6668,3 +6668,10 @@ def test_primary_review_uses_a_new_profile_name_for_each_attempt(tmp_path: Path)
         assert len(name.removeprefix("hephaestus-review-")) == 32
         names.append(name)
     assert len(set(names)) == 3
+
+
+@pytest.mark.parametrize("name", ["agent_stage_execution_request", "_PI_AGENT_STAGE_REQUESTS"])
+def test_retired_direct_stage_policy_selector_is_unavailable(name: str) -> None:
+    """Generic direct stages have no alternate runtime dispatch path."""
+    with pytest.raises(AttributeError):
+        getattr(agent_runtime, name)

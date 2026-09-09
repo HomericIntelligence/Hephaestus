@@ -237,6 +237,8 @@ class PipelineConfig:
     source_revision: str | None = None
     issues: list[int] = field(default_factory=list)
     prs: list[int] = field(default_factory=list)
+    rebase: bool = False
+    update_plan: bool = False
     loops: int = 1
     max_workers: int = 1
     parallel_repos: int = 1

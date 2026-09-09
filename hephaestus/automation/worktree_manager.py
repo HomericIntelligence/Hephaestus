@@ -40,7 +40,7 @@ from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.worktree_identity import source_worktree_name
 
-from .git_utils import get_repo_root, is_clean_working_tree, rebase_worktree_onto, run
+from .git_utils import get_repo_root, is_clean_working_tree, run
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +244,7 @@ class WorktreeManager:
         ] = {}
         self._implementation_writer_authorities: dict[Path, ImplementationWriterAuthority] = {}
         self.worktrees: dict[int | str, Path] = {}
+        self._fresh_branch_creations: set[tuple[Path, str]] = set()
         self.preserved: list[tuple[int | str, Path]] = []
         self.lock = threading.Lock()
 
@@ -801,7 +802,6 @@ class WorktreeManager:
                                     worktree_path,
                                     branch_name,
                                     base_sha=base_sha,
-                                    refresh_base=refresh_base,
                                     timeout=timeout,
                                 )
                             else:
@@ -809,7 +809,6 @@ class WorktreeManager:
                                     worktree_path,
                                     branch_name,
                                     base_sha=base_sha,
-                                    refresh_base=refresh_base,
                                     replace_existing_base_branch=True,
                                     timeout=timeout,
                                 )
@@ -1701,13 +1700,20 @@ class WorktreeManager:
                 "implementation writer adoption local branch changed"
             )
 
+    def consume_fresh_branch_creation(self, path: Path, branch: str) -> bool:
+        """Return one proof that this manager created the local branch."""
+        key = (path.resolve(), branch)
+        if key not in self._fresh_branch_creations:
+            return False
+        self._fresh_branch_creations.remove(key)
+        return True
+
     def _add_worktree_for_branch(
         self,
         worktree_path: Path,
         branch_name: str,
         *,
         base_sha: str | None = None,
-        refresh_base: bool = False,
         replace_existing_base_branch: bool = False,
         timeout: int | None = None,
     ) -> None:
@@ -1715,19 +1721,15 @@ class WorktreeManager:
 
         Resolution order:
 
-        1. Branch exists locally → reuse it, then rebase it if this is an
-           issue-major fresh-base checkout.
-        2. Branch exists on origin only → fetch and extend ``origin/<branch>``,
-           so a remote branch from a prior loop is not discarded and re-created
-           from base (which would produce a divergent duplicate PR — #1018),
-           then rebase it if this is an issue-major fresh-base checkout.
-        3. Branch is new → create it from the base branch.
+        1. The branch exists locally: reuse it without a rebase.
+        2. The branch exists only on origin: fetch it and use its current head.
+        3. The branch is new: create it from the base branch.
+
+        The pipeline must authorize each rebase through a separate Git job.
 
         Args:
             worktree_path: Destination path for the worktree.
             branch_name: Branch the worktree should track.
-            refresh_base: When True, reused issue automation branches are rebased
-                onto the refreshed base before the implementer starts.
             timeout: Optional timeout in seconds for each git command.
 
         """
@@ -1746,6 +1748,8 @@ class WorktreeManager:
                 cwd=self.repo_root,
                 **_timeout_kw(timeout),
             )
+            if not replace_existing_base_branch:
+                self._fresh_branch_creations.add((worktree_path.resolve(), branch_name))
         elif self._local_branch_exists(branch_name, timeout=timeout):
             self._refresh_stale_local_branch_if_safe(branch_name, timeout=timeout)
             logger.info("Branch %s already exists, reusing it", branch_name)
@@ -1753,12 +1757,6 @@ class WorktreeManager:
                 ["git", "worktree", "add", str(worktree_path), branch_name],
                 cwd=self.repo_root,
                 **_timeout_kw(timeout),
-            )
-            self._rebase_existing_issue_branch_if_requested(
-                worktree_path,
-                branch_name,
-                refresh_base=refresh_base,
-                timeout=timeout,
             )
         elif self._remote_branch_exists(branch_name, timeout=timeout):
             logger.info(
@@ -1789,12 +1787,6 @@ class WorktreeManager:
                 cwd=self.repo_root,
                 **_timeout_kw(timeout),
             )
-            self._rebase_existing_issue_branch_if_requested(
-                worktree_path,
-                branch_name,
-                refresh_base=refresh_base,
-                timeout=timeout,
-            )
         else:
             run(
                 [
@@ -1809,49 +1801,7 @@ class WorktreeManager:
                 cwd=self.repo_root,
                 **_timeout_kw(timeout),
             )
-
-    def _rebase_existing_issue_branch_if_requested(
-        self,
-        worktree_path: Path,
-        branch_name: str,
-        *,
-        refresh_base: bool,
-        timeout: int | None = None,
-    ) -> None:
-        """Rebase reused issue automation branches before implementation starts."""
-        if not refresh_base or not self._is_issue_automation_branch(branch_name):
-            return
-        base_branch_name = self._origin_base_branch_name(timeout=timeout)
-        if base_branch_name is None:
-            logger.info(
-                "Skipping pre-implementation rebase for %s: base %s is not an origin branch",
-                branch_name,
-                self.base_branch,
-            )
-            return
-        logger.info(
-            "Rebasing reused issue branch %s onto %s before implementation",
-            branch_name,
-            self.base_branch,
-        )
-        if not rebase_worktree_onto(worktree_path, base_branch_name, **_timeout_kw(timeout)):
-            logger.warning(
-                "Could not rebase reused issue branch %s onto %s before implementation; "
-                "proceeding with current branch head",
-                branch_name,
-                self.base_branch,
-            )
-
-    def _origin_base_branch_name(self, *, timeout: int | None = None) -> str | None:
-        """Return the branch name portion for an ``origin/<branch>`` base."""
-        base_ref = self._resolve_base_branch(timeout=timeout)
-        if base_ref.startswith("refs/remotes/origin/"):
-            return base_ref.removeprefix("refs/remotes/origin/")
-        if base_ref.startswith("origin/"):
-            return base_ref.removeprefix("origin/")
-        if "/" not in base_ref and not _looks_like_sha(base_ref):
-            return base_ref
-        return None
+            self._fresh_branch_creations.add((worktree_path.resolve(), branch_name))
 
     def _refresh_stale_local_branch_if_safe(
         self,
