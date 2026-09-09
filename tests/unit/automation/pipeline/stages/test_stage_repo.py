@@ -9,31 +9,38 @@ planning review, and terminal completion.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import hephaestus.automation.loop_repo_manager as loop_repo_manager_mod
+from hephaestus.automation.issue_waves import WAVE_LEASE_PAYLOAD, IssueWaveStore, WaveLease
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
-from hephaestus.automation.pipeline.stages.repo import RepoStage
+from hephaestus.automation.pipeline.stages.repo import (
+    SYNCED_MAIN_SHA_KEY,
+    RepoIssueSource,
+    RepoStage,
+)
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
 
 from .conftest import FakeStageGitHub
 
 
 class _RepoPaths:
-    """Paths stub exposing a projects root and an optional explicit checkout."""
+    """Provide explicit project and repository paths."""
 
-    def __init__(self, projects_dir: Path, *, repo_root: Path | None = None) -> None:
+    def __init__(self, projects_dir: Path, *, repo_root: Path) -> None:
         self.projects_dir = projects_dir
-        self.repo_root = repo_root or projects_dir
+        self.repo_root = repo_root
         self.worktree = self.repo_root
 
 
@@ -45,8 +52,8 @@ def repo_item() -> WorkItem:
 
 @pytest.fixture
 def repo_ctx(tmp_path: Path, make_ctx: Callable[..., Any]) -> Any:
-    """StageContext whose paths expose a temp projects_dir."""
-    return make_ctx(paths=_RepoPaths(tmp_path))
+    """Provide the checkout path selected by the coordinator."""
+    return make_ctx(paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"))
 
 
 def _facts(
@@ -177,7 +184,7 @@ class TestOnEnterAndCloneStates:
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
     ) -> None:
         """[dry-run] logs the would-clone and proceeds — no job submitted."""
-        ctx = make_ctx(dry_run=True, paths=_RepoPaths(tmp_path))
+        ctx = make_ctx(dry_run=True, paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"))
         repo_item.state = "CLONE_WAIT"
 
         result = RepoStage().step(repo_item, ctx)
@@ -194,7 +201,7 @@ class TestOnEnterAndCloneStates:
     ) -> None:
         """Dry runs report a reusable checkout sync without submitting a GitJob."""
         (tmp_path / "repo-a").mkdir()
-        ctx = make_ctx(dry_run=True, paths=_RepoPaths(tmp_path))
+        ctx = make_ctx(dry_run=True, paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"))
         repo_item.state = "CLONE_WAIT"
         caplog.set_level(logging.INFO, logger="hephaestus.automation.pipeline.stages.repo")
 
@@ -239,6 +246,296 @@ class TestOnEnterAndCloneStates:
         assert repo_item.attempts["clone"] == 0
         assert "clone_failed" not in repo_item.payload
         assert repo_item.payload["checkout_verified"] is True
+
+    @pytest.mark.parametrize("has_issue_limit", [False, True])
+    @pytest.mark.parametrize("checkout_exists", [False, True])
+    def test_invalid_sync_revision_cannot_use_a_fixture_fallback(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        has_issue_limit: bool,
+        checkout_exists: bool,
+    ) -> None:
+        """A malformed worker revision is a failed checkout in every context."""
+        checkout = tmp_path / "checkout"
+        if checkout_exists:
+            checkout.mkdir()
+        config: Any = SimpleNamespace(issue_limit=None) if has_issue_limit else SimpleNamespace()
+        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path, repo_root=checkout))
+        repo_item.state = "CLONE_WAIT"
+        repo_item.payload["checkout_op"] = "sync_checkout"
+        stage = RepoStage()
+
+        stage.on_job_done(repo_item, JobResult(ok=True, value="invalid-revision"), ctx)
+
+        assert repo_item.attempts.get("clone") == 1
+        assert repo_item.payload.get("clone_failed") is True
+        assert not repo_item.payload.get("checkout_verified")
+        assert SYNCED_MAIN_SHA_KEY not in repo_item.payload
+        assert ctx.github.mutation_log == []
+        retry = stage.step(repo_item, ctx)
+        assert isinstance(retry, JobRequest)
+
+    def test_checkout_uses_the_explicit_root_even_when_it_is_the_projects_directory(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+    ) -> None:
+        """A path equality cannot change the repository selected by the coordinator."""
+        ctx = make_ctx(paths=_RepoPaths(tmp_path, repo_root=tmp_path))
+        repo_item.state = "CLONE_WAIT"
+
+        request = RepoStage().step(repo_item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.op == "sync_checkout"
+        assert request.job.kwargs["dest"] == str(tmp_path)
+
+
+_WAVE_BASE = "a" * 40
+_WAVE_HEAD = "b" * 40
+_WAVE_MERGE = "c" * 40
+
+
+def _passing_wave_store(
+    root: Path, *, final_wave: bool = False
+) -> tuple[IssueWaveStore, WaveLease]:
+    """Record a passing wave that still needs ancestry verification."""
+    store = IssueWaveStore(root, "test-org", "repo-a")
+    if final_wave:
+        for limit in (1, 2, 4, 8):
+            empty = store.seal_selection(store.plan_admission(_WAVE_BASE, limit), [])
+            store.verify_prior_wave(empty, current_main_sha=_WAVE_BASE, ancestry_verified=True)
+    lease = store.seal_selection(store.plan_admission(_WAVE_BASE, None if final_wave else 1), [7])
+    store.record_merge_receipt(
+        lease,
+        issue_number=7,
+        pr_number=17,
+        reviewed_head_sha=_WAVE_HEAD,
+        merge_sha=_WAVE_MERGE,
+    )
+    store.record_terminal_outcome(lease, issue_number=7, passed=True, reason="merged", pr_number=17)
+    return store, lease
+
+
+def _wave_item() -> WorkItem:
+    """Enter wave admission with the synchronized default-branch revision."""
+    return WorkItem(
+        repo="repo-a",
+        kind=ItemKind.REPO,
+        stage=StageName.REPO,
+        state="WAVE_ADMIT",
+        payload={SYNCED_MAIN_SHA_KEY: _WAVE_MERGE},
+    )
+
+
+class TestIssueWaveRecovery:
+    """Fresh ancestry and issue facts control durable wave recovery."""
+
+    @pytest.mark.parametrize("concurrent_update", [False, True], ids=["advance", "concurrent"])
+    def test_next_wave_uses_its_verified_checkpoint_generation(
+        self,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+        concurrent_update: bool,
+    ) -> None:
+        """A wave can use its own verification write but cannot absorb another writer."""
+        store, lease = _passing_wave_store(tmp_path)
+        ctx = make_ctx(
+            paths=_RepoPaths(tmp_path, repo_root=tmp_path), config_overrides={"issue_limit": 2}
+        )
+        item = _wave_item()
+        facts = {
+            7: replace(_facts(7, pr=17, pr_merged=True), issue_is_closed=True),
+            8: _facts(8, labels={"state:plan-blocked"}),
+            9: _facts(9),
+            10: _facts(10, labels={"state:skip"}),
+            11: _facts(11),
+            12: _facts(12),
+        }
+        discovered: list[int] = []
+        reads: list[int] = []
+
+        def read_issue(number: int, github: Any) -> IssueFacts:
+            assert github is ctx.github
+            reads.append(number)
+            return facts[number]
+
+        def discover(org: str, repo: str, **kwargs: object) -> Iterator[dict[str, Any]]:
+            assert (org, repo) == ("test-org", "repo-a")
+            assert kwargs == {
+                "network_timeout": ctx.config.network_timeout,
+                "shutdown": ctx.cancellation,
+            }
+            if concurrent_update:
+                other = IssueWaveStore(tmp_path, "test-org", "repo-a")
+                other.verify_prior_wave(
+                    lease,
+                    current_main_sha=_WAVE_MERGE,
+                    ancestry_verified=True,
+                    facts_by_issue={7: facts[7]},
+                )
+            for number in (7, 8, 9, 10, 11, 12):
+                discovered.append(number)
+                yield {"number": number}
+
+        monkeypatch.setattr(seeding_mod, "seed_issue_from_github", read_issue)
+        monkeypatch.setattr(loop_repo_manager_mod, "_iter_open_issue_meta", discover)
+        stage = RepoStage()
+        pending = stage.step(item, ctx)
+
+        assert isinstance(pending, JobRequest)
+        assert isinstance(pending.job, GitJob)
+        assert pending.job.op == "verify_issue_wave_ancestry"
+        assert pending.job.kwargs == {
+            "repo_root": str(tmp_path),
+            "main_sha": _WAVE_MERGE,
+            "ancestor_shas": (_WAVE_BASE, _WAVE_MERGE),
+        }
+        assert discovered == reads == []
+        item.state = pending.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True, value={"main_sha": _WAVE_MERGE, "ancestors": (_WAVE_BASE, _WAVE_MERGE)}
+            ),
+            ctx,
+        )
+        outcome = stage.step(item, ctx)
+
+        assert discovered == [7, 8, 9, 10, 11]
+        assert reads == [7, 7, 8, 9, 10, 11]
+        checkpoint = store.load()
+        assert checkpoint is not None
+        assert checkpoint.waves[0].verified_main_sha == _WAVE_MERGE
+        assert ctx.github.mutation_log == []
+        if concurrent_update:
+            assert isinstance(outcome, StageOutcome)
+            assert outcome.disposition is Disposition.FINISH_FAIL
+            assert "checkpoint changed before selection sealing" in outcome.note
+            assert len(checkpoint.waves) == 1
+            assert checkpoint.current_wave.issue_numbers == (7,)
+            assert "_repo_issue_source" not in item.payload
+            return
+
+        assert isinstance(outcome, Continue)
+        assert outcome.next_state == "LABELS"
+        assert len(checkpoint.waves) == 2
+        selected = item.payload[WAVE_LEASE_PAYLOAD]
+        assert selected.issue_numbers == (9, 11)
+        assert selected.base_main_sha == _WAVE_MERGE
+        source = item.payload["_repo_issue_source"]
+        assert isinstance(source, RepoIssueSource)
+        assert source.wave_lease == selected
+        assert source.one_pass is True
+        assert [row["number"] for row in source.metadata] == [9, 11]
+        resumed = IssueWaveStore(tmp_path, "test-org", "repo-a").plan_admission(_WAVE_MERGE, 2)
+        assert resumed.mode == "resume"
+        assert resumed.lease == selected
+
+    def test_final_wave_closes_once_and_rechecks_facts_on_restart(
+        self,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A final audit is durable, and later audits cannot trust changed merge facts."""
+        store, _lease = _passing_wave_store(tmp_path, final_wave=True)
+        ctx = make_ctx(
+            paths=_RepoPaths(tmp_path, repo_root=tmp_path), config_overrides={"issue_limit": None}
+        )
+        facts = {7: replace(_facts(7, pr=17, pr_merged=True), issue_is_closed=True)}
+        reads: list[int] = []
+
+        def read_issue(number: int, github: Any) -> IssueFacts:
+            assert github is ctx.github
+            reads.append(number)
+            return facts[number]
+
+        def no_discovery(*_args: object, **_kwargs: object) -> Iterator[dict[str, Any]]:
+            raise AssertionError("a completed rollout must not discover another wave")
+
+        monkeypatch.setattr(seeding_mod, "seed_issue_from_github", read_issue)
+        monkeypatch.setattr(loop_repo_manager_mod, "_iter_open_issue_meta", no_discovery)
+        stage = RepoStage()
+        item = _wave_item()
+        pending = stage.step(item, ctx)
+
+        assert isinstance(pending, JobRequest)
+        assert isinstance(pending.job, GitJob)
+        assert pending.job.op == "verify_issue_wave_ancestry"
+        assert reads == []
+        item.state = pending.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True, value={"main_sha": _WAVE_MERGE, "ancestors": (_WAVE_BASE, _WAVE_MERGE)}
+            ),
+            ctx,
+        )
+        completed = stage.step(item, ctx)
+
+        assert isinstance(completed, StageOutcome)
+        assert completed.disposition is Disposition.FINISH_PASS
+        checkpoint = store.load()
+        assert checkpoint is not None
+        assert checkpoint.status == "completed"
+        assert checkpoint.completed_main_sha == _WAVE_MERGE
+        saved = store.checkpoint_path.read_bytes()
+        restarted = RepoStage().step(_wave_item(), ctx)
+
+        assert isinstance(restarted, StageOutcome)
+        assert restarted.disposition is Disposition.FINISH_PASS
+        assert "audit-only" in restarted.note
+        assert store.checkpoint_path.read_bytes() == saved
+        facts[7] = replace(facts[7], pr_is_merged=False)
+        changed = RepoStage().step(_wave_item(), ctx)
+
+        assert isinstance(changed, StageOutcome)
+        assert changed.disposition is Disposition.FINISH_FAIL
+        assert "recorded merged PR" in changed.note
+        assert reads == [7, 7, 7]
+        assert store.checkpoint_path.read_bytes() == saved
+        assert ctx.github.mutation_log == []
+
+    def test_failed_ancestry_preserves_checkpoint_before_any_issue_read(
+        self,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed ancestry job cannot create a new source or modify its checkpoint."""
+        store, _lease = _passing_wave_store(tmp_path)
+        saved = store.checkpoint_path.read_bytes()
+        ctx = make_ctx(
+            paths=_RepoPaths(tmp_path, repo_root=tmp_path), config_overrides={"issue_limit": 2}
+        )
+
+        def no_read(*_args: object, **_kwargs: object) -> Any:
+            raise AssertionError("issue reads require successful ancestry verification")
+
+        monkeypatch.setattr(seeding_mod, "seed_issue_from_github", no_read)
+        monkeypatch.setattr(loop_repo_manager_mod, "_iter_open_issue_meta", no_read)
+        stage = RepoStage()
+        item = _wave_item()
+        pending = stage.step(item, ctx)
+
+        assert isinstance(pending, JobRequest)
+        item.state = pending.on_done_state
+        stage.on_job_done(item, JobResult(ok=False, error="merge is not on main"), ctx)
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note == "merge is not on main"
+        assert "_repo_issue_source" not in item.payload
+        assert WAVE_LEASE_PAYLOAD not in item.payload
+        assert store.checkpoint_path.read_bytes() == saved
+        assert ctx.github.mutation_log == []
 
 
 class TestDiscover:
@@ -294,7 +591,7 @@ class TestDiscover:
                 return None
 
         github = RepoScopedGitHub()
-        ctx = make_ctx(github=github, paths=_RepoPaths(tmp_path))
+        ctx = make_ctx(github=github, paths=_RepoPaths(tmp_path, repo_root=tmp_path))
         monkeypatch.setattr(
             loop_repo_manager_mod,
             "_iter_open_issue_meta",
@@ -384,7 +681,7 @@ class TestDiscover:
         )
         github = FakeStageGitHub(issue_state="CLOSED", issue_title="Merged work")
         ctx = make_ctx(
-            paths=_RepoPaths(tmp_path),
+            paths=_RepoPaths(tmp_path, repo_root=tmp_path),
             github=github,
             learning_journal=journal,
         )

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -44,7 +44,7 @@ from hephaestus.automation.issue_waves import (
     IssueWaveStore,
     WaveAdmissionPlan,
     WaveLease,
-    is_full_commit_sha as is_wave_commit_sha,
+    is_full_commit_sha as is_full_commit_sha,
 )
 from hephaestus.automation.learning_journal import LearningJournalStore
 
@@ -94,11 +94,6 @@ WAVE_PLAN_KEY = "_issue_wave_admission_plan"
 WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
 WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
 
-# Stage consumers retain this public compatibility name. The issue-wave wrapper
-# delegates validation to the shared Git utility without adding a direct I/O
-# dependency to this pipeline stage.
-is_full_commit_sha = is_wave_commit_sha
-
 
 def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
     """Return whether ``value`` is the coordinator's UUID4 hex token."""
@@ -107,18 +102,6 @@ def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
         and len(value) == 32
         and all(character in "0123456789abcdef" for character in value)
     )
-
-
-def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
-    """Return the effective local checkout path for the repo item.
-
-    Coordinator contexts always provide a per-repository ``repo_root``.  The
-    projects-root fallback keeps legacy lightweight stage contexts compatible
-    while making an explicit noncanonical root authoritative for clone checks.
-    """
-    repo_root = Path(str(ctx.paths.repo_root))
-    projects_dir = Path(str(ctx.paths.projects_dir))
-    return projects_dir / item.repo if repo_root == projects_dir else repo_root
 
 
 @dataclass
@@ -220,11 +203,11 @@ class RepoStage(Stage):
         if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             return Continue(next_state="LABELS")
         main_sha = item.payload.get(SYNCED_MAIN_SHA_KEY)
-        requested = getattr(ctx.config, "issue_limit", None)
+        requested = ctx.config.issue_limit
         repo_root = Path(str(ctx.paths.repo_root))
         if (
             ctx.dry_run
-            and not is_wave_commit_sha(main_sha)
+            and not is_full_commit_sha(main_sha)
             and requested is None
             and not repo_root.is_dir()
         ):
@@ -234,7 +217,7 @@ class RepoStage(Stage):
             return Continue(next_state="LABELS")
         try:
             store = self._wave_store(item, ctx)
-            if ctx.dry_run and not is_wave_commit_sha(main_sha):
+            if ctx.dry_run and not is_full_commit_sha(main_sha):
                 # A dry-run has no truthful checkout SHA.  It may preserve the
                 # ordinary absent-checkpoint behavior, but cannot bypass an
                 # existing staged rollout.
@@ -336,11 +319,16 @@ class RepoStage(Stage):
                     }
                     store.validate_prior_wave_facts(prior.lease(ctx.org, item.repo), facts)
                     if plan.requires_ancestry:
-                        store.verify_prior_wave(
+                        checkpoint = store.verify_prior_wave(
                             prior.lease(ctx.org, item.repo),
                             current_main_sha=main_sha,
                             ancestry_verified=True,
                             facts_by_issue=facts,
+                        )
+                        plan = replace(
+                            plan,
+                            expected_generation=checkpoint.generation,
+                            checkpoint=checkpoint,
                         )
                 selected = self._select_wave_issues(item, ctx, plan.requested_limit)
                 if ctx.dry_run:
@@ -416,21 +404,15 @@ class RepoStage(Stage):
             )
 
         if item.payload.pop("checkout_verified", False):
-            return Continue(
-                next_state="WAVE_ADMIT" if hasattr(ctx.config, "issue_limit") else "LABELS"
-            )
+            return Continue(next_state="WAVE_ADMIT")
 
-        dest = _repo_checkout_path(item, ctx)
+        dest = Path(str(ctx.paths.repo_root))
         if ctx.dry_run:
             if dest.exists():
                 logger.info("[dry-run] would synchronize %s/%s at %s", ctx.org, item.repo, dest)
-                return Continue(
-                    next_state="WAVE_ADMIT" if hasattr(ctx.config, "issue_limit") else "LABELS"
-                )
+                return Continue(next_state="WAVE_ADMIT")
             logger.info("[dry-run] would clone %s/%s to %s", ctx.org, item.repo, dest)
-            return Continue(
-                next_state="WAVE_ADMIT" if hasattr(ctx.config, "issue_limit") else "LABELS"
-            )
+            return Continue(next_state="WAVE_ADMIT")
 
         if item.payload.pop("checkout_cloned", False) or dest.exists():
             item.payload["checkout_op"] = "sync_checkout"
@@ -532,16 +514,6 @@ class RepoStage(Stage):
                 logger.info("repo:%s: clone completed; verifying checkout", item.repo)
             elif operation == "sync_checkout":
                 if not is_full_commit_sha(result.value):
-                    # Lightweight isolated stage fixtures predate the
-                    # synchronized-main contract and do not materialize a
-                    # checkout. Preserve their characterization behavior;
-                    # real coordinator contexts always provide a checkout.
-                    if (
-                        not hasattr(ctx.config, "issue_limit")
-                        or not Path(str(ctx.paths.repo_root)).is_dir()
-                    ):
-                        item.payload["checkout_verified"] = True
-                        return
                     item.attempts["clone"] = item.attempts.get("clone", 0) + 1
                     item.payload["clone_failed"] = True
                     logger.warning(
