@@ -98,6 +98,13 @@ def issue_read_failure_category(error: BaseException) -> str:
     return "read-failed"
 
 
+def issue_read_error(issue_number: int, error: BaseException) -> RuntimeError:
+    """Build an issue-read error with a fixed failure category."""
+    return RuntimeError(
+        f"Failed to fetch issue #{issue_number}: {issue_read_failure_category(error)}"
+    )
+
+
 def gh_issue_json(
     issue_number: int,
     repo: tuple[str, str] | None = None,
@@ -154,9 +161,7 @@ def gh_issue_json(
         if isinstance(raw_body, str):
             data["bodyDigest"] = issue_body_digest(raw_body)
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError, TypeError, ValueError) as e:
-        raise RuntimeError(
-            f"Failed to fetch issue #{issue_number}: {issue_read_failure_category(e)}"
-        ) from e
+        raise issue_read_error(issue_number, e) from e
     return data
 
 
