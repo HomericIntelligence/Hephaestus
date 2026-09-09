@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.pipeline_github import PipelineGitHub
+from hephaestus.automation.pipeline_github_audit import PipelineGitHubAuditReceipts
 from hephaestus.automation.rebase_review_receipt import (
     RebaseReviewRecord,
     original_audit_identity,
@@ -71,7 +71,7 @@ def test_parser_rejects_duplicate_fields() -> None:
         parse_review_rebase_record(marker + "\n" + raw)
 
 
-class MemoryHost(PipelineGitHub):
+class MemoryHost(PipelineGitHubAuditReceipts):
     """Use an in-memory comment transport."""
 
     org = "LLM360"
@@ -91,12 +91,16 @@ class MemoryHost(PipelineGitHub):
         self, issue_number: int, marker: str, body: str, *, legacy_marker: str | None = None
     ) -> None:
         """Replace the comment with the selected marker."""
+        del issue_number, legacy_marker
         self.bodies = [prior for prior in self.bodies if not prior.startswith(marker)] + [body]
+        return None
 
     def _patch_issue_comment(
         self, comment_id: int, body: str, *, repo: tuple[str, str] | None = None
     ) -> None:
+        del repo
         self.bodies[comment_id - 1] = body
+        return None
 
 
 def test_publication_requires_original_owned_audit() -> None:
