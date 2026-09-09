@@ -179,7 +179,7 @@ def test_default_reader_selects_ranked_bound_skills_for_pipeline_advise_payload(
         )
 
     monkeypatch.setattr(
-        "hephaestus.automation.mnemosyne_skill_host.read_selected_skill_corpus",
+        "hephaestus.automation.mnemosyne_corpus_reader.read_selected_skill_corpus",
         read_selected,
     )
     request = _request("advise", tmp_path)
@@ -212,7 +212,7 @@ def test_default_reader_reads_committed_git_output(
     def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=0, stdout="skills/debugging.md\n", stderr="")
 
-    monkeypatch.setattr("hephaestus.automation.mnemosyne_skill_host.run_subprocess", run)
+    monkeypatch.setattr("hephaestus.automation.mnemosyne_corpus_reader.run_subprocess", run)
 
     output = DefaultCorpusReader._subprocess_git_output(
         tmp_path, ("ls-tree", "-r", "--name-only", "b" * 40)
@@ -241,7 +241,7 @@ def test_default_reader_reports_committed_git_read_failures(
             raise result
         return result
 
-    monkeypatch.setattr("hephaestus.automation.mnemosyne_skill_host.run_subprocess", run)
+    monkeypatch.setattr("hephaestus.automation.mnemosyne_corpus_reader.run_subprocess", run)
 
     with pytest.raises(MnemosyneCorpusError, match=message):
         DefaultCorpusReader._subprocess_git_output(

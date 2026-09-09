@@ -646,7 +646,7 @@ class MnemosyneLearningPreparationService:
     ) -> None:
         """Require review when a supplied candidate could duplicate an entry."""
         from hephaestus.automation.athena_contract import load_athena_contract_receipt
-        from hephaestus.automation.mnemosyne_skill_host import DefaultCorpusReader
+        from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
         from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest
 
         if not isinstance(source, PostMergeLearningSource) or not source.verification_evidence:
