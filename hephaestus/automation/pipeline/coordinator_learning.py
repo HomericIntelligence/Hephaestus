@@ -130,7 +130,7 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
             kind=intent.kind.value,
             identity=intent.journal_identity(),
         )
-        if record["status"] in {"succeeded", "failed"}:
+        if record["status"] in {"succeeded", "failed", "deferred"}:
             return []
         if github.drive_green_learn_inflight(item.issue):
             if journal.claim(intent.key):

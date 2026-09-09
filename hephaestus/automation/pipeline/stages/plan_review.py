@@ -72,7 +72,6 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
-from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.comment_identity import validate_planning_body_for_write
 from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
 from hephaestus.automation.prompts._shared import fence_content
@@ -107,7 +106,6 @@ from hephaestus.prompts import PromptCatalog
 
 from ..coordinator_sessions import agent_session_lifecycle
 from ..plan_journal import publish_plan_revision, reconcile_plan_journal
-from ..work_item import LearningIntent
 from .base import (
     AgentJob,
     Continue,
@@ -116,7 +114,6 @@ from .base import (
     JobResult,
     Stage,
     StageContext,
-    StageName,
     StageOutcome,
     StepResult,
     WorkItem,
@@ -1094,26 +1091,9 @@ class PlanReviewStage(Stage):
         return outcome
 
     def _complete_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Apply GO, record auxiliary learning, and release the main stage."""
+        """Apply GO and release the main stage."""
         assert item.issue is not None  # noqa: S101 - _eval narrows the issue
         logger.info("plan_review:%d: GO verdict; applying label and advancing", item.issue)
-        if ctx.config.enable_learn:
-            plan_text = str(item.payload.get("plan_text") or "")
-            intent = LearningIntent.approved_plan(
-                repo=item.repo,
-                issue=item.issue,
-                plan_revision=int(item.payload.get("plan_revision") or 0),
-                plan_fingerprint=plan_fingerprint(plan_text) if plan_text else "",
-            )
-            if intent not in item.learning_intents:
-                item.learning_intents.append(intent)
-            if isinstance(ctx.learning_journal, LearningJournalStore):
-                ctx.learning_journal.ensure_pending(
-                    intent.key,
-                    kind=intent.kind.value,
-                    identity=intent.journal_identity(),
-                )
-            item.learning_resume_stage = StageName.IMPLEMENTATION
         self._write_verdict_labels(item.issue, ctx, is_go=True)
         if not is_exclusive_plan_state(
             _require_issue_labels(item, ctx),

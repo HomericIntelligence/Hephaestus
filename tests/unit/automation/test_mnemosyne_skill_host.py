@@ -179,7 +179,7 @@ def test_default_reader_selects_ranked_bound_skills_for_pipeline_advise_payload(
         )
 
     monkeypatch.setattr(
-        "hephaestus.automation.mnemosyne_skill_host.read_selected_skill_corpus",
+        "hephaestus.automation.mnemosyne_corpus_reader.read_selected_skill_corpus",
         read_selected,
     )
     request = _request("advise", tmp_path)
@@ -212,7 +212,7 @@ def test_default_reader_reads_committed_git_output(
     def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=0, stdout="skills/debugging.md\n", stderr="")
 
-    monkeypatch.setattr("hephaestus.automation.mnemosyne_skill_host.run_subprocess", run)
+    monkeypatch.setattr("hephaestus.automation.mnemosyne_corpus_reader.run_subprocess", run)
 
     output = DefaultCorpusReader._subprocess_git_output(
         tmp_path, ("ls-tree", "-r", "--name-only", "b" * 40)
@@ -241,7 +241,7 @@ def test_default_reader_reports_committed_git_read_failures(
             raise result
         return result
 
-    monkeypatch.setattr("hephaestus.automation.mnemosyne_skill_host.run_subprocess", run)
+    monkeypatch.setattr("hephaestus.automation.mnemosyne_corpus_reader.run_subprocess", run)
 
     with pytest.raises(MnemosyneCorpusError, match=message):
         DefaultCorpusReader._subprocess_git_output(
@@ -310,10 +310,10 @@ def test_learn_rejects_incomplete_explicit_delivery_with_exact_diagnostic(
     assert result.error == "learn delivery payload lacks non-empty worktree_path"
 
 
-def test_default_host_constructs_and_uses_concrete_delivery_backend(
+def test_default_host_defers_raw_delivery_without_source_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default host wiring delivers through the host-owned concrete backend."""
+    """A raw delivery payload cannot supply verified source evidence."""
 
     class Service:
         def __init__(self, *, github: object, gh_extra_path_root: Path | None = None) -> None:
@@ -357,9 +357,9 @@ def test_default_host_constructs_and_uses_concrete_delivery_backend(
 
     result = host.execute(request)
 
-    assert result.ok is True
-    assert result.delivery_receipt is not None
-    assert result.delivery_receipt["pr_number"] == 8
+    assert result.ok is False
+    assert result.delivery_receipt is None
+    assert result.error == "learning_deferred:source_evidence_required"
 
 
 def test_github_delivery_adapter_creates_pr_and_returns_server_number() -> None:

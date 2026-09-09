@@ -97,6 +97,7 @@ class RunStats:
     auxiliary_job_count: int = 0
     auxiliary_job_time_s: float = 0.0
     auxiliary_job_failure_count: int = 0
+    auxiliary_job_deferred_count: int = 0
 
     @property
     def interrupted(self) -> bool:
@@ -375,6 +376,8 @@ def print_summary(
         stats.auxiliary_job_failure_count,
     )
 
+    logger.info("  auxiliary jobs deferred: %d", stats.auxiliary_job_deferred_count)
+
     for line in format_preserved_worktrees(preserved, sys.argv[0]):
         logger.info("%s", line)
     for line in format_direct_review_recovery_worktrees(recovery_preserved):
@@ -410,6 +413,7 @@ def print_summary(
             auxiliary_jobs=stats.auxiliary_job_count,
             auxiliary_job_time_s=round(stats.auxiliary_job_time_s, 1),
             auxiliary_job_failures=stats.auxiliary_job_failure_count,
+            auxiliary_jobs_deferred=stats.auxiliary_job_deferred_count,
             wall_s=round(stats.wall_s, 1),
             resumable=resumable,
             preserved_worktrees=[[number, path] for _, number, path in preserved],
