@@ -364,10 +364,7 @@ def test_host_rebase_receipt_retains_the_original_review(
     assert item.payload["reviewed_pr_head_sha"] == "a" * 40
     assert item.payload["review_audit"] is audit
     assert item.payload["retained_rebase_review_proof"] is proof
-    saved = github.review_rebase_records[1001]
-    assert saved.reviewed_head_sha == proof.reviewed_head_sha
-    assert saved.resulting_head_sha == proof.resulting_head_sha
-    assert saved.audit is audit
+    assert not any(name == "publish_review_rebase_record" for name, _ in github.mutation_log)
 
 
 def test_host_noop_rebase_keeps_the_review(make_ctx: Any, make_work_item: Any) -> None:

@@ -72,7 +72,7 @@ import shlex
 import sys
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -112,7 +112,6 @@ from hephaestus.automation.prompts.implementation import (
     get_implementation_prompt,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
-from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.remediation_prepublication import (
     canonical_source_receipt_json,
     source_receipt_digest,
@@ -2107,11 +2106,6 @@ class ImplementationStage(Stage):
                 or item.payload.get("host_verification_bootstrap_proof") is not None
             ):
                 return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_proof_invalid")
-            try:
-                record = RebaseReviewRecord(**asdict(proof), audit=audit)
-                ctx.github.publish_review_rebase_record(record)
-            except Exception:
-                return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_publication_failed")
             for key in (
                 "rebase_reason",
                 "post_review_rebase_required",
