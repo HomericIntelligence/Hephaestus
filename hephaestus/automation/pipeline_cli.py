@@ -670,6 +670,7 @@ def build_config(
         "host_verification_pyxis_sha256",
         "host_verification_pyxis_authority",
         "host_verification_pyxis_quota_root",
+        "podman_machine",
     )
     options = {name: getattr(args, name) for name in common_fields}
     agent = args.agent or "claude"

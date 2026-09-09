@@ -7,7 +7,7 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -1222,3 +1222,13 @@ def test_update_plan_rejects_missing_issue_or_planning_scope(
     with pytest.raises(SystemExit):
         loop_runner.parse_args(["--update-plan", *options], profile=profile)
     assert "--update-plan requires" in capsys.readouterr().err
+
+
+def test_selected_podman_machine_reaches_pipeline_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The successful preflight selection survives the configuration handoff."""
+    preflight = Mock()
+    monkeypatch.setattr(loop_runner, "prepare_podman_machine", preflight)
+    cfg = _capture_config(["--podman-machine", "hephaestus-ci", "--dry-run"], monkeypatch)
+    assert isinstance(cfg, PipelineConfig)
+    assert cfg.podman_machine == "hephaestus-ci"
+    preflight.assert_called_once_with("hephaestus-ci", start_timeout_s=120, health_timeout_s=60)

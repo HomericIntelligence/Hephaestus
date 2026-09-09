@@ -158,6 +158,7 @@ class Coordinator(
                 host_verification_pyxis_sha256=config.host_verification_pyxis_sha256,
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
+                podman_machine=config.podman_machine,
             )
             from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 

@@ -24,6 +24,11 @@ If a check fails, it records the `machine-start.lock` owner and the last 200
 serial-log lines. It then stops pipeline dispatch. It does not stop, remove, or
 recreate a machine.
 
+The selected connection reaches the verified local CI runner through the loop
+configuration. It does not change the global Podman default. Ambient
+`CONTAINER_CONNECTION` and `CONTAINER_ENGINE` values do not select this loop
+connection. Immutable host verification keeps its separate execution boundary.
+
 ## Inspect the host state
 
 List all machines and system connections before you change state:
@@ -51,6 +56,8 @@ tail -n 200 /private/var/folders/<host-path>/T/podman/hephaestus-ci.log
 
 ## Get approval
 
+If the existing machine passes its named-connection health check, skip recreation.
+
 Get explicit approval to delete only the hephaestus-ci machine. Deletion removes the
 images, containers, and other state that the machine stores. There is no
 rollback for this machine-local state. The native fallback is the recovery path
@@ -69,29 +76,27 @@ podman machine rm hephaestus-ci
 Do not remove `podman-machine-default`. Do not use a broad Podman reset command.
 
 Create the replacement with 8 GiB of memory. The CI image build can use more
-than 4 GiB when APT installs the validation tools. Start the machine and make
-its connection active:
+than 4 GiB when APT installs the validation tools. Start the machine without changing the default connection:
 
 ```bash
-podman machine init --cpus 4 --disk-size 30 --memory 8192 --provider applehv --now --update-connection hephaestus-ci
+podman machine init --cpus 4 --disk-size 30 --memory 8192 --provider applehv --now --update-connection=false hephaestus-ci
 ```
 
 ## Verify the machine
 
-Verify that the machine is running and that hephaestus-ci is the active
-connection:
+Verify that the machine is running and that its named connection is healthy:
 
 ```bash
 podman machine inspect hephaestus-ci
 podman system connection list
-podman info
+podman --connection hephaestus-ci info
 ```
 
 In the `podman machine inspect` output, verify that `ConfigDir.Path` ends in
 `/applehv`. Also verify that `LastUp` is not empty or the zero timestamp. These
 checks prove that the replacement uses AppleHV and completed at least one boot.
 
-Stop if `podman info` cannot connect to the server. Keep the native fallback
+Stop if `podman --connection hephaestus-ci info` cannot connect to the server. Keep the native fallback
 active. Capture the serial log and the owner of `machine-start.lock`, if one
 exists. Do not delete or stop a different machine.
 
@@ -100,13 +105,13 @@ exists. Do not delete or stop a different machine.
 Build the local image from the current reviewed checkout:
 
 ```bash
-podman build -f ci/Containerfile -t hephaestus-ci:local .
+podman --connection hephaestus-ci build -f ci/Containerfile -t hephaestus-ci:local .
 ```
 
 Run the complete local CI runner through Podman:
 
 ```bash
-CONTAINER_ENGINE=podman bash scripts/run_ci_local.sh all --rebuild
+CONTAINER_CONNECTION=hephaestus-ci CONTAINER_ENGINE=podman bash scripts/run_ci_local.sh all --rebuild
 ```
 
 The command must exit with status 0. Its output must not contain

@@ -156,6 +156,7 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
+from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
@@ -3792,6 +3793,7 @@ class WorkerPool:
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
         host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
+        podman_machine: str | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -3819,8 +3821,12 @@ class WorkerPool:
             host_verification_pyxis_authority: Host-owned image provenance file.
             host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
             host_verification_pyxis_placement: Optional host-selected allocation and node.
+            podman_machine: Selected connection for the verified local CI runner.
 
         """
+        if podman_machine is not None:
+            validate_podman_machine_name(podman_machine)
+        self._podman_machine = podman_machine
         self._executor = ThreadPoolExecutor(
             max_workers=size,
             thread_name_prefix="hephaestus-pipeline-worker",
@@ -5087,13 +5093,16 @@ class WorkerPool:
                 return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
             return self._run_immutable_build_test(job)
         argv = job.argv
+        environment = build_python_phase_env(job.cwd)
         if job.verified_runner_source_revision is not None:
+            if self._podman_machine is not None:
+                environment["CONTAINER_CONNECTION"] = self._podman_machine
+                environment["CONTAINER_ENGINE"] = "podman"
             argv = build_verified_runner_argv(
                 job.argv,
                 job.verified_runner_source_revision,
             )
         try:
-            environment = build_python_phase_env(job.cwd)
             result = run_subprocess(
                 list(argv),
                 cwd=str(job.cwd),

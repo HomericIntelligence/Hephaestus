@@ -28,6 +28,12 @@ class PodmanMachineError(RuntimeError):
     """Report a fail-closed Podman machine preparation error."""
 
 
+def validate_podman_machine_name(name: str) -> None:
+    """Reject names that cannot identify one Podman machine."""
+    if not isinstance(name, str) or not _MACHINE_NAME.fullmatch(name):
+        raise PodmanMachineError("Invalid Podman machine name.")
+
+
 def _run_command(command: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
     """Run one noninteractive host command with a finite timeout."""
     return subprocess.run(
@@ -144,8 +150,7 @@ def prepare_podman_machine(
     :class:`PodmanMachineError` before pipeline dispatch when readiness cannot
     be proved.
     """
-    if not _MACHINE_NAME.fullmatch(name):
-        raise PodmanMachineError(f"Invalid Podman machine name: {name!r}.")
+    validate_podman_machine_name(name)
     if start_timeout_s <= 0 or health_timeout_s <= 0:
         raise PodmanMachineError("Podman machine timeouts must be positive.")
 

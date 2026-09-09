@@ -7726,3 +7726,29 @@ def test_failed_implementation_reconciles_source_before_another_turn(
     assert result.disposition is Disposition.RETRY
     assert item.state == "WORKTREE_WAIT"
     assert item.attempts["implement"] == 1
+
+
+def test_verified_runner_snapshot_retains_selected_podman_connection(tmp_path: Path) -> None:
+    """The verified shell snapshot receives the host-selected connection."""
+    source = '#!/bin/bash\nprintf "%s:%s" "$CONTAINER_ENGINE" "$CONTAINER_CONNECTION"\n'
+    repo, revision = _committed_runner_fixture(tmp_path, source)
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        podman_machine="hephaestus-ci",
+    )
+    job = BuildTestJob(
+        repo="Hephaestus",
+        cwd=repo,
+        argv=("bash", "scripts/run_ci_local.sh", "all", "--rebuild"),
+        timeout_s=30,
+        verified_runner_source_revision=revision,
+    )
+    try:
+        result = pool._run_build_test(job)
+    finally:
+        pool.shutdown(mark_interrupted=False)
+    assert result.ok, result.stderr_tail
+    assert result.stdout_tail == "podman:hephaestus-ci"
