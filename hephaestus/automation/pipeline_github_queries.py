@@ -4,6 +4,7 @@ import json
 import subprocess
 
 from .github_api.graphql import reviewed_pr_state_query
+from .github_api.issues import issue_read_error
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 from .remediation_recovery import REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES
@@ -385,12 +386,9 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                         "id,number,title,state,labels,body,url",
                     ]
                 )
-            except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
-                raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
-            try:
                 data = json.loads(result.stdout or "{}")
-            except (json.JSONDecodeError, TypeError, ValueError) as exc:
-                raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
+            except (subprocess.SubprocessError, OSError, RuntimeError, TypeError, ValueError) as e:
+                raise issue_read_error(issue_number, e) from e
             if not isinstance(data, dict):
                 raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
             raw_body = data.get("body")
