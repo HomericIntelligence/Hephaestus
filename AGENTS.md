@@ -296,9 +296,12 @@ follow the task prompt.
 
 ### Delegated Verification
 
-The main agent must not run local verification commands. It must start one
-test-only subagent for each verification task and wait for its report. Use
-`gpt-5.6-luna` with `xhigh` reasoning by default for this subagent.
+The main agent must not run local verification commands. It must use one or
+more test-only subagents for verification and wait for their reports. One
+subagent can run multiple related verification commands. The main agent can
+use more subagents when separate verification work benefits from parallel
+execution. Use `gpt-5.6-luna`
+with `xhigh` reasoning by default for these subagents.
 
 Verification includes unit, integration, and shell tests; lint checks;
 formatter checks; and type checks. Give the subagent the exact commands that
