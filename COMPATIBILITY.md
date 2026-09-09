@@ -266,6 +266,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `CommandRegistry` | 0.1.0 | Registry type for CLI subcommands |
 | `COMMAND_REGISTRY` | 0.1.0 | Default shared `CommandRegistry` instance |
 | `DRY_RUN_HELP_CAVEAT` | 0.9.0 | Standard help text appended for dry-run flags |
+| `Localizer` | TBD | Immutable catalog-backed boundary for user-facing CLI text |
 | `MODEL_REFERENCE_HELP` | 0.9.8 | Standard help text for model-reference options |
 | `add_advise_timeout_arg` | 0.9.8 | Add an `--advise-timeout` flag to a parser |
 | `add_agent_timeout_arg` | 0.9.8 | Add an `--agent-timeout` flag to a parser |
@@ -289,8 +290,11 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `emit_json_status` | 0.6.0 | Emit a structured JSON status envelope |
 | `format_output` | 0.1.0 | Format a value for human-readable output |
 | `format_table` | 0.1.0 | Render rows as an aligned text table |
+| `get_localizer` | TBD | Return the active context-local localizer |
 | `register_command` | 0.1.0 | Decorator registering a CLI subcommand |
 | `resolve_repo_root` | 0.9.8 | Return the explicit CLI repo-root arg or auto-detect it |
+| `text` | TBD | Translate and format an authored user-facing source template |
+| `using_localizer` | TBD | Temporarily select a localizer for the current context |
 
 ### `hephaestus.system`
 

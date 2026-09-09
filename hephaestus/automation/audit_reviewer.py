@@ -33,6 +33,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.automation.prompts.catalog import PromptCatalog
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
     add_role_agent_args,
@@ -265,9 +266,11 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="+",
         type=int,
         default=[],
-        help="Audit only these PR numbers (default: all open).",
+        help=text("Audit only these PR numbers (default: all open)."),
     )
-    parser.add_argument("--codex", action="store_true", help="Deprecated alias for --agent codex.")
+    parser.add_argument(
+        "--codex", action="store_true", help=text("Deprecated alias for --agent codex.")
+    )
     parser.add_argument("--model", default="", metavar="MODEL[:EFFORT]")
     parser.add_argument("--reviewer-model", default="", metavar="MODEL[:EFFORT]")
     parser.add_argument("--fallback-model", default="", metavar="MODEL[:EFFORT]")

@@ -44,6 +44,7 @@ from hephaestus.agents.runtime import (
     resolve_agent,
 )
 from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
     add_agent_timeout_arg,
@@ -173,77 +174,83 @@ Examples:
     parser.add_argument(
         "--epic",
         type=int,
-        help="Epic issue number containing sub-issues",
+        help=text("Epic issue number containing sub-issues"),
     )
     parser.add_argument(
         "--issues",
         type=int,
         nargs="+",
-        help="Specific issue numbers to implement (alternative to --epic)",
+        help=text("Specific issue numbers to implement (alternative to --epic)"),
     )
     parser.add_argument(
         "--analyze",
         action="store_true",
-        help="(Deprecated, ignored) kept for CLI compatibility; analysis lives in the pipeline",
+        help=text(
+            "(Deprecated, ignored) kept for CLI compatibility; analysis lives in the pipeline"
+        ),
     )
     parser.add_argument(
         "--health-check",
         action="store_true",
-        help="Run health check of dependencies and environment",
+        help=text("Run health check of dependencies and environment"),
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="(Deprecated, ignored) kept for CLI compatibility; the pipeline resumes from state",
+        help=text(
+            "(Deprecated, ignored) kept for CLI compatibility; the pipeline resumes from state"
+        ),
     )
     parser.add_argument(
         "--no-skip-closed",
         action="store_true",
-        help="Implement closed issues (default: skip closed issues)",
+        help=text("Implement closed issues (default: skip closed issues)"),
     )
     parser.add_argument(
         "--no-auto-merge",
         action="store_true",
-        help="(Deprecated, ignored) native auto-merge is not used; merge-wait conditionally merges",
+        help=text(
+            "(Deprecated, ignored) native auto-merge is not used; merge-wait conditionally merges"
+        ),
     )
     parser.add_argument(
         "--no-learn",
         action="store_true",
-        help="Do not create or execute auxiliary learning intents",
+        help=text("Do not create or execute auxiliary learning intents"),
     )
     parser.add_argument(
         "--learning-workers",
         type=positive_int,
         default=1,
-        help="Independent auxiliary learning workers (default: 1)",
+        help=text("Independent auxiliary learning workers (default: 1)"),
     )
     parser.add_argument(
         "--learning-queue-capacity",
         type=positive_int,
         default=1,
-        help="Bounded auxiliary learning queue capacity (default: 1)",
+        help=text("Bounded auxiliary learning queue capacity (default: 1)"),
     )
     parser.add_argument(
         "--no-follow-up",
         action="store_true",
-        help="Disable automatic filing of follow-up issues (enabled by default)",
+        help=text("Disable automatic filing of follow-up issues (enabled by default)"),
     )
     parser.add_argument(
         "--no-advise",
         action="store_true",
-        help="Skip the advise step before implementation",
+        help=text("Skip the advise step before implementation"),
     )
     parser.add_argument(
         "--nitpick",
         action="store_true",
-        help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
+        help=text("Let the reviewer emit nitpick-severity comments (suppressed by default)"),
     )
     add_agent_timeout_arg(parser, default=1800)
     parser.add_argument(
         "--reviewer-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=MODEL_REFERENCE_HELP,
+        help=text(MODEL_REFERENCE_HELP),
     )
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
     parser.add_argument(
@@ -267,7 +274,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
 
     if args.epic and args.issues:
-        parser.error("Cannot specify both --epic and --issues")
+        parser.error(text("Cannot specify both --epic and --issues"))
 
     return args
 

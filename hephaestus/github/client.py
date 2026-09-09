@@ -30,6 +30,7 @@ import threading
 import time
 from collections.abc import Mapping
 
+from hephaestus.cli.localization import text
 from hephaestus.github.environment import gh_child_environment
 from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
@@ -61,9 +62,9 @@ def positive_timeout(value: str) -> int:
     try:
         timeout = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("timeout must be an integer") from exc
+        raise argparse.ArgumentTypeError(text("timeout must be an integer")) from exc
     if timeout <= 0:
-        raise argparse.ArgumentTypeError("timeout must be positive")
+        raise argparse.ArgumentTypeError(text("timeout must be positive"))
     return timeout
 
 

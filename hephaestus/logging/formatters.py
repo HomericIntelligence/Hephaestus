@@ -16,11 +16,22 @@ Usage:
     logger.info("hello", extra={"request_id": "abc-123"})
 """
 
+from __future__ import annotations
+
+import copy
 import json
 import logging
 import traceback
 from datetime import UTC, datetime
-from typing import Any
+from threading import Lock
+from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:
+    from hephaestus._localization import Localizer
+
+_RECORD_LOCALIZERS: WeakKeyDictionary[logging.LogRecord, Localizer] = WeakKeyDictionary()
+_RECORD_LOCALIZERS_LOCK = Lock()
 
 # Fields that are reserved for the formatter and cannot be overridden by
 # context or extra data.  If a context key collides with one of these, it
@@ -28,6 +39,55 @@ from typing import Any
 RESERVED_FIELDS: frozenset[str] = frozenset(
     {"timestamp", "level", "logger", "message", "exception", "stack_info"}
 )
+
+
+def _capture_record_localizer(record: logging.LogRecord, localizer: Localizer) -> None:
+    """Associate localization state without reserving a public record field."""
+    with _RECORD_LOCALIZERS_LOCK:
+        _RECORD_LOCALIZERS[record] = localizer
+
+
+def _get_record_localizer(record: logging.LogRecord) -> Localizer | None:
+    """Return localization state captured when *record* entered our handlers."""
+    with _RECORD_LOCALIZERS_LOCK:
+        return _RECORD_LOCALIZERS.get(record)
+
+
+class _LocalizedFormatter(logging.Formatter):
+    """Translate copied plain-text log message templates.
+
+    The localizer captured at construction is a fallback for manually created
+    or already-deferred records.  Normal Hephaestus logging captures the active
+    context-local localizer on each ``LogRecord`` when the record is emitted, so
+    module-level loggers configured before a catalog is selected can still
+    render localized output later without depending on handler re-creation.
+    """
+
+    def __init__(
+        self,
+        fmt: str | None = None,
+        datefmt: str | None = None,
+        *,
+        localizer: Localizer | None = None,
+    ) -> None:
+        """Capture the active localizer for deferred or threaded formatting."""
+        # Build the standard formatter through the module attribute so callers
+        # can observe the normal logging.Formatter construction seam.
+        self._formatter = logging.Formatter(fmt, datefmt=datefmt)
+        super().__init__(fmt, datefmt=datefmt)
+        if localizer is None:
+            from hephaestus._localization import get_localizer
+
+            localizer = get_localizer()
+        self._localizer = localizer
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format a translated shallow copy without mutating the record."""
+        copied = copy.copy(record)
+        if isinstance(copied.msg, str):
+            localizer = _get_record_localizer(record) or self._localizer
+            copied.msg = localizer.template(copied.msg)
+        return self._formatter.format(copied)
 
 
 class JsonFormatter(logging.Formatter):

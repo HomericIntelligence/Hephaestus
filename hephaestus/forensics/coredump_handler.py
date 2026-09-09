@@ -53,6 +53,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 #: Default candidate output directories, tried in order. The first that
@@ -110,7 +111,7 @@ def _max_bytes_arg(raw: str) -> int:
     value = _parse_max_bytes(raw)
     if value is None:
         raise argparse.ArgumentTypeError(
-            "max bytes must be positive digits with an optional K/M/G/T suffix"
+            text("max bytes must be positive digits with an optional K/M/G/T suffix")
         )
     return value
 
@@ -176,7 +177,7 @@ BUNDLE_NOT_RUN = "NOT_RUN"
 VERIFY_SIGNAL_LOST_EXIT = 3
 
 
-def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
+def verify_crash_bundle(log_dir: Path, *, localize: bool = True) -> tuple[str, str]:
     """Enforce the handler's failure-signal contract on a crash bundle.
 
     The kernel ignores a pipe handler's exit code, so every failure path logs
@@ -202,19 +203,31 @@ def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
 
     """
     log_path = log_dir / "handler.log"
+
+    def render(template: str, **values: object) -> str:
+        """Render human detail, or retain English detail for JSON output."""
+        return text(template, **values) if localize else template % values
+
     if not log_path.is_file():
         return BUNDLE_NOT_RUN, (
-            f"{log_path} is missing — the handler never ran "
-            "(the kernel cannot report a pipe handler's exit code)"
+            render(
+                "%(path)s is missing — the handler never ran "
+                "(the kernel cannot report a pipe handler's exit code)",
+                path=log_path,
+            )
         )
     try:
         contents = log_path.read_text(encoding="utf-8")
     except OSError as exc:
-        return BUNDLE_NOT_RUN, f"{log_path} is unreadable ({exc})"
+        return BUNDLE_NOT_RUN, render(
+            "%(path)s is unreadable (%(error)s)", path=log_path, error=exc
+        )
 
     lines = [ln for ln in contents.splitlines() if ln.strip()]
     if not lines:
-        return BUNDLE_NOT_RUN, f"{log_path} is empty — no handler activity recorded"
+        return BUNDLE_NOT_RUN, render(
+            "%(path)s is empty — no handler activity recorded", path=log_path
+        )
 
     # A `wrote ` line is the authoritative success signal; a successful capture
     # may also carry a chmod/max-bytes WARNING, so `wrote ` wins over WARNING.
@@ -226,10 +239,11 @@ def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
         return len(parts) == 2 and parts[1].startswith("wrote ")
 
     if any(_message_is_wrote(ln) for ln in lines):
-        return BUNDLE_OK, f"{log_path} records a successful capture"
-    return BUNDLE_RAN_WITH_ERRORS, (
-        f"{log_path} records handler activity but no successful capture "
-        "(handler ran; inspect the log for the failure)"
+        return BUNDLE_OK, render("%(path)s records a successful capture", path=log_path)
+    return BUNDLE_RAN_WITH_ERRORS, render(
+        "%(path)s records handler activity but no successful capture "
+        "(handler ran; inspect the log for the failure)",
+        path=log_path,
     )
 
 
@@ -289,7 +303,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``hephaestus-coredump-handler`` CLI."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-coredump-handler",
-        description=(
+        description=text(
             "Kernel pipe-mode core_pattern handler. Invoked by the Linux kernel "
             "with the core ELF on stdin; not meant to be run interactively."
         ),
@@ -298,7 +312,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-dir",
         action="append",
         default=None,
-        help=(
+        help=text(
             "ordered output-directory candidate for the core file. Repeat for "
             "fallback candidates. The built-in default is used when omitted."
         ),
@@ -307,27 +321,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-bytes",
         type=_max_bytes_arg,
         default=DEFAULT_MAX_BYTES,
-        help="maximum captured core size in bytes (optional K/M/G/T suffix)",
+        help=text("maximum captured core size in bytes (optional K/M/G/T suffix)"),
     )
     parser.add_argument(
         "--verify",
         action="store_true",
-        help=(
+        help=text(
             "verification mode: do not read stdin. Inspect the resolved bundle "
             "directory and assert the handler-ran contract (a missing "
             "handler.log means the handler never ran). Exit 0 if the handler "
             "ran, 3 if its failure signal was lost. For CI artifact steps."
         ),
     )
-    parser.add_argument("pid", nargs="?", help="PID of the crashing process (%%p)")
-    parser.add_argument("exe", nargs="?", help="executable basename (%%e)")
-    parser.add_argument("crash_time", nargs="?", help="crash time, seconds since epoch (%%t)")
-    parser.add_argument("signal", nargs="?", help="signal number (%%s)")
+    parser.add_argument("pid", nargs="?", help=text("PID of the crashing process (%%p)"))
+    parser.add_argument("exe", nargs="?", help=text("executable basename (%%e)"))
+    parser.add_argument("crash_time", nargs="?", help=text("crash time, seconds since epoch (%%t)"))
+    parser.add_argument("signal", nargs="?", help=text("signal number (%%s)"))
     parser.add_argument(
         "global_pid",
         nargs="?",
         default="",
-        help="global (host-namespace) PID (%%P) — captured, unused in the filename",
+        help=text("global (host-namespace) PID (%%P) — captured, unused in the filename"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -368,12 +382,15 @@ def _run_verify(target_dirs: list[str] | None, as_json: bool) -> int:
         raise ValueError("no candidate target directories provided")
     # log_dir is the parent of target_dir (see write_core).
     target = next((Path(c) for c in cleaned if Path(c).is_dir()), Path(cleaned[-1]))
-    verdict, detail = verify_crash_bundle(target.parent)
+    verdict, detail = verify_crash_bundle(target.parent, localize=not as_json)
     exit_code = 0 if verdict in (BUNDLE_OK, BUNDLE_RAN_WITH_ERRORS) else VERIFY_SIGNAL_LOST_EXIT
     if as_json:
         emit_json_status(exit_code, message=detail, verdict=verdict)
     else:
-        print(f"{verdict}: {detail}", file=sys.stdout if exit_code == 0 else sys.stderr)
+        print(
+            text("%(verdict)s: %(detail)s", verdict=verdict, detail=detail),
+            file=sys.stdout if exit_code == 0 else sys.stderr,
+        )
     return exit_code
 
 
@@ -411,7 +428,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message=msg)
         else:
-            print(f"hephaestus-coredump-handler: {msg}", file=sys.stderr)
+            print(
+                text("hephaestus-coredump-handler: %(message)s", message=msg),
+                file=sys.stderr,
+            )
         return 1
 
     # TTY guard: when invoked by the kernel, stdin is a pipe carrying the core
@@ -422,9 +442,11 @@ def main(argv: list[str] | None = None) -> int:
             emit_json_status(1, message="stdin is a TTY — refusing to run")
         else:
             print(
-                "hephaestus-coredump-handler: stdin is a TTY — refusing to run "
-                "(would block). This is a kernel core_pattern handler; test it with "
-                "`printf 'fake' | hephaestus-coredump-handler <pid> <exe> <time> <sig>`.",
+                text(
+                    "hephaestus-coredump-handler: stdin is a TTY — refusing to run "
+                    "(would block). This is a kernel core_pattern handler; test it with "
+                    "`printf 'fake' | hephaestus-coredump-handler <pid> <exe> <time> <sig>`."
+                ),
                 file=sys.stderr,
             )
         return 1

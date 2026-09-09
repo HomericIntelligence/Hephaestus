@@ -26,6 +26,7 @@ import logging
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
     add_agent_timeout_arg,
@@ -102,63 +103,63 @@ Examples:
         "--issues",
         type=int,
         nargs="+",
-        help="Issue numbers to plan (default: all open issues)",
+        help=text("Issue numbers to plan (default: all open issues)"),
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-planning even when the issue is already at-or-past state:plan-go",
+        help=text("Force re-planning even when the issue is already at-or-past state:plan-go"),
     )
     parser.add_argument(
         "--reset-plan-review-session",
         action="store_true",
-        help="Explicitly discard reviewer conversation state for the selected --issues",
+        help=text("Explicitly discard reviewer conversation state for the selected --issues"),
     )
     parser.add_argument(
         "--system-prompt",
         type=Path,
-        help="(Deprecated, ignored) system prompt file path; kept for CLI compatibility",
+        help=text("(Deprecated, ignored) system prompt file path; kept for CLI compatibility"),
     )
     parser.add_argument(
         "--no-skip-closed",
         action="store_true",
-        help="(Deprecated, ignored) kept for CLI compatibility; closed issues never queue",
+        help=text("(Deprecated, ignored) kept for CLI compatibility; closed issues never queue"),
     )
     parser.add_argument(
         "--no-advise",
         action="store_true",
-        help="Skip the advise step (don't search team knowledge base before planning)",
+        help=text("Skip the advise step (don't search team knowledge base before planning)"),
     )
     parser.add_argument(
         "--learning-workers",
         type=positive_int,
         default=1,
-        help="Independent auxiliary learning workers (default: 1)",
+        help=text("Independent auxiliary learning workers (default: 1)"),
     )
     parser.add_argument(
         "--learning-queue-capacity",
         type=positive_int,
         default=1,
-        help="Bounded auxiliary learning queue capacity (default: 1)",
+        help=text("Bounded auxiliary learning queue capacity (default: 1)"),
     )
     parser.add_argument(
         "--no-learn",
         action="store_true",
-        help="Do not create or execute auxiliary learning intents",
+        help=text("Do not create or execute auxiliary learning intents"),
     )
     parser.add_argument(
         "--evidence-receipt-dir",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Write private typed queue-job receipts beneath PATH (disabled by default).",
+        help=text("Write private typed queue-job receipts beneath PATH (disabled by default)."),
     )
     add_agent_timeout_arg(parser, default=1200)
     parser.add_argument(
         "--reviewer-model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help=MODEL_REFERENCE_HELP,
+        help=text(MODEL_REFERENCE_HELP),
     )
     parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
     add_pipeline_runtime_args(parser, role="planner", timeouts=("gh", "metadata"))
@@ -170,7 +171,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.reset_plan_review_session and not args.issues:
-        parser.error("--reset-plan-review-session requires explicit --issues")
+        parser.error(text("--reset-plan-review-session requires explicit --issues"))
     return args
 
 

@@ -1,6 +1,7 @@
 """Command-line interface tools."""
 
 from hephaestus.cli.colors import Colors
+from hephaestus.cli.localization import Localizer, get_localizer, text, using_localizer
 from hephaestus.cli.utils import (
     COMMAND_REGISTRY,
     DRY_RUN_HELP_CAVEAT,
@@ -38,6 +39,7 @@ __all__ = [
     "MODEL_REFERENCE_HELP",
     "Colors",
     "CommandRegistry",
+    "Localizer",
     "add_advise_timeout_arg",
     "add_agent_timeout_arg",
     "add_dry_run_arg",
@@ -60,6 +62,9 @@ __all__ = [
     "emit_json_status",
     "format_output",
     "format_table",
+    "get_localizer",
     "register_command",
     "resolve_repo_root",
+    "text",
+    "using_localizer",
 ]

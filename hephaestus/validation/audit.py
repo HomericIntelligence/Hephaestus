@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
 from hephaestus.utils.helpers import get_repo_root
 
@@ -320,7 +321,7 @@ def main() -> int:
 
     ignore_ids = load_ignore_list(args.ignore_file)
     if ignore_ids and not args.json:
-        print(f"pip-audit: ignoring {len(ignore_ids)} advisory ID(s)")
+        print(text("pip-audit: ignoring %(value0)s advisory ID(s)", value0=len(ignore_ids)))
 
     blocking, suppressed = filter_audit_results(data, ignore_ids)
 
@@ -328,18 +329,34 @@ def main() -> int:
         return _emit_audit_json(blocking, suppressed)
 
     if suppressed:
-        print("pip-audit: non-blocking vulnerabilities (below configured threshold):")
+        print(text("pip-audit: non-blocking vulnerabilities (below configured threshold):"))
         for name, version, vuln_id, label in suppressed:
-            print(f"  [{label}] {name}=={version} {vuln_id}")
+            print(
+                text(
+                    "  [%(value0)s] %(value1)s==%(value2)s %(value3)s",
+                    value0=label,
+                    value1=name,
+                    value2=version,
+                    value3=vuln_id,
+                )
+            )
 
     if blocking:
-        print("pip-audit: BLOCKING vulnerabilities found (HIGH/CRITICAL/UNKNOWN):")
+        print(text("pip-audit: BLOCKING vulnerabilities found (HIGH/CRITICAL/UNKNOWN):"))
         for name, version, vuln_id, label in blocking:
-            print(f"  [{label}] {name}=={version} {vuln_id}")
+            print(
+                text(
+                    "  [%(value0)s] %(value1)s==%(value2)s %(value3)s",
+                    value0=label,
+                    value1=name,
+                    value2=version,
+                    value3=vuln_id,
+                )
+            )
         return 1
 
     if not suppressed:
-        print("pip-audit: no vulnerabilities found")
+        print(text("pip-audit: no vulnerabilities found"))
     return 0
 
 
@@ -349,7 +366,7 @@ def _audit_input_error(detail: str, json_mode: bool) -> int:
     if json_mode:
         emit_json_status(1, message=message)
     else:
-        print(f"filter_audit: {message}", file=sys.stderr)
+        print(text("filter_audit: %(message)s", message=message), file=sys.stderr)
     return 1
 
 
@@ -389,7 +406,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--ignore-file",
         type=Path,
         default=None,
-        help="Path to ignore file (default: .pip-audit-ignore.txt in repo root)",
+        help=text("Path to ignore file (default: .pip-audit-ignore.txt in repo root)"),
     )
     return parser
 

@@ -22,6 +22,7 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.scripts_lib.check_cli_table_sync import _load_scripts, check_prose_counts
 
@@ -592,21 +593,28 @@ def validate_documentation(repo_root: Path) -> list[Finding]:
 def _print_findings(findings: list[Finding]) -> None:
     """Print human-readable findings."""
     if not findings:
-        print("OK: normative documentation maintenance checks passed")
+        print(text("OK: normative documentation maintenance checks passed"))
         return
     for finding in findings:
         location = f"{finding.file}:{finding.line}"
-        print(f"{location}: {finding.rule}: {finding.message}")
-    print(f"Found {len(findings)} documentation maintenance finding(s).")
+        print(
+            text(
+                "%(location)s: %(rule)s: %(message)s",
+                location=location,
+                rule=finding.rule,
+                message=finding.message,
+            )
+        )
+    print(text("Found %(count)d documentation maintenance finding(s).", count=len(findings)))
 
 
 def main() -> int:
     """Run the documentation maintenance CLI and return its exit status."""
     parser = create_validation_parser(
-        "Validate ownership and currency contracts for normative documentation",
-        epilog="Example: %(prog)s --repo-root /path/to/repository --json",
+        text("Validate ownership and currency contracts for normative documentation"),
+        epilog=text("Example: %(prog)s --repo-root /path/to/repository --json"),
     )
-    parser.add_argument("--verbose", "-v", action="store_true", help="Print passing checks")
+    parser.add_argument("--verbose", "-v", action="store_true", help=text("Print passing checks"))
     args = parser.parse_args()
     repo_root = resolve_repo_root(args)
     findings = validate_documentation(repo_root)

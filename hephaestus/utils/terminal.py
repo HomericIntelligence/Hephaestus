@@ -18,6 +18,7 @@ import sys
 import threading
 from collections.abc import Callable, Generator
 
+from hephaestus.cli.localization import text
 from hephaestus.config.child_environments import read_approved_parent_env
 
 _TERMINAL_RESTORE_TIMEOUT_SECONDS = 2
@@ -112,8 +113,11 @@ def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:
         else:
             _shutdown_requested[0] = True
             print(
-                f"\nReceived signal {signum}. Shutting down gracefully… "
-                "(press Ctrl+C again to force quit)",
+                text(
+                    "\nReceived signal %(signal)d. Shutting down gracefully… "
+                    "(press Ctrl+C again to force quit)",
+                    signal=signum,
+                ),
                 flush=True,
             )
             shutdown_fn()

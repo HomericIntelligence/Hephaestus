@@ -26,6 +26,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -153,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(
+        description=text(
             "Reconcile the severity:* label for a GitHub issue from its issue-form "
             "Severity answer supplied as an explicit file or standard input."
         )
@@ -167,14 +168,14 @@ def main(argv: list[str] | None = None) -> int:
         "--body-file",
         required=True,
         metavar="PATH",
-        help="issue body path, or - to read standard input",
+        help=text("Issue body path, or - to read standard input"),
     )
     parser.add_argument(
         "--gh-timeout",
         type=positive_timeout,
         default=DEFAULT_GH_TIMEOUT,
         metavar="SECONDS",
-        help=f"per-call GitHub CLI timeout (default: {DEFAULT_GH_TIMEOUT})",
+        help=text("Per-call GitHub CLI timeout (default: %(value0)s)", value0=DEFAULT_GH_TIMEOUT),
     )
     args = parser.parse_args(argv)
     configure_github_throttle_from_args(args)
@@ -185,14 +186,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text(
+                    "Unexpected GITHUB_REPOSITORY %(repository)r (expected owner/name)",
+                    repository=repo,
+                ),
+                file=sys.stderr,
+            )
         return 1
     if args.issue_number <= 0:
         message = f"Unexpected --issue-number {args.issue_number!r} (not a positive integer)"
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text(
+                    "Unexpected --issue-number %(number)r (not a positive integer)",
+                    number=args.issue_number,
+                ),
+                file=sys.stderr,
+            )
         return 1
     try:
         body = _read_body(args.body_file)
@@ -201,7 +214,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             emit_json_status(1, message)
         else:
-            print(message, file=sys.stderr)
+            print(
+                text(
+                    "Could not read --body-file %(path)r: %(error)s",
+                    path=args.body_file,
+                    error=exc,
+                ),
+                file=sys.stderr,
+            )
         return 1
     selected = parse_severity(body)
     apply_severity_label(
@@ -214,7 +234,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         emit_json_status(0, message, severity=selected)
     else:
-        print(message)
+        print(
+            text(
+                "Reconciled severity label to: %(selected)s",
+                selected=selected or text("(none)"),
+            )
+        )
     return 0
 
 

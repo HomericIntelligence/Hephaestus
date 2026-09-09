@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -167,10 +168,10 @@ def _target_from_arguments(
 ) -> RepositoryTarget:
     """Bind an explicit target, or derive it only from a direct canonical URL."""
     if (host is None) != (repository is None):
-        parser.error("--target-host and --target-repository must be supplied together")
+        parser.error(text("--target-host and --target-repository must be supplied together"))
     if host is not None and repository is not None:
         if host != "github.com":
-            parser.error("--target-host must be github.com")
+            parser.error(text("--target-host must be github.com"))
         try:
             target = RepositoryTarget(
                 host=host,
@@ -184,7 +185,7 @@ def _target_from_arguments(
             except RuntimeError as error:
                 parser.error(str(error))
             if supplied.casefold() != target.repository.casefold():
-                parser.error("pull-request URL does not match --target-repository")
+                parser.error(text("pull-request URL does not match --target-repository"))
         return target
     if identifier is not None and identifier.startswith("https://"):
         try:
@@ -195,7 +196,10 @@ def _target_from_arguments(
         except RuntimeError as error:
             parser.error(str(error))
     parser.error(
-        "numeric pull requests and branch discovery require --target-host and --target-repository"
+        text(
+            "numeric pull requests and branch discovery require "
+            "--target-host and --target-repository"
+        )
     )
     raise AssertionError("argument parser returned after a target error")
 

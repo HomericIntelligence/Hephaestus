@@ -67,6 +67,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.config.child_environments import read_approved_parent_env
 
@@ -102,7 +103,7 @@ def _parse_execution_timeout(raw: str) -> int:
     try:
         timeout = int(raw)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("timeout must be an integer") from exc
+        raise argparse.ArgumentTypeError(text("timeout must be an integer")) from exc
     try:
         return _validate_execution_timeout(timeout)
     except ValueError as exc:
@@ -303,7 +304,7 @@ def on_stop(event):
     # We never set breakpoints, so the only stops we expect are signals.
     if isinstance(event, gdb.SignalEvent):
         signo = event.stop_signal
-        print("[run-under-gdb] caught " + signo + "; dumping " + CORE_FILE)
+        print(CRASH_MESSAGE % {{"signal": signo, "core": CORE_FILE}})
         gdb.execute("generate-core-file " + CORE_FILE)
         gdb.execute("bt full")
         gdb.execute("info threads")
@@ -429,7 +430,10 @@ def run_under_gdb(
     command_bin = resolve_command(command)
     if command_bin is None:
         print(
-            f"[run-under-gdb] ERROR: could not resolve command '{command}' on PATH",
+            text(
+                "[run-under-gdb] ERROR: could not resolve command '%(value0)s' on PATH",
+                value0=command,
+            ),
             file=sys.stderr,
         )
         return 127
@@ -470,10 +474,16 @@ def run_under_gdb(
             additional_process_group_file=process_group_file,
         )
 
-        print(f"[run-under-gdb] gdb log  : {gdb_log}", file=sys.stderr)
-        print(f"[run-under-gdb] core file: {core_file} (written on crash)", file=sys.stderr)
-        print(f"[run-under-gdb] binary   : {command_bin}", file=sys.stderr)
-        print(f"[run-under-gdb] args     : {' '.join(command_args)}", file=sys.stderr)
+        print(text("[run-under-gdb] gdb log  : %(value0)s", value0=gdb_log), file=sys.stderr)
+        print(
+            text("[run-under-gdb] core file: %(value0)s (written on crash)", value0=core_file),
+            file=sys.stderr,
+        )
+        print(text("[run-under-gdb] binary   : %(value0)s", value0=command_bin), file=sys.stderr)
+        print(
+            text("[run-under-gdb] args     : %(value0)s", value0=" ".join(command_args)),
+            file=sys.stderr,
+        )
 
         # Prefer the Python-recorded exit code; fall back to gdb's own status
         # if the file is missing (gdb died before the hook fired).
@@ -497,7 +507,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``hephaestus-run-under-gdb`` CLI."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-run-under-gdb",
-        description=(
+        description=text(
             "Run a command under gdb -batch so a real ELF core and backtrace "
             "are captured before the inferior's own signal handler runs."
         ),
@@ -507,7 +517,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_execution_timeout,
         default=_EXECUTION_TIMEOUT_SECONDS,
         metavar="SECONDS",
-        help=(
+        help=text(
             "Execution timeout in seconds, from 1 through 86400 "
             f"(default: {_EXECUTION_TIMEOUT_SECONDS}); place before <core-dir>"
         ),
@@ -515,25 +525,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--direct",
         action="store_true",
-        help="execute the command directly without starting gdb",
+        help=text("execute the command directly without starting gdb"),
     )
     parser.add_argument(
         "--gdb-cmd-prefix",
         default=None,
-        help="validated command prefix inserted before gdb (for example: 'uv run --')",
+        help=text("validated command prefix inserted before gdb (for example: 'uv run --')"),
     )
     parser.add_argument(
         "core_dir",
-        help="directory for cores and gdb logs (created if absent)",
+        help=text("directory for cores and gdb logs (created if absent)"),
     )
     parser.add_argument(
         "command",
-        help="the program to run (resolved via PATH if not an explicit path)",
+        help=text("the program to run (resolved via PATH if not an explicit path)"),
     )
     parser.add_argument(
         "command_args",
         nargs=argparse.REMAINDER,
-        help="arguments passed to the command verbatim",
+        help=text("arguments passed to the command verbatim"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -569,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=args.timeout,
                 )
             except ValueError as exc:
-                print(f"[run-under-gdb] ERROR: {exc}", file=sys.stderr)
+                print(text("[run-under-gdb] ERROR: %(value0)s", value0=exc), file=sys.stderr)
                 if args.json:
                     emit_json_status(2, message=f"invalid --gdb-cmd-prefix: {exc}")
                 return 2

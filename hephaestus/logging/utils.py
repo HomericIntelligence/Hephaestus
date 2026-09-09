@@ -24,7 +24,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from hephaestus.constants import LOG_FORMAT
-from hephaestus.logging.formatters import JsonFormatter
+from hephaestus.logging.formatters import (
+    JsonFormatter,
+    _capture_record_localizer,
+    _LocalizedFormatter,
+)
 
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
@@ -36,6 +40,23 @@ _MINIMUM_DEPENDENCY_LOG_LEVELS = {"markdown_it": logging.WARNING}
 _correlation_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "correlation_id", default=None
 )
+
+
+class _LocalizingFilter(logging.Filter):
+    """Capture localization context for records handled by Hephaestus."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Attach the emission-context localizer without global logging hooks."""
+        from hephaestus._localization import get_localizer
+
+        _capture_record_localizer(record, get_localizer())
+        return True
+
+
+def _ensure_localizing_filter(target: logging.Filterer) -> None:
+    """Add one localization filter to a Hephaestus-owned logger or handler."""
+    if not any(isinstance(filter_, _LocalizingFilter) for filter_ in target.filters):
+        target.addFilter(_LocalizingFilter())
 
 
 # WHY justified: logging.LoggerAdapter is non-generic at runtime on Python 3.10
@@ -175,6 +196,11 @@ def get_logger(
 
     # Lock protects the check-then-add TOCTOU race condition during concurrent initialization
     with _handler_setup_lock:
+        # Capture the localizer when this named logger emits a record. This is
+        # scoped to the logger configured by the caller and leaves the
+        # process-global LogRecord factory untouched.
+        _ensure_localizing_filter(logger)
+
         # Add console handler if one doesn't already exist
         has_console = any(
             isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
@@ -182,6 +208,7 @@ def get_logger(
         )
         if not has_console:
             console_handler = logging.StreamHandler(sys.stdout)
+            _ensure_localizing_filter(console_handler)
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
 
@@ -194,6 +221,7 @@ def get_logger(
             )
             if not has_file:
                 file_handler = logging.FileHandler(log_file)
+                _ensure_localizing_filter(file_handler)
                 file_handler.setFormatter(formatter)
                 logger.addHandler(file_handler)
 
@@ -255,8 +283,14 @@ def setup_logging(
     if json_format:
         formatter = JsonFormatter()
     else:
+        from hephaestus._localization import get_localizer
+
         format_string = format_string or LOG_FORMAT
-        formatter = logging.Formatter(format_string, datefmt=datefmt)
+        formatter = _LocalizedFormatter(
+            format_string,
+            datefmt=datefmt,
+            localizer=get_localizer(),
+        )
 
     primary_target = sys.stderr if primary_stream == "stderr" else sys.stdout
     stream_targets = [primary_target] if primary_stream is not None else []
@@ -280,6 +314,7 @@ def setup_logging(
                 existing_file.setFormatter(formatter)
             else:
                 file_handler = logging.FileHandler(log_file)
+                _ensure_localizing_filter(file_handler)
                 file_handler.setFormatter(formatter)
                 root_logger.addHandler(file_handler)
 
@@ -296,5 +331,6 @@ def setup_logging(
             )
             if not has_stream:
                 stream_handler = logging.StreamHandler(stream)
+                _ensure_localizing_filter(stream_handler)
                 stream_handler.setFormatter(formatter)
                 root_logger.addHandler(stream_handler)

@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, create_parser, emit_json_status
 from hephaestus.github.git_ops import run_git
 
@@ -267,5 +268,5 @@ def remove_worktree_main(argv: Sequence[str] | None = None) -> int:
     if arguments.json:
         emit_json_status(0, f"removed {target} at {head}", path=str(target), head=head)
     else:
-        print(f"removed {target} at {head}")
+        print(text("removed %(target)s at %(head)s", target=target, head=head))
     return 0

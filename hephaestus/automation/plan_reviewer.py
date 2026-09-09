@@ -37,6 +37,7 @@ from hephaestus.automation._review_utils import (
     work_report_context,
 )
 from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
     add_role_agent_args,
@@ -723,7 +724,7 @@ Examples:
         type=int,
         nargs="+",
         required=True,
-        help="Issue numbers whose plans should be reviewed",
+        help=text("Issue numbers whose plans should be reviewed"),
     )
     add_agent_timeout_arg(parser, default=1200)
     parser.add_argument("--model", default="", metavar="MODEL[:EFFORT]")
@@ -733,7 +734,7 @@ Examples:
         "--work-report",
         type=Path,
         default=None,
-        help="Write the completed work-unit count to PATH.",
+        help=text("Write the completed work-unit count to PATH."),
     )
     return parser
 

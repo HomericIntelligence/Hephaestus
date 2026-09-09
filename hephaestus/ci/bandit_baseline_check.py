@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.io import safe_write
 
 
@@ -138,14 +139,14 @@ def _write_baseline(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compare a Bandit LOW-severity report with its reviewed baseline."
+        description=text("Compare a Bandit LOW-severity report with its reviewed baseline.")
     )
     parser.add_argument("report_path", type=Path)
     parser.add_argument("baseline_path", type=Path)
     parser.add_argument("--update-baseline", action="store_true")
     parser.add_argument(
         "--review-reference",
-        help="Issue or PR recording the security review; required when updating.",
+        help=text("Issue or PR recording the security review; required when updating."),
     )
     return parser
 
@@ -157,31 +158,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.update_baseline and (
         args.review_reference is None or not args.review_reference.strip()
     ):
-        parser.error("--update-baseline requires --review-reference")
+        parser.error(text("--update-baseline requires --review-reference"))
     if args.review_reference is not None and not args.update_baseline:
-        parser.error("--review-reference requires --update-baseline")
+        parser.error(text("--review-reference requires --update-baseline"))
 
     try:
         current = count_by_test_id(_load_json_object(args.report_path))
         if args.update_baseline:
             _write_baseline(args.baseline_path, current, args.review_reference)
-            print(f"Updated Bandit LOW baseline: {args.baseline_path}")
+            print(text("Updated Bandit LOW baseline: %(value0)s", value0=args.baseline_path))
             return 0
         baseline = _baseline_counts(_load_json_object(args.baseline_path))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        print(f"ERROR: invalid Bandit baseline input: {exc}", file=sys.stderr)
+        print(text("ERROR: invalid Bandit baseline input: %(value0)s", value0=exc), file=sys.stderr)
         return 2
 
     problems = diff_against_baseline(current, baseline)
     if not problems:
         return 0
 
-    print("ERROR: Bandit LOW-severity report does not match the reviewed baseline:")
+    print(text("ERROR: Bandit LOW-severity report does not match the reviewed baseline:"))
     for problem in problems:
-        print(f"  {problem}")
+        print(text("  %(value0)s", value0=problem))
     print(
-        "\nReview every changed finding. After approval, use "
-        "--update-baseline with --review-reference; see SECURITY.md."
+        text(
+            "\nReview every changed finding. After approval, use "
+            "--update-baseline with --review-reference; see SECURITY.md."
+        )
     )
     return 1
 

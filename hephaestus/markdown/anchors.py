@@ -22,7 +22,27 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+
+_BROKEN_ANCHOR_ERROR = re.compile(
+    r"^(?P<source>.+): broken anchor '#(?P<anchor>.*)' in link "
+    r"'(?P<target>.*)' \(valid: (?P<valid>.*)\)$"
+)
+
+
+def _format_anchor_error(error: str) -> str:
+    """Render a raw validation finding through the human-text boundary."""
+    if (value := error.removeprefix("Target file not found: ")) != error:
+        return text("Target file not found: %(value0)s", value0=value)
+    if (value := error.removeprefix("Source file not found: ")) != error:
+        return text("Source file not found: %(value0)s", value0=value)
+    if match := _BROKEN_ANCHOR_ERROR.fullmatch(error):
+        return text(
+            "%(source)s: broken anchor '#%(anchor)s' in link '%(target)s' (valid: %(valid)s)",
+            **match.groupdict(),
+        )
+    return error
 
 
 def heading_to_anchor(heading: str) -> str:
@@ -191,12 +211,14 @@ def check_anchors(
 
     if errors:
         for error in errors:
-            print(error, file=sys.stderr)
-        print(f"\n{len(errors)} broken anchor link(s) found.", file=sys.stderr)
+            print(_format_anchor_error(error), file=sys.stderr)
+        print(
+            text("\n%(value0)s broken anchor link(s) found.", value0=len(errors)), file=sys.stderr
+        )
         return 1
 
     if verbose:
-        print(f"All anchor links to {target_file.name} are valid.")
+        print(text("All anchor links to %(value0)s are valid.", value0=target_file.name))
     return 0
 
 
@@ -208,32 +230,32 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Validate anchor fragments in markdown links against actual headings",
-        epilog="Example: %(prog)s --target docs/installation.md --verbose",
+        description=text("Validate anchor fragments in markdown links against actual headings"),
+        epilog=text("Example: %(prog)s --target docs/installation.md --verbose"),
     )
     parser.add_argument(
         "sources",
         nargs="*",
         type=Path,
-        help="Markdown files to scan for links (default: all .md files in repo)",
+        help=text("Markdown files to scan for links (default: all .md files in repo)"),
     )
     parser.add_argument(
         "--target",
         type=Path,
         required=True,
-        help="Target markdown file whose headings define valid anchors",
+        help=text("Target markdown file whose headings define valid anchors"),
     )
     parser.add_argument(
         "--repo-root",
         type=Path,
         default=None,
-        help="Repository root for auto-discovery (default: auto-detect via git)",
+        help=text("Repository root for auto-discovery (default: auto-detect via git)"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print success message when no errors are found",
+        help=text("Print success message when no errors are found"),
     )
     add_json_arg(parser)
     add_version_arg(parser)

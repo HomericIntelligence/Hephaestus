@@ -22,6 +22,7 @@ from collections import deque
 from typing import Any
 
 from hephaestus.cli.colors import Colors
+from hephaestus.cli.localization import get_localizer
 from hephaestus.utils.terminal import restore_terminal
 
 from .status_tracker import StatusTracker
@@ -145,12 +146,15 @@ class CursesUI:
         """
         if curses is None:
             raise RuntimeError(
-                "CursesUI requires the stdlib `curses` module, which is not "
-                "bundled with CPython on Windows. Run the automation pipeline "
-                "from a POSIX environment, or set --no-ui."
+                get_localizer().text(
+                    "CursesUI requires the stdlib `curses` module, which is not "
+                    "bundled with CPython on Windows. Run the automation pipeline "
+                    "from a POSIX environment, or set --no-ui."
+                )
             )
         self.status_tracker = status_tracker
         self.log_manager = log_manager
+        self._localizer = get_localizer()
         self.stdscr: Any = None
         self.running = False
         self.thread: threading.Thread | None = None
@@ -237,7 +241,7 @@ class CursesUI:
         height, width = self.stdscr.getmaxyx()
 
         # Display title
-        title = "Hephaestus Issue Implementer"
+        title = self._localizer.text("Hephaestus Issue Implementer")
         if len(title) < width:
             self.stdscr.addstr(0, 0, title, curses.A_BOLD)
 
@@ -317,7 +321,12 @@ class CursesUI:
             return row
 
         with contextlib.suppress(curses.error):
-            self.stdscr.addstr(row, 0, "Recent Activity:", curses.A_BOLD)
+            self.stdscr.addstr(
+                row,
+                0,
+                self._localizer.text("Recent Activity:"),
+                curses.A_BOLD,
+            )
         row += 1
 
         # Gather recent logs from all threads

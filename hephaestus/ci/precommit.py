@@ -10,6 +10,7 @@ from typing import cast
 
 import yaml
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 _VALID_HOOK_STATUSES = ("failed", "passed")
@@ -61,7 +62,7 @@ def format_summary_table(elapsed_s: int, file_count: int, hook_status: str) -> s
         raise ValueError("hook_status must be 'passed' or 'failed'")
 
     status_icon = "[PASS]" if hook_status == "passed" else "[FAIL]"
-    return (
+    return text(
         "## Pre-commit Hook Benchmark\n\n"
         "| Metric | Value |\n"
         "|--------|-------|\n"
@@ -99,30 +100,30 @@ def write_step_summary(content: str, summary_path: str | None = None) -> None:
 
 def bench_precommit_main(argv: list[str] | None = None) -> int:
     """Report pre-commit timing without making performance advisory-only."""
-    parser = argparse.ArgumentParser(description="Report pre-commit hook benchmark results.")
+    parser = argparse.ArgumentParser(description=text("Report pre-commit hook benchmark results."))
     parser.add_argument(
         "--elapsed",
         type=_parse_non_negative_int,
         required=True,
-        help="Elapsed time in seconds.",
+        help=text("Elapsed time in seconds."),
     )
     parser.add_argument(
         "--files",
         type=_parse_non_negative_int,
         default=0,
-        help="Number of files processed.",
+        help=text("Number of files processed."),
     )
     parser.add_argument(
         "--status",
         choices=_VALID_HOOK_STATUSES,
         default="passed",
-        help='Hook exit status string, e.g. "passed" or "failed".',
+        help=text('Hook exit status string, e.g. "passed" or "failed".'),
     )
     parser.add_argument(
         "--threshold",
         type=_parse_non_negative_int,
         default=120,
-        help="Warning threshold in seconds (default: 120).",
+        help=text("Warning threshold in seconds (default: 120)."),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -149,9 +150,12 @@ def bench_precommit_main(argv: list[str] | None = None) -> int:
     write_step_summary(table)
     if over_threshold:
         emit_warning(
-            f"Pre-commit hooks took {args.elapsed}s, which exceeds "
-            f"the {args.threshold}s threshold. "
-            "Consider reviewing hook configuration for performance regressions."
+            text(
+                "Pre-commit hooks took %(elapsed)ds, which exceeds the %(threshold)ds "
+                "threshold. Consider reviewing hook configuration for performance regressions.",
+                elapsed=args.elapsed,
+                threshold=args.threshold,
+            )
         )
     return 0
 

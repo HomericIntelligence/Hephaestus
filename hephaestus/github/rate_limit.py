@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo
 
+from hephaestus.cli.localization import text
 from hephaestus.github.environment import gh_child_environment
 from hephaestus.utils.helpers import run_subprocess
 
@@ -616,11 +617,11 @@ def resolve_quota_reset_epoch(*texts: str) -> int | None:
         ``None`` if no quota message is present in any stream.
 
     """
-    for text in texts:
-        if not text:
+    for output_text in texts:
+        if not output_text:
             continue
         for detect in (detect_rate_limit, detect_claude_usage_cap, detect_session_limit):
-            epoch = detect(text)
+            epoch = detect(output_text)
             if epoch is not None:
                 return epoch
     return None
@@ -664,7 +665,7 @@ def _countdown_loop(epoch: int, is_interrupted: Callable[[], bool]) -> None:
 
     while True:
         if is_interrupted():
-            print("\n[INFO] Wait interrupted by user")
+            print(text("\n[INFO] Wait interrupted by user"))
             raise KeyboardInterrupt
         remaining = epoch - int(time.time())
         if remaining <= 0:
@@ -675,7 +676,12 @@ def _countdown_loop(epoch: int, is_interrupted: Callable[[], bool]) -> None:
         m, s = divmod(r, 60)
         if is_tty:
             print(
-                f"\r[INFO] Rate limit resets in {h:02d}:{m:02d}:{s:02d}",
+                text(
+                    "\r[INFO] Rate limit resets in %(value0)02d:%(value1)02d:%(value2)02d",
+                    value0=h,
+                    value1=m,
+                    value2=s,
+                ),
                 end="",
                 flush=True,
             )

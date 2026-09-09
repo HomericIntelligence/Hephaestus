@@ -35,6 +35,7 @@ import logging
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
     add_pipeline_runtime_args,
@@ -120,7 +121,7 @@ Examples:
         type=int,
         nargs="+",
         default=[],
-        help=(
+        help=text(
             "Scope to these issue numbers' PRs. Requires at least one issue "
             "number when given. Omit the flag to use bounded linked-issue "
             "discovery; unrelated open PRs are not enumerated."
@@ -132,7 +133,7 @@ Examples:
         nargs="*",
         default=[],
         metavar="PR",
-        help=(
+        help=text(
             "PR numbers to drive directly, bypassing issue-to-PR discovery (#918). "
             "Each PR must carry the repository-policy 'Closes #N' issue link "
             "so the loop has independent requirements context. May be combined "
@@ -144,7 +145,7 @@ Examples:
         type=positive_int,
         default=None,
         metavar="ID",
-        help=(
+        help=text(
             "Select an authenticated source-review grant comment for PR #3006. "
             "Requires only --prs 3006 in HomericIntelligence/Hephaestus. "
             "The selector does not grant authority."
@@ -153,31 +154,31 @@ Examples:
     parser.add_argument(
         "--no-advise",
         action="store_true",
-        help="Skip the advise step before loop review",
+        help=text("Skip the advise step before loop review"),
     )
     parser.add_argument(
         "--learning-workers",
         type=positive_int,
         default=1,
-        help="Independent auxiliary learning workers (default: 1)",
+        help=text("Independent auxiliary learning workers (default: 1)"),
     )
     parser.add_argument(
         "--learning-queue-capacity",
         type=positive_int,
         default=1,
-        help="Bounded auxiliary learning queue capacity (default: 1)",
+        help=text("Bounded auxiliary learning queue capacity (default: 1)"),
     )
     parser.add_argument(
         "--no-learn",
         action="store_true",
-        help="Do not create or execute auxiliary learning intents",
+        help=text("Do not create or execute auxiliary learning intents"),
     )
     parser.add_argument(
         "--no-include-bot-prs",
         dest="include_bot_prs",
         action="store_false",
         default=True,
-        help=(
+        help=text(
             "Compatibility option retained for the retired open-PR sweep. "
             "No-scope discovery is linked-issue based, so unrelated bot PRs "
             "remain out of scope; use --prs to select a PR explicitly."
@@ -188,7 +189,7 @@ Examples:
         dest="include_all_authors",
         action="store_true",
         default=False,
-        help=(
+        help=text(
             "Compatibility option retained for the retired author-filtered "
             "open-PR sweep. It does not widen linked-issue discovery; explicit "
             "--issues and --prs scopes are processed regardless of author."
@@ -210,7 +211,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.host_verification_bootstrap_comment is not None and (args.issues or args.prs != [3006]):
-        parser.error("--host-verification-bootstrap-comment requires only --prs 3006")
+        parser.error(text("--host-verification-bootstrap-comment requires only --prs 3006"))
     return args
 
 

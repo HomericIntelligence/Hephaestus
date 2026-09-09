@@ -19,6 +19,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 _CONTINUATION_STARTERS = frozenset(
@@ -116,9 +117,12 @@ class FragmentFinding:
     def format(self) -> str:
         """Return a human-readable description of this finding."""
         return (
-            f"  {self.file}:{self.line}\n"
-            f"    Context: {self.context}\n"
-            f"    First line: {self.docstring_first_line!r}\n"
+            text("  %(file)s:%(line)d", file=self.file, line=self.line)
+            + "\n"
+            + text("    Context: %(context)s", context=self.context)
+            + "\n"
+            + text("    First line: %(first_line)r", first_line=self.docstring_first_line)
+            + "\n"
         )
 
 
@@ -252,9 +256,12 @@ def format_report(findings: list[FragmentFinding]) -> str:
 
     """
     if not findings:
-        return "No docstring fragment violations found.\n"
+        return text("No docstring fragment violations found.\n")
 
-    lines: list[str] = [f"Found {len(findings)} genuine docstring fragment(s):", ""]
+    lines: list[str] = [
+        text("Found %(count)d genuine docstring fragment(s):", count=len(findings)),
+        "",
+    ]
     for f in findings:
         lines.append(f.format())
     return "\n".join(lines)
@@ -288,12 +295,12 @@ def main() -> int:
         "--directory",
         type=Path,
         default=None,
-        help="Directory to scan (default: auto-detect source package)",
+        help=text("Directory to scan (default: auto-detect source package)"),
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Print detailed output",
+        help=text("Print detailed output"),
     )
 
     args = parser.parse_args()
