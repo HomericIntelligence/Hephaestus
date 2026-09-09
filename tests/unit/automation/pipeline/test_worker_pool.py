@@ -2952,6 +2952,27 @@ class TestWorkerPoolSubmitComplete:
         assert f"(allow file-write* {scratch_entry})" in profile
         assert f"(allow file-write* {pi_smoke_logs_entry})" in profile
 
+    def test_host_verification_profile_allows_apple_git_toolchains(self, tmp_path: Path) -> None:
+        """The immutable sandbox can run trusted Apple Git support tools."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        runtime = tmp_path / "runtime"
+        pi_smoke_logs = source / "pi-smoke-logs"
+
+        profile = _host_verification_profile(
+            source=source,
+            scratch=scratch,
+            runtime_environment=runtime,
+            git_metadata=tmp_path / "metadata.git",
+            pi_smoke_logs=pi_smoke_logs,
+            executable=Path("/usr/bin/uv"),
+        )
+
+        command_line_tools = Path("/Library/Developer/CommandLineTools").resolve()
+        xcode_tools = Path("/Applications/Xcode.app/Contents/Developer").resolve()
+        assert f'(subpath "{command_line_tools}")' in profile
+        assert f'(subpath "{xcode_tools}")' in profile
+
     def test_hdiutil_blank_image_argv_uses_no_srcfolder_only_format(self, tmp_path: Path) -> None:
         """The quota image uses the valid blank-HFS+ form accepted by macOS."""
         argv = _hdiutil_create_argv(tmp_path / "scratch.dmg")

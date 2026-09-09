@@ -1262,6 +1262,8 @@ def _host_verification_profile(
         Path("/sbin"),
         Path("/usr"),
         Path("/System"),
+        Path("/Library/Developer/CommandLineTools"),
+        Path("/Applications/Xcode.app/Contents/Developer"),
         Path("/opt/homebrew"),
         Path("/usr/local"),
     )
