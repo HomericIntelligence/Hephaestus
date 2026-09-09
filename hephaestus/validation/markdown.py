@@ -521,7 +521,7 @@ def check_readmes_main() -> int:
         dest="directory",
         type=Path,
         default=None,
-        help="Legacy alias for --repo-root (directory to scan)",
+        help=text("Legacy alias for --repo-root (directory to scan)"),
     )
     parser.add_argument(
         "--required-section",

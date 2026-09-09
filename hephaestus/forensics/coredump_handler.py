@@ -219,11 +219,15 @@ def verify_crash_bundle(log_dir: Path, *, localize: bool = True) -> tuple[str, s
     try:
         contents = log_path.read_text(encoding="utf-8")
     except OSError as exc:
-        return BUNDLE_NOT_RUN, render("%(path)s is unreadable (%(error)s)", path=log_path, error=exc)
+        return BUNDLE_NOT_RUN, render(
+            "%(path)s is unreadable (%(error)s)", path=log_path, error=exc
+        )
 
     lines = [ln for ln in contents.splitlines() if ln.strip()]
     if not lines:
-        return BUNDLE_NOT_RUN, render("%(path)s is empty — no handler activity recorded", path=log_path)
+        return BUNDLE_NOT_RUN, render(
+            "%(path)s is empty — no handler activity recorded", path=log_path
+        )
 
     # A `wrote ` line is the authoritative success signal; a successful capture
     # may also carry a chmod/max-bytes WARNING, so `wrote ` wins over WARNING.
@@ -425,9 +429,7 @@ def main(argv: list[str] | None = None) -> int:
             emit_json_status(1, message=msg)
         else:
             print(
-                text(
-                    "hephaestus-coredump-handler: %(message)s", message=msg
-                ),
+                text("hephaestus-coredump-handler: %(message)s", message=msg),
                 file=sys.stderr,
             )
         return 1

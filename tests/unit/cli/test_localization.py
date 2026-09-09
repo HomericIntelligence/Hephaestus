@@ -1,4 +1,3 @@
-"""Tests for the public CLI localization boundary."""
 """Tests for the user-facing localization boundary."""
 
 import argparse
@@ -8,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+import hephaestus.cli as cli
 from hephaestus._localization import _placeholder_signature
 from hephaestus.cli.localization import (
     Localizer,
@@ -139,10 +139,12 @@ def test_context_nesting_and_exception_restoration() -> None:
     original = get_localizer()
     with using_localizer({"Hello": "Bonjour"}) as outer:
         assert get_localizer() is outer
-        with pytest.raises(RuntimeError):
+        try:
             with using_localizer({"Hello": "Hola"}):
                 assert text("Hello") == "Hola"
                 raise RuntimeError("stop")
+        except RuntimeError:
+            pass
         assert text("Hello") == "Bonjour"
     assert get_localizer() is original
 
@@ -192,8 +194,6 @@ def test_mixed_positional_and_named_values_are_rejected() -> None:
     localizer = Localizer()
     with pytest.raises(TypeError, match="cannot mix"):
         localizer.text("%s %(name)s", "value", name="other")
-
-import hephaestus.cli as cli
 
 
 def test_cli_exposes_localizer() -> None:

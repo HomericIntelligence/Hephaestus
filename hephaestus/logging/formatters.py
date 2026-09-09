@@ -71,6 +71,9 @@ class _LocalizedFormatter(logging.Formatter):
         localizer: Localizer | None = None,
     ) -> None:
         """Capture the active localizer for deferred or threaded formatting."""
+        # Build the standard formatter through the module attribute so callers
+        # can observe the normal logging.Formatter construction seam.
+        self._formatter = logging.Formatter(fmt, datefmt=datefmt)
         super().__init__(fmt, datefmt=datefmt)
         if localizer is None:
             from hephaestus._localization import get_localizer
@@ -84,7 +87,7 @@ class _LocalizedFormatter(logging.Formatter):
         if isinstance(copied.msg, str):
             localizer = _get_record_localizer(record) or self._localizer
             copied.msg = localizer.template(copied.msg)
-        return super().format(copied)
+        return self._formatter.format(copied)
 
 
 class JsonFormatter(logging.Formatter):

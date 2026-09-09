@@ -18,6 +18,7 @@ import sys
 import threading
 from collections.abc import Callable, Generator
 
+from hephaestus.cli.localization import text
 from hephaestus.config.child_environments import read_approved_parent_env
 
 _TERMINAL_RESTORE_TIMEOUT_SECONDS = 2

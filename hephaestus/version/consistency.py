@@ -158,7 +158,7 @@ def _get_canonical_version(repo_root: Path) -> str:
     version = _version_from_git_tag(repo_root)
     if version is None:
         print(
-            "ERROR: could not determine the canonical version from a vX.Y.Z Git tag.",
+            text("ERROR: could not determine the canonical version from a vX.Y.Z Git tag."),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -241,7 +241,7 @@ def check_version_consistency(repo_root: Path, verbose: bool = False) -> int:
     """
     canonical_version = _get_canonical_version(repo_root)
     if verbose:
-        print(f"Canonical version (git tag): {canonical_version}")
+        print(text("Canonical version (git tag): %(version)s", version=canonical_version))
     return 0
 
 
@@ -268,7 +268,7 @@ def _verify_requested_version(
     try:
         parse_version(requested_version)
     except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(text("ERROR: %(error)s", error=exc), file=sys.stderr)
         return 1
 
     canonical = _version_from_git_tag(repo_root)
@@ -288,12 +288,12 @@ def _verify_requested_version(
 
     if errors:
         for error in errors:
-            print(f"ERROR: {error}", file=sys.stderr)
+            print(text("ERROR: %(error)s", error=error), file=sys.stderr)
         return 1
 
     if verbose:
-        print(f"Canonical tag version: {canonical}")
-        print(f"Installed distribution version: {installed}")
+        print(text("Canonical tag version: %(version)s", version=canonical))
+        print(text("Installed distribution version: %(version)s", version=installed))
     return 0
 
 
@@ -393,7 +393,7 @@ def check_package_version_consistency(
     """
     canonical = _get_canonical_version(repo_root)
     if verbose:
-        print(f"Canonical version (git tag): {canonical}")
+        print(text("Canonical version (git tag): %(version)s", version=canonical))
 
     all_errors: list[str] = []
     all_errors.extend(_check_init_version_errors(package_init, canonical, verbose))
@@ -461,16 +461,21 @@ def _ensure_bump_supported(repo_root: Path) -> None:
 
 def _report_bump_refusal(exc: ValueError) -> None:
     """Report a dynamic-version refusal and the supported release workflow."""
-    print(f"ERROR: version bump refused: {exc}", file=sys.stderr)
+    print(text("ERROR: version bump refused: %(error)s", error=exc), file=sys.stderr)
     print(
-        "Hephaestus releases use the signed Auto Tag Release workflow; see docs/RELEASING.md.",
+        text(
+            "Hephaestus releases use the signed Auto Tag Release workflow; see docs/RELEASING.md."
+        ),
         file=sys.stderr,
     )
 
 
 def _report_bump_inspection_error(exc: OSError) -> None:
     """Report a version-configuration inspection failure."""
-    print(f"ERROR: could not inspect version configuration: {exc}", file=sys.stderr)
+    print(
+        text("ERROR: could not inspect version configuration: %(error)s", error=exc),
+        file=sys.stderr,
+    )
 
 
 def preview_version(repo_root: Path, part: str, verbose: bool = False) -> str:
@@ -491,7 +496,13 @@ def preview_version(repo_root: Path, part: str, verbose: bool = False) -> str:
     """
     current_str, requested = _calculate_next_version(repo_root, part)
     if verbose:
-        print(f"Computed next version: {current_str} -> {requested}")
+        print(
+            text(
+                "Computed next version: %(current)s -> %(requested)s",
+                current=current_str,
+                requested=requested,
+            )
+        )
     return requested
 
 
@@ -533,11 +544,17 @@ def bump_version(
     try:
         current_str, requested = _calculate_next_version(repo_root, part)
     except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(text("ERROR: %(error)s", error=exc), file=sys.stderr)
         return 1
 
     if verbose and emit_human_output:
-        print(f"Computed next version: {current_str} -> {requested}")
+        print(
+            text(
+                "Computed next version: %(current)s -> %(requested)s",
+                current=current_str,
+                requested=requested,
+            )
+        )
     return 0
 
 
@@ -560,7 +577,7 @@ def check_version_consistency_main() -> int:
     parser.add_argument(
         "--expected-version",
         required=True,
-        help="Exact X.Y.Z version expected from both the Git tag and installed package",
+        help=text("Exact X.Y.Z version expected from both the Git tag and installed package"),
     )
     parser.add_argument(
         "--verbose",
@@ -669,7 +686,7 @@ def bump_version_main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=(
+        help=text(
             "Deprecated compatibility flag; previews are compute-only and dynamic "
             "version projects are refused"
         ),
@@ -709,7 +726,11 @@ def bump_version_main() -> int:
             )
         )
     else:
-        print(f"Computed next version: {requested}")
-        print("No files or tags were changed.")
-        print("Use the explicitly dispatched Auto Tag Release workflow to create the signed tag.")
+        print(text("Computed next version: %(version)s", version=requested))
+        print(text("No files or tags were changed."))
+        print(
+            text(
+                "Use the explicitly dispatched Auto Tag Release workflow to create the signed tag."
+            )
+        )
     return 0

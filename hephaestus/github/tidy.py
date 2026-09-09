@@ -551,8 +551,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--cleanup-stale-worktrees",
         action="store_true",
         help=(
-            "Interactively remove clean worktrees for closed issues or merged branches "
-            f"(requires Git {_WORKTREE_LIST_Z_MIN_GIT} or later)"
+            text(
+                "Interactively remove clean worktrees for closed issues or merged branches "
+                "(requires Git %(version)s or later)",
+                version=_WORKTREE_LIST_Z_MIN_GIT,
+            )
         ),
     )
     parser.add_argument(
@@ -577,7 +580,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help="Model name and optional effort; omit to use the tool default",
+        help=text("Model name and optional effort; omit to use the tool default"),
     )
     add_prompt_dir_argument(parser)
     parser.add_argument(
@@ -585,14 +588,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=positive_timeout,
         default=DEFAULT_GH_TIMEOUT,
         metavar="SECONDS",
-        help=f"per-call GitHub CLI timeout (default: {DEFAULT_GH_TIMEOUT})",
+        help=text("Per-call GitHub CLI timeout (default: %(timeout)s)", timeout=DEFAULT_GH_TIMEOUT),
     )
     parser.add_argument(
         "--rebase-timeout",
         type=positive_timeout,
         default=2400,
         metavar="SECONDS",
-        help="direct rebase-agent timeout (default: 2400)",
+        help=text("Direct rebase-agent timeout (default: 2400)"),
     )
     add_logging_args(parser)
     add_github_throttle_args(parser)

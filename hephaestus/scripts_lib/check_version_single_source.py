@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.cli.localization import text
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root as _get_repo_root
 

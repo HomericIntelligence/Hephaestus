@@ -795,25 +795,25 @@ def add_host_verification_pyxis_image_arg(parser: argparse.ArgumentParser) -> No
         type=Path,
         default=None,
         metavar="PATH",
-        help=("Owner-only Enroot squashfs path shared with Slurm compute nodes."),
+        help=text("Owner-only Enroot squashfs path shared with Slurm compute nodes."),
     )
     parser.add_argument(
         "--host-verification-pyxis-sha256",
         default=None,
         metavar="SHA256",
-        help="Expected squashfs SHA-256 from a separate host-owned authority.",
+        help=text("Expected squashfs SHA-256 from a separate host-owned authority."),
     )
     parser.add_argument(
         "--host-verification-pyxis-authority",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Owner-only provenance authority for the expected squashfs.",
+        help=text("Owner-only provenance authority for the expected squashfs."),
     )
     parser.add_argument(
         "--host-verification-pyxis-quota-root",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Private maximum-1-GiB filesystem shared with Slurm compute nodes.",
+        help=text("Private maximum-1-GiB filesystem shared with Slurm compute nodes."),
     )

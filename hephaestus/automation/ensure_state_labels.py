@@ -36,6 +36,7 @@ import sys
 import threading
 
 from hephaestus.automation.github_api import gh_call
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,

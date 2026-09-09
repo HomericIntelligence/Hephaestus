@@ -223,7 +223,10 @@ def check_coverage(threshold: float, path: str, coverage_file: Path) -> bool:
     try:
         coverage = parse_coverage_report(coverage_file)
     except (FileNotFoundError, CoverageReportError) as error:
-        print(f"\nERROR: Coverage check failed for {path}: {error}", file=sys.stderr)
+        print(
+            text("\nERROR: Coverage check failed for %(path)s: %(error)s", path=path, error=error),
+            file=sys.stderr,
+        )
         return False
 
     # User-facing CLI report output — intentionally written to stdout.
@@ -299,7 +302,7 @@ def _check_module_floors(
                 error=error_code,
             )
         else:
-            print(f"\nERROR: {message}", file=sys.stderr)
+            print(text("\nERROR: %(message)s", message=message), file=sys.stderr)
         return 1
 
     all_modules_pass = True
@@ -329,21 +332,33 @@ def _check_module_floors(
             )
         except ValueError as exc:
             if not args.json:
-                print(f"\nERROR: {exc}", file=sys.stderr)
+                print(text("\nERROR: %(error)s", error=exc), file=sys.stderr)
             all_modules_pass = False
             continue
 
         if coverage_metric < module_threshold:
             if not args.json:
                 print(
-                    f"\nModule {module_path}: {metric_name} coverage "
-                    f"{coverage_metric:.2f}% "
-                    f"(below threshold of {module_threshold:.2f}%)",
+                    text(
+                        "\nModule %(module)s: %(metric)s coverage %(coverage).2f%% "
+                        "(below threshold of %(threshold).2f%%)",
+                        module=module_path,
+                        metric=metric_name,
+                        coverage=coverage_metric,
+                        threshold=module_threshold,
+                    ),
                     file=sys.stderr,
                 )
             all_modules_pass = False
         elif not args.json and args.verbose:
-            print(f"  {module_path}: {metric_name} coverage {coverage_metric:.2f}% ✓")
+            print(
+                text(
+                    "  %(module)s: %(metric)s coverage %(coverage).2f%% ✓",
+                    module=module_path,
+                    metric=metric_name,
+                    coverage=coverage_metric,
+                )
+            )
 
     return 0 if all_modules_pass else 1
 

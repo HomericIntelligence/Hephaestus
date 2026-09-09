@@ -22,6 +22,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.io.toml import import_tomllib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent

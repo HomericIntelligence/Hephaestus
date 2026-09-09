@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo
 
+from hephaestus.cli.localization import text
 from hephaestus.github.environment import gh_child_environment
 from hephaestus.utils.helpers import run_subprocess
 

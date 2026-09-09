@@ -245,7 +245,10 @@ def _check_files(
         if schema_path is None:
             if allow_unmapped:
                 print(
-                    f"WARNING: No schema mapping for {file_path} — skipping",
+                    text(
+                        "WARNING: No schema mapping for %(path)s — skipping",
+                        path=file_path,
+                    ),
                     file=sys.stderr,
                 )
                 skipped += 1
@@ -270,7 +273,7 @@ def _check_files(
         else:
             passed += 1
             if verbose:
-                print(f"PASS: {file_path}")
+                print(text("PASS: %(path)s", path=file_path))
 
     exit_code = 0 if dry_run or not diagnostics else 1
     return SchemaCheckResult(
@@ -321,7 +324,7 @@ def main() -> int:
     parser.add_argument(
         "--allow-unmapped",
         action="store_true",
-        help="Explicitly skip requested files that have no matching schema",
+        help=text("Explicitly skip requested files that have no matching schema"),
     )
 
     args = parser.parse_args()
@@ -367,7 +370,7 @@ def main() -> int:
         if args.json:
             emit_json_status(1, message=message, errors=[message])
         else:
-            print(f"ERROR: {message}", file=sys.stderr)
+            print(text("ERROR: %(message)s", message=message), file=sys.stderr)
         return 1
 
     result = check_files(
@@ -394,15 +397,18 @@ def main() -> int:
         )
     elif result.diagnostics:
         for error in result.diagnostics:
-            print(f"ERROR: {error}", file=sys.stderr)
+            print(text("ERROR: %(error)s", error=error), file=sys.stderr)
     else:
         print(
-            "Summary: "
-            f"requested={result.requested}, "
-            f"validated={result.validated}, "
-            f"skipped={result.skipped}, "
-            f"passed={result.passed}, "
-            f"failed={result.failed}"
+            text(
+                "Summary: requested=%(requested)d, validated=%(validated)d, "
+                "skipped=%(skipped)d, passed=%(passed)d, failed=%(failed)d",
+                requested=result.requested,
+                validated=result.validated,
+                skipped=result.skipped,
+                passed=result.passed,
+                failed=result.failed,
+            )
         )
     return result.exit_code
 

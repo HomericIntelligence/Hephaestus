@@ -38,9 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output", required=True, help=text("Where to write the agent's final response")
     )
-    parser.add_argument(
-        "--log-file", help=text("Where to write combined agent stdout/stderr")
-    )
+    parser.add_argument("--log-file", help=text("Where to write combined agent stdout/stderr"))
     parser.add_argument(
         "--skill-file", help=text("Optional skill instructions to prepend to the prompt")
     )

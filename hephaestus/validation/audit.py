@@ -329,7 +329,7 @@ def main() -> int:
         return _emit_audit_json(blocking, suppressed)
 
     if suppressed:
-        print("pip-audit: non-blocking vulnerabilities (below configured threshold):")
+        print(text("pip-audit: non-blocking vulnerabilities (below configured threshold):"))
         for name, version, vuln_id, label in suppressed:
             print(
                 text(
@@ -342,7 +342,7 @@ def main() -> int:
             )
 
     if blocking:
-        print("pip-audit: BLOCKING vulnerabilities found (HIGH/CRITICAL/UNKNOWN):")
+        print(text("pip-audit: BLOCKING vulnerabilities found (HIGH/CRITICAL/UNKNOWN):"))
         for name, version, vuln_id, label in blocking:
             print(
                 text(
@@ -366,7 +366,7 @@ def _audit_input_error(detail: str, json_mode: bool) -> int:
     if json_mode:
         emit_json_status(1, message=message)
     else:
-        print(f"filter_audit: {message}", file=sys.stderr)
+        print(text("filter_audit: %(message)s", message=message), file=sys.stderr)
     return 1
 
 

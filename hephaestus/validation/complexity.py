@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     create_validation_parser,
     emit_json_status,
@@ -196,7 +197,7 @@ def check_max_complexity(
     try:
         violations = run_ruff_complexity_check(path, threshold, repo_root)
     except RuffComplexityError as exc:
-        print(f"\n[ERROR] Complexity check failed: {exc}", file=sys.stderr)
+        print(text("\n[ERROR] Complexity check failed: %(error)s", error=exc), file=sys.stderr)
         if exc.stderr:
             print(exc.stderr, file=sys.stderr)
         return False

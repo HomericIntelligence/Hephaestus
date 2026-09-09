@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="hephaestus-scaffold-subpackage",
-        description="Scaffold a minimal Hephaestus subpackage with a structural import test.",
+        description=text("Scaffold a minimal Hephaestus subpackage with a structural import test."),
     )
     parser.add_argument(
         "name",
