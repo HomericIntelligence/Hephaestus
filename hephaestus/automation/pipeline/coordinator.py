@@ -101,6 +101,8 @@ class Coordinator(
         self._wall_time = wall_time or time.time
         self.shutdown = shutdown_event or threading.Event()
         self.shutdown_event = self.shutdown
+        self._worker_shutdown = threading.Event()
+        self.worker_shutdown_event = self._worker_shutdown
         self._force_shutdown = force_shutdown_event or threading.Event()
         self.force_shutdown_event = self._force_shutdown
         self._idle_poll_s = idle_poll_s
@@ -139,7 +141,7 @@ class Coordinator(
             )
             pool = WorkerPool(
                 size=work_window,
-                shutdown=self.shutdown,
+                shutdown=self._worker_shutdown,
                 completion_q=self.completion_q,
                 gh_extra_path_root=config.gh_extra_path_root,
                 github_job_runner=PipelineGitHubJobRunner(
@@ -169,7 +171,9 @@ class Coordinator(
         else:
             assert auxiliary_pool_factory is not None  # noqa: S101
             pool = pool_factory(
-                size=work_window, shutdown=self.shutdown, completion_q=self.completion_q
+                size=work_window,
+                shutdown=self._worker_shutdown,
+                completion_q=self.completion_q,
             )
             auxiliary_pool = auxiliary_pool_factory(
                 size=config.learning_workers,

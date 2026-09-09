@@ -38,6 +38,44 @@ work. OpenCode and Pi use their native error or fallback behavior.
 
 ## 0.x → 1.0 (forthcoming — not yet released)
 
+### Queue automation cutover
+
+Stop all old coordinators before you install and start the new queue owner.
+Drain active work or park it with its recovery evidence. Preserve unresolved
+external effects, local commits, worktrees, current journals, learning claims,
+source records, and issue-wave checkpoints. Do not let old and new coordinators
+use the same state directory.
+
+Use these replacements for removed automation commands:
+
+| Removed command | Replacement |
+|---|---|
+| `hephaestus-audit-prs --prs N` | `hephaestus-review-prs --prs N` |
+| `hephaestus-drive-prs-green --prs N` | `hephaestus-automation-loop --prs N --stages pr_review,merge_wait` |
+| `hephaestus-agent-stage` | Select the applicable retained command and stage scope. There is no one-operation provider command. |
+| `hephaestus-merge-prs --prs N` | `hephaestus-automation-loop --prs N --stages pr_review,merge_wait` |
+
+The retained commands are `hephaestus-automation-loop`,
+`hephaestus-plan-issues`, `hephaestus-implement-issues`, and
+`hephaestus-review-prs`. They use one parser. Supply comma-separated positive
+identifiers with `--issues` or `--prs`. Use `--stages` only with a contiguous
+sequence of the six main queue stages. Use `--merge-attempts` and
+`--max-workers` in place of the removed option aliases.
+
+Current plan pointers, publication repair records, issue-wave checkpoints,
+learning intents and claims, source ownership records, reply journals, and
+verification records remain supported. Reply handoffs support armed format 2
+and remediation format 3. Retired commands, option aliases, and record formats
+have no conversion path.
+
+After cutover, start one retained queue command with an explicit repository and
+item scope. Examine its recovery result before you increase the scope. See the
+[CI driver stall runbook](runbooks/ci-driver-stall.md) for recovery checks.
+
+Before rollback, stop the current coordinator. Examine all possible effects
+from the new coordinator. Keep current journals and local evidence until each
+operation has a known result. Restoring the old code does not make replay safe.
+
 ### Summary
 
 Version 1.0 intentionally removes ambient Hephaestus environment configuration.

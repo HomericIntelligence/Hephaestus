@@ -135,7 +135,7 @@ class AuxiliaryWorkerPool:
                 self._completion_wakeup.set()
 
     def shutdown(self, *, mark_interrupted: bool = True) -> None:
-        """Stop pending work and optionally mark active work interrupted."""
+        """Stop pending work and wait for active work after an interruption."""
         if mark_interrupted:
             self._shutdown.set()
         if self._athena_skill_executor is not None:
@@ -144,4 +144,4 @@ class AuxiliaryWorkerPool:
             futures = tuple(self._futures)
         for future in futures:
             future.cancel()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor.shutdown(wait=mark_interrupted, cancel_futures=True)

@@ -3781,7 +3781,8 @@ class WorkerPool:
         UN-STARTED futures; a job already blocked in a ``claude`` subprocess
         would keep running and pin its non-daemon worker thread (holding the
         interpreter open at exit — the #2059 leak). Terminating tracked process
-        groups frees those workers promptly.
+        groups frees those workers promptly. An interrupted shutdown waits for
+        active workers before the coordinator releases their ownership records.
         """
         with self._pretest_lock:
             self._pretest_closed = True
@@ -3790,8 +3791,11 @@ class WorkerPool:
             self._shutdown.set()
         if self._athena_skill_executor is not None:
             self._athena_skill_executor.cancel()
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        subprocess_registry.terminate_all()
+        if mark_interrupted:
+            subprocess_registry.terminate_all()
+        self._executor.shutdown(wait=mark_interrupted, cancel_futures=True)
+        if not mark_interrupted:
+            subprocess_registry.terminate_all()
 
     def _on_future_done(self, handle: JobHandle, future: Future[JobResult]) -> None:
         """Drain result to completion queue when a job future completes.

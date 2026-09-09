@@ -1272,6 +1272,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     shutdown_signal_message(signum, self.config.grace_s, immediate=False)
                 )
                 self.shutdown.set()
+                self._worker_shutdown.set()
                 self._grace_deadline = self._monotonic() + self.config.grace_s
                 self._wake_completion_wait()
 
@@ -1287,6 +1288,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     def _teardown_immediate(self) -> None:
         """Cancel the pool and synthesize interrupted results for in-flight items."""
         self.shutdown.set()
+        self._worker_shutdown.set()
         self._force_shutdown.set()
         self._shutdown_pool()
 
@@ -1304,15 +1306,16 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         self._pool_shut_down = True
         try:
-            # ``self.shutdown`` belongs to the coordinator's signal path. A
-            # normal ``finally`` must reap worker resources without changing
-            # its exit outcome to an interruption (#2431), while a genuine
-            # signal preserves the pool's direct cancellation semantics.
-            self.pool.shutdown(mark_interrupted=self.shutdown.is_set())
+            # The worker event is separate from the operator-signal event.
+            # Thus, a fatal exit cancels active work without changing exit 1
+            # to an operator-interrupt exit (#2431).
+            self.pool.shutdown(mark_interrupted=self._worker_shutdown.is_set() or self._fatal)
         except Exception:  # pragma: no cover - defensive
             logger.exception("pool shutdown raised")
         try:
-            self.auxiliary_pool.shutdown(mark_interrupted=self.shutdown.is_set())
+            self.auxiliary_pool.shutdown(
+                mark_interrupted=self._force_shutdown.is_set() or self._fatal
+            )
         except Exception:  # pragma: no cover - defensive
             logger.exception("auxiliary pool shutdown raised")
         try:

@@ -45,10 +45,12 @@ if TYPE_CHECKING:
         github: StageGitHub
         _github_factory: Callable[[str, Path], StageGitHub] | None
         shutdown: Event
+        _worker_shutdown: Event
         _force_shutdown: Event
         _monotonic: Callable[[], float]
         _wall_time: Callable[[], float]
         shutdown_event: Event
+        worker_shutdown_event: Event
         force_shutdown_event: Event
         _idle_poll_s: float
         _stall_ticks_before_retry: int

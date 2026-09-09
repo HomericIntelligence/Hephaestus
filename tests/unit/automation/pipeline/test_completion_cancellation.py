@@ -50,3 +50,36 @@ def test_worker_completion_keeps_the_cancellation_origin(
     else:
         assert result.error == "worker_crash: CancelledError: running operation stopped"
     assert completions.empty()
+
+
+@pytest.mark.parametrize("auxiliary", [False, True], ids=["main", "auxiliary"])
+def test_interrupted_shutdown_waits_for_running_work(auxiliary: bool) -> None:
+    """Interrupted shutdown must reap active work before it returns."""
+    completions: queue.Queue[tuple[JobHandle, JobResult]] = queue.Queue(maxsize=1)
+    shutdown = threading.Event()
+    if auxiliary:
+        pool = AuxiliaryWorkerPool(
+            size=1, shutdown=shutdown, completion_q=completions, athena_skill_executor=None
+        )
+    else:
+        pool = WorkerPool(size=1, shutdown=shutdown, completion_q=completions)
+    started = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+
+    def active_work() -> None:
+        started.set()
+        release.wait()
+
+    pool._executor.submit(active_work)
+    assert started.wait(timeout=1)
+    shutdown_thread = threading.Thread(
+        target=lambda: (pool.shutdown(mark_interrupted=True), stopped.set())
+    )
+    shutdown_thread.start()
+    try:
+        assert not stopped.wait(timeout=0.05)
+    finally:
+        release.set()
+        assert stopped.wait(timeout=2)
+        shutdown_thread.join(timeout=1)

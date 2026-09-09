@@ -187,7 +187,7 @@ def test_coordinator_supplies_distinct_bounded_factory_channels(tmp_path: Path) 
     assert auxiliary.completion_q is coordinator.auxiliary_completion_q
     assert auxiliary.completion_q.maxsize == 1
     assert main.completion_q is not auxiliary.completion_q
-    assert main.shutdown_event is coordinator.shutdown
+    assert main.shutdown_event is coordinator.worker_shutdown_event
     assert auxiliary.shutdown_event is coordinator.force_shutdown_event
 
 

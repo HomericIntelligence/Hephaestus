@@ -18,7 +18,8 @@ reordering them would be more complexity than benefit.
 If you change a stage to take meaningful action that depends on dependency
 order (e.g. an "implement-then-merge" pipeline that must merge #A before
 posting a plan against #B), wire :class:`DependencyResolver` into that
-stage too — see ``IssueImplementer.run`` for the canonical call shape.
+stage too. See ``pipeline.admission.order_for_implementation`` for the
+canonical call shape.
 """
 
 import logging

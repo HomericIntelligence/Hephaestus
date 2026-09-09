@@ -978,6 +978,63 @@ def _fake_in_flight_item(
 class TestFatalTeardown:
     """Fatal-exception exit must reap the pool + park in-flight items (#2059)."""
 
+    def test_fatal_teardown_keeps_ownership_until_both_lanes_stop(self, tmp_path: Path) -> None:
+        """Fatal teardown must not clear ownership while a lane is active."""
+
+        class BlockingShutdownPool(FakeWorkerPool):
+            def __init__(self) -> None:
+                super().__init__()
+                self.shutdown_started = threading.Event()
+                self.release_shutdown = threading.Event()
+
+            def shutdown(self, *, mark_interrupted: bool = True) -> None:
+                super().shutdown(mark_interrupted=mark_interrupted)
+                self.shutdown_started.set()
+                assert self.release_shutdown.wait(timeout=2)
+
+        main = BlockingShutdownPool()
+        auxiliary = BlockingShutdownPool()
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(main, auxiliary),
+            install_signals=False,
+        )
+        main_item = _issue_item(41, StageName.IMPLEMENTATION)
+        _fake_in_flight_item(coordinator, main_item)
+        auxiliary_item = _issue_item(42, StageName.LEARNING)
+        auxiliary_handle = JobHandle(
+            job=GitJob(repo="repo-a", op="remove_worktree", timeout_s=1),
+            on_done_state="DONE",
+        )
+        claim_test_item(coordinator, auxiliary_item)
+        coordinator.auxiliary_in_flight[auxiliary_handle] = auxiliary_item
+        coordinator._fatal = True
+
+        shutdown_thread = threading.Thread(target=coordinator._shutdown_pool)
+        shutdown_thread.start()
+        try:
+            assert main.shutdown_started.wait(timeout=1)
+            assert main_item in coordinator.in_flight.values()
+            assert auxiliary_item in coordinator.auxiliary_in_flight.values()
+            main.release_shutdown.set()
+            assert auxiliary.shutdown_started.wait(timeout=1)
+            assert main_item in coordinator.in_flight.values()
+            assert auxiliary_item in coordinator.auxiliary_in_flight.values()
+        finally:
+            main.release_shutdown.set()
+            auxiliary.release_shutdown.set()
+            shutdown_thread.join(timeout=2)
+
+        assert not shutdown_thread.is_alive()
+        assert coordinator.in_flight == {}
+        assert coordinator.auxiliary_in_flight == {}
+
     def test_fatal_exception_shuts_down_pool_and_parks_in_flight(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -999,8 +1056,10 @@ class TestFatalTeardown:
 
         exit_code = coordinator.run()
 
-        # Fatal, not interrupt: shutdown must NOT be set (would mis-report 130).
+        # Fatal teardown must signal active workers without reporting exit 130.
+        assert pool.shutdown_event.is_set()
         assert not coordinator.shutdown.is_set()
+        assert coordinator.force_shutdown_event.is_set()
         assert coordinator._fatal is True
         assert exit_code == 1
         # Pool reaped exactly once; in-flight maps cleared.
@@ -1011,6 +1070,22 @@ class TestFatalTeardown:
         assert in_flight.result is not None
         assert not in_flight.result.passed
         assert in_flight.result.reason == "resumable at implementation"
+
+    def test_fatal_during_signal_shutdown_preserves_interrupt_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fatal error after an operator signal must keep exit 130."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+
+        def interrupt_then_boom() -> None:
+            coordinator.shutdown.set()
+            raise RuntimeError("fatal after interrupt")
+
+        monkeypatch.setattr(coordinator, "_seed_pass", interrupt_then_boom)
+
+        assert coordinator.run() == 130
+        assert coordinator._fatal is True
+        assert coordinator.shutdown.is_set()
 
     def test_signal_teardown_shuts_down_pool_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
