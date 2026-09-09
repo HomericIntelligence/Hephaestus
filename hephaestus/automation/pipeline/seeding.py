@@ -44,6 +44,7 @@ from hephaestus.automation.github_api import (
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.requirements_recovery import (
     has_contaminated_issue_body,
     is_semantic_disposition_candidate,
@@ -97,6 +98,24 @@ def read_pending_implementation_go_audit(
     return receipt
 
 
+def read_review_rebase_record(github: Any, pr_number: int) -> RebaseReviewRecord | None:
+    """Read retained facts without accepting a serialized process proof."""
+    reader = getattr(type(github), "read_review_rebase_record", None)
+    if not callable(reader):
+        return None
+    try:
+        record = reader(github, pr_number)
+    except (ValueError, RuntimeError) as error:
+        raise IssueClassificationError(f"rebase review recovery blocked: {error}") from error
+    if record is not None and (
+        not isinstance(record, RebaseReviewRecord)
+        or record.pr_number != pr_number
+        or record.state != "active"
+    ):
+        raise IssueClassificationError("rebase review record is invalid")
+    return record
+
+
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
 #: issue is EXCLUDED from the pipeline (state:skip) — exclusion is NOT
 #: completion, so it is deliberately distinct from ``StageName.FINISHED``.
@@ -147,6 +166,7 @@ class IssueFacts:
     pr_has_implementation_no_go: bool = False
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
+    pending_review_rebase_record: RebaseReviewRecord | None = None
     body: str = ""
     authority_sanitized: bool = False
 
@@ -206,6 +226,7 @@ class SeedEntry:
     skip_tag_obligation: EpicSkipTagObligation | None = None
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
+    pending_review_rebase_record: RebaseReviewRecord | None = None
     non_code: bool = False
     non_code_labels: tuple[str, ...] = ()
     non_code_evidence_digest: str = ""
@@ -335,6 +356,8 @@ def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classificat
     # unarmed PR before returning to review; a matching current-process
     # proof attempts one ordinary conditional merge. No queue stage
     # creates, disables, adopts, or polls automatic merge.
+    if facts.pending_review_rebase_record is not None:
+        return StageName.MERGE_WAIT, f"#{facts.number} retained rebase requires host verification"
     if facts.pending_implementation_go_audit is not None:
         return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
     if facts.pr_has_implementation_go:
@@ -530,6 +553,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     pr_has_implementation_go = False
     pr_has_implementation_no_go = False
     pending_implementation_go_audit = None
+    pending_review_rebase_record = None
     pr_number: int | None = github.find_pr_for_issue(issue_number)
     if pr_number is not None:
         pr_is_open = True
@@ -537,6 +561,11 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
             github.pr_has_implementation_state_label(pr_number)
         )
         pending_implementation_go_audit = read_pending_implementation_go_audit(github, pr_number)
+        pending_review_rebase_record = read_review_rebase_record(github, pr_number)
+        if pending_review_rebase_record is not None and (
+            pending_review_rebase_record.issue_number != issue_number
+        ):
+            raise IssueClassificationError("rebase review issue does not match")
     else:
         pr_number = github.find_merged_pr_for_issue(issue_number)
         if pr_number is not None:
@@ -555,6 +584,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         pending_implementation_go_audit=pending_implementation_go_audit,
+        pending_review_rebase_record=pending_review_rebase_record,
         authority_sanitized=issue_data.get("authoritySanitized") is True,
     )
 
@@ -590,6 +620,7 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
         issue_body=facts.body,
         skip_tag_obligation=obligation,
         pending_implementation_go_audit=facts.pending_implementation_go_audit,
+        pending_review_rebase_record=facts.pending_review_rebase_record,
         pending_implementation_go_label_confirmed=bool(
             facts.pending_implementation_go_audit is not None and facts.pr_has_implementation_go
         ),
@@ -675,12 +706,25 @@ def seed_from_cli(
             continue
 
         pending_audit = None
+        rebase_record = None
         if github is not None:
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             pending_audit = read_pending_implementation_go_audit(github, pr)
+            rebase_record = read_review_rebase_record(github, pr)
         else:
             has_go = is_implementation_go(gh_pr_label_names(pr))
-        if pending_audit is not None:
+        if rebase_record is not None:
+            entries.append(
+                SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.MERGE_WAIT,
+                    reason=f"PR #{pr} retained rebase requires host verification",
+                    pr_number=pr,
+                    pending_review_rebase_record=rebase_record,
+                )
+            )
+        elif pending_audit is not None:
             entries.append(
                 SeedEntry(
                     kind="pr",

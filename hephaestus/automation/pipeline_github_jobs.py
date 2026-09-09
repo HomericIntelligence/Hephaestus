@@ -22,9 +22,13 @@ from hephaestus.automation.pipeline.github_jobs import (
     InspectAdoptedRemediationPrStateRequest,
     InspectDirtyDirectPrStateRequest,
     InspectRebaseConflictRequest,
+    InspectRebaseReviewRequest,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
+    PublishRebaseReviewRequest,
     RebaseConflictInspected,
+    RebaseReviewInspected,
+    RebaseReviewPublished,
     ReconcilePrReviewRequest,
     ReconcileScopeExpansionDependenciesRequest,
     RecoverRemediationReplyJournalRequest,
@@ -73,6 +77,8 @@ class PipelineGitHubJobRunner:
                 InspectDirtyDirectPrStateRequest,
                 InspectAdoptedRemediationPrStateRequest,
                 InspectRebaseConflictRequest,
+                PublishRebaseReviewRequest,
+                InspectRebaseReviewRequest,
             ),
         ) and (job.request.repository.casefold() != f"{self.org}/{job.repo}".casefold()):
             raise ValueError("dirty direct request repository does not match the runner")
@@ -151,13 +157,88 @@ class PipelineGitHubJobRunner:
             return RebaseConflictInspected(request, False, "rebase live state is unavailable")
         return RebaseConflictInspected(request, True, "exact GO conflict confirmed")
 
+    @staticmethod
+    def _publish_rebase_review(
+        request: PublishRebaseReviewRequest, github: StageGitHub
+    ) -> RebaseReviewPublished:
+        """Keep publication bound to the original live source and GO state."""
+        record = request.record
+
+        def admitted() -> bool:
+            state = github.gh_pr_state(record.pr_number)
+            return isinstance(state, dict) and (
+                state.get("state") == "OPEN"
+                and state.get("headRefOid") == record.source_head_sha
+                and state.get("baseRefOid") == record.target_base_sha
+                and state.get("baseRefName") == "main"
+                and "autoMergeRequest" in state
+                and state["autoMergeRequest"] is None
+                and github.pr_has_implementation_state_label(record.pr_number) == (True, False)
+            )
+
+        try:
+            if not admitted():
+                return RebaseReviewPublished(request, False)
+            github.publish_review_rebase_record(record)
+            if github.read_review_rebase_record(record.pr_number) != record or not admitted():
+                return RebaseReviewPublished(request, False)
+        except Exception:
+            return RebaseReviewPublished(request, False)
+        return RebaseReviewPublished(request, True)
+
+    @staticmethod
+    def _inspect_rebase_review(
+        request: InspectRebaseReviewRequest, github: StageGitHub
+    ) -> RebaseReviewInspected:
+        """Read the original audit and resulting identity twice without writes."""
+        record = request.record
+        try:
+            for _ in range(2):
+                state = github.gh_pr_state(record.pr_number)
+                if not isinstance(state, dict) or (
+                    state.get("state") != "OPEN"
+                    or state.get("headRefOid") != record.resulting_head_sha
+                    or state.get("baseRefOid") != record.target_base_sha
+                    or state.get("baseRefName") != "main"
+                    or "autoMergeRequest" not in state
+                    or state["autoMergeRequest"] is not None
+                    or github.pr_has_implementation_state_label(record.pr_number) != (True, False)
+                    or github.read_review_rebase_record(record.pr_number) != record
+                ):
+                    return RebaseReviewInspected(request, False)
+        except Exception:
+            return RebaseReviewInspected(request, False)
+        return RebaseReviewInspected(request, True)
+
+    def _run_rebase_request(
+        self,
+        request: InspectRebaseReviewRequest
+        | PublishRebaseReviewRequest
+        | InspectRebaseConflictRequest,
+        github: StageGitHub,
+    ) -> RebaseReviewInspected | RebaseReviewPublished | RebaseConflictInspected:
+        """Dispatch the closed rebase evidence operations."""
+        match request:
+            case InspectRebaseReviewRequest():
+                return self._inspect_rebase_review(request, github)
+            case PublishRebaseReviewRequest():
+                return self._publish_rebase_review(request, github)
+            case InspectRebaseConflictRequest():
+                return self._inspect_rebase_conflict(request, github)
+            case unknown:
+                return assert_never(unknown)
+
     def _run_request(self, job: GitHubJob, github: StageGitHub) -> GitHubReceipt:
         """Dispatch one closed request inside its operation deadline."""
         match job.request:
             case InspectAdoptedRemediationPrStateRequest():
                 return _read_adopted_remediation_state(job.request, github)
-            case InspectRebaseConflictRequest():
-                return self._inspect_rebase_conflict(job.request, github)
+            case (
+                InspectRebaseReviewRequest()
+                | PublishRebaseReviewRequest()
+                | InspectRebaseConflictRequest()
+            ):
+                return self._run_rebase_request(job.request, github)
             case InspectDirtyDirectPrStateRequest():
                 return _read_dirty_direct_state(job.request, github)
             case RecoverReplyJournalRequest():
@@ -1035,7 +1116,7 @@ class PipelineGitHubJobRunner:
             ):
                 return None
             cleared = revoke_bootstrap_go(
-                github, pr=request.pr_number, head_sha=request.reviewed_head_sha
+                github, pr=request.pr_number, head_sha=request.merge_head_sha
             )
             return (
                 "host_verification_bootstrap_revoked"
@@ -1072,7 +1153,7 @@ class PipelineGitHubJobRunner:
             head = str(state.get("headRefOid") or "")
             if not head:
                 return "missing_pr_head"
-            if head != request.reviewed_head_sha:
+            if head != request.merge_head_sha:
                 return "reviewed_head_drift"
             return state, head
 
@@ -1125,7 +1206,7 @@ class PipelineGitHubJobRunner:
                 mergeable,
                 status,
             )
-            if readiness_head != request.reviewed_head_sha:
+            if readiness_head != request.merge_head_sha:
                 return "readiness_wait", fingerprint
             if status in requestable and mergeable == "MERGEABLE":
                 if park_if_ready or request.declined_readiness_fingerprint == fingerprint:
@@ -1185,7 +1266,7 @@ class PipelineGitHubJobRunner:
 
         try:
             checks_green = github.required_checks_pass_for_head(
-                request.reviewed_head_sha,
+                request.merge_head_sha,
                 policy,
                 deadline_s=request.deadline_s,
                 cancellation=request.cancellation,
@@ -1226,7 +1307,7 @@ class PipelineGitHubJobRunner:
         try:
             result = github.merge_pr_if_head(
                 request.pr_number,
-                request.reviewed_head_sha,
+                request.merge_head_sha,
                 policy=current_policy,
                 pull_request_id=final_state.get("id"),
                 deadline_s=request.deadline_s,

@@ -1,6 +1,7 @@
 """Check the host rebase admission policy."""
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -235,3 +236,158 @@ def test_initial_conflict_continuation_does_not_publish(tmp_path: Path) -> None:
     assert result.value["head_sha"] == changed
     remote.assert_not_called()
     push.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [None, "tree_changed", "remote_changed", "audit_missing"])
+def test_published_rebase_returns_separate_review_proof(
+    tmp_path: Path, failure: str | None
+) -> None:
+    """A checked rebase keeps the old review head apart from the new head."""
+    from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.automation.review_audit import ReviewAudit
+
+    pool = object.__new__(WorkerPool)
+    from hephaestus.automation.pipeline.github_jobs import (
+        PublishRebaseReviewRequest,
+        RebaseReviewInspected,
+        RebaseReviewPublished,
+    )
+
+    pool._github_job_runner = MagicMock(
+        run=lambda job: (
+            RebaseReviewPublished(job.request, True)
+            if isinstance(job.request, PublishRebaseReviewRequest)
+            else RebaseReviewInspected(job.request, True)
+        )
+    )
+    head, base, rewritten, tree = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    audit = ReviewAudit("A", "Checks passed.", (), "", True, "GO")
+    job = GitJob(
+        repo="repo",
+        expected_repository="test/repo",
+        op="rebase",
+        timeout_s=60,
+        kwargs={
+            "cwd": tmp_path,
+            "repo_root": str(tmp_path),
+            "rebase_reason": "review_conflict",
+            "branch": "issue-branch",
+            "pr_number": 8,
+            "issue_number": 7,
+            "publish_rebased_head": True,
+            "expected_remote_sha": head,
+            "reviewed_head_sha": head,
+            "reviewed_base_sha": "e" * 40,
+            "review_audit": None if failure == "audit_missing" else audit,
+        },
+    )
+    with (
+        patch.object(pool, "_revalidate_review_conflict", return_value=None),
+        patch.object(
+            pool, "_git_fetch_main", return_value=JobResult(ok=True, value={"head_sha": base})
+        ),
+        patch.object(pool, "_sync_writer_to_expected_remote_head", return_value=None),
+        patch.object(pool, "_read_publish_head", side_effect=[head, head, head, rewritten]),
+        patch.object(
+            pool,
+            "_read_remote_branch_head",
+            return_value=head if failure == "remote_changed" else rewritten,
+        ),
+        patch.object(pool, "_authenticated_remote_revalidator", return_value=lambda: ({}, ())),
+        patch(f"{WP}.git_utils.is_clean_working_tree", return_value=True),
+        patch(
+            f"{WP}.git_utils.run",
+            side_effect=lambda cmd, **kw: MagicMock(
+                returncode=1 if "--is-ancestor" in cmd else 0,
+                stdout=("f" * 40 if failure == "tree_changed" and "rev-parse" in cmd else tree)
+                + "\n",
+            ),
+        ),
+        patch(f"{WP}._required_git_signing_env", return_value={}),
+        patch(f"{WP}.git_utils.rebase_worktree_onto", return_value=True),
+        patch(f"{WP}.git_utils.push_head_to_branch"),
+    ):
+        result = pool._git_rebase_once(job)
+    if failure is not None:
+        assert not result.ok
+        assert result.error
+        return
+    assert result.ok
+    assert "retained_rebase_review_proof" in result.value
+    proof = result.value["retained_rebase_review_proof"]
+    assert proof.reviewed_head_sha == head
+    assert proof.resulting_head_sha == rewritten
+    assert proof.resulting_tree_sha == tree
+    assert proof.target_base_sha == base
+
+
+@pytest.mark.parametrize("publication_ok", [True, False])
+def test_review_record_is_visible_before_the_rebase_push(
+    tmp_path: Path, publication_ok: bool
+) -> None:
+    """A crash after push must leave a durable record for recovery."""
+    from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.automation.review_audit import ReviewAudit
+
+    pool = object.__new__(WorkerPool)
+    events: list[str] = []
+
+    def publish(job: Any) -> object:
+        from hephaestus.automation.pipeline.github_jobs import (
+            InspectRebaseReviewRequest,
+            RebaseReviewInspected,
+            RebaseReviewPublished,
+        )
+
+        if isinstance(job.request, InspectRebaseReviewRequest):
+            return RebaseReviewInspected(job.request, True)
+        events.append("record")
+        return RebaseReviewPublished(job.request, publication_ok)
+
+    pool._github_job_runner = MagicMock(run=publish)
+    head, base, rewritten, tree = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    job = GitJob(
+        repo="repo",
+        expected_repository="test/repo",
+        op="rebase",
+        timeout_s=60,
+        kwargs={
+            "cwd": tmp_path,
+            "repo_root": str(tmp_path),
+            "rebase_reason": "review_conflict",
+            "branch": "issue-branch",
+            "pr_number": 8,
+            "issue_number": 7,
+            "publish_rebased_head": True,
+            "expected_remote_sha": head,
+            "reviewed_head_sha": head,
+            "reviewed_base_sha": "e" * 40,
+            "review_audit": ReviewAudit("A", "Checks passed.", (), "", True, "GO"),
+        },
+    )
+    with (
+        patch.object(pool, "_revalidate_review_conflict", return_value=None),
+        patch.object(
+            pool, "_git_fetch_main", return_value=JobResult(ok=True, value={"head_sha": base})
+        ),
+        patch.object(pool, "_sync_writer_to_expected_remote_head", return_value=None),
+        patch.object(pool, "_read_publish_head", side_effect=[head, head, head, rewritten]),
+        patch.object(pool, "_read_remote_branch_head", return_value=rewritten),
+        patch.object(pool, "_authenticated_remote_revalidator", return_value=lambda: ({}, ())),
+        patch(f"{WP}.git_utils.is_clean_working_tree", return_value=True),
+        patch(
+            f"{WP}.git_utils.run",
+            side_effect=lambda cmd, **kw: MagicMock(
+                returncode=1 if "--is-ancestor" in cmd else 0, stdout=tree + "\n"
+            ),
+        ),
+        patch(f"{WP}._required_git_signing_env", return_value={}),
+        patch(f"{WP}.git_utils.rebase_worktree_onto", return_value=True),
+        patch(
+            f"{WP}.git_utils.push_head_to_branch",
+            side_effect=lambda *a, **kw: events.append("push"),
+        ),
+    ):
+        result = pool._git_rebase_once(job)
+    assert result.ok is publication_ok
+    assert events == (["record", "push"] if publication_ok else ["record"])

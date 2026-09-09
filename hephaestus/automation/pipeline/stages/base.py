@@ -76,6 +76,8 @@ from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
 
 if TYPE_CHECKING:
+    from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
+
     from ..coordinator_types import PipelineConfig
 
 __all__ = [
@@ -478,6 +480,14 @@ class StageGitHub(Protocol):
 
     def pending_implementation_go_audit(self, pr_number: int) -> Any:
         """Return the actor-owned pending audit receipt, if one exists."""
+        pass
+
+    def publish_review_rebase_record(self, record: RebaseReviewRecord) -> None:
+        """Store rebase facts for fresh host verification after a restart."""
+        pass
+
+    def read_review_rebase_record(self, pr_number: int) -> RebaseReviewRecord | None:
+        """Read authenticated rebase facts without restoring merge authority."""
         pass
 
     def clear_pending_implementation_go_audit(self, pr_number: int, head_sha: str) -> None:

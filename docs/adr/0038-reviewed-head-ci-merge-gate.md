@@ -32,7 +32,10 @@ exact-head status evidence ─────► current CI merge gate
 
 1. The PR is open, targets `main`, has an explicitly absent
    `autoMergeRequest`, and has an exclusive `state:implementation-go` label.
-2. The current PR head equals the process-local reviewed head.
+2. The current PR head equals the process-local reviewed head, or a host-verified
+   rebase proof binds it to that reviewed head. The original review identity
+   does not change. The host verifies the complete resulting tree against the
+   original reviewed change and the recorded new base.
 3. No unresolved review thread exists. A stable effective-policy read combines
    classic branch protection with each applicable active ruleset. At least one
    enforcement source must require review-thread resolution without a bypass
@@ -59,7 +62,7 @@ exact-head status evidence ─────► current CI merge gate
    conversation safety to this fresh equal policy. It then repeats the
    open-head-label admission. It sends the conditional request immediately after
    that admission, with no intervening mutable read.
-6. The queue sends one normal REST merge request with `sha=<reviewed head>` and
+6. The queue sends one normal REST merge request with `sha=<merge head>` and
    `merge_method=squash`. The request is the only merge-state mutation owned by
    the queue. The queue does not enable or manage native auto-merge.
 
@@ -87,7 +90,22 @@ The single-maintainer workflow can merge a reviewed head with passing required
 status evidence without a second GitHub user. Head drift, missing or failed
 required status evidence, unresolved threads, untrusted PR state, and
 incomplete reads still stop the merge path. A non-required failed Check Run can
-produce an `UNSTABLE` merge state, but does not stop this gate. A process restart
-still loses the process-local proof and sends the PR through fresh review.
+produce an `UNSTABLE` merge state, but does not stop this gate.
+
+A rebase alone does not require another implementation review. The host keeps
+an actor-owned receipt that binds the original GO audit and the resulting
+commit. After a restart, the host authenticates that audit and verifies the
+rebase again before it restores merge eligibility. Receipt data alone cannot
+restore authority. Missing, malformed, revoked, or mismatched retained evidence
+stops recovery without another review attempt.
+
+The merge head is the reviewed head for an ordinary review. For a verified
+rebase, it is the recorded resulting head. Required CI/CD, queue admission, and
+the conditional merge request must all use this merge head. A new merge head
+resets readiness deadlines and queue admission evidence.
+
+The ADR-0046 bootstrap proof remains process-local and bound to its original
+head. This exception cannot transfer through a rebase receipt. An unverified
+rebase stops with an evidence gap. Substantive corrections require review.
 Scope-expansion publication uses a generic stable review-list query. No
 queue-owned operator-authorization implementation remains.

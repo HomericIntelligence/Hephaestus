@@ -13,6 +13,12 @@ from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
 )
 from hephaestus.automation.issue_timeline import _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE
+from hephaestus.automation.rebase_review_receipt import (
+    REBASE_REVIEW_PREFIX,
+    RebaseReviewRecord,
+    parse_review_rebase_record,
+    render_review_rebase_record,
+)
 from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
 
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -21,6 +27,60 @@ from .review_journal import has_exact_leading_marker
 
 class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
     """Own durable pending-publication receipts independently of label state."""
+
+    def publish_review_rebase_record(self, record: RebaseReviewRecord) -> None:
+        """Store rebase facts and confirm their authenticated readback."""
+        if record.repository != f"{self.org}/{self.repo}" or record.state != "active":
+            raise ValueError("rebase record does not match the repository")
+        self.read_review_rebase_record(record.pr_number)
+        owned = [
+            str(comment.get("body", ""))
+            for comment in self._repo_issue_comments(record.pr_number)
+            if self._comment_owned_by_viewer(comment)
+        ]
+        self._require_original_rebase_audit(record, owned)
+        marker, body = render_review_rebase_record(record)
+        self.upsert_issue_comment(record.pr_number, marker, body)
+        if self.read_review_rebase_record(record.pr_number) != record:
+            raise RuntimeError("rebase record readback failed")
+
+    def read_review_rebase_record(self, pr_number: int) -> RebaseReviewRecord | None:
+        """Read one owned record and its original audit without restoring proof."""
+        owned = [
+            str(comment.get("body", ""))
+            for comment in self._repo_issue_comments(pr_number)
+            if self._comment_owned_by_viewer(comment)
+        ]
+        records = [
+            parse_review_rebase_record(body)
+            for body in owned
+            if body.startswith(REBASE_REVIEW_PREFIX)
+        ]
+        if not records:
+            return None
+        if len(records) != 1 or records[0] is None:
+            raise RuntimeError("rebase records are ambiguous")
+        record = records[0]
+        if (
+            record.repository != f"{self.org}/{self.repo}"
+            or record.pr_number != pr_number
+            or record.state != "active"
+        ):
+            raise RuntimeError("rebase record is revoked or does not match")
+        self._require_original_rebase_audit(record, owned)
+        return record
+
+    @staticmethod
+    def _require_original_rebase_audit(record: RebaseReviewRecord, owned: list[str]) -> None:
+        """Require one unchanged owned audit for the original reviewed head."""
+        _, audit_body = render_implementation_go_audit(
+            record.audit, pr_number=record.pr_number, head_sha=record.reviewed_head_sha
+        )
+        matching_audits = [
+            body for body in owned if body.partition("\n")[0] == record.original_audit_id
+        ]
+        if matching_audits != [audit_body]:
+            raise RuntimeError("original rebase review audit is absent or changed")
 
     def persist_pending_implementation_go_audit(
         self, pr_number: int, head_sha: str, audit: ReviewAudit

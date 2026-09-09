@@ -72,7 +72,7 @@ import shlex
 import sys
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -100,6 +100,7 @@ from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_pa
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
+from hephaestus.automation.pipeline.rebase_review import REBASE_REVIEW_PROOF_KEY, RebaseReviewProof
 from hephaestus.automation.prompts.address_review import (
     get_address_review_prompt,
     get_remediation_reply_recovery_prompt,
@@ -111,6 +112,7 @@ from hephaestus.automation.prompts.implementation import (
     get_implementation_prompt,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
+from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.remediation_prepublication import (
     canonical_source_receipt_json,
     source_receipt_digest,
@@ -121,6 +123,7 @@ from hephaestus.automation.remediation_recovery import (
     RemediationReviewInput,
 )
 from hephaestus.automation.reply_limits import MAX_ADDRESS_REPLY_CHARS
+from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.review_journal import PlanDiscoveryStatus
 from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
@@ -2082,9 +2085,49 @@ class ImplementationStage(Stage):
         return Continue(next_state=next_state)
 
     @staticmethod
-    def _finish_rebase(item: WorkItem) -> StepResult:
+    def _finish_rebase(item: WorkItem, ctx: StageContext) -> StepResult:
         """Resume normal work after one authorized rebase."""
-        reason = item.payload.pop("rebase_reason", None)
+        reason = item.payload.get("rebase_reason")
+        proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
+        if item.payload.pop("rebase_unchanged_review", False):
+            item.payload.pop("rebase_reason", None)
+            item.payload.pop("post_review_rebase_required", None)
+            return StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
+        if isinstance(proof, RebaseReviewProof) and item.payload.pop("rebase_proof_ready", False):
+            audit = item.payload.get("review_audit")
+            if (
+                proof.repository != f"{ctx.org}/{item.repo}"
+                or proof.issue_number != item.issue
+                or proof.pr_number != item.pr
+                or proof.reviewed_head_sha != item.payload.get("reviewed_pr_head_sha")
+                or proof.resulting_head_sha != item.payload.get("_impl_source_revision")
+                or not isinstance(audit, ReviewAudit)
+                or not is_clean_go_review(audit)
+                or item.payload.get("host_verification_bootstrap_proof") is not None
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_proof_invalid")
+            try:
+                record = RebaseReviewRecord(**asdict(proof), audit=audit)
+                ctx.github.publish_review_rebase_record(record)
+            except Exception:
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_publication_failed")
+            for key in (
+                "rebase_reason",
+                "post_review_rebase_required",
+                "rebase_conflict",
+                "rebase_agent_started",
+                "merge_readiness_deadline_s",
+                "merge_readiness_head_sha",
+                "merge_readiness_polls",
+                "merge_readiness_declined_fingerprint",
+                "merge_queue_admitted_head_sha",
+                "merge_queue_admitted_proof_generation",
+            ):
+                item.payload.pop(key, None)
+            return StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
+        if item.payload.pop("rebase_review_failure", None) is not None:
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_unverified")
+        item.payload.pop("rebase_reason", None)
         for key in (
             "post_review_rebase_required",
             "rebase_conflict",
@@ -2094,6 +2137,7 @@ class ImplementationStage(Stage):
             _SYNC_RESTORED_WRITER_BEFORE_REBASE,
             "reviewed_pr_head_sha",
             "reviewed_pr_node_id",
+            REBASE_REVIEW_PROOF_KEY,
             "host_verification_bootstrap_proof",
         ):
             item.payload.pop(key, None)
@@ -2118,10 +2162,16 @@ class ImplementationStage(Stage):
         """Require GO and a live conflict for the exact reviewed head."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
-        if item.payload.get("reviewed_pr_head_sha") != head:
-            return ImplementationStage._finish_rebase(item)
+        proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
+        expected = (
+            proof.resulting_head_sha
+            if isinstance(proof, RebaseReviewProof)
+            else item.payload.get("reviewed_pr_head_sha")
+        )
+        if expected != head:
+            return ImplementationStage._finish_rebase(item, ctx)
         if ctx.github.pr_has_implementation_state_label(item.pr) != (True, False):
-            return ImplementationStage._finish_rebase(item)
+            return ImplementationStage._finish_rebase(item, ctx)
         readiness = ctx.github.gh_pr_merge_readiness(item.pr)
         if (
             not isinstance(readiness, dict)
@@ -2133,7 +2183,9 @@ class ImplementationStage(Stage):
         if readiness.get("mergeable") != "CONFLICTING" and readiness.get(
             "mergeStateStatus"
         ) not in {"DIRTY", "CONFLICTING"}:
-            return ImplementationStage._finish_rebase(item)
+            item.payload.pop("rebase_reason", None)
+            item.payload.pop("post_review_rebase_required", None)
+            return StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
         return None
 
     def _rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -2144,11 +2196,11 @@ class ImplementationStage(Stage):
         if item.payload.get("rebase_conflict"):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if item.payload.pop(_REBASE_HEAD_DRIFT, None):
-            return self._finish_rebase(item)
+            return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop("rebase_complete", None):
-            return self._finish_rebase(item)
+            return self._finish_rebase(item, ctx)
         if reason == "implementation_start" and (
             item.pr is not None or item.payload.get("implementation_started")
         ):
@@ -2193,6 +2245,12 @@ class ImplementationStage(Stage):
             "pr_number": item.pr,
             "repo_root": str(ctx.paths.repo_root),
         }
+        kwargs.update(
+            reviewed_head_sha=item.payload.get("reviewed_pr_head_sha"),
+            reviewed_base_sha=item.payload.get("reviewed_pr_base_sha"),
+            review_audit=item.payload.get("review_audit"),
+            host_verification_bootstrap_proof=item.payload.get("host_verification_bootstrap_proof"),
+        )
         if reason == "implementation_start" and DIRECT_SCOPE_RESERVATION_KEY in item.payload:
             kwargs["direct_scope_reservation"] = item.payload[DIRECT_SCOPE_RESERVATION_KEY]
         kwargs["expected_remote_sha" if item.pr is not None else "expected_head_sha"] = (
@@ -2263,7 +2321,7 @@ class ImplementationStage(Stage):
                 "rebase_expected_remote_sha",
             ):
                 item.payload.pop(key, None)
-            return self._finish_rebase(item)
+            return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_conflict_agent_error", None):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if not item.payload.pop("rebase_conflict_agent_complete", False):
@@ -2280,6 +2338,13 @@ class ImplementationStage(Stage):
                 "issue_number": item.issue,
                 "repo_root": str(ctx.paths.repo_root),
                 "rebase_reason": item.payload.get("rebase_reason"),
+                "pr_number": item.pr,
+                "reviewed_head_sha": item.payload.get("reviewed_pr_head_sha"),
+                "reviewed_base_sha": item.payload.get("reviewed_pr_base_sha"),
+                "review_audit": item.payload.get("review_audit"),
+                "host_verification_bootstrap_proof": item.payload.get(
+                    "host_verification_bootstrap_proof"
+                ),
                 "direct_scope_reservation": (
                     item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
                     if item.payload.get("rebase_reason") == "implementation_start"
@@ -3201,6 +3266,32 @@ class ImplementationStage(Stage):
         if item.state == REBASE_AGENT_WAIT:
             item.payload["rebase_agent_started"] = result.ok
             return
+
+        if item.state in {REBASE_WAIT, REBASE_CONTINUE_WAIT} and result.ok:
+            value = result.value if isinstance(result.value, dict) else {}
+            proof = value.get(REBASE_REVIEW_PROOF_KEY)
+            prior = item.payload.get(REBASE_REVIEW_PROOF_KEY)
+            prior_head = (
+                prior.resulting_head_sha
+                if isinstance(prior, RebaseReviewProof)
+                else item.payload.get("reviewed_pr_head_sha")
+            )
+            if (
+                value.get("rebased") is False
+                and value.get("published") is False
+                and value.get("head_sha") == prior_head
+                and is_clean_go_review(item.payload.get("review_audit"))
+            ):
+                item.payload["rebase_unchanged_review"] = True
+            elif isinstance(proof, RebaseReviewProof) and value.get("published") is True:
+                item.payload[REBASE_REVIEW_PROOF_KEY] = proof
+                item.payload["rebase_proof_ready"] = True
+            elif item.payload.get("reviewed_pr_head_sha") and value.get(
+                "head_sha"
+            ) != item.payload.get("reviewed_pr_head_sha"):
+                item.payload["rebase_review_failure"] = value.get(
+                    "rebase_review_failure", "proof_missing"
+                )
 
         if item.state == REBASE_WAIT:
             result = _consume_initial_rebase_reservation(item, result)

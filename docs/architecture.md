@@ -1428,8 +1428,10 @@ in-memory reviewed-head proof before each request. It may issue a bounded
 sequence (default: five) of policy-selected server merge requests. Admission
 for every request requires an open
 `main` PR, an explicitly unarmed record, an exclusive implementation-GO
-label, the current-process reviewed-head proof, no unresolved review threads,
-and complete passing required status evidence for that head. A read-only
+label, the current-process reviewed-head proof or a verified retained rebase
+proof, no unresolved review threads, and complete passing required status
+evidence for the merge head. The merge head is the original reviewed commit
+or the separate resulting commit in a host-verified rebase proof. A read-only
 readiness wait may park for the `--poll-max-wait` period before a request. Its
 default is 1,200 seconds (20 minutes) for each reviewed head. The wait does not
 consume the merge budget or authorize a merge. After status evidence
@@ -1498,8 +1500,18 @@ stateDiagram-v2
 Architectural contract:
 
 - A current-process review proof is bound to the reviewed head commit.
+- A retained rebase proof keeps that original review identity and binds a
+  separate resulting commit. The host compares the complete resulting tree
+  with the original reviewed change applied to the recorded new base.
+- CI/CD, merge queue admission, and conditional merge requests use the resulting
+  commit after a verified rebase. Readiness and queue state cannot transfer
+  from the previous merge head.
+- A rebase cannot transfer an ADR-0046 bootstrap exception. Unverified rebase
+  evidence stops the continuation. A rebase alone does not require another
+  source review.
 - Existing external merge ownership is preserved.
-- Missing or drifted proof returns approval to PR review with zero label writes.
+- Missing ordinary review proof returns approval to PR review with zero label
+  writes. Invalid retained rebase evidence stops recovery without a review retry.
 - A matching eligibility label, current-process proof, and passing exact-head
   required status evidence can submit a bounded sequence of policy-selected
   server merge requests, each only after fresh admission.
@@ -1712,17 +1724,19 @@ continues.
 
 ### Merge-wait restart semantics
 
-The queue is in-memory. A restart re-seeds normally through the ordinary
-[`classifier`](../hephaestus/automation/pipeline/seeding.py) and does not recover
-the process-local reviewed-head proof. The implementation-GO label and native
-review records survive the restart only as non-authoritative context. The loop
-requires a fresh automated review to recreate the process-local proof before
-merge admission. A direct PR seed or restart therefore cannot use a durable
-implementation-GO label by itself. Merge wait first requires a
-confirmed-unarmed read, then returns the PR to review without mutating its
-labels. Other-run auto-merge requests are
-[blocked without adoption or mutation](../hephaestus/automation/pipeline/stages/merge_wait.py)
-and require operator handling.
+The queue is in-memory. A restart re-seeds through the ordinary
+[`classifier`](../hephaestus/automation/pipeline/seeding.py). An actor-owned
+retained rebase record supplies recovery inputs, not a review proof. The host
+must authenticate the original published GO audit and verify the complete
+rebase tree again. Only the new host result can restore merge eligibility.
+The original reviewed commit stays unchanged in the restored record.
+
+Malformed, revoked, foreign, mismatched, or incomplete retained evidence stops
+recovery. It does not start another review. The implementation-GO label alone
+cannot restore authority. Without a retained rebase record, the existing
+review recovery rules remain applicable. Every merge still requires fresh
+head, label, thread, CI/CD, and repository-policy checks. Other-run auto-merge
+requests remain blocked without adoption or mutation.
 
 ---
 

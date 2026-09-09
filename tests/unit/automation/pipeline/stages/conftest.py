@@ -42,6 +42,7 @@ from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
 )
+from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
@@ -191,6 +192,7 @@ class FakeStageGitHub(FakeGitHub):
         self._thread_replies: dict[str, list[dict[str, str]]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
+        self.review_rebase_records: dict[int, RebaseReviewRecord] = {}
         self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
 
     def _issue_labels(self, issue_number: int) -> set[str]:
@@ -690,6 +692,15 @@ class FakeStageGitHub(FakeGitHub):
     ) -> PendingImplementationGoAudit | None:
         """Return the fake durable recovery record."""
         return self.pending_go_audits.get(pr_number)
+
+    def publish_review_rebase_record(self, record: RebaseReviewRecord) -> None:
+        """Store the fake durable rebase record."""
+        self.review_rebase_records[record.pr_number] = record
+        self._log("publish_review_rebase_record", record.pr_number, record.resulting_head_sha)
+
+    def read_review_rebase_record(self, pr_number: int) -> RebaseReviewRecord | None:
+        """Return retained facts without a process proof."""
+        return self.review_rebase_records.get(pr_number)
 
     def clear_pending_implementation_go_audit(self, pr_number: int, head_sha: str) -> None:
         """Clear only a matching exact-head fake recovery record."""

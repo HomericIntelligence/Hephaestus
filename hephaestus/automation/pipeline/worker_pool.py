@@ -128,6 +128,11 @@ from hephaestus.automation.pipeline.rebase_policy import (
     RebasePolicySelector,
     RebaseValidationPolicy,
 )
+from hephaestus.automation.pipeline.rebase_review import (
+    REBASE_REVIEW_PROOF_KEY,
+    RebaseReviewProof,
+    verify_rebase_tree,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
     implementation_remediation_reply_handoff_journal_entry,
@@ -162,6 +167,7 @@ from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
+from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -5056,6 +5062,9 @@ class WorkerPool:
         elif job.op == "fetch_main":
             return self._git_fetch_main(job)
 
+        elif job.op == "verify_rebase_review":
+            return self._git_verify_rebase_review(job)
+
         elif job.op == "rebase":
             return self._git_rebase(job)
 
@@ -5893,6 +5902,15 @@ class WorkerPool:
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
+        record = (
+            self._prepare_rebase_review_publication(
+                job, base_sha=base_sha, source_head=expected, resulting_head=source_sha
+            )
+            if publish
+            else None
+        )
+        if isinstance(record, JobResult):
+            return record
         if publish:
             revalidate = self._authenticated_remote_revalidator(
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
@@ -5908,14 +5926,214 @@ class WorkerPool:
                 remote_config=remote_config,
                 revalidate_remote=revalidate,
             )
-        return JobResult(
+        completed = JobResult(
             ok=True,
-            value={
-                "rebased": True,
-                "published": publish,
-                "head_sha": source_sha,
-            },
+            value={"rebased": True, "published": publish, "head_sha": source_sha},
         )
+        return self._retain_rebase_review(job, completed, record)
+
+    def _inspect_rebase_review_record(self, job: GitJob, record: object) -> bool:
+        """Read fresh authenticated audit, record, label, and PR evidence."""
+        from hephaestus.automation.pipeline.github_jobs import (
+            InspectRebaseReviewRequest,
+            RebaseReviewInspected,
+        )
+        from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
+
+        runner = getattr(self, "_github_job_runner", None)
+        root = job.kwargs.get("repo_root")
+        if (
+            runner is None
+            or not isinstance(root, (str, Path))
+            or not isinstance(record, RebaseReviewRecord)
+        ):
+            return False
+        try:
+            request = InspectRebaseReviewRequest(record)
+            receipt = runner.run(
+                GitHubJob(
+                    repo=job.repo,
+                    repo_root=Path(root).resolve(strict=True),
+                    request=request,
+                    descr="inspect_rebase_review_record",
+                )
+            )
+            return (
+                isinstance(receipt, RebaseReviewInspected)
+                and receipt.request == request
+                and receipt.verified
+            )
+        except Exception:
+            return False
+
+    def _git_verify_rebase_review(self, job: GitJob) -> JobResult:
+        """Check a durable record against fresh remote and tree evidence."""
+        from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
+
+        record = job.kwargs.get("record")
+        if (
+            not isinstance(record, RebaseReviewRecord)
+            or record.repository != job.transport_repository
+            or record.state != "active"
+            or not is_clean_go_review(record.audit)
+        ):
+            return JobResult(ok=False, error="rebase review record is invalid")
+        root = job.kwargs.get("repo_root")
+        if not isinstance(root, (str, Path)) or not Path(root).is_dir():
+            return JobResult(ok=False, error="rebase review repository is unavailable")
+        cwd = Path(root)
+        if not self._inspect_rebase_review_record(job, record):
+            return JobResult(ok=False, error="rebase review record or audit changed")
+        try:
+            env, config = self._authenticated_remote_git_configuration(
+                cwd=cwd, expected_repo=record.repository, timeout=job.timeout_s
+            )
+            ref = f"refs/pull/{record.pr_number}/head"
+
+            def read_head() -> bool:
+                fields = git_utils.run(
+                    ["git", *config, "ls-remote", "--refs", "origin", ref],
+                    cwd=cwd,
+                    timeout=job.timeout_s,
+                    env=env,
+                ).stdout.split()
+                return fields == [record.resulting_head_sha, ref]
+
+            if not read_head():
+                return JobResult(ok=False, error="rebase review remote head changed")
+            for revision in (
+                record.reviewed_head_sha,
+                record.reviewed_base_sha,
+                record.target_base_sha,
+                record.resulting_head_sha,
+            ):
+                git_utils.run(
+                    ["git", *config, "fetch", "--no-tags", "origin", revision],
+                    cwd=cwd,
+                    timeout=job.timeout_s,
+                    env=env,
+                )
+            tree = verify_rebase_tree(
+                cwd,
+                reviewed_head_sha=record.reviewed_head_sha,
+                reviewed_base_sha=record.reviewed_base_sha,
+                target_base_sha=record.target_base_sha,
+                resulting_head_sha=record.resulting_head_sha,
+                timeout=job.timeout_s,
+            )
+            if tree != record.resulting_tree_sha or not read_head():
+                return JobResult(ok=False, error="rebase review tree or remote head changed")
+            if not self._inspect_rebase_review_record(job, record):
+                return JobResult(ok=False, error="rebase review record or audit changed")
+            fields = {
+                name: getattr(record, name) for name in RebaseReviewProof.__dataclass_fields__
+            }
+            return JobResult(ok=True, value=RebaseReviewProof(**fields))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return JobResult(ok=False, error="rebase review verification failed")
+
+    def _prepare_rebase_review_publication(
+        self, job: GitJob, *, base_sha: str, source_head: str, resulting_head: str
+    ) -> object:
+        """Store exact rebase facts before the host publishes the new head."""
+        from hephaestus.automation.pipeline.github_jobs import (
+            PublishRebaseReviewRequest,
+            RebaseReviewPublished,
+        )
+        from hephaestus.automation.rebase_review_receipt import (
+            RebaseReviewRecord,
+            original_audit_identity,
+        )
+
+        if job.kwargs.get("reviewed_head_sha") is None:
+            return None
+        audit = job.kwargs.get("review_audit")
+        if not isinstance(audit, ReviewAudit) or not is_clean_go_review(audit):
+            return JobResult(ok=False, error="initial rebase review audit is invalid")
+        if job.kwargs.get("host_verification_bootstrap_proof") is not None:
+            return JobResult(ok=False, error="bootstrap review cannot transfer across a rebase")
+        cwd = Path(str(job.kwargs.get("cwd") or ""))
+        reviewed = job.kwargs.get("reviewed_head_sha")
+        reviewed_base = job.kwargs.get("reviewed_base_sha")
+        if (
+            not isinstance(reviewed, str)
+            or not isinstance(reviewed_base, str)
+            or not all(_is_full_commit_sha(v) for v in (resulting_head, reviewed, reviewed_base))
+        ):
+            return JobResult(ok=False, error="rebase review identity is invalid")
+        tree = verify_rebase_tree(
+            cwd,
+            reviewed_head_sha=reviewed,
+            reviewed_base_sha=reviewed_base,
+            target_base_sha=base_sha,
+            resulting_head_sha=resulting_head,
+            timeout=job.timeout_s,
+        )
+        if tree is None:
+            return JobResult(ok=False, error="rebase tree changed; source decision required")
+        try:
+            pr = job.kwargs.get("pr_number")
+            issue = job.kwargs.get("issue_number")
+            if not isinstance(pr, int) or not isinstance(issue, int):
+                return JobResult(ok=False, error="rebase issue or PR identity is invalid")
+            record = RebaseReviewRecord(
+                repository=job.transport_repository,
+                issue_number=issue,
+                pr_number=pr,
+                reviewed_head_sha=reviewed,
+                reviewed_base_sha=reviewed_base,
+                source_head_sha=source_head,
+                target_base_sha=base_sha,
+                resulting_head_sha=resulting_head,
+                resulting_tree_sha=tree,
+                original_audit_id=original_audit_identity(pr, reviewed),
+                audit=audit,
+            )
+            runner = getattr(self, "_github_job_runner", None)
+            root = job.kwargs.get("repo_root")
+            if runner is None or not isinstance(root, (str, Path)):
+                return JobResult(ok=False, error="rebase record publication is unavailable")
+            request = PublishRebaseReviewRequest(record)
+            receipt = runner.run(
+                GitHubJob(
+                    repo=job.repo,
+                    repo_root=Path(root).resolve(strict=True),
+                    request=request,
+                    descr="publish_rebase_review_record",
+                )
+            )
+            if (
+                not isinstance(receipt, RebaseReviewPublished)
+                or receipt.request != request
+                or not receipt.published
+            ):
+                return JobResult(ok=False, error="rebase record publication failed")
+            return record
+        except Exception:
+            return JobResult(ok=False, error="rebase record publication failed")
+
+    def _retain_rebase_review(self, job: GitJob, result: JobResult, record: object) -> JobResult:
+        """Return a typed review proof only after the exact remote readback."""
+        from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
+
+        if record is None:
+            return result
+        if not isinstance(record, RebaseReviewRecord) or not isinstance(result.value, dict):
+            return JobResult(ok=False, error="rebase review record is invalid")
+        remote = self._read_remote_branch_head(
+            Path(str(job.kwargs.get("cwd") or "")),
+            remote="origin",
+            branch=str(job.kwargs.get("branch") or ""),
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        if result.value.get("published") is not True or remote != record.resulting_head_sha:
+            return JobResult(ok=False, error="rebase publication is unverified")
+        if not self._inspect_rebase_review_record(job, record):
+            return JobResult(ok=False, error="rebase review record or audit changed")
+        fields = {name: getattr(record, name) for name in RebaseReviewProof.__dataclass_fields__}
+        value = {**result.value, REBASE_REVIEW_PROOF_KEY: RebaseReviewProof(**fields)}
+        return replace(result, value=value)
 
     def _sync_writer_to_expected_remote_head(
         self,
@@ -6336,6 +6554,15 @@ class WorkerPool:
         if source_sha == expected_remote_sha:
             return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
 
+        record = (
+            self._prepare_rebase_review_publication(
+                job, base_sha=base_sha, source_head=expected_remote_sha, resulting_head=source_sha
+            )
+            if publish
+            else None
+        )
+        if isinstance(record, JobResult):
+            return record
         if publish:
             revalidate_remote = self._authenticated_remote_revalidator(
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
@@ -6351,7 +6578,7 @@ class WorkerPool:
                 remote_config=remote_config,
                 revalidate_remote=revalidate_remote,
             )
-        return JobResult(
+        completed = JobResult(
             ok=True,
             value={
                 "rebased": True,
@@ -6360,6 +6587,7 @@ class WorkerPool:
                 "rebase_policy": policy.name if policy is not None else None,
             },
         )
+        return self._retain_rebase_review(job, completed, record)
 
     @staticmethod
     def _parse_rebase_continuation(

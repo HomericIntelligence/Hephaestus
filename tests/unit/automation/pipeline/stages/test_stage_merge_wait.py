@@ -1513,3 +1513,36 @@ def test_exhausted_merge_budget_does_not_enter_readiness_wait(
 def test_stage_github_exposes_a_conditional_merge_adapter(make_ctx: Any) -> None:
     """The stage contract has an explicit adapter rather than a CLI merge escape hatch."""
     assert callable(getattr(make_ctx().github, "merge_pr_if_head", None))
+
+
+def test_retained_review_checks_the_resulting_rebase_head(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Required checks use the new head while the initial review stays fixed."""
+    from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
+
+    item = _reviewed_item(make_work_item)
+    item.payload["retained_rebase_review_proof"] = RebaseReviewProof(
+        repository="test-org/test-repo",
+        issue_number=item.issue,
+        pr_number=item.pr,
+        reviewed_head_sha="a" * 40,
+        reviewed_base_sha="b" * 40,
+        source_head_sha="a" * 40,
+        target_base_sha="b" * 40,
+        resulting_head_sha="c" * 40,
+        resulting_tree_sha="d" * 40,
+        original_audit_id=(
+            f"<!-- hephaestus-implementation-go-audit:pr={item.pr}:head={'a' * 40} -->"
+        ),
+    )
+    github = _ConditionalGitHub(
+        states=[_open_pr("c" * 40)],
+        readiness={**_open_pr("c" * 40), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+        required_checks_green=False,
+    )
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github, org="test-org"))
+    assert result == StageOutcome(Disposition.BLOCKED, "required_checks_not_green")
+    assert github.checked_heads == ["c" * 40]
+    assert github.merge_attempts == []
+    assert item.payload["reviewed_pr_head_sha"] == "a" * 40
