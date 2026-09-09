@@ -201,10 +201,11 @@ the pytest summary to make sure that the command collected those tests. For
 example:
 
 ```bash
-just test
+uv run pytest --override-ini="addopts=" tests/unit/utils/test_general_utils.py -v
 ```
 
-`just test` runs the fast test selection used by pre-commit and pull-request
+The override clears the default fast selection so the named tests can run.
+Use the paths for your changed tests. `just test` runs the fast selection used by pre-commit and pull-request
 CI. Nightly CI runs the remaining functional, package, shell, and coverage
 tests.
 

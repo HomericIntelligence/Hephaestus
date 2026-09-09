@@ -546,7 +546,7 @@ run_lint() {
 run_unit() {
     log_step "Unit tests + structure/coverage checks"
     run_in_container bash -c '\
-        uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not nightly" \
+        uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not performance and not contract" \
             --cov=hephaestus --cov-report=xml --cov-report=term-missing && \
         uv run hephaestus-check-test-structure && \
         uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml'
@@ -555,7 +555,8 @@ run_unit() {
 run_integration() {
     log_step "Integration tests"
     run_in_container bash -c '\
-        uv run pytest tests/integration --require-cli --override-ini="addopts=" -v --strict-markers -m "not nightly and not artifact"'
+        uv run pytest tests/integration --require-cli --override-ini="addopts=" -v --strict-markers \
+            -m "not precommit and not performance and not contract and not artifact and not codex_release_artifact"'
 }
 
 run_cli() {

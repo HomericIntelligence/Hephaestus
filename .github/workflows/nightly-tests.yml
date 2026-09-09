@@ -158,13 +158,20 @@ jobs:
           uv run pytest tests/integration --override-ini="addopts="
           --basetemp=build/pytest-artifacts -v --strict-markers
           -m "artifact and not codex_release_artifact"
+      - name: Build CI image
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
       - name: Validate offline Codex artifacts
-        env:
-          HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT: ${{ github.workspace }}/build/test-fixtures/codex-sigstore/rust-v0.153.4
         run: >
-          uv run pytest tests/integration --override-ini="addopts="
-          --basetemp=build/pytest-codex-artifacts -v --strict-markers
-          -m codex_release_artifact
+          podman run --rm --network=none --tmpfs /tmp:rw,size=4g,mode=1777
+          -v "$PWD:/workspace:Z"
+          -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/codex-sigstore/rust-v0.153.4:ro"
+          -v "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro"
+          -e HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4
+          -e UV_NO_SYNC=1 -e PYTHONPATH=/workspace
+          --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run pytest tests/integration
+          --override-ini="addopts=" --basetemp=build/pytest-codex-artifacts
+          -v --strict-markers -m codex_release_artifact
 
   notify-failure:
     name: Open or update failure tracking issue

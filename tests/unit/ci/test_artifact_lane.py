@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import tomllib
 from pathlib import Path
 from typing import Any, cast
@@ -62,6 +63,21 @@ def test_required_workflow_has_no_standalone_test_jobs() -> None:
         "build",
     }
     assert retired_jobs.isdisjoint(jobs)
+
+
+def test_nightly_codex_artifacts_keep_the_offline_fixture_boundary() -> None:
+    """Artifact admission runs without network or writable fixture aliases."""
+    workflow = _load_workflow(REPO_ROOT / ".github" / "workflows" / "nightly-tests.yml")
+    argv = shlex.split(_step_run(workflow, "build", "Validate offline Codex artifacts"))
+    assert argv[:2] == ["podman", "run"]
+    assert "--network=none" in argv
+    mounts = {argv[index + 1] for index, arg in enumerate(argv) if arg in {"-v", "--volume"}}
+    fixture = "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4"
+    assert f"{fixture}:/codex-sigstore/rust-v0.153.4:ro" in mounts
+    assert f"{fixture}:/workspace/build/test-fixtures/codex-sigstore/rust-v0.153.4:ro" in mounts
+    assert "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in argv
+    assert "UV_NO_SYNC=1" in argv
+    assert "podman build" in _step_run(workflow, "build", "Build CI image")
 
 
 def test_release_integration_job_uses_the_full_release_selection() -> None:

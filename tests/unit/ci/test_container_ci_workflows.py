@@ -77,20 +77,10 @@ def test_build_artifact_step_uses_the_provisioned_fixture() -> None:
         "build",
         "Validate offline Codex artifacts",
     )
-    validation_definition = _workflow_step_definition(
-        "nightly-tests.yml",
-        "build",
-        "Validate offline Codex artifacts",
-    )
-
     assert "scripts/provision_codex_sigstore_fixture.py" in provision
     assert provision_definition["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
     assert "build/test-fixtures/codex-sigstore/rust-v0.153.4" in provision
-    assert validation_definition["env"] == {
-        "HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT": (
-            "${{ github.workspace }}/build/test-fixtures/codex-sigstore/rust-v0.153.4"
-        )
-    }
+    assert "-e HEPHAESTUS_CODEX_SIGSTORE_FIXTURE_ROOT=/codex-sigstore/rust-v0.153.4" in validation
     assert "-m codex_release_artifact" in validation
     assert "--basetemp=build/pytest-codex-artifacts" in validation
     generic = _workflow_step(

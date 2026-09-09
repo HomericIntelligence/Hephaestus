@@ -7,8 +7,8 @@ This directory contains GitHub-specific configuration files for Hephaestus.
 ### Lint Job (`workflows/_required.yml`)
 
 Runs the full pre-commit hook suite (ruff, mypy, security checks) as the
-required `lint` job on pull requests. Pre-commit does not run pytest. The
-required `unit-tests` and `integration-tests` jobs own full-suite execution.
+required `lint` job on pull requests. Pre-commit runs the shared fast pytest
+selection. Nightly CI owns full unit coverage and the remaining functional tests.
 
 ### Security Workflow (`workflows/security.yml`)
 
@@ -30,13 +30,12 @@ sync. `nightly-tests.yml` owns full coverage, remaining functional tests,
 package and installed-CLI checks, shell tests, and Pi conformance. Cryptographic
 commit signatures are enforced by the active `homeric-main-baseline` ruleset. The
 automation loop runs `$athena:pr-review` and owns the
-`state:implementation-go` label. `merge_wait` may then make a bounded sequence
-(default: five) of individual SHA-conditional ordinary REST squash-merge
-requests. Every request has fresh reviewed-head, open-`main`, unarmed, and
-exclusive-label admission; only retryable HTTP 405 readiness and unresolved
-transport ambiguity can timer-park a later request. It never invokes `gh pr
-merge`, arms native auto-merge, manages a merge queue, or uses an administrator
-bypass. The privileged label-event auto-merge workflow remains removed.
+`state:implementation-go` label. `merge_wait` uses exact-head queue admission
+when the effective ruleset requires a merge queue. Direct merge requires strict
+update protection that the actor cannot bypass. Each request requires fresh
+reviewed-head, open-`main`, unarmed, exclusive-label, and required-check evidence.
+The loop does not invoke `gh pr merge`, arm native auto-merge, or use an
+administrator bypass. The privileged label-event auto-merge workflow remains removed.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 

@@ -37,9 +37,11 @@ protection from a source that the current actor cannot bypass.
 
 ## Queue pre-PR source checks
 
-Developer pre-commit hooks do not run pytest. Before a developer creates a PR,
-the developer runs each new or changed test and verifies collection and success.
-The required CI/CD test jobs are the full-suite authority.
+Developer pre-commit hooks and required PR lint run the shared fast pytest
+selection. Before creating a PR, run each new or changed test and verify
+collection and success. Use `--override-ini="addopts="` for focused tests outside
+the fast selection. Nightly CI owns full unit coverage and the remaining
+functional tests, as specified in [ADR-0049](../adr/0049-fast-pr-nightly-tests.md).
 
 Before publishing a Hephaestus implementation, the queue runs the fixed command
 `bash scripts/run_ci_local.sh all --rebuild`. Rebuilding the

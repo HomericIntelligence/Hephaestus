@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tomllib
@@ -1099,6 +1100,31 @@ def _engine_calls(tmp_path: Path) -> list[list[str]]:
         offset += size
     assert offset == len(values)
     return calls
+
+
+@pytest.mark.parametrize(
+    ("subset", "directory", "selection"),
+    [
+        ("unit", "unit", "not performance and not contract"),
+        (
+            "integration",
+            "integration",
+            "not precommit and not performance and not contract and not artifact "
+            "and not codex_release_artifact",
+        ),
+    ],
+)
+def test_local_full_lanes_retain_nightly_tests(
+    tmp_path: Path, subset: str, directory: str, selection: str
+) -> None:
+    """Explicit full lanes include normal tests marked for nightly execution."""
+    result, _ = _run_runner(tmp_path, subset)
+    assert result.returncode == 0, result.stderr
+    command = next(
+        call[-1] for call in _engine_calls(tmp_path) if f"pytest tests/{directory}" in call[-1]
+    )
+    argv = shlex.split(command)
+    assert argv[argv.index("-m") + 1] == selection
 
 
 @pytest.mark.parametrize("shell", ["/bin/bash", "/opt/homebrew/bin/bash"])

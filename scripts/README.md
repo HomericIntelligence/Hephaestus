@@ -53,8 +53,11 @@ through installed `hephaestus-*` console scripts.
 
 ### Local CI
 
+- **`run_fast_tests.sh`** — Run the shared fast pytest selection for pre-commit,
+  `just test`, and required PR lint. The script clears default pytest options
+  and selects the `precommit` marker.
 - **`run_ci_local.sh`** — Run the locally executable required source checks or
-  a named subset. Its `build` subset runs the required artifact lifecycle lane
+  a named subset. Its `build` subset runs the nightly artifact lifecycle lane
   rather than a separate package-build approximation. Project-toolchain
   commands use a Podman/Docker image that the runner builds automatically when
   absent. Pass `--rebuild` to rebuild the image from the current checkout; the
@@ -65,7 +68,7 @@ through installed `hephaestus-*` console scripts.
   these tools to provision and extract the fixed Codex artifact before it
   starts the network-free test container.
 - **`provision_codex_sigstore_fixture.py`** — Provision and validate the fixed
-  offline Codex release evidence for the required artifact test lane.
+  offline Codex release evidence for the nightly artifact test lane.
 - **`prepare_host_verification_pyxis_image.py`** — Build `ci/Containerfile`
   with local Podman or Docker and export a local Enroot squashfs image for
   Linux PR-review host verification. The command builds an exact committed

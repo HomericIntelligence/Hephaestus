@@ -59,5 +59,6 @@ numbered, and listed here.
 | [0044](0044-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |
 | [0045](0045-one-use-dirty-direct-writer-continuation.md) | One-use dirty direct-writer continuation | Draft |
 | [0046](0046-review-host-verification-bootstrap.md) | Target-specific source-review bootstrap | Accepted |
-| [0047](0047-ci-owned-full-pytest-suites.md) | CI owns full pytest suite execution | Accepted |
+| [0047](0047-ci-owned-full-pytest-suites.md) | CI owns full pytest suite execution | Partly superseded by 0049 |
 | [0048](0048-automation-rebase-triggers.md) | Automation rebase triggers | Accepted |
+| [0049](0049-fast-pr-nightly-tests.md) | Fast PR tests and nightly full validation | Accepted |
