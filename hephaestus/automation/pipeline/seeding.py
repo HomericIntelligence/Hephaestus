@@ -130,6 +130,15 @@ def pending_review_supersedes_rebase(
     )
 
 
+def pending_review_entry_stage(
+    audit: PendingImplementationGoAudit | None, record: RebaseReviewRecord | None
+) -> StageName:
+    """Select audit publication or host verification for a pending review."""
+    if audit is not None and (record is None or pending_review_supersedes_rebase(audit, record)):
+        return StageName.PR_REVIEW
+    return StageName.MERGE_WAIT
+
+
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
 #: issue is EXCLUDED from the pipeline (state:skip) — exclusion is NOT
 #: completion, so it is deliberately distinct from ``StageName.FINISHED``.

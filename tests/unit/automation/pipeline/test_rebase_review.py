@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline.rebase_review import verify_rebase_tree
+from hephaestus.automation.rebase_review_verification import verify_rebase_tree
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -93,7 +93,7 @@ def test_restart_rebuilds_proof_from_remote_and_original_tree(
     """A durable record needs fresh remote and tree evidence."""
     from unittest.mock import patch
 
-    from hephaestus.automation import git_utils
+    import hephaestus.automation.git_utils as git_utils
     from hephaestus.automation.pipeline.jobs import GitJob
     from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
     from hephaestus.automation.pipeline.worker_pool import WorkerPool

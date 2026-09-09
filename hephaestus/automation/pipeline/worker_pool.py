@@ -131,7 +131,6 @@ from hephaestus.automation.pipeline.rebase_policy import (
 from hephaestus.automation.pipeline.rebase_review import (
     REBASE_REVIEW_PROOF_KEY,
     RebaseReviewProof,
-    verify_rebase_tree,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
@@ -145,6 +144,7 @@ from hephaestus.automation.pipeline.tool_scopes import (
     tool_scope_for,
 )
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
+from hephaestus.automation.rebase_review_verification import verify_rebase_tree
 from hephaestus.automation.remediation_prepublication import (
     RemediationPretestCandidate,
     canonical_source_receipt_json,

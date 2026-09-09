@@ -753,15 +753,7 @@ class SourceCoordinator(_CoordinatorHost):
             if rebase_record is not None and rebase_record.issue_number != issue_number:
                 raise _seeding.IssueClassificationError("rebase review issue does not match")
             if pending_audit is not None or has_go or rebase_record is not None:
-                stage_name = (
-                    ct.StageName.PR_REVIEW
-                    if pending_audit is not None
-                    and (
-                        rebase_record is None
-                        or _seeding.pending_review_supersedes_rebase(pending_audit, rebase_record)
-                    )
-                    else ct.StageName.MERGE_WAIT
-                )
+                stage_name = _seeding.pending_review_entry_stage(pending_audit, rebase_record)
                 reason = (
                     f"PR #{pr} has a pending implementation-go audit"
                     if pending_audit is not None
