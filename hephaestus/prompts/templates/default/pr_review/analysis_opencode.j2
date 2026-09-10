@@ -1,0 +1,51 @@
+Analyze PR #{{ pr_number }} with {{ review_context_kind }} #{{ issue_number }}.
+
+{{ untrusted_notice }}
+
+Issue:
+{{ issue_body_block }}
+
+Prior guidance:
+{{ advise_findings_block }}
+
+PR description:
+{{ pr_description_block }}
+
+PR diff:
+{{ pr_diff_block }}
+
+Host validation receipts:
+{{ host_verifications_block }}
+
+A receipt is local evidence only when it has `ok: true`, `status: passed`, and
+the reviewed `head_sha`. A skipped, missing, or failed receipt is an evidence
+gap. Do not run local checks in this read-only review.
+
+Find correctness, security, architecture, scope, and false-green test defects.
+Inspect every changed path and its full source from the current checkout.
+Return `BLOCKED` if you cannot recover the full source or requirements.
+Use `GO` only after you complete that full review.
+Use inline comments only for changed lines. Use these severities:
+`critical` for a security, correctness, or data-loss defect; `major` for a
+blocking design or maintenance defect; `minor` for a small real defect; and
+`nitpick` for a cosmetic preference.
+
+{{ nitpick_directive }}
+
+For a fix that must be in a separate issue, use `scope_expansions` with
+`title`, `reason`, `source_path`, `source_line`, `required_paths`, and
+`acceptance_criteria`. If a comment removes unrelated work, add
+`scope_retraction_paths` with all paths to restore.
+
+{{ terse_output_directive }}
+
+End with exactly one fenced JSON object. Do not write a textual decision.
+Use `GO` only when no blocking defect or evidence gap remains.
+
+```json
+{"verdict":"GO","grade":"A","summary":"LGTM","comments":[],"scope_expansions":[]}
+```
+
+Each comment needs `path`, changed `line`, `side":"RIGHT"`, `severity`, and
+`body`. Grade must be `A` through `F`. Verdict must be `GO`, `NOGO`, or
+`BLOCKED`. Keep `summary` at 200 characters or fewer. Put the JSON block last.

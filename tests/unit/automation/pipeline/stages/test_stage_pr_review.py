@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pytest
 
 import hephaestus.automation.pipeline.stages.pr_review_jobs as pr_review_jobs
+from hephaestus.agents import runtime as agent_runtime
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import parse_addressed_replies
 from hephaestus.automation.pipeline.github_jobs import (
@@ -1683,6 +1684,42 @@ class TestPrReviewStageStep:
         assert result.job.parse is not None
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
+
+    def test_opencode_review_job_selects_compact_prompt_contract(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The pipeline tells the prompt builder which direct provider runs."""
+        stage = PrReviewStage()
+        ctx = make_ctx(config_overrides={"agent": "opencode"})
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+
+        result = _dispatch_review(stage, item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.agent == "opencode"
+        assert result.job.prompt_kwargs["reviewer_provider"] == "opencode"
+        assert len(result.job.prompt_builder(**result.job.prompt_kwargs)) <= 5_000
+
+        response = """```json
+{"verdict":"GO","grade":"A","summary":"LGTM","comments":[],"scope_expansions":[]}
+```"""
+        events = json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_review",
+                "part": {"type": "text", "text": response},
+            }
+        )
+        session_id, final_text = agent_runtime._parse_opencode_json_events(events)
+        assert result.job.parse is not None
+        parsed = result.job.parse(final_text)
+        audit = parsed.audit
+
+        assert session_id == "ses_review"
+        assert isinstance(audit, ReviewAudit)
+        assert audit.valid
+        assert audit.verdict == "GO"
 
     def test_review_wait_reuses_the_reviewer_session_across_rounds(
         self, make_ctx: Any, make_work_item: Any

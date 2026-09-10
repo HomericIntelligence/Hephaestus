@@ -361,10 +361,11 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             SourceLane.REVIEW,
             revision=str(item.payload.get("reviewed_pr_head_sha") or ""),
         )
+        reviewer_agent = agent_provider(ctx, "reviewer")
         job = AgentJob(
             repo=item.repo,
             issue=issue,
-            agent=agent_provider(ctx, "reviewer"),
+            agent=reviewer_agent,
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_bounded_pr_review_analysis_prompt,
             cwd=workspace.cwd,
@@ -398,6 +399,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 ),
                 "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
+                "reviewer_provider": reviewer_agent,
             },
             parse=_parse_review_response,  # structural audit parsed in-worker
             descr="review",

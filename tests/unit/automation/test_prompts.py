@@ -109,6 +109,56 @@ def test_pr_analysis_prompt_example_is_accepted_by_review_parser() -> None:
     assert audit.findings
 
 
+def test_opencode_pr_analysis_prompt_is_compact_fenced_and_json_only() -> None:
+    """OpenCode receives bounded context without a skill self-invocation."""
+    inputs = {
+        "PR_DIFF": "DIFF_PAYLOAD_7B3F",
+        "ISSUE_BODY": "ISSUE_PAYLOAD_91C2",
+        "PR_DESCRIPTION": "DESCRIPTION_PAYLOAD_06DA",
+        "ADVISE_FINDINGS": "ADVISE_PAYLOAD_E448",
+        "HOST_VERIFICATIONS": '[{"receipt_payload":"2f85"}]',
+    }
+    rendered = prompts.get_pr_review_analysis_prompt(
+        pr_number=2,
+        issue_number=1,
+        pr_diff=inputs["PR_DIFF"],
+        issue_body=inputs["ISSUE_BODY"],
+        pr_description=inputs["PR_DESCRIPTION"],
+        advise_findings=inputs["ADVISE_FINDINGS"],
+        host_verifications_json=inputs["HOST_VERIFICATIONS"],
+        reviewer_provider="opencode",
+    )
+
+    _assert_fenced(rendered, inputs)
+    trusted_text = _FENCE_RE.sub("", rendered)
+    assert "$athena:pr-review" not in trusted_text
+    assert "invoke external plugins" not in trusted_text.lower()
+    assert len(rendered) <= 5_000
+    assert parse_review_audit(rendered).valid
+
+
+def test_opencode_bounded_pr_analysis_prompt_limits_large_context() -> None:
+    """Large review inputs stay below OpenCode's accepted request size."""
+    rendered = prompts.build_bounded_pr_review_analysis_prompt(
+        pr_number=2,
+        issue_number=1,
+        pr_diff="diff-line\n" * 4_000,
+        issue_body="issue " * 2_000,
+        pr_description="description " * 2_000,
+        advise_findings="guidance " * 2_000,
+        host_verifications_json=json.dumps(
+            [{"head_sha": "a" * 40, "ok": True, "status": "passed"}] * 200
+        ),
+        reviewer_provider="opencode",
+    )
+
+    assert len(rendered) <= 5_000
+    assert "[... PR diff truncated ...]" in rendered
+    assert "Inspect every changed path and its full source from the current checkout." in rendered
+    assert "Return `BLOCKED` if you cannot recover the full source or requirements." in rendered
+    assert parse_review_audit(rendered).valid
+
+
 def test_address_prompt_example_is_accepted_by_address_parser() -> None:
     """The address response example satisfies exhaustive reply validation."""
     rendered = prompts.get_address_review_prompt(
