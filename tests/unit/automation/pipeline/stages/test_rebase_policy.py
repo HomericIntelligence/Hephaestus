@@ -80,7 +80,7 @@ def test_initial_rebase_returns_to_first_implementation(make_ctx: Any, make_work
 
 
 def test_manual_conflict_restarts_from_captured_base(make_ctx: Any, make_work_item: Any) -> None:
-    """The manual conflict retry uses the base from the aborted attempt."""
+    """The manual conflict retry keeps agent success across the coordinator callback order."""
     stage = ImplementationStage()
     item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
     item.payload["rebase_reason"] = "manual"
@@ -101,8 +101,8 @@ def test_manual_conflict_restarts_from_captured_base(make_ctx: Any, make_work_it
     request = stage.step(item, make_ctx())
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, AgentJob)
-    item.state = request.on_done_state
     stage.on_job_done(item, JobResult(ok=True), make_ctx())
+    item.state = request.on_done_state
     assert stage.step(item, make_ctx()) == Continue(next_state="REBASE_WAIT")
     item.state = "REBASE_WAIT"
     request = stage.step(item, make_ctx())
@@ -110,6 +110,32 @@ def test_manual_conflict_restarts_from_captured_base(make_ctx: Any, make_work_it
     assert isinstance(request.job, GitJob)
     assert request.job.kwargs["resolve_conflicts"] is True
     assert request.job.kwargs["expected_base_sha"] == "b" * 40
+
+
+def test_manual_conflict_retains_failed_preparation_across_callback_order(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A failed conflict preparation stops after the coordinator advances the state."""
+    stage = ImplementationStage()
+    item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+    item.payload.update(
+        rebase_reason="manual",
+        rebase_restart_required=True,
+        rebase_restart_base_sha="b" * 40,
+        rebase_restart_head_sha="a" * 40,
+    )
+    _prepared_writer(item)
+
+    request = stage.step(item, make_ctx())
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, AgentJob)
+    stage.on_job_done(item, JobResult(ok=False, error="agent failed"), make_ctx())
+    assert item.payload["rebase_agent_started"] is False
+    item.state = request.on_done_state
+
+    assert stage.step(item, make_ctx()) == StageOutcome(
+        Disposition.FINISH_FAIL, "rebase_agent_failed"
+    )
 
 
 def test_reviewed_conflict_starts_an_agent_before_rebase(
