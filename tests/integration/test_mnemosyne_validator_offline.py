@@ -140,12 +140,21 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
 
         initial_inputs = bound_inputs(source)
         commands: list[list[str]] = []
+        sandbox_calls = 0
 
         def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal sandbox_calls
             commands.append(argv)
             environment = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
             validator_argv = [str(environment / "bin/python"), "scripts/validate_plugins.py"]
-            validator_run = argv[0] == "/usr/bin/sandbox-exec" and argv[3] == validator_argv[0]
+            sandbox_run = argv[0] == "/usr/bin/sandbox-exec"
+            validator_run = sandbox_run and sandbox_calls == 1
+            if sandbox_run:
+                if sandbox_calls == 0:
+                    assert argv[3:] == ["/usr/bin/true"]
+                sandbox_calls += 1
+            if validator_run:
+                assert argv[3:] == validator_argv
             artifacts = (
                 _digests(environment.parent, Path(sys.base_prefix).resolve())
                 if validator_run
@@ -156,7 +165,6 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
                 assert not (Path(kwargs["env"]["TMPDIR"]) / "validator-sentinel").exists()
             assert result.returncode == 0, result.stderr
             if validator_run:
-                assert argv[3:] == validator_argv
                 sentinel = Path(kwargs["env"]["TMPDIR"]) / "validator-sentinel"
                 assert json.loads(sentinel.read_text()) == {"wheel": 42, "prefix": str(environment)}
                 assert _digests(environment.parent, Path(sys.base_prefix).resolve()) == artifacts
@@ -164,16 +172,20 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
             return result
 
         evidence = MnemosynePluginValidator(runner=runner).validate(source)
+        assert sandbox_calls == 3
         assert evidence == (
             " ".join(commands[-2][3:]),
             " ".join(commands[-1][3:]),
         )
+        successful_status = subprocess.check_output(["git", "status", "--porcelain"], cwd=source)
+        assert successful_status == b""
         lesson.write_text("This text has no heading.\n")
         try:
             with pytest.raises(LearnDeliveryError, match="learning markdownlint failed"):
                 MnemosynePluginValidator().validate(source)
         finally:
             lesson.write_text("# Lesson\n")
-        assert subprocess.check_output(["git", "status", "--porcelain"], cwd=source) == b""
+        failure_status = subprocess.check_output(["git", "status", "--porcelain"], cwd=source)
+        assert failure_status == b""
         with pytest.raises(TimeoutError):
             listener.accept()
