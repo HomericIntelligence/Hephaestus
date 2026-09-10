@@ -4068,9 +4068,13 @@ class TestAgentErrorHandling:
         assert result.error == "review-session-lost"
         assert result.session_lost is True
 
-    def test_codex_event_failure_is_explicit_agent_error(self, pool: WorkerPool) -> None:
+    def test_codex_event_failure_is_explicit_agent_error(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
         """Structured Codex failures cross the worker boundary as agent errors."""
-        job = _agent_job(agent="codex")
+        job = _agent_job(agent="codex", cwd=tmp_path)
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
