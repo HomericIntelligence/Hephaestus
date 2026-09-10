@@ -9,6 +9,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 PRE_COMMIT_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
 
 
@@ -94,6 +95,27 @@ def test_pre_commit_cache_keeps_one_absolute_path_between_stages() -> None:
     assert "chmod -R a+rwX /opt/pre-commit-cache" in runtime
     assert "/root/.cache/pre-commit" not in runtime
     assert "/home/ci/.cache/pre-commit" not in runtime
+
+
+def test_direct_build_context_contains_only_containerfile_inputs() -> None:
+    """Direct image builds must exclude volatile and private workspace files."""
+    patterns = [
+        line
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+
+    assert patterns == [
+        "**",
+        "!.pre-commit-config.yaml",
+        "!README.md",
+        "!pyproject.toml",
+        "!uv.lock",
+        "!ci/",
+        "!ci/Containerfile",
+        "!hephaestus/",
+        "!hephaestus/**",
+    ]
 
 
 def test_runtime_tools_follow_the_requested_build_architecture() -> None:
