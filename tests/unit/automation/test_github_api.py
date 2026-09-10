@@ -2173,8 +2173,8 @@ class TestAssertBranchCommitsSignedApiFallback:
         ]
         verified.assert_not_called()
 
-    def test_no_range_resolves_defers_without_crashing(self) -> None:
-        """An unavailable local range defers to server policy without a local verdict."""
+    def test_no_range_resolves_fails_closed(self) -> None:
+        """An unavailable commit range cannot bypass signature verification."""
         run_git = Mock(
             side_effect=[
                 subprocess.CompletedProcess([], 0, "", ""),
@@ -2182,9 +2182,10 @@ class TestAssertBranchCommitsSignedApiFallback:
             ]
         )
         verified = Mock(side_effect=AssertionError("unexpected API check"))
-        prs_module._assert_branch_commits_signed(
-            "feature-branch", base="main", run_git=run_git, verify_commit=verified
-        )
+        with pytest.raises(ValueError, match="Could not resolve commits"):
+            prs_module._assert_branch_commits_signed(
+                "feature-branch", base="main", run_git=run_git, verify_commit=verified
+            )
         assert run_git.call_count == 5
         verified.assert_not_called()
 

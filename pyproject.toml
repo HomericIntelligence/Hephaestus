@@ -319,13 +319,15 @@ exclude_dirs = ["tests", "build", ".venv"]
 #   B404/B403 (import subprocess/pickle) - subprocess and pickle are core to
 #     this repo's CLI-orchestration and cache-format helpers; use is scoped by
 #     the more specific B603/B301 checks below, not this import-level flag.
-#   B603/B607 (subprocess call / partial executable path) - all call sites use
-#     git, gh, gpg, or claude with fixed literal argument lists (no shell=True,
-#     no untrusted input in argv[0]); genuine shell-injection risk (shell=True)
-#     is HIGH severity and is unaffected by this threshold.
+#   B603/B607 (subprocess call / partial executable path) - command execution
+#     uses no shell=True and fixed or repository-controlled argument vectors.
+#     Callers use approved environment builders where needed, and bounded
+#     timeouts or process-group tracking where children can persist.
 #   B101 (assert) - internal invariant checks, not security boundaries.
 #   B105 (hardcoded password string) - false positives on non-secret constant
 #     strings; audited individually, see hephaestus/ci/bandit_low_baseline.json.
+#   B110 (try, except, pass) - terminal cleanup must not mask the caller's
+#     failure or process exit. The timeout branch prints a bounded warning.
 #   B112 (try/except/continue) - intentional retry-loop control flow.
 #   B311 (random) - non-cryptographic random for retry jitter
 #     (hephaestus/utils/retry.py:80); any future security-sensitive use of

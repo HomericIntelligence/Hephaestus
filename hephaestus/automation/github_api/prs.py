@@ -72,8 +72,12 @@ def _assert_branch_commits_signed(
         run_git(["git", "fetch", "origin", base, "--quiet"])
     except (CancelledError, subprocess.TimeoutExpired):
         raise
-    except Exception:
-        pass
+    except Exception as exc:
+        _api.logger.warning(
+            "Could not refresh base %r before commit signature verification: %s",
+            base,
+            exc,
+        )
 
     candidate_ranges = (
         f"origin/{base}..origin/{branch}",
@@ -89,13 +93,10 @@ def _assert_branch_commits_signed(
             break
 
     if result is None:
-        _api.logger.warning(
-            "Could not resolve any commit range for branch %r (vs %s); "
-            "skipping local sign check and deferring to GitHub verification.",
-            branch,
-            base,
+        raise ValueError(
+            f"Could not resolve commits for branch {branch!r} against base {base!r}; "
+            "commit signatures cannot be verified"
         )
-        return
 
     bad: list[tuple[str, str]] = []
     for line in (result.stdout or "").splitlines():

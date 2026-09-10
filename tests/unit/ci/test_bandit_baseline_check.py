@@ -45,33 +45,48 @@ def test_count_by_test_id_empty_results() -> None:
     assert count_by_test_id({"errors": [], "results": []}) == {}
 
 
-def test_diff_flags_new_test_id() -> None:
-    """A test ID absent from the baseline is a regression."""
-    problems = diff_against_baseline({"B311": 1, "B999": 1}, {"B311": 1})
-    assert problems == ["REGRESSION: B999 is new (0 -> 1)"]
-
-
-def test_diff_flags_increased_count() -> None:
-    """A count higher than the baseline is a regression."""
-    problems = diff_against_baseline({"B607": 30}, {"B607": 23})
-    assert problems == ["REGRESSION: B607 count increased (23 -> 30)"]
-
-
-def test_diff_flags_decreased_count_as_stale() -> None:
-    """A lower observed count identifies a stale baseline entry."""
-    problems = diff_against_baseline({"B607": 10}, {"B607": 23})
-    assert problems == ["STALE BASELINE: B607 count decreased (23 -> 10)"]
-
-
-def test_diff_flags_missing_current_test_id_as_stale() -> None:
-    """A baseline ID absent from the report identifies a stale entry."""
-    problems = diff_against_baseline({}, {"B607": 23})
-    assert problems == ["STALE BASELINE: B607 is no longer observed (23 -> 0)"]
-
-
-def test_diff_clean_when_matching() -> None:
-    """Matching counts produce no drift."""
-    assert diff_against_baseline({"B311": 1, "B607": 23}, {"B311": 1, "B607": 23}) == []
+@pytest.mark.parametrize(
+    ("current", "baseline", "expected"),
+    [
+        pytest.param(
+            {"B311": 1, "B607": 23},
+            {"B311": 1, "B607": 23},
+            [],
+            id="unchanged",
+        ),
+        pytest.param(
+            {"B607": 30},
+            {"B607": 23},
+            ["REGRESSION: B607 count increased (23 -> 30)"],
+            id="increased-count",
+        ),
+        pytest.param(
+            {"B607": 10},
+            {"B607": 23},
+            ["STALE BASELINE: B607 count decreased (23 -> 10)"],
+            id="decreased-count",
+        ),
+        pytest.param(
+            {"B311": 1, "B999": 1},
+            {"B311": 1},
+            ["REGRESSION: B999 is new (0 -> 1)"],
+            id="new-finding-id",
+        ),
+        pytest.param(
+            {},
+            {"B607": 23},
+            ["STALE BASELINE: B607 is no longer observed (23 -> 0)"],
+            id="removed-finding-id",
+        ),
+    ],
+)
+def test_diff_classifies_finding_changes(
+    current: dict[str, int],
+    baseline: dict[str, int],
+    expected: list[str],
+) -> None:
+    """The comparator classifies each supported finding-count change."""
+    assert diff_against_baseline(current, baseline) == expected
 
 
 def test_main_prints_regression_and_stale_sections(
