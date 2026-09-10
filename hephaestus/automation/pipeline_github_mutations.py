@@ -319,7 +319,7 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
                 base="main",
                 run_git=self._run_signature_git,
                 verify_commit=lambda oid: github_prs._gh_commit_is_verified(
-                    oid, repository=repository, run_gh=self._gh
+                    oid, repository=repository, run_gh=self._deadline_gh_call
                 ),
             )
             with github_api._body_file(body) as body_path:
