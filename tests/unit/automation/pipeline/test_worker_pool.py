@@ -1780,6 +1780,36 @@ class TestHostVerificationGitExecPath:
         assert '  (subpath "/Library/Developer/CommandLineTools")' not in profile
         assert '  (subpath "/Applications/Xcode.app/Contents/Developer")' not in profile
 
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
+    def test_immutable_git_reads_validated_system_config(
+        self, pool: WorkerPool
+    ) -> None:
+        """Git can read its validated system configuration in the sandbox."""
+        checkout = Path.cwd().resolve()
+        head = _git(checkout, "rev-parse", "HEAD")
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        program = (
+            "import os, subprocess; from pathlib import Path; "
+            "target = Path(os.environ['TMPDIR']) / 'git-config-probe'; "
+            "target.mkdir(); "
+            "subprocess.run(('git', 'init', '-q'), cwd=target, check=True)"
+        )
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=("uv", "run", "python", "-I", "-c", program),
+            timeout_s=60,
+            expected_head_sha=head,
+            immutable_source=True,
+        )
+
+        result = pool._run_build_test(job)
+
+        assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
+        assert result.value["head_sha"] == head
+        assert result.value["immutable_source"] is True
+        assert _immutable_runner_checkout_state(checkout) == checkout_before
+
     def test_missing_system_git_config_is_stably_unavailable(
         self, safe_git_exec_tmp_path: Path
     ) -> None:
