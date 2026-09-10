@@ -1808,6 +1808,15 @@ class TestHostVerificationGitExecPath:
         assert result.value["immutable_source"] is True
         assert _immutable_runner_checkout_state(checkout) == checkout_before
 
+    def test_active_sandbox_git_reads_validated_system_config(self, tmp_path: Path) -> None:
+        """Git can initialize a repository in the active host sandbox."""
+        target = tmp_path / "git-config-probe"
+        target.mkdir()
+
+        subprocess.run(("git", "init", "-q"), cwd=target, check=True)
+
+        assert (target / ".git").is_dir()
+
     def test_missing_system_git_config_is_stably_unavailable(
         self, safe_git_exec_tmp_path: Path
     ) -> None:

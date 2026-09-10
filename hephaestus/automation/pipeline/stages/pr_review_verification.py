@@ -105,6 +105,24 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
         descr="review_worker_pool_agent_execution_error",
     ),
     _HostVerificationSpec(
+        changed_path="tests/unit/automation/pipeline/test_worker_pool.py",
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                "tests/unit/automation/pipeline/test_worker_pool.py::"
+                "TestHostVerificationGitExecPath::"
+                "test_active_sandbox_git_reads_validated_system_config"
+            ),
+            "-q",
+            "--tb=short",
+        ),
+        descr="review_worker_pool_git_exec_path",
+    ),
+    _HostVerificationSpec(
         changed_path="tests/performance/test_worker_pool_load.py",
         argv=(
             "uv",
