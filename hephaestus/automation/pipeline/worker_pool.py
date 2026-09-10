@@ -959,6 +959,7 @@ _TRUSTED_GIT_EXEC_ROOTS = (
     Path("/Applications/Xcode.app/Contents/Developer"),
 )
 _TRUSTED_GIT_EXEC_RELATIVE_PATH = Path("usr/libexec/git-core")
+_TRUSTED_GIT_SYSTEM_CONFIG_RELATIVE_PATH = Path("usr/share/git-core/gitconfig")
 
 
 def _validated_system_git_executable(git_executable: str | None) -> str:
@@ -1063,17 +1064,38 @@ def _validated_git_exec_directory(candidate: Path) -> Path:
     return exec_path
 
 
-def _validated_git_exec_path() -> tuple[str, Path]:
-    """Return the direct developer Git and its validated support directory."""
+def _validated_git_system_config(toolchain_root: Path) -> Path:
+    """Return the validated system configuration file for one Git toolchain."""
+    candidate = toolchain_root / _TRUSTED_GIT_SYSTEM_CONFIG_RELATIVE_PATH
+    try:
+        _validate_git_exec_components(candidate.parent)
+        canonical = candidate.resolve(strict=True)
+        mode = candidate.lstat().st_mode
+    except RuntimeError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable") from exc
+    if candidate.is_symlink() or canonical != candidate or not stat.S_ISREG(mode) or mode & 0o022:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    return canonical
+
+
+def _validated_git_exec_path() -> tuple[str, Path, Path]:
+    """Return the direct Git executable, support directory, and system config."""
     system_git = _validated_system_git_executable(_trusted_executable("git", path=os.defpath))
     candidate = _probed_git_exec_path(system_git)
     exec_path = _validated_git_exec_directory(candidate)
-    developer_git = exec_path.parents[2] / "usr" / "bin" / "git"
+    toolchain_root = exec_path.parents[2]
+    developer_git = toolchain_root / "usr" / "bin" / "git"
     try:
         _validate_git_exec_components(developer_git.parent)
     except OSError as exc:
         raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable") from exc
-    return _validated_system_git_executable(str(developer_git)), exec_path
+    return (
+        _validated_system_git_executable(str(developer_git)),
+        exec_path,
+        _validated_git_system_config(toolchain_root),
+    )
 
 
 def _host_verification_env(
@@ -1384,6 +1406,7 @@ def _host_verification_profile(
     executable: Path,
     git_executable: Path,
     git_exec_path: Path,
+    git_system_config: Path,
 ) -> str:
     """Build the macOS profile; only the declared scratch tree is writable."""
     allowed_roots = (
@@ -1421,6 +1444,7 @@ def _host_verification_profile(
             f'  (literal "{_sandbox_string(executable)}")',
             f'  (literal "{_sandbox_string(git_executable)}")',
             f'  (subpath "{_sandbox_string(git_exec_path)}")',
+            f'  (literal "{_sandbox_string(git_system_config)}")',
             *(f'  (subpath "{_sandbox_string(root)}")' for root in allowed_roots),
             ")",
             # ``getcwd`` and dynamic-loader path checks need metadata on the
@@ -1437,6 +1461,7 @@ def _host_verification_profile(
                     executable,
                     git_executable,
                     git_exec_path,
+                    git_system_config,
                 )
             ),
             # Tests and validation helpers commonly use the stable ``/tmp``
@@ -1462,6 +1487,7 @@ def _host_verification_command(
     pi_smoke_logs: Path,
     git_executable: Path,
     git_exec_path: Path,
+    git_system_config: Path,
 ) -> tuple[str, ...]:
     """Return a command that denies network and host writes to PR code.
 
@@ -1492,6 +1518,7 @@ def _host_verification_command(
             executable=executable,
             git_executable=git_executable,
             git_exec_path=git_exec_path,
+            git_system_config=git_system_config,
         ),
     )
     # Start through a constant trusted shell so resource limits are inherited
@@ -5123,7 +5150,7 @@ class WorkerPool:
         if executable is None:
             return JobResult(ok=False, error="host_verification_executable_unavailable")
         try:
-            launcher_git_executable, git_exec_path = _validated_git_exec_path()
+            launcher_git_executable, git_exec_path, git_system_config = _validated_git_exec_path()
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
         git_executable = _trusted_git_executable()
@@ -5163,6 +5190,7 @@ class WorkerPool:
                             pi_smoke_logs=pi_smoke_logs,
                             git_executable=Path(launcher_git_executable),
                             git_exec_path=git_exec_path,
+                            git_system_config=git_system_config,
                         )
                         result = _run_bounded_host_command(
                             command,

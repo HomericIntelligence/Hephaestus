@@ -107,23 +107,25 @@ of these development-tool roots:
 - `/Library/Developer/CommandLineTools`
 - `/Applications/Xcode.app/Contents/Developer`
 
-The Git executable, each path component, and the final directory must exist.
-They must not be symbolic links or permit group or world writes. The final
-object must be a directory. A relative path, a path with control characters,
-multiple output lines, a different directory, or a path outside an approved
-root causes a failure.
+The Git executable, each path component, the final directory, and the fixed
+`usr/share/git-core/gitconfig` file must exist. They must not be symbolic links
+or permit group or world writes. The final support path must be a directory.
+The system configuration must be a regular file. A relative path, a path with
+control characters, multiple output lines, a different directory, or a path
+outside an approved root causes a failure.
 
 The worker derives and validates the direct `usr/bin/git` executable in the
 same toolchain. It binds a generated verified-runner command to this executable
 before the sandbox starts. This avoids the `/usr/bin/git` developer-selection
 shim, which cannot resolve a toolchain through the narrow sandbox profile.
 
-The sandbox grants read access to the direct Git executable and the validated
-`git-core` directory. It grants metadata access to the directory ancestors that
-macOS needs for path resolution. It does not grant read access to `/Library`,
-`/Applications`, or an entire development-tool root. The candidate environment
-does not contain `GIT_EXEC_PATH`. A discovery or validation error stops host
-verification before candidate code starts.
+The sandbox grants read access to the direct Git executable, the validated
+`git-core` directory, and the exact validated system configuration file. It
+grants metadata access to the directory ancestors that macOS needs for path
+resolution. It does not grant read access to the system configuration
+directory, `/Library`, `/Applications`, or an entire development-tool root.
+The candidate environment does not contain `GIT_EXEC_PATH`. A discovery or
+validation error stops host verification before candidate code starts.
 
 Run the focused resolver, profile, and immutable boundary regressions on a
 macOS host:
