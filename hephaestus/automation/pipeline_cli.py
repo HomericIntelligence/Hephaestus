@@ -406,6 +406,7 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
     parser.set_defaults(profile=profile, stages=stages, force=False)
     parser.set_defaults(
         podman_machine=None,
+        podman_machine_preflight_failed=False,
         podman_start_timeout=120,
         podman_health_timeout=60,
     )
@@ -671,6 +672,7 @@ def build_config(
         "host_verification_pyxis_authority",
         "host_verification_pyxis_quota_root",
         "podman_machine",
+        "podman_machine_preflight_failed",
     )
     options = {name: getattr(args, name) for name in common_fields}
     agent = args.agent or "claude"
@@ -725,7 +727,14 @@ def _prepare_host_runtime(args: argparse.Namespace) -> int | None:
                 health_timeout_s=args.podman_health_timeout,
             )
         except PodmanMachineError as exc:
-            return _error_exit(args, str(exc), "Podman machine preflight failed.")
+            LOG.warning(
+                "Podman machine preflight failed. The queue will continue without the "
+                "selected connection. The macOS implementation stage will use its native "
+                "pre-PR check: %s",
+                exc,
+            )
+            args.podman_machine = None
+            args.podman_machine_preflight_failed = True
     selected = set(args.stages)
     if (
         not args.dry_run

@@ -4056,6 +4056,27 @@ class TestTestsAndFix:
         assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
 
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_failed_podman_preflight_starts_with_native_fallback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed selected-machine preflight retains the macOS native gate."""
+        stage = ImplementationStage()
+        ctx = make_ctx(
+            org="HomericIntelligence",
+            config_overrides={"podman_machine_preflight_failed": True},
+        )
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == PRE_PR_TEST_ARGV
+        assert result.job.verified_runner_source_revision is None
+        assert item.payload["pre_pr_runner_mode"] == "native"
+        assert item.payload["pre_pr_fallback_reason"] == "container-engine-unavailable"
+
     def test_hephaestus_required_checks_cannot_be_replaced_by_generic_override(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

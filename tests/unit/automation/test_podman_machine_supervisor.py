@@ -298,30 +298,38 @@ def test_failure_collects_lock_owner_and_serial_log_without_recovery_mutation(
     assert all(not ({"rm", "stop", "reset"} & set(command)) for command in commands)
 
 
-def test_main_does_not_dispatch_when_podman_preflight_fails(
+def test_main_dispatches_native_fallback_when_podman_preflight_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed host preflight prevents all pipeline work."""
+    """A failed host preflight keeps queue dispatch without the connection."""
     from hephaestus.automation import pipeline_cli
     from hephaestus.automation.pipeline import coordinator as coordinator_mod
 
-    dispatched = False
+    dispatched_config: Any = None
 
     def fail_preflight(*_args: Any, **_kwargs: Any) -> None:
         raise PodmanMachineError("not ready")
 
-    def record_dispatch(*_args: Any, **_kwargs: Any) -> int:
-        nonlocal dispatched
-        dispatched = True
+    def record_dispatch(config: Any) -> int:
+        nonlocal dispatched_config
+        dispatched_config = config
         return 0
 
     monkeypatch.setattr(pipeline_cli, "prepare_podman_machine", fail_preflight)
     monkeypatch.setattr(coordinator_mod, "run_pipeline", record_dispatch)
+    monkeypatch.setattr(
+        pipeline_cli,
+        "_resolve_org_and_repos",
+        lambda _args: ("HomericIntelligence", ["Hephaestus"], None),
+    )
+    monkeypatch.setattr(pipeline_cli, "_preflight_token_scopes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline_cli, "resolve_agent", lambda _agent, **_kwargs: "codex")
 
     result = pipeline_cli.main(["--podman-machine", "hephaestus-ci", "--agent", "codex"])
 
-    assert result == 1
-    assert dispatched is False
+    assert result == 0
+    assert dispatched_config.podman_machine is None
+    assert dispatched_config.podman_machine_preflight_failed is True
 
 
 def test_full_queue_parser_accepts_bounded_podman_machine_options() -> None:
