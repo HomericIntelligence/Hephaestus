@@ -534,7 +534,7 @@ run_in_container_with_codex_fixture() {
 
 run_lint() {
     log_step "Lint (pre-commit + doc-link validation)"
-    prepare_candidate_snapshot
+    prepare_candidate_snapshot || return 1
     run_in_container env \
         "GIT_INDEX_FILE=${CANDIDATE_INDEX_CONTAINER}" \
         "GIT_OBJECT_DIRECTORY=${CANDIDATE_OBJECTS_CONTAINER}" \
@@ -676,7 +676,7 @@ run_secrets() {
     log_step "Gitleaks repository scan"
     local history_args=(detect --source=. --verbose --exit-code=1)
     local candidate_args=(dir --verbose --exit-code=1 .)
-    prepare_candidate_snapshot
+    prepare_candidate_snapshot || return 1
     if [ -f .gitleaks.toml ]; then
         history_args+=(--config=.gitleaks.toml)
         candidate_args+=(--config=.gitleaks.toml)
