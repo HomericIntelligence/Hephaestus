@@ -81,6 +81,7 @@ class AuxiliaryWorkerPool:
         start = time.monotonic()
         if self._shutdown.is_set():
             return JobResult(ok=False, interrupted=True, error="interrupted_before_start")
+        host_started = False
         try:
             if isinstance(job, AthenaSkillJob):
                 if self._athena_skill_executor is None:
@@ -92,6 +93,7 @@ class AuxiliaryWorkerPool:
                     remaining = int(deadline.remaining())
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired("Athena operation deadline", 0)
+                    host_started = True
                     value = self._athena_skill_executor.execute(
                         replace(job.request, timeout_s=remaining)
                     )
@@ -103,6 +105,12 @@ class AuxiliaryWorkerPool:
         except Exception as exc:
             result = JobResult(ok=False, error=f"{type(exc).__name__}: {exc}")
         if self._shutdown.is_set():
+            if isinstance(job, AthenaSkillJob) and not host_started:
+                result = replace(
+                    result,
+                    error="interrupted_before_start",
+                    stderr_tail=result.error or "",
+                )
             result = replace(result, ok=False, interrupted=True)
         return replace(
             result,

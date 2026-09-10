@@ -111,6 +111,14 @@ def test_signature_api_fallback_uses_explicit_repository_and_remaining_budget(
 
     def run_gh(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         if argv[:2] == ["api", "repos/owner/repo/commits/abc123"]:
+            if "--repo" in argv:
+                raise subprocess.CalledProcessError(1, argv, stderr="unknown flag: --repo")
+            assert argv == [
+                "api",
+                "repos/owner/repo/commits/abc123",
+                "--jq",
+                ".commit.verification.verified",
+            ]
             clock[0] += 2.0
             return subprocess.CompletedProcess(argv, 0, "true\n", "")
         assert argv[:2] == ["pr", "create"]

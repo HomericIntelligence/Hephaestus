@@ -123,6 +123,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         """Apply one repo-scoped overlap safety rule to every candidate class."""
         dispatch: list[ct.WorkItem] = []
         selected_claims: set[_admission.PlanFileClaim] = set()
+        candidate_ids = {id(item) for item, _identity in candidates}
         fresh_candidate_ids = {
             id(item)
             for item, _identity in candidates
@@ -131,11 +132,10 @@ class ImplementationDispatcher(_CoordinatorHost):
         for item, identity in candidates:
             if item.issue is None:  # defensive: candidate construction excludes this case
                 continue
-            # Fresh candidates compete in queue order. A started peer keeps
-            # its reservation when review returns it to implementation.
-            claimed = self._active_implementation_file_claims(
-                exclude_item_ids=fresh_candidate_ids | {id(item)}
-            )
+            # Fresh work respects every started owner. Returning owners can
+            # compete with queued peers without releasing claims to fresh work.
+            excluded_ids = fresh_candidate_ids if id(item) in fresh_candidate_ids else candidate_ids
+            claimed = self._active_implementation_file_claims(exclude_item_ids=excluded_ids)
             claimed.update(selected_claims)
             blocked_claims = item.payload.get(ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY)
             if blocked_claims is not None and set(blocked_claims) == claimed:
@@ -247,7 +247,7 @@ class ImplementationDispatcher(_CoordinatorHost):
                 continue
             item_claims = set(item.payload.get(ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, ()))
             changed_paths = item.payload.get("review_changed_paths")
-            if item.stage in ct._REALIZED_DIFF_CLAIM_STAGES and isinstance(changed_paths, list):
+            if isinstance(changed_paths, list):
                 repo = (self.config.org, item.repo)
                 item_claims.update(
                     (repo, path) for path in changed_paths if isinstance(path, str) and path

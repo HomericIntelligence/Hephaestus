@@ -341,7 +341,9 @@ def _log_token_scope_remediation(args: list[str], stderr: str) -> None:
     )
 
 
-def _extract_reset_epoch(e: subprocess.CalledProcessError) -> int | None:
+def _extract_reset_epoch(
+    e: subprocess.CalledProcessError, *, allow_probe: bool = True
+) -> int | None:
     """Return a rate-limit reset epoch parsed from a failed ``gh`` invocation.
 
     Inspects stderr first (REST CLI message form) and falls back to stdout
@@ -350,9 +352,9 @@ def _extract_reset_epoch(e: subprocess.CalledProcessError) -> int | None:
     related.
     """
     stderr = e.stderr if e.stderr else ""
-    epoch = detect_rate_limit(stderr)
+    epoch = detect_rate_limit(stderr, allow_probe=allow_probe)
     if epoch is None and e.stdout:
-        epoch = detect_rate_limit(e.stdout)
+        epoch = detect_rate_limit(e.stdout, allow_probe=allow_probe)
     return epoch
 
 
@@ -409,6 +411,7 @@ def _gh_call_impl(
     track_process_group: bool = False,
     throttle: bool = True,
     shutdown: threading.Event | None = None,
+    probe_rate_limit: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -425,6 +428,7 @@ def _gh_call_impl(
             :func:`gh_cli_timeout`.
         track_process_group: Make the child available to host shutdown.
         throttle: Whether to acquire the global and per-thread throttle gates.
+        probe_rate_limit: Whether error classification can request a reset time.
 
     Returns:
         CompletedProcess instance
@@ -457,7 +461,7 @@ def _gh_call_impl(
             stderr = e.stderr if e.stderr else ""
             _raise_if_claude_usage(stderr, e)
 
-            reset_epoch = _extract_reset_epoch(e)
+            reset_epoch = _extract_reset_epoch(e, allow_probe=probe_rate_limit)
             if reset_epoch is not None:
                 _handle_rate_limit_attempt(
                     reset_epoch=reset_epoch,
@@ -619,6 +623,8 @@ def _gh_call(
             kwargs["track_process_group"] = True
         if shutdown is not None:
             kwargs["shutdown"] = shutdown
+        if deadline_s is not None or shutdown is not None:
+            kwargs["probe_rate_limit"] = False
         return _GH_BREAKER.call(invoke)
     except subprocess.CalledProcessError:
         if not check and result is not None:

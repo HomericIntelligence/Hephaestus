@@ -128,7 +128,7 @@ operator-broker = "operator_package.pi_broker:create_adapter"
 hephaestus-plan-issues \
   --agent pi \
   --pi-isolation-adapter operator-broker \
-  --parallel 1 \
+  --max-workers 1 \
   --json
 ```
 

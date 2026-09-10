@@ -3345,7 +3345,7 @@ class ImplementationStage(Stage):
             item.payload[_PLAN_SCOPE_STATE] = item.state
             return
         host_source_result = (
-            item.state in {REBASE_WAIT, REBASE_CONTINUE_WAIT, PR_CREATE}
+            item.state in {REBASE_WAIT, REBASE_CONTINUE_WAIT, COMMIT_PUSH_WAIT, PR_CREATE}
             or item.payload.get("remediation_writer_inspection_inflight")
             or item.payload.get("dirty_recovery_inflight")
         )
