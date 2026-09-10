@@ -23,8 +23,11 @@ connection. It requires the AppleHV provider, a running state, and a nonempty
 inspected SSH port, remote user, and identity before it runs the health check.
 If a check fails, it records the `machine-start.lock` owner from the approved
 Podman data directory and at most 200 serial-log lines. The serial-log read and
-encoded detail are each limited to 16 KiB. It then stops pipeline dispatch. It does not stop, remove, or
-recreate a machine.
+encoded detail are each limited to 16 KiB. The loop then removes the selected
+connection from its configuration and continues pipeline dispatch. On macOS,
+Hephaestus implementation work uses the native pre-PR check until a later run
+passes the machine preflight. The supervisor does not stop, remove, or recreate
+a machine.
 
 The selected connection reaches the verified local CI runner through the loop
 configuration. It does not change the global Podman default. Ambient
