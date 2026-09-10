@@ -3745,8 +3745,11 @@ class TestPlanningStageStep:
 
         outcome = stage.step(item, make_ctx(github=github))
 
-        assert outcome == StageOutcome(Disposition.RETRY, "plan disappeared before verification")
-        assert item.attempts.get("plan", 0) == 0
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert "plan disappeared before verification" in outcome.note
+        assert item.attempts["plan"] == 1
+        assert item.payload["retry_delay_s"] > 0
         assert github.mutation_log == []
 
     def test_on_enter_persistent_journal_read_error_is_bounded_to_plan_no_go(

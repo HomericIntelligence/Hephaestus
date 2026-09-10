@@ -1750,7 +1750,7 @@ def _publish_candidate_plan_or_retry(
 
 
 def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
-    """Publish or recover the candidate plan, then authorize advancement by label."""
+    """Publish or recover the candidate, then confirm the current plan and labels."""
     assert item.issue is not None  # noqa: S101 - stage validates the issue
     followup_outcome = _resume_published_plan_or_retry(item, ctx)
     if followup_outcome:
@@ -1789,23 +1789,26 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     if not awaiting_revision_candidate and verified_lookup.status is PlanDiscoveryStatus.FOUND:
         return _verify_published_plan_state(item, ctx)
 
-    if posted_plan or (initial_plan_found and not awaiting_revision_candidate):
-        return StageOutcome(Disposition.RETRY, "plan disappeared before verification")
-
+    plan_disappeared = posted_plan or (initial_plan_found and not awaiting_revision_candidate)
+    reason = "plan disappeared before verification" if plan_disappeared else "plan not found"
     attempt = item.attempts.get("plan", 0) + 1
     item.attempts["plan"] = attempt
     budget = ctx.budget("plan")
     if attempt < budget:
         logger.warning(
-            "planning:%d: plan comment not found; retry %d/%d",
+            "planning:%d: %s; retry %d/%d",
             item.issue,
+            reason,
             attempt,
             budget,
         )
-        item.state = "PLAN_WAIT"
-        return StageOutcome(Disposition.RETRY, f"plan not found, retry {attempt}/{budget}")
-    logger.error("planning:%d: plan not found after %d attempts; exhausted", item.issue, budget)
-    return StageOutcome(Disposition.FINISH_FAIL, f"plan not found after {budget} attempts")
+        if plan_disappeared:
+            item.payload["retry_delay_s"] = float(2 ** (attempt - 1))
+        else:
+            item.state = "PLAN_WAIT"
+        return StageOutcome(Disposition.RETRY, f"{reason}; retry {attempt}/{budget}")
+    logger.error("planning:%d: %s; exhausted after %d attempts", item.issue, reason, budget)
+    return StageOutcome(Disposition.FINISH_FAIL, f"{reason}; exhausted after {budget} attempts")
 
 
 def _planning_main_refresh_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
@@ -1843,8 +1846,10 @@ class PlanningStage(Stage):
       lands in ``item.payload["plan_text"]``; the plan comment posted by the
       pipeline is the durable artifact. Source-workspace preparation is
       bounded and timer-retried before either agent job is built.
-    - VERIFY: check the plan comment exists -> ADVANCE, else reset to
-      ``PLAN_WAIT`` and RETRY within the ``plan`` budget, then FINISH_FAIL.
+    - VERIFY: confirm the current plan before ADVANCE. If a plan disappears,
+      use timer retries to confirm it. If no plan was found or published,
+      return to ``PLAN_WAIT``. Both retries use the ``plan`` budget and
+      produce FINISH_FAIL at its limit.
 
     on_enter idempotency guards (re-housed from ``Planner._pr_coverage_skip``
     and the planner's tri-state plan discovery, all ordered at-or-past checks):
