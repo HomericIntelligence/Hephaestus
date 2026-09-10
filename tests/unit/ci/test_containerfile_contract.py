@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import yaml
+from pathspec import GitIgnoreSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
@@ -112,10 +113,33 @@ def test_direct_build_context_contains_only_containerfile_inputs() -> None:
         "!pyproject.toml",
         "!uv.lock",
         "!ci/",
+        "ci/*",
         "!ci/Containerfile",
         "!hephaestus/",
         "!hephaestus/**",
     ]
+    candidates = {
+        ".pre-commit-config.yaml",
+        "README.md",
+        "build/private.env",
+        "ci/Containerfile",
+        "ci/private.env",
+        "hephaestus/__init__.py",
+        "pyproject.toml",
+        "uv.lock",
+    }
+    ignore_spec = GitIgnoreSpec.from_lines(patterns)
+
+    included = {path for path in candidates if not ignore_spec.match_file(path)}
+
+    assert included == {
+        ".pre-commit-config.yaml",
+        "README.md",
+        "ci/Containerfile",
+        "hephaestus/__init__.py",
+        "pyproject.toml",
+        "uv.lock",
+    }
 
 
 def test_runtime_tools_follow_the_requested_build_architecture() -> None:

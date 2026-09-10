@@ -6,6 +6,7 @@
 !pyproject.toml
 !uv.lock
 !ci/
+ci/*
 !ci/Containerfile
 !hephaestus/
 !hephaestus/**
