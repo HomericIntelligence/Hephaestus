@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -149,6 +150,34 @@ class TestCheckFiles:
         exit_code, _errors = check_files([tmp_path])
         assert exit_code == 0
 
+    @pytest.mark.parametrize(
+        ("windows_style", "expected_exit_code"),
+        [(False, 0), (True, 1)],
+        ids=("posix", "windows"),
+    )
+    def test_recursive_suffix_uses_platform_case_rules(
+        self,
+        tmp_path: Path,
+        windows_style: bool,
+        expected_exit_code: int,
+    ) -> None:
+        """Use the platform-normalized case when recursive selection checks a suffix."""
+        source = tmp_path / "source"
+        source.mkdir()
+        candidate = source / "BAD.PY"
+        candidate.write_text("Result = DomainResult\n", encoding="utf-8")
+
+        def controlled_normcase(value: str) -> str:
+            return value.lower() if windows_style else value
+
+        with patch("os.path.normcase", side_effect=controlled_normcase):
+            exit_code, errors = check_files([source])
+
+        assert exit_code == expected_exit_code
+        assert bool(errors) == bool(expected_exit_code)
+        if errors:
+            assert str(candidate) in errors[0]
+
     def test_accepts_file_paths(self, tmp_path: Path) -> None:
         """Individual file paths work."""
         py_file = tmp_path / "single.py"
@@ -163,6 +192,8 @@ class TestCheckFiles:
         locked = source / "locked"
         locked.mkdir(parents=True)
         (locked / "hidden.py").write_text("x = 1\n", encoding="utf-8")
+        sibling = source / "sibling.py"
+        sibling.write_text("Runner = TaskRunner\n", encoding="utf-8")
         later = tmp_path / "later.py"
         later.write_text("Result = DomainResult\n", encoding="utf-8")
         real_scandir = os.scandir
@@ -177,9 +208,12 @@ class TestCheckFiles:
 
         assert exit_code == 1
         assert any(str(locked) in error and "search denied" in error for error in errors)
+        assert any(str(sibling) in error and "TaskRunner" in error for error in errors)
         assert any(str(later) in error and "DomainResult" in error for error in errors)
 
-    def test_python_suffix_directory_is_not_scanned_as_file(self, tmp_path: Path) -> None:
+    def test_python_suffix_directory_is_not_scanned_as_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Scan children but do not read a directory whose name ends in .py."""
         package = tmp_path / "package.py"
         package.mkdir()
@@ -191,6 +225,7 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
         assert str(child) in errors[0]
+        assert capsys.readouterr().err == ""
 
     def test_reports_entry_classification_error(self, tmp_path: Path) -> None:
         """Report an entry that cannot be classified."""
@@ -199,6 +234,7 @@ class TestCheckFiles:
         broken = source / "broken.py"
         entry = MagicMock()
         entry.path = str(broken)
+        entry.is_junction.return_value = False
         entry.stat.side_effect = OSError("classification failed")
         entries = MagicMock()
         entries.__enter__.return_value = iter([entry])
@@ -223,18 +259,23 @@ class TestCheckFiles:
         assert exit_code == 0
         assert errors == []
 
-    def test_explicit_directory_symlink_is_not_followed(self, tmp_path: Path) -> None:
-        """Do not follow a directory link that an explicit input selects."""
+    def test_explicit_directory_symlink_is_scanned_as_root(self, tmp_path: Path) -> None:
+        """Scan a directory link that an explicit input selects."""
         target = tmp_path / "target"
+        outside = tmp_path / "outside"
         target.mkdir()
+        outside.mkdir()
         (target / "hidden.py").write_text("Result = DomainResult\n", encoding="utf-8")
-        linked = tmp_path / "linked.py"
+        (outside / "outside.py").write_text("Runner = TaskRunner\n", encoding="utf-8")
+        (target / "nested").symlink_to(outside, target_is_directory=True)
+        linked = tmp_path / "src-link"
         linked.symlink_to(target, target_is_directory=True)
 
         exit_code, errors = check_files([linked])
 
-        assert exit_code == 0
-        assert errors == []
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(linked / "hidden.py") in errors[0]
 
     def test_explicit_file_symlink_is_scanned(self, tmp_path: Path) -> None:
         """Scan a regular Python file that an explicit link selects."""
@@ -260,8 +301,8 @@ class TestCheckFiles:
         assert len(errors) == 1
         assert f"Could not read {linked}:" in errors[0]
 
-    def test_recursive_file_symlink_is_not_scanned(self, tmp_path: Path) -> None:
-        """Do not scan a file link that recursive discovery finds."""
+    def test_recursive_file_symlink_is_scanned(self, tmp_path: Path) -> None:
+        """Scan a regular file link that recursive discovery finds."""
         source = tmp_path / "source"
         source.mkdir()
         target = tmp_path / "target.py"
@@ -270,8 +311,78 @@ class TestCheckFiles:
 
         exit_code, errors = check_files([source])
 
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(source / "linked.py") in errors[0]
+
+    def test_broken_recursive_python_symlink_is_read_error(self, tmp_path: Path) -> None:
+        """Report a broken Python file link found during recursion."""
+        source = tmp_path / "source"
+        source.mkdir()
+        linked = source / "linked.py"
+        linked.symlink_to(tmp_path / "missing.py")
+
+        exit_code, errors = check_files([source])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert f"Could not read {linked}:" in errors[0]
+
+    def test_reports_recursive_symlink_target_error(self, tmp_path: Path) -> None:
+        """Report a file link target that cannot be classified."""
+        source = tmp_path / "source"
+        source.mkdir()
+        linked = source / "linked.py"
+        entry = MagicMock()
+        entry.path = str(linked)
+        entry.name = linked.name
+        entry.is_junction.return_value = False
+        link_status = MagicMock()
+        link_status.st_mode = stat.S_IFLNK
+        entry.stat.side_effect = [link_status, PermissionError("target denied")]
+        entries = MagicMock()
+        entries.__enter__.return_value = iter([entry])
+
+        with patch("os.scandir", return_value=entries):
+            exit_code, errors = check_files([source])
+
+        assert exit_code == 1
+        assert errors == [f"Could not read {linked}: target denied"]
+
+    def test_explicit_junction_is_scanned_as_root(self, tmp_path: Path) -> None:
+        """Scan an explicit junction root on platforms that support it."""
+        root = tmp_path / "junction"
+        root.mkdir()
+        child = root / "child.py"
+        child.write_text("Result = DomainResult\n", encoding="utf-8")
+
+        def controlled_is_junction(path: Path) -> bool:
+            return path == root
+
+        with patch.object(Path, "is_junction", controlled_is_junction):
+            exit_code, errors = check_files([root])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(child) in errors[0]
+
+    def test_nested_junction_is_not_followed(self, tmp_path: Path) -> None:
+        """Do not follow a junction found during recursive discovery."""
+        source = tmp_path / "source"
+        source.mkdir()
+        junction = source / "junction"
+        entry = MagicMock()
+        entry.path = str(junction)
+        entry.is_junction.return_value = True
+        entries = MagicMock()
+        entries.__enter__.return_value = iter([entry])
+
+        with patch("os.scandir", return_value=entries):
+            exit_code, errors = check_files([source])
+
         assert exit_code == 0
         assert errors == []
+        entry.stat.assert_not_called()
 
 
 class TestUpdateStringState:
@@ -493,6 +604,29 @@ def test_partial_read_mixed_inputs(
     assert len(errors) == 3
     assert any(str(first) in item and str(error) in item for item in errors)
     assert any(str(later) in item and "TaskRunner" in item for item in errors)
+
+
+def test_earlier_finding_survives_later_read_error(tmp_path: Path) -> None:
+    """Keep an earlier finding when a later file cannot be read."""
+    first = tmp_path / "first.py"
+    first.write_text("Result = DomainResult\n", encoding="utf-8")
+    later = tmp_path / "later.py"
+    real_open = open
+
+    def controlled_open(file: Path, *, encoding: str) -> TextIO:
+        if file == later:
+            raise PermissionError("read denied")
+        return real_open(file, encoding=encoding)
+
+    with patch("builtins.open", side_effect=controlled_open):
+        exit_code, errors = check_files([first, later])
+
+    assert exit_code == 1
+    assert len(errors) == 2
+    assert str(first) in errors[0]
+    assert "DomainResult" in errors[0]
+    assert str(later) in errors[1]
+    assert "read denied" in errors[1]
 
 
 @pytest.mark.parametrize("invalid_encoding", [False, True])

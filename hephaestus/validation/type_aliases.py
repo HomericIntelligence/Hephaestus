@@ -178,6 +178,11 @@ def _record_read_error(result: _BatchResult, path: Path, error: OSError) -> None
     result.read_errors.append(f"Could not read {path}: {error}")
 
 
+def _has_python_suffix(name: str) -> bool:
+    """Use platform case rules to identify a Python file name."""
+    return os.path.normcase(name).endswith(os.path.normcase(".py"))
+
+
 def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
     """Find regular Python files without following directory links."""
     files: list[Path] = []
@@ -190,11 +195,21 @@ def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
                 for entry in entries:
                     entry_path = Path(entry.path)
                     try:
+                        if entry.is_junction():
+                            continue
                         mode = entry.stat(follow_symlinks=False).st_mode
                         if stat.S_ISDIR(mode):
                             pending.append(entry_path)
-                        elif stat.S_ISREG(mode) and entry.name.endswith(".py"):
+                        elif stat.S_ISREG(mode) and _has_python_suffix(entry.name):
                             files.append(entry_path)
+                        elif stat.S_ISLNK(mode) and _has_python_suffix(entry.name):
+                            try:
+                                target_mode = entry.stat().st_mode
+                            except OSError as error:
+                                _record_read_error(result, entry_path, error)
+                                continue
+                            if stat.S_ISREG(target_mode):
+                                files.append(entry_path)
                     except OSError as error:
                         _record_read_error(result, entry_path, error)
         except OSError as error:
@@ -206,6 +221,8 @@ def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
 def _select_path(path: Path, result: _BatchResult) -> list[Path]:
     """Select Python files from one explicit input path."""
     try:
+        if path.is_junction():
+            return _collect_python_files(path, result)
         mode = path.stat(follow_symlinks=False).st_mode
     except FileNotFoundError:
         return [path] if path.suffix == ".py" else []
@@ -217,14 +234,19 @@ def _select_path(path: Path, result: _BatchResult) -> list[Path]:
         return _collect_python_files(path, result)
     if stat.S_ISREG(mode) and path.suffix == ".py":
         return [path]
-    if not stat.S_ISLNK(mode) or path.suffix != ".py":
+    if not stat.S_ISLNK(mode):
         return []
 
     try:
         target_mode = path.stat().st_mode
-    except OSError:
-        return [path]
-    if stat.S_ISREG(target_mode):
+    except FileNotFoundError:
+        return [path] if path.suffix == ".py" else []
+    except OSError as error:
+        _record_read_error(result, path, error)
+        return []
+    if stat.S_ISDIR(target_mode):
+        return _collect_python_files(path, result)
+    if stat.S_ISREG(target_mode) and path.suffix == ".py":
         return [path]
     return []
 
