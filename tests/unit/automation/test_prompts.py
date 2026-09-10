@@ -109,6 +109,17 @@ def test_pr_analysis_prompt_example_is_accepted_by_review_parser() -> None:
     assert audit.findings
 
 
+def test_pr_analysis_prompt_limits_findings_to_the_fixed_host_plan() -> None:
+    """Reviewers cannot require coordinator receipts outside the fixed plan."""
+    rendered = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+    normalized = " ".join(rendered.split())
+
+    assert "complete coordinator-bound host plan" in normalized
+    assert "Do not require an additional coordinator-bound receipt" in normalized
+    assert "outside this supplied plan" in normalized
+    assert "Missing, skipped, or failed receipts in this supplied plan" in normalized
+
+
 def test_opencode_pr_analysis_prompt_is_compact_fenced_and_json_only() -> None:
     """OpenCode receives bounded context without a skill self-invocation."""
     inputs = {
