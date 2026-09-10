@@ -4104,6 +4104,110 @@ class TestExactHeadChecks:
         ]
         assert all(0 < entry.kwargs["timeout"] <= 120 for entry in call_mock.call_args_list)
 
+    def test_accepts_stable_successful_repeated_runs_for_required_context(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """Stable successful repeated runs can prove one required context."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "total_count": 2,
+                    "check_runs": [
+                        self._check_run(head),
+                        self._check_run(head, check_run_id=2),
+                    ],
+                }
+            ),
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
+    @pytest.mark.parametrize(
+        ("returned_head", "status", "conclusion"),
+        [
+            ("a" * 40, "in_progress", ""),
+            ("a" * 40, "completed", "failure"),
+            ("b" * 40, "completed", "success"),
+        ],
+    )
+    def test_rejects_nonpassing_repeated_run_for_required_context(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        returned_head: str,
+        status: str,
+        conclusion: str,
+        command_runner: MagicMock,
+    ) -> None:
+        """One nonpassing repeated run blocks its required context."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "total_count": 2,
+                    "check_runs": [
+                        self._check_run(head),
+                        self._check_run(
+                            returned_head,
+                            check_run_id=2,
+                            status=status,
+                            conclusion=conclusion,
+                        ),
+                    ],
+                }
+            ),
+        )
+        command_runner.side_effect = MagicMock(side_effect=[response, response])
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
+    def test_rejects_repeated_runs_that_change_between_evidence_reads(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """A changed repeated-run set cannot prove one required context."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "total_count": 2,
+                    "check_runs": [
+                        self._check_run(head),
+                        self._check_run(head, check_run_id=2),
+                    ],
+                }
+            ),
+        )
+        second = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "total_count": 2,
+                    "check_runs": [
+                        self._check_run(head),
+                        self._check_run(head, check_run_id=3),
+                    ],
+                }
+            ),
+        )
+        command_runner.side_effect = MagicMock(side_effect=[first, second])
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
     @pytest.mark.parametrize(
         ("returned_head", "status", "conclusion"),
         [
