@@ -137,7 +137,6 @@ _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = "_implementation_file_claims"
 _FILE_CLAIM_STAGES = frozenset(
     {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT}
 )
-_REALIZED_DIFF_CLAIM_STAGES = frozenset({StageName.PR_REVIEW, StageName.MERGE_WAIT})
 
 #: WorkItem payload key holding consecutive file-overlap deferrals.
 _FILE_OVERLAP_DEFERRALS_KEY = "file_overlap_deferrals"

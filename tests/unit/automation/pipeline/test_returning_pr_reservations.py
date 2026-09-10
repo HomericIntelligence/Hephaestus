@@ -67,6 +67,7 @@ def _returning_pr(
     paths: set[str],
     *,
     repo: str = "repo-a",
+    freeze_review_paths: bool = True,
 ) -> WorkItem:
     """Accept a PR with verified paths, then route it back to implementation."""
     item = WorkItem(
@@ -82,7 +83,8 @@ def _returning_pr(
         },
     )
     assert coordinator._push_item(item, StageName.PR_REVIEW, enter=True)
-    coordinator._active_implementation_file_claims()
+    if freeze_review_paths:
+        coordinator._active_implementation_file_claims()
     coordinator._route(
         claim_test_item(coordinator, item),
         StageOutcome(Disposition.FAIL_BACK, "agent_error"),
@@ -101,24 +103,52 @@ def _returning_pr(
         ),
     ],
 )
+@pytest.mark.parametrize("waiter_case", ["none", "frozen", "review-paths"])
 def test_returning_prs_make_serial_progress_through_review_and_merge(
-    tmp_path: Path, paths_by_item: list[set[str]]
+    tmp_path: Path, paths_by_item: list[set[str]], waiter_case: str
 ) -> None:
     """One queued owner runs; its claims block peers until it leaves merge."""
-    coordinator, pool = _coordinator(tmp_path, max_workers=len(paths_by_item))
+    with_aged_waiter = waiter_case != "none"
+    coordinator, pool = _coordinator(
+        tmp_path, max_workers=len(paths_by_item) + int(with_aged_waiter)
+    )
     items = [
-        _returning_pr(coordinator, tmp_path, index + 1, paths)
+        _returning_pr(
+            coordinator,
+            tmp_path,
+            index + 1,
+            paths,
+            freeze_review_paths=waiter_case != "review-paths",
+        )
         for index, paths in enumerate(paths_by_item)
     ]
     assert coordinator.items == items
     assert coordinator.live_work_count == len(items)
+    waiters: list[WorkItem] = []
+    if with_aged_waiter:
+        waiter = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=99,
+            stage=StageName.IMPLEMENTATION,
+            payload={
+                "_implementation_file_claims": frozenset(
+                    (("org", "repo-a"), path) for paths in paths_by_item for path in paths
+                ),
+                "file_overlap_deferrals": 100,
+            },
+        )
+        assert coordinator._push_item(waiter, StageName.IMPLEMENTATION, enter=True)
+        waiters.append(waiter)
 
     for index, item in enumerate(items):
         coordinator._drain_implementation()
 
         assert list(coordinator.in_flight.values()) == [item]
         assert len(pool.submitted) == index + 1
-        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == items[index + 1 :]
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == (
+            items[index + 1 :] + waiters
+        )
         for _ in range(3):
             coordinator._drain_implementation()
         assert len(pool.submitted) == index + 1
@@ -141,7 +171,12 @@ def test_returning_prs_make_serial_progress_through_review_and_merge(
         assert item.result is not None and item.result.passed
         assert "_implementation_file_claims" not in item.payload
 
-    assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+    assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == waiters
+    if waiters:
+        coordinator._drain_implementation()
+        assert list(coordinator.in_flight.values()) == waiters
+        assert len(pool.submitted) == len(items) + 1
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
 
 
 @pytest.mark.parametrize("owner_stage", [StageName.PR_REVIEW, StageName.MERGE_WAIT])
