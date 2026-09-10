@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,10 +22,16 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
+    RateBudgetRead,
+    ReadRateBudgetRequest,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.stage_results import Continue, JobRequest
 from hephaestus.automation.pipeline.stages.learning import CLAIM
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, claim_test_item
@@ -99,8 +106,11 @@ def _restore_item(coordinator: Coordinator) -> WorkItem:
     return item
 
 
+@pytest.mark.parametrize(
+    "stop_error", [InterruptedError, KeyboardInterrupt, SystemExit, GeneratorExit]
+)
 def test_cancelled_learning_lease_returns_claim_to_pending_and_retries_after_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_error: type[BaseException]
 ) -> None:
     """A cancelled lease has no host effects and permits a later delivery."""
     repo_root, revision, _second = _repository(tmp_path)
@@ -125,6 +135,8 @@ def test_cancelled_learning_lease_returns_claim_to_pending_and_retries_after_res
             if path == lock_path:
                 waiting.set()
                 assert cancel_ready.wait(timeout=5)
+                if stop_error is not InterruptedError:
+                    raise stop_error("lease cancelled") from None
             raise
 
     monkeypatch.setattr(source_worktree, "file_lock", observe_lock)
@@ -135,11 +147,11 @@ def test_cancelled_learning_lease_returns_claim_to_pending_and_retries_after_res
             coordinator.force_shutdown_event.set()
             cancel_ready.set()
             handle, result = coordinator.auxiliary_completion_q.get(timeout=5)
+            assert result.interrupted and not result.ok
+            assert result.error == "interrupted_before_start"
+            assert result.stderr_tail.startswith(f"{stop_error.__name__}:")
             coordinator._handle_completion(handle, result, auxiliary=True)
 
-        assert result.interrupted and not result.ok
-        assert result.error == "interrupted_before_start"
-        assert result.stderr_tail.startswith("InterruptedError:")
         assert host.calls == []
         record = journal.load(intent.key)
         assert record is not None and record["status"] == "pending"
@@ -236,4 +248,151 @@ def test_cancelled_learning_after_host_entry_preserves_unknown_effect_on_restart
     finally:
         host.release.set()
         coordinator.auxiliary_pool.shutdown()
+        journal._release_claim_lock(intent.key)
+
+
+@pytest.mark.parametrize("host_error", [None, KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_fatal_shared_host_cancellation_preserves_unknown_learning_claim(
+    tmp_path: Path,
+    host_error: type[BaseException] | None,
+) -> None:
+    """Fatal shutdown must retain an uncertain claim before either pool waits."""
+    repo_root, revision, _second = _repository(tmp_path)
+    main_started = threading.Event()
+    main_release = threading.Event()
+
+    class CancelledHost(_Host):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.cancelled = threading.Event()
+
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            self.calls.append(request)
+            self.started.set()
+            assert self.cancelled.wait(timeout=10)
+            if host_error is not None:
+                raise host_error("unconfirmed delivery after cancellation")
+            return AthenaSkillResult(kind="learn", error="unconfirmed delivery after cancellation")
+
+        def cancel(self) -> None:
+            self.cancelled.set()
+
+    class MainRunner:
+        gh_timeout = 30
+
+        def run(
+            self,
+            job: GitHubJob,
+            *,
+            shutdown: threading.Event | None = None,
+            deadline_s: float | None = None,
+        ) -> RateBudgetRead:
+            assert isinstance(job.request, ReadRateBudgetRequest)
+            main_started.set()
+            assert main_release.wait(timeout=10)
+            return RateBudgetRead(job.request, remaining=None, reset_epoch=None)
+
+    host = CancelledHost()
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=repo_root.parent,
+            repo_roots={"repo": repo_root},
+            max_workers=1,
+            learning_workers=1,
+            learning_queue_capacity=1,
+            rate_guard_enabled=False,
+            budget_overrides={"learn": 3},
+        ),
+        github=FakeStageGitHub(),
+        pool_factory=lambda **kwargs: WorkerPool(
+            **kwargs,
+            lock_dir=tmp_path / "worker-locks",
+            github_job_runner=MainRunner(),
+            athena_skill_executor=host,
+        ),
+        auxiliary_pool_factory=lambda **kwargs: AuxiliaryWorkerPool(
+            **kwargs, athena_skill_executor=host
+        ),
+        install_signals=False,
+    )
+    intent = LearningIntent.post_merge(repo="repo", issue=1, pr=2)
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING)
+    item.learning_intents.append(intent)
+    request = _prepare_request(coordinator, item, revision)
+    journal = coordinator._ctx_for(item).learning_journal
+    main = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=3, stage=StageName.PLANNING)
+    claim_test_item(coordinator, main)
+    errors: list[BaseException] = []
+
+    def teardown() -> None:
+        try:
+            coordinator._shutdown_pool()
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=teardown)
+    try:
+        coordinator._submit(
+            main,
+            JobRequest(
+                GitHubJob(
+                    "repo",
+                    repo_root,
+                    ReadRateBudgetRequest(time.monotonic() + 30),
+                    "controlled_main_operation",
+                ),
+                "RATE_BUDGET",
+            ),
+        )
+        assert main_started.wait(timeout=5)
+        coordinator._submit(item, request)
+        assert host.started.wait(timeout=5)
+        coordinator._fatal = True
+        thread.start()
+        completions = coordinator.auxiliary_completion_q
+        with completions.not_empty:
+            assert completions.not_empty.wait_for(lambda: bool(completions.queue), timeout=5)
+            _handle, result = completions.queue[0]
+        assert thread.is_alive(), "The main job must hold the fatal teardown interval open"
+        main_release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not errors
+
+        record = journal.load(intent.key)
+        assert record is not None and record["status"] == "claimed"
+        assert journal.claim_is_active(intent.key)
+        assert result.interrupted and not result.ok
+        assert len(host.calls) == 1
+        assert coordinator.learning_work_count == 0
+        assert completions.empty()
+        assert not coordinator.in_flight and not coordinator.auxiliary_in_flight
+        assert not coordinator.shutdown.is_set(), "Fatal failure must retain exit status 1"
+
+        # Process exit releases the lock without authorizing a new delivery.
+        journal._release_claim_lock(intent.key)
+        restarted = _coordinator(repo_root, host)
+        try:
+            recovered = _restore_item(restarted)
+            recovered.state = CLAIM
+            stage = restarted.stages[StageName.LEARNING]
+            ctx = restarted._ctx_for(recovered)
+            assert stage.on_enter(recovered, ctx) is None
+            assert isinstance(stage.step(recovered, ctx), Continue)
+            final = ctx.learning_journal.load(intent.key)
+            assert final is not None and final["status"] == "failed"
+            assert final["error"] == "outcome_unknown"
+            assert final["attempts"] == 1
+            assert len(host.calls) == 1
+        finally:
+            restarted._shutdown_pool()
+    finally:
+        host.cancel()
+        main_release.set()
+        if thread.ident is not None:
+            thread.join(timeout=10)
+        coordinator._shutdown_pool()
         journal._release_claim_lock(intent.key)

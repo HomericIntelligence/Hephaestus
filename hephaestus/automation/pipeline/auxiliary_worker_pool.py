@@ -102,7 +102,7 @@ class AuxiliaryWorkerPool:
                 if self._cleanup_runner is None:
                     raise RuntimeError("cleanup job submitted without a cleanup runner")
                 result = self._cleanup_runner(job)
-        except Exception as exc:
+        except (Exception, KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
             result = JobResult(ok=False, error=f"{type(exc).__name__}: {exc}")
         if self._shutdown.is_set():
             if isinstance(job, AthenaSkillJob) and not host_started:
