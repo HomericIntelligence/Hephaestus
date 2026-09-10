@@ -252,7 +252,7 @@ def _output_from_exception(error: BaseException) -> str:
 
 def _rate_limit_evidence(text: str) -> int | None:
     """Return primary reset metadata or zero for secondary/unknown limits."""
-    reset = detect_rate_limit(text)
+    reset = detect_rate_limit(text, allow_probe=False)
     if reset is not None:
         return reset
     if detect_secondary_rate_limit(text):

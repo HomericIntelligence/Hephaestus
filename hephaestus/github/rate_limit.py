@@ -184,7 +184,7 @@ def parse_reset_epoch(time_str: str, tz: str) -> int:
     return int(local.timestamp())
 
 
-def detect_rate_limit(text: str) -> int | None:
+def detect_rate_limit(text: str, *, allow_probe: bool = True) -> int | None:
     """Detect a rate-limit message in *text* and return the reset epoch.
 
     Recognises two phrasings:
@@ -202,6 +202,8 @@ def detect_rate_limit(text: str) -> int | None:
     Args:
         text: Text to search (typically ``gh`` CLI stderr output, or a
             GraphQL JSON error payload rendered as a string).
+        allow_probe: If false, use only the message and a recent cached reset.
+            Return ``0`` when the reset time is unknown. Do not start a request.
 
     Returns:
         Unix timestamp when the rate limit resets, ``0`` if rate-limited
@@ -212,7 +214,7 @@ def detect_rate_limit(text: str) -> int | None:
     if m:
         return parse_reset_epoch(m.group("time"), m.group("tz"))
     if GRAPHQL_RATE_LIMIT_RE.search(text):
-        probed = gh_rate_limit_reset_epoch()
+        probed = gh_rate_limit_reset_epoch(allow_probe=allow_probe)
         return probed if probed is not None else 0
     return None
 
@@ -226,7 +228,7 @@ _RATE_LIMIT_PROBE_TTL = 30.0
 _rate_limit_probe_cache: dict[str, tuple[int | None, float]] = {}
 
 
-def gh_rate_limit_reset_epoch(resource: str = "graphql") -> int | None:
+def gh_rate_limit_reset_epoch(resource: str = "graphql", *, allow_probe: bool = True) -> int | None:
     """Return the upcoming reset epoch for a GitHub API resource, or ``None``.
 
     Calls ``gh api rate_limit`` to fetch the current rate-limit window for
@@ -238,6 +240,8 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql") -> int | None:
         resource: Resource name as it appears under ``.resources`` in the
             ``gh api rate_limit`` JSON. Defaults to ``"graphql"`` since
             that is what hephaestus's hot paths consume.
+        allow_probe: If false, return only a recent cached result. Do not start
+            a request when the cache is absent or expired.
 
     Returns:
         Unix timestamp when the resource's window resets, or ``None`` if
@@ -248,6 +252,8 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql") -> int | None:
     now = time.monotonic()
     if cached is not None and (now - cached[1]) < _RATE_LIMIT_PROBE_TTL:
         return cached[0]
+    if not allow_probe:
+        return None
 
     try:
         result = run_subprocess(
