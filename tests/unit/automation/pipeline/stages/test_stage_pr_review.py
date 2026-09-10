@@ -2517,8 +2517,18 @@ class TestPrReviewStageStep:
             runtime_environment: Path,
             git_metadata: Path,
             pi_smoke_logs: Path,
+            git_executable: Path,
+            git_exec_path: Path,
         ) -> tuple[str, ...]:
-            del source, scratch, runtime_environment, git_metadata, pi_smoke_logs
+            del (
+                source,
+                scratch,
+                runtime_environment,
+                git_metadata,
+                pi_smoke_logs,
+                git_executable,
+                git_exec_path,
+            )
             assert argv == (sys.executable, *spec.argv[1:])
             return (sys.executable, "-m", "pytest", *spec.argv[3:])
 
@@ -2547,6 +2557,10 @@ class TestPrReviewStageStep:
                     side_effect=checkout_matches_immutable_head,
                 ),
                 patch(f"{module}._trusted_uv_executable", return_value=sys.executable),
+                patch(
+                    f"{module}._validated_git_exec_path",
+                    return_value=(sys.executable, tmp_path / "git-core"),
+                ),
                 patch(f"{module}._trusted_git_executable", return_value=sys.executable),
                 patch(
                     f"{module}._verifier_owned_runtime_environment",
