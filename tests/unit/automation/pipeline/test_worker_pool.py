@@ -91,6 +91,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
+    _HostVerificationBoundaryError,
     _ignore_local_agent_failure,
     _linux_resource_limited_command,
     _owned_codex_adapter,
@@ -103,6 +104,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
+    _validated_git_exec_path,
     _validated_signing_key,
     _verifier_owned_runtime_environment,
 )
@@ -120,6 +122,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceRecoveryKind,
     SourceWorkspaceTerminalError,
 )
+from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -1600,6 +1603,438 @@ def test_github_job_classifies_wrapped_rate_limit(
     assert "private" not in repr(result)
 
 
+def _git_exec_path_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Create one safe system-Git and development-tool fixture."""
+    system_git = tmp_path / "system" / "git"
+    system_git.parent.mkdir()
+    system_git.write_text("#!/bin/sh\n", encoding="utf-8")
+    system_git.chmod(0o755)
+    toolchain = tmp_path / "toolchain"
+    git_exec_path = toolchain / "usr" / "libexec" / "git-core"
+    git_exec_path.mkdir(parents=True)
+    developer_git = toolchain / "usr" / "bin" / "git"
+    developer_git.parent.mkdir()
+    developer_git.write_text("#!/bin/sh\n", encoding="utf-8")
+    developer_git.chmod(0o755)
+    for directory in (
+        toolchain,
+        toolchain / "usr",
+        toolchain / "usr" / "libexec",
+        git_exec_path,
+    ):
+        directory.chmod(0o755)
+    return system_git, toolchain, git_exec_path, developer_git
+
+
+@pytest.fixture
+def safe_git_exec_tmp_path(tmp_path: Path) -> Iterator[Path]:
+    """Put Git path fixtures below repository-owned safe path components."""
+    root = Path.cwd() / "build" / "pytest-host-git-exec-path" / f"{os.getpid()}-{tmp_path.name}"
+    root.mkdir(parents=True)
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_NATIVE_FALLBACK_RUNNER = (
+    "#!/bin/bash\n"
+    "printf '%s\\n' 'HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent' >&2\n"
+    "exit 75\n"
+)
+
+
+def _immutable_verified_runner_repository(tmp_path: Path) -> tuple[Path, str]:
+    """Create one trusted runner and helper commit for the macOS boundary."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    _git(checkout, "init", "-b", "main")
+    _git(checkout, "config", "core.filemode", "false")
+    _git(checkout, "config", "user.name", "Test User")
+    _git(checkout, "config", "user.email", "test@example.invalid")
+    runner = checkout / "scripts" / "run_ci_local.sh"
+    helper = checkout / "scripts" / "shell" / "lib" / "install_helpers.sh"
+    runner.parent.mkdir(parents=True)
+    helper.parent.mkdir(parents=True)
+    runner.write_text(_NATIVE_FALLBACK_RUNNER, encoding="utf-8")
+    runner.chmod(0o755)
+    helper.write_text("#!/bin/bash\n", encoding="utf-8")
+    helper.chmod(0o644)
+    _git(checkout, "add", "scripts")
+    _git(checkout, "update-index", "--chmod=+x", "scripts/run_ci_local.sh")
+    _git(checkout, "commit", "--no-gpg-sign", "-m", "test: add trusted runner")
+    return checkout, _git(checkout, "rev-parse", "HEAD")
+
+
+def _immutable_runner_checkout_state(checkout: Path) -> tuple[str, str]:
+    """Return the immutable head and worktree status of a test checkout."""
+    return (
+        _git(checkout, "rev-parse", "HEAD"),
+        _git(checkout, "status", "--porcelain=v1", "--untracked-files=all"),
+    )
+
+
+class TestHostVerificationGitExecPath:
+    """Tests for the host-owned system Git support-path boundary."""
+
+    def test_unavailable_system_git_is_rejected(self) -> None:
+        """A missing system Git has the stable unavailable category."""
+        with (
+            patch(f"{_WP}._trusted_executable", return_value=None),
+            patch(f"{_WP}._run_bounded_git_output") as probe,
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unavailable$",
+            ),
+        ):
+            _validated_git_exec_path()
+        probe.assert_not_called()
+
+    def test_resolves_system_git_before_candidate_launch(
+        self, monkeypatch: pytest.MonkeyPatch, safe_git_exec_tmp_path: Path
+    ) -> None:
+        """The probe uses the same fixed Git selection as the verified runner."""
+        system_git, toolchain, git_exec_path, developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
+        monkeypatch.setenv("PATH", "/unsafe/homebrew/bin")
+        monkeypatch.setenv("GIT_EXEC_PATH", "/unsafe/git-core")
+        monkeypatch.setenv("DEVELOPER_DIR", "/unsafe/developer")
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(f"{git_exec_path}\n".encode()),
+        )
+
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)) as resolver,
+            patch(
+                f"{_WP}._trusted_git_executable",
+                side_effect=AssertionError("snapshot Git discovery is not the launcher selector"),
+            ),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded) as probe,
+        ):
+            selected_git, selected_exec_path = _validated_git_exec_path()
+
+        assert (selected_git, selected_exec_path) == (str(developer_git), git_exec_path)
+        resolver.assert_called_once_with("git", path=os.defpath)
+        probe.assert_called_once_with(
+            (str(system_git), "--exec-path"),
+            cwd=Path("/"),
+            timeout=30,
+            max_bytes=4096,
+            retain_text=True,
+            env=probe.call_args.kwargs["env"],
+        )
+        environment = probe.call_args.kwargs["env"]
+        assert environment["PATH"] == os.defpath
+        assert "GIT_EXEC_PATH" not in environment
+        assert "DEVELOPER_DIR" not in environment
+
+    def test_profile_grants_only_validated_git_exec_path(self, tmp_path: Path) -> None:
+        """The profile grants one exact Git support tree and ancestor metadata."""
+        _system_git, toolchain, git_exec_path, developer_git = _git_exec_path_fixture(tmp_path)
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        runtime = tmp_path / "runtime"
+        pi_smoke_logs = source / "pi-smoke-logs"
+
+        profile = _host_verification_profile(
+            source=source,
+            scratch=scratch,
+            runtime_environment=runtime,
+            git_metadata=tmp_path / "metadata.git",
+            pi_smoke_logs=pi_smoke_logs,
+            executable=Path("/usr/bin/uv"),
+            git_executable=developer_git,
+            git_exec_path=git_exec_path,
+        )
+
+        exact_read = f'  (subpath "{git_exec_path.resolve()}")'
+        root_read = f'  (subpath "{toolchain.resolve()}")'
+        metadata = f'(allow file-read-metadata (path-ancestors "{git_exec_path.resolve()}"))'
+        assert exact_read in profile
+        assert f'  (literal "{developer_git.resolve()}")' in profile
+        assert root_read not in profile
+        assert metadata in profile
+        assert '  (subpath "/Library")' not in profile
+        assert '  (subpath "/Applications")' not in profile
+        assert '  (subpath "/Library/Developer/CommandLineTools")' not in profile
+        assert '  (subpath "/Applications/Xcode.app/Contents/Developer")' not in profile
+
+    @pytest.mark.parametrize(
+        "probe_error",
+        (
+            subprocess.CalledProcessError(1, ("/usr/bin/git", "--exec-path")),
+            subprocess.TimeoutExpired(("/usr/bin/git", "--exec-path"), 30),
+            _GitInspectionResourceLimitError("Git output limit exceeded"),
+            OSError("probe failed"),
+        ),
+    )
+    def test_probe_failures_are_stably_unavailable(
+        self, tmp_path: Path, probe_error: BaseException
+    ) -> None:
+        """A failed or unbounded probe has one unavailable error category."""
+        system_git, toolchain, _git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", side_effect=probe_error),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unavailable$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    @pytest.mark.parametrize(
+        "output",
+        (
+            "",
+            "relative/usr/libexec/git-core\n",
+            "/approved/usr/libexec/git-core",
+            "/approved/usr/libexec/git-core\nextra\n",
+            "/approved/usr/libexec/git-core\x00\n",
+            "/approved/usr/libexec/git-core\x7f\n",
+        ),
+    )
+    def test_malformed_probe_output_is_stably_unsafe(self, tmp_path: Path, output: str) -> None:
+        """Malformed Git output has one unsafe error category."""
+        system_git, toolchain, _git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
+        bounded = _BoundedGitOutput(text=output, sha256="0" * 64, byte_count=len(output))
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    def test_rejects_invalid_git_exec_path_before_launch(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
+        """Unapproved, indirect, or writable support paths fail closed."""
+        tmp_path = safe_git_exec_tmp_path
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
+        external = tmp_path / "external" / "usr" / "libexec" / "git-core"
+        external.mkdir(parents=True)
+        wrong_suffix = toolchain / "libexec" / "git-core"
+        wrong_suffix.mkdir(parents=True)
+        symlink_path = toolchain / "usr" / "libexec" / "git-core-link"
+        symlink_path.symlink_to(git_exec_path, target_is_directory=True)
+
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+        ):
+            for candidate in (external, wrong_suffix, symlink_path):
+                bounded = _BoundedGitOutput(
+                    text=f"{candidate}\n",
+                    sha256="0" * 64,
+                    byte_count=len(str(candidate)) + 1,
+                )
+                with (
+                    patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+                    pytest.raises(
+                        _HostVerificationBoundaryError,
+                        match=r"^host_verification_git_exec_path_unsafe$",
+                    ),
+                ):
+                    _validated_git_exec_path()
+
+            git_exec_path.chmod(0o777)
+            writable = _BoundedGitOutput(
+                text=f"{git_exec_path}\n",
+                sha256="0" * 64,
+                byte_count=len(str(git_exec_path)) + 1,
+            )
+            with (
+                patch(f"{_WP}._run_bounded_git_output", return_value=writable),
+                pytest.raises(
+                    _HostVerificationBoundaryError,
+                    match=r"^host_verification_git_exec_path_unsafe$",
+                ),
+            ):
+                _validated_git_exec_path()
+
+    def test_missing_git_exec_path_is_stably_unavailable(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
+        """A missing exact Git support directory has the unavailable category."""
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
+        shutil.rmtree(git_exec_path)
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unavailable$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    def test_symlinked_exact_git_exec_path_is_rejected(
+        self,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """The exact support directory cannot be a symbolic link."""
+        tmp_path = safe_git_exec_tmp_path
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
+        target = tmp_path / "support-target"
+        target.mkdir()
+        git_exec_path.rmdir()
+        git_exec_path.symlink_to(target, target_is_directory=True)
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    def test_symlinked_git_exec_path_ancestor_is_rejected(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
+        """An approved-root ancestor cannot redirect the support directory."""
+        tmp_path = safe_git_exec_tmp_path
+        system_git = tmp_path / "system" / "git"
+        system_git.parent.mkdir()
+        system_git.write_text("#!/bin/sh\n", encoding="utf-8")
+        system_git.chmod(0o755)
+        actual_parent = tmp_path / "actual-parent"
+        actual_root = actual_parent / "CommandLineTools"
+        git_exec_path = actual_root / "usr" / "libexec" / "git-core"
+        git_exec_path.mkdir(parents=True)
+        developer_git = actual_root / "usr" / "bin" / "git"
+        developer_git.parent.mkdir(parents=True)
+        developer_git.write_text("#!/bin/sh\n", encoding="utf-8")
+        developer_git.chmod(0o755)
+        redirected_parent = tmp_path / "redirected-parent"
+        redirected_parent.symlink_to(actual_parent, target_is_directory=True)
+        approved_root = redirected_parent / "CommandLineTools"
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (approved_root,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    def test_missing_developer_git_parent_is_stably_unavailable(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
+        """A missing developer Git parent has the unavailable category."""
+        system_git, toolchain, git_exec_path, developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
+        shutil.rmtree(developer_git.parent)
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unavailable$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    def test_unsafe_system_git_is_rejected(self, tmp_path: Path) -> None:
+        """The selected launcher Git must be one safe canonical executable."""
+        system_git, toolchain, _git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
+        system_git.chmod(0o777)
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output") as probe,
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
+        probe.assert_not_called()
+
+    def test_non_executable_system_git_is_rejected(self, tmp_path: Path) -> None:
+        """The selected launcher Git must have execute permission."""
+        system_git, toolchain, _git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
+        system_git.chmod(0o644)
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output") as probe,
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
+        probe.assert_not_called()
+
+    def test_invalid_path_stops_before_candidate_execution(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A resolver error stops before source setup and candidate execution."""
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+        with (
+            patch(f"{_WP}.sys.platform", "darwin"),
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(
+                f"{_WP}._validated_git_exec_path",
+                side_effect=_HostVerificationBoundaryError(
+                    "host_verification_git_exec_path_unsafe"
+                ),
+            ),
+            patch(f"{_WP}._bounded_git_archive") as archive,
+            patch(f"{_WP}._run_bounded_host_command") as candidate,
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.error == "host_verification_git_exec_path_unsafe"
+        archive.assert_not_called()
+        candidate.assert_not_called()
+
+
 class TestWorkerPoolSubmitComplete:
     """Tests for basic submit/complete workflow."""
 
@@ -2584,6 +3019,10 @@ class TestWorkerPoolSubmitComplete:
         with (
             patch(f"{_WP}.sys.platform", "darwin"),
             patch(
+                f"{_WP}._validated_git_exec_path",
+                return_value=("/usr/bin/git", tmp_path / "git-core"),
+            ),
+            patch(
                 f"{_WP}._verifier_owned_runtime_environment",
                 return_value=Path(sys.prefix),
             ),
@@ -2933,6 +3372,8 @@ class TestWorkerPoolSubmitComplete:
             git_metadata=tmp_path / "metadata.git",
             pi_smoke_logs=pi_smoke_logs,
             executable=Path("/usr/bin/uv"),
+            git_executable=Path("/usr/bin/git"),
+            git_exec_path=tmp_path / "git-core",
         )
 
         source_entry = f'(subpath "{source.resolve()}")'
@@ -2951,6 +3392,93 @@ class TestWorkerPoolSubmitComplete:
         assert f"(allow file-write* {source_entry})" not in profile
         assert f"(allow file-write* {scratch_entry})" in profile
         assert f"(allow file-write* {pi_smoke_logs_entry})" in profile
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
+    def test_immutable_trusted_runner_preserves_native_fallback(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A trusted immutable runner preserves the authorized fallback result."""
+        checkout, trusted_revision = _immutable_verified_runner_repository(tmp_path)
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=build_verified_runner_argv(("bash", "scripts/run_ci_local.sh"), trusted_revision),
+            timeout_s=60,
+            expected_head_sha=trusted_revision,
+            immutable_source=True,
+        )
+
+        result = pool._run_build_test(job)
+
+        assert result.error == "rc=75", (result.stdout_tail, result.stderr_tail)
+        assert "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent" in result.stderr_tail
+        assert result.value["head_sha"] == trusted_revision
+        assert result.value["immutable_source"] is True
+        assert _immutable_runner_checkout_state(checkout) == checkout_before
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
+    def test_immutable_changed_runner_rejects_native_fallback(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A changed runner cannot reuse the trusted fallback authority."""
+        checkout, trusted_revision = _immutable_verified_runner_repository(tmp_path)
+        runner = checkout / "scripts" / "run_ci_local.sh"
+        runner.write_text(
+            f"{_NATIVE_FALLBACK_RUNNER}# changed runner\n",
+            encoding="utf-8",
+        )
+        _git(checkout, "add", "scripts/run_ci_local.sh")
+        _git(checkout, "commit", "--no-gpg-sign", "-m", "test: change runner")
+        candidate_revision = _git(checkout, "rev-parse", "HEAD")
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=build_verified_runner_argv(("bash", "scripts/run_ci_local.sh"), trusted_revision),
+            timeout_s=60,
+            expected_head_sha=candidate_revision,
+            immutable_source=True,
+        )
+
+        result = pool._run_build_test(job)
+
+        assert result.error == "rc=1", (result.stdout_tail, result.stderr_tail)
+        assert "The candidate CI runner cannot authorize native fallback." in result.stderr_tail
+        assert "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent" in result.stderr_tail
+        assert result.value["head_sha"] == candidate_revision
+        assert result.value["immutable_source"] is True
+        assert _immutable_runner_checkout_state(checkout) == checkout_before
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
+    def test_immutable_changed_helper_rejects_native_fallback(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A changed helper cannot reuse the trusted fallback authority."""
+        checkout, trusted_revision = _immutable_verified_runner_repository(tmp_path)
+        helper = checkout / "scripts" / "shell" / "lib" / "install_helpers.sh"
+        helper.write_text("#!/bin/bash\n# changed helper\n", encoding="utf-8")
+        _git(checkout, "add", "scripts/shell/lib/install_helpers.sh")
+        _git(checkout, "commit", "--no-gpg-sign", "-m", "test: change helper")
+        candidate_revision = _git(checkout, "rev-parse", "HEAD")
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=build_verified_runner_argv(("bash", "scripts/run_ci_local.sh"), trusted_revision),
+            timeout_s=60,
+            expected_head_sha=candidate_revision,
+            immutable_source=True,
+        )
+
+        result = pool._run_build_test(job)
+
+        assert result.error == "rc=1", (result.stdout_tail, result.stderr_tail)
+        assert "The candidate CI runner cannot authorize native fallback." in result.stderr_tail
+        assert "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent" in result.stderr_tail
+        assert result.value["head_sha"] == candidate_revision
+        assert result.value["immutable_source"] is True
+        assert _immutable_runner_checkout_state(checkout) == checkout_before
 
     def test_hdiutil_blank_image_argv_uses_no_srcfolder_only_format(self, tmp_path: Path) -> None:
         """The quota image uses the valid blank-HFS+ form accepted by macOS."""
@@ -2983,6 +3511,8 @@ class TestWorkerPoolSubmitComplete:
                 runtime_environment=runtime,
                 git_metadata=metadata,
                 pi_smoke_logs=pi_smoke_logs,
+                git_executable=Path("/usr/bin/git"),
+                git_exec_path=tmp_path / "git-core",
             )
 
         assert "limit -f 131072" in command[2]
@@ -3297,10 +3827,12 @@ class TestWorkerPoolSubmitComplete:
         assert f"'''exec' '{sealed.resolve() / 'bin' / 'python'}'" in copied
 
     def test_host_verification_environment_keeps_tool_output_in_scratch(
-        self, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """UV, Ruff, pytest coverage, and bytecode write only to scratch."""
         scratch = tmp_path / "scratch"
+        monkeypatch.setenv("GIT_EXEC_PATH", "/unsafe/git-core")
+        monkeypatch.setenv("DEVELOPER_DIR", "/unsafe/developer")
 
         environment = _host_verification_env(scratch, "/usr/bin/uv", tmp_path / "runtime")
 
@@ -3312,6 +3844,8 @@ class TestWorkerPoolSubmitComplete:
         ):
             assert Path(environment[key]).is_relative_to(scratch.resolve())
         assert environment["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+        assert "GIT_EXEC_PATH" not in environment
+        assert "DEVELOPER_DIR" not in environment
 
     def test_host_output_aliases_keep_coverage_xml_in_scratch(self, tmp_path: Path) -> None:
         """The full coverage receipt cannot write into the immutable source tree."""
@@ -3534,9 +4068,13 @@ class TestAgentErrorHandling:
         assert result.error == "review-session-lost"
         assert result.session_lost is True
 
-    def test_codex_event_failure_is_explicit_agent_error(self, pool: WorkerPool) -> None:
+    def test_codex_event_failure_is_explicit_agent_error(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
         """Structured Codex failures cross the worker boundary as agent errors."""
-        job = _agent_job(agent="codex")
+        job = _agent_job(agent="codex", cwd=tmp_path)
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),

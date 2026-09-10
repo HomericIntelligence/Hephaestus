@@ -93,6 +93,59 @@ The direct ruleset contexts and `required-checks-gate` remain authoritative
 merge requirements. The local run is early failure feedback only; it does not grant
 `state:implementation-go` and does not replace GitHub's exact-head checks.
 
+## macOS PR-review Git boundary
+
+Before candidate code starts, host verification resolves Git with the system
+search path from `os.defpath`. It runs that exact Git with `--exec-path` from
+the filesystem root. The probe has a fixed timeout, bounded output, and a
+Git-only environment. The environment removes `GIT_EXEC_PATH` and
+`DEVELOPER_DIR`.
+
+The worker accepts only the canonical `usr/libexec/git-core` directory in one
+of these development-tool roots:
+
+- `/Library/Developer/CommandLineTools`
+- `/Applications/Xcode.app/Contents/Developer`
+
+The Git executable, each path component, and the final directory must exist.
+They must not be symbolic links or permit group or world writes. The final
+object must be a directory. A relative path, a path with control characters,
+multiple output lines, a different directory, or a path outside an approved
+root causes a failure.
+
+The worker derives and validates the direct `usr/bin/git` executable in the
+same toolchain. It binds a generated verified-runner command to this executable
+before the sandbox starts. This avoids the `/usr/bin/git` developer-selection
+shim, which cannot resolve a toolchain through the narrow sandbox profile.
+
+The sandbox grants read access to the direct Git executable and the validated
+`git-core` directory. It grants metadata access to the directory ancestors that
+macOS needs for path resolution. It does not grant read access to `/Library`,
+`/Applications`, or an entire development-tool root. The candidate environment
+does not contain `GIT_EXEC_PATH`. A discovery or validation error stops host
+verification before candidate code starts.
+
+Run the focused resolver, profile, and immutable boundary regressions on a
+macOS host:
+
+```bash
+uv run pytest -o addopts= \
+  tests/unit/automation/pipeline/test_worker_pool.py::TestHostVerificationGitExecPath \
+  tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_trusted_runner_preserves_native_fallback \
+  tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_runner_rejects_native_fallback \
+  tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_helper_rejects_native_fallback \
+  -q --tb=short
+```
+
+The host must have the project virtual environment, `sandbox-exec`, system Git
+in an approved toolchain, and usable HFS+ quota mounts. A missing prerequisite
+must fail the macOS acceptance run. A platform skip is not acceptance evidence.
+
+If a released resolver or profile rule causes a macOS boundary regression,
+revert the resolver, its exact profile rule, its tests, and this section in one
+revert commit. Run the existing host-verification protection tests before the
+next release. Do not add broader sandbox permissions as a rollback action.
+
 ## Linux PR-review host verification
 
 Linux PR-review host verification runs the candidate command in a read-only

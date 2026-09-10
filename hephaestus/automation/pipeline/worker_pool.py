@@ -204,7 +204,10 @@ from hephaestus.automation.source_worktree import (
     _terminal_json_object,
     _terminal_read_bytes,
 )
-from hephaestus.automation.verified_runner import build_verified_runner_argv
+from hephaestus.automation.verified_runner import (
+    bind_verified_runner_git_executable,
+    build_verified_runner_argv,
+)
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -229,6 +232,7 @@ from hephaestus.automation.worktree_snapshot import (
 )
 from hephaestus.config.child_environments import (
     build_codex_implementation_child_env,
+    build_git_child_env,
     build_git_signing_env,
     build_host_verification_env,
     build_python_phase_env,
@@ -900,6 +904,7 @@ _HOST_VERIFICATION_SCRATCH_MAX_BYTES = 512 * 1024 * 1024
 # still the non-bypassable aggregate quota for every PR-visible write.
 _HOST_VERIFICATION_POLL_S = 0.05
 _HOST_VERIFICATION_SETUP_TIMEOUT_S = 30
+_HOST_VERIFICATION_GIT_EXEC_OUTPUT_MAX_BYTES = 4096
 _LINUX_RESOURCE_LIMIT_BOOTSTRAP = (
     "import os, resource, sys\n"
     "limits = ((resource.RLIMIT_CPU, int(sys.argv[1])), "
@@ -947,6 +952,128 @@ def _sandbox_string(path: Path) -> str:
     # the physical path. A lexical temporary-directory path would otherwise
     # deny the declared snapshot's current working directory.
     return str(path.resolve()).replace("\\", "\\\\").replace('"', '\\"')
+
+
+_TRUSTED_GIT_EXEC_ROOTS = (
+    Path("/Library/Developer/CommandLineTools"),
+    Path("/Applications/Xcode.app/Contents/Developer"),
+)
+_TRUSTED_GIT_EXEC_RELATIVE_PATH = Path("usr/libexec/git-core")
+
+
+def _validated_system_git_executable(git_executable: str | None) -> str:
+    """Return one safe canonical system Git executable."""
+    if git_executable is None:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable")
+    git_path = Path(git_executable)
+    try:
+        canonical_git = git_path.resolve(strict=True)
+        git_mode = git_path.lstat().st_mode
+    except RuntimeError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable") from exc
+    if (
+        not git_path.is_absolute()
+        or git_path.is_symlink()
+        or canonical_git != git_path
+        or not stat.S_ISREG(git_mode)
+        or not os.access(git_path, os.X_OK)
+        or git_mode & 0o022
+    ):
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    return git_executable
+
+
+def _probed_git_exec_path(git_executable: str) -> Path:
+    """Run the bounded system Git probe and return its absolute result."""
+    probe_environment = build_git_child_env()
+    probe_environment["PATH"] = os.defpath
+    probe_environment.pop("GIT_EXEC_PATH", None)
+    probe_environment.pop("DEVELOPER_DIR", None)
+    try:
+        result = _run_bounded_git_output(
+            (git_executable, "--exec-path"),
+            cwd=Path(os.path.sep),
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            max_bytes=_HOST_VERIFICATION_GIT_EXEC_OUTPUT_MAX_BYTES,
+            retain_text=True,
+            env=probe_environment,
+        )
+    except (
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable") from exc
+
+    output = result.text
+    if (
+        not output.endswith("\n")
+        or output.count("\n") != 1
+        or not output[:-1]
+        or any(ord(character) < 32 or ord(character) == 127 for character in output[:-1])
+    ):
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    candidate = Path(output[:-1])
+    if not candidate.is_absolute():
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    return candidate
+
+
+def _absolute_directory_components(path: Path) -> tuple[Path, ...]:
+    """Return each absolute directory component from the filesystem root."""
+    current = Path(path.anchor)
+    components = [current]
+    for part in path.parts[1:]:
+        current /= part
+        components.append(current)
+    return tuple(components)
+
+
+def _validate_git_exec_components(path: Path) -> None:
+    """Reject an indirect, non-directory, or writable path component."""
+    for directory in _absolute_directory_components(path):
+        mode = directory.lstat().st_mode
+        if directory.is_symlink() or not stat.S_ISDIR(mode) or mode & 0o022:
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+
+
+def _validated_git_exec_directory(candidate: Path) -> Path:
+    """Return the approved canonical directory for one Git probe result."""
+    try:
+        expected = next(
+            (
+                root / _TRUSTED_GIT_EXEC_RELATIVE_PATH
+                for root in _TRUSTED_GIT_EXEC_ROOTS
+                if candidate == root / _TRUSTED_GIT_EXEC_RELATIVE_PATH
+            ),
+            None,
+        )
+        if expected is None:
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+        _validate_git_exec_components(expected)
+        exec_path = candidate.resolve(strict=True)
+        if exec_path != expected:
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    except RuntimeError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable") from exc
+    return exec_path
+
+
+def _validated_git_exec_path() -> tuple[str, Path]:
+    """Return the direct developer Git and its validated support directory."""
+    system_git = _validated_system_git_executable(_trusted_executable("git", path=os.defpath))
+    candidate = _probed_git_exec_path(system_git)
+    exec_path = _validated_git_exec_directory(candidate)
+    developer_git = exec_path.parents[2] / "usr" / "bin" / "git"
+    try:
+        _validate_git_exec_components(developer_git.parent)
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable") from exc
+    return _validated_system_git_executable(str(developer_git)), exec_path
 
 
 def _host_verification_env(
@@ -1255,6 +1382,8 @@ def _host_verification_profile(
     git_metadata: Path,
     pi_smoke_logs: Path,
     executable: Path,
+    git_executable: Path,
+    git_exec_path: Path,
 ) -> str:
     """Build the macOS profile; only the declared scratch tree is writable."""
     allowed_roots = (
@@ -1290,6 +1419,8 @@ def _host_verification_profile(
             f'  (subpath "{_sandbox_string(git_metadata)}")',
             f'  (subpath "{_sandbox_string(pi_smoke_logs)}")',
             f'  (literal "{_sandbox_string(executable)}")',
+            f'  (literal "{_sandbox_string(git_executable)}")',
+            f'  (subpath "{_sandbox_string(git_exec_path)}")',
             *(f'  (subpath "{_sandbox_string(root)}")' for root in allowed_roots),
             ")",
             # ``getcwd`` and dynamic-loader path checks need metadata on the
@@ -1304,6 +1435,8 @@ def _host_verification_profile(
                     git_metadata,
                     pi_smoke_logs,
                     executable,
+                    git_executable,
+                    git_exec_path,
                 )
             ),
             # Tests and validation helpers commonly use the stable ``/tmp``
@@ -1327,6 +1460,8 @@ def _host_verification_command(
     runtime_environment: Path,
     git_metadata: Path,
     pi_smoke_logs: Path,
+    git_executable: Path,
+    git_exec_path: Path,
 ) -> tuple[str, ...]:
     """Return a command that denies network and host writes to PR code.
 
@@ -1355,6 +1490,8 @@ def _host_verification_command(
             git_metadata=git_metadata,
             pi_smoke_logs=pi_smoke_logs,
             executable=executable,
+            git_executable=git_executable,
+            git_exec_path=git_exec_path,
         ),
     )
     # Start through a constant trusted shell so resource limits are inherited
@@ -4985,10 +5122,15 @@ class WorkerPool:
         )
         if executable is None:
             return JobResult(ok=False, error="host_verification_executable_unavailable")
+        try:
+            launcher_git_executable, git_exec_path = _validated_git_exec_path()
+        except _HostVerificationBoundaryError as exc:
+            return JobResult(ok=False, error=str(exc))
         git_executable = _trusted_git_executable()
         if git_executable is None:
             return JobResult(ok=False, error="host_verification_git_unavailable")
-        argv = (executable, *job.argv[1:])
+        bound_argv = bind_verified_runner_git_executable(job.argv, launcher_git_executable)
+        argv = (executable, *bound_argv[1:])
         try:
             runtime_environment = _verifier_owned_runtime_environment(job.cwd)
         except _HostVerificationBoundaryError as exc:
@@ -5019,6 +5161,8 @@ class WorkerPool:
                             runtime_environment=runtime_environment,
                             git_metadata=git_metadata,
                             pi_smoke_logs=pi_smoke_logs,
+                            git_executable=Path(launcher_git_executable),
+                            git_exec_path=git_exec_path,
                         )
                         result = _run_bounded_host_command(
                             command,
@@ -5027,7 +5171,10 @@ class WorkerPool:
                             scratch=scratch,
                             additional_writable_paths=(pi_smoke_logs,),
                             environment=_host_verification_env(
-                                scratch, executable, runtime_environment, git_executable
+                                scratch,
+                                executable,
+                                runtime_environment,
+                                launcher_git_executable,
                             ),
                             timeout_s=job.timeout_s,
                             shutdown=self._shutdown,

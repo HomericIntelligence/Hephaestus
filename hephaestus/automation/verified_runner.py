@@ -9,7 +9,7 @@ from pathlib import Path
 
 from hephaestus.utils.git import _is_full_commit_sha
 
-__all__ = ["build_verified_runner_argv"]
+__all__ = ["bind_verified_runner_git_executable", "build_verified_runner_argv"]
 
 # The launcher reads each candidate file through one no-follow descriptor walk.
 # It runs only the anonymous snapshots that it verifies. The fixed read bound
@@ -240,3 +240,16 @@ def build_verified_runner_argv(
         runner_shell_executable,
         *candidate_argv,
     )
+
+
+def bind_verified_runner_git_executable(
+    argv: tuple[str, ...], git_executable: str
+) -> tuple[str, ...]:
+    """Bind a generated launcher to one validated direct Git executable."""
+    if (
+        len(argv) < 9
+        or argv[1:4] != ("-I", "-c", _VERIFIED_RUNNER_LAUNCHER)
+        or argv[4] != "hephaestus-required-check"
+    ):
+        return argv
+    return (*argv[:6], git_executable, *argv[7:])
