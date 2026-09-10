@@ -198,7 +198,7 @@ class TestWiring:
         coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
         assert created["size"] == 12
-        assert created["shutdown"] is coordinator.shutdown
+        assert created["shutdown"] is coordinator.worker_shutdown_event
         assert created["completion_q"] is coordinator.completion_q
         assert created["gh_extra_path_root"] == gh_root
         assert created["github_job_runner"] is not None

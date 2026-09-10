@@ -181,12 +181,22 @@ def test_forced_shutdown_publishes_cancelled_queued_job(
     pool = auxiliary.AuxiliaryWorkerPool(
         size=1, shutdown=forced, completion_q=completions, athena_skill_executor=host
     )
+    shutdown_done = threading.Event()
+
+    def stop_pool() -> None:
+        pool.shutdown()
+        shutdown_done.set()
+
     try:
         running = pool.submit(AthenaSkillJob(request=learning_request), "DONE")
         assert host.started.wait(timeout=1)
         queued = pool.submit(AthenaSkillJob(request=learning_request), "DONE")
-        pool.shutdown()
+        shutdown_thread = threading.Thread(target=stop_pool)
+        shutdown_thread.start()
+        assert not shutdown_done.wait(timeout=0.05)
         host.release.set()
+        assert shutdown_done.wait(timeout=2)
+        shutdown_thread.join(timeout=1)
         results = dict(completions.get(timeout=2) for _ in range(2))
 
         assert set(results) == {running, queued}

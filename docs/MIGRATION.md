@@ -52,7 +52,7 @@ Use these replacements for removed automation commands:
 |---|---|
 | `hephaestus-audit-prs --prs N` | `hephaestus-review-prs --prs N` |
 | `hephaestus-drive-prs-green --prs N` | `hephaestus-automation-loop --prs N --stages pr_review,merge_wait` |
-| `hephaestus-agent-stage` | Select the applicable retained command and stage scope. There is no one-operation provider command. |
+| hephaestus-agent-stage | Select the applicable retained command and stage scope. There is no one-operation provider command. |
 | `hephaestus-merge-prs --prs N` | `hephaestus-automation-loop --prs N --stages pr_review,merge_wait` |
 
 The retained commands are `hephaestus-automation-loop`,

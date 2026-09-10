@@ -57,6 +57,7 @@ def test_interrupted_shutdown_waits_for_running_work(auxiliary: bool) -> None:
     """Interrupted shutdown must reap active work before it returns."""
     completions: queue.Queue[tuple[JobHandle, JobResult]] = queue.Queue(maxsize=1)
     shutdown = threading.Event()
+    pool: WorkerPool | AuxiliaryWorkerPool
     if auxiliary:
         pool = AuxiliaryWorkerPool(
             size=1, shutdown=shutdown, completion_q=completions, athena_skill_executor=None
@@ -71,11 +72,13 @@ def test_interrupted_shutdown_waits_for_running_work(auxiliary: bool) -> None:
         started.set()
         release.wait()
 
+    def stop_pool() -> None:
+        pool.shutdown(mark_interrupted=True)
+        stopped.set()
+
     pool._executor.submit(active_work)
     assert started.wait(timeout=1)
-    shutdown_thread = threading.Thread(
-        target=lambda: (pool.shutdown(mark_interrupted=True), stopped.set())
-    )
+    shutdown_thread = threading.Thread(target=stop_pool)
     shutdown_thread.start()
     try:
         assert not stopped.wait(timeout=0.05)
