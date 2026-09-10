@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import importlib
-import queue
 import threading
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from functools import partial
 from pathlib import Path
+from time import monotonic
 from typing import cast
 from unittest.mock import ANY, MagicMock, patch
 
@@ -16,6 +16,7 @@ import pytest
 
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import GitJob
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
@@ -150,7 +151,7 @@ def test_manual_rebase_without_conflicts_does_not_run_repository_policy(
     pool = WorkerPool(
         size=1,
         shutdown=threading.Event(),
-        completion_q=queue.Queue(),
+        completion_q=CompletionQueue(),
         lock_dir=tmp_path / "locks",
     )
     head, base, rewritten = "a" * 40, "b" * 40, "c" * 40
@@ -159,6 +160,7 @@ def test_manual_rebase_without_conflicts_does_not_run_repository_policy(
         expected_repository="HomericIntelligence/Hephaestus",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "rebase_reason": "manual",
@@ -199,7 +201,7 @@ def test_manual_rebase_without_conflicts_does_not_run_repository_policy(
             patch.object(pool, "_run_rebase_structural_validation") as structural,
             patch.object(pool, "_validate_rebased_tree") as semantic,
         ):
-            result = pool._git_rebase_once(job)
+            result = pool._git_rebase_once(job, record_source=MagicMock())
     finally:
         pool.shutdown(mark_interrupted=False)
 
@@ -218,8 +220,9 @@ def test_manual_rebase_without_conflicts_does_not_run_repository_policy(
             head,
             tmp_path,
             source_sha=rewritten,
-            timeout=60,
+            timeout=ANY,
             env={},
             remote_config=(),
             revalidate_remote=ANY,
         )
+        assert 0 < push.call_args.kwargs["timeout"] <= 60

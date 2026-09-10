@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import GitJob
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    claim_test_item,
+    fake_worker_factories,
+)
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -22,9 +27,10 @@ def _coordinator(tmp_path: Path) -> Coordinator:
             parallel_repos=1,
             max_workers=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
 
@@ -37,7 +43,9 @@ def _issue(number: int, stage: StageName) -> WorkItem:
 def _complete_finished_item(coordinator: Coordinator, item: WorkItem) -> None:
     """Drive a finished item through its terminal coordinator release path."""
     assert coordinator._claim_item(StageName.FINISHED) is item
-    coordinator._route(item, StageOutcome(Disposition.FINISH_PASS, "recorded"))
+    coordinator._route(
+        claim_test_item(coordinator, item), StageOutcome(Disposition.FINISH_PASS, "recorded")
+    )
 
 
 def test_global_permit_refuses_c_plus_one_across_distinct_stage_queues(tmp_path: Path) -> None:
@@ -63,7 +71,7 @@ def test_global_permit_refuses_c_plus_one_across_distinct_stage_queues(tmp_path:
     # Routing to the auxiliary finished sink transfers permit ownership. The
     # main lane can admit new work while cleanup remains nonterminal.
     assert coordinator._claim_item(StageName.PLANNING) is first
-    coordinator._finish(first, passed=True, reason="done")
+    coordinator._finish(claim_test_item(coordinator, first), passed=True, reason="done")
     assert coordinator.live_work_count == 0
     assert coordinator.learning_work_count == 1
 
@@ -82,7 +90,7 @@ def test_global_permit_survives_a_lease_and_timer_park(tmp_path: Path) -> None:
 
     assert coordinator._push_item(parked, StageName.PLANNING, enter=True) is True
     assert coordinator._claim_item(StageName.PLANNING) is parked
-    coordinator._timer_park(parked, delay_s=60)
+    coordinator._timer_park(claim_test_item(coordinator, parked), delay_s=60)
 
     assert coordinator.queues[StageName.PLANNING].snapshot() == []
     assert [entry[2] for entry in coordinator.timers] == [parked]
@@ -100,9 +108,9 @@ def test_global_permit_survives_an_inflight_job(tmp_path: Path) -> None:
     assert coordinator._push_item(in_flight, StageName.PLANNING, enter=True) is True
     assert coordinator._claim_item(StageName.PLANNING) is in_flight
     coordinator._submit(
-        in_flight,
+        claim_test_item(coordinator, in_flight),
         JobRequest(
-            GitJob(repo="repo-a", op="push", timeout_s=1),
+            GitJob(repo="repo-a", op="verify_issue_wave_ancestry", timeout_s=1),
             on_done_state="AFTER_JOB",
         ),
     )

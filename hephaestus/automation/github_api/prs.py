@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
-import re
 import subprocess
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
-from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
-from hephaestus.utils.helpers import strip_null_bytes
 
 _ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
 _PULL_REQUEST_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
@@ -21,69 +18,63 @@ class OpenPrDiscoveryIncompleteError(RuntimeError):
     """A head lookup that retained known PRs but could not prove completeness."""
 
     def __init__(self, branch: str, open_prs: list[tuple[int, str]], reason: str) -> None:
-        """Record the known PRs that must be contained before failing closed."""
+        """Record known PRs and the reason the lookup is incomplete."""
         super().__init__(f"could not verify existing PR state for head {branch!r}: {reason}")
         self.open_prs = open_prs
 
 
-def _gh_commit_is_verified(oid: str) -> bool:
-    """Return True if GitHub reports *oid*'s signature as verified.
+def _gh_commit_is_verified(
+    oid: str,
+    *,
+    repository: tuple[str, str],
+    run_gh: Callable[[list[str]], subprocess.CompletedProcess[str]],
+) -> bool:
+    """Read GitHub signature evidence for the explicitly selected repository.
 
-    The local ``git log --format=%G?`` check returns ``N`` (no signature) for a
-    commit that is actually **SSH-signed** when the local checkout has no
-    ``gpg.ssh.allowedSignersFile`` configured — git cannot verify SSH signatures
-    without it. GitHub, however, validates the signature server-side and exposes
-    the result at ``repos/{owner}/{repo}/commits/{sha}`` under
-    ``.commit.verification.verified``. That flag is the source of truth at PR
-    time (the same rationale that makes ``U`` acceptable above), so we consult
-    it before declaring a policy violation. Any lookup failure returns False so
-    the caller falls back to the strict local verdict (fail safe).
+    Local Git cannot verify some SSH signatures without an allowed-signers
+    file. A verified GitHub signature can satisfy that local check. The caller
+    supplies the bounded command runner. An ordinary lookup failure returns
+    False; cancellation and timeout stop the operation.
     """
+    owner, name = repository
     try:
-        owner, name = _api.get_repo_info()
-        result = _api._gh_call(
+        result = run_gh(
             [
                 "api",
                 f"repos/{owner}/{name}/commits/{oid}",
                 "--jq",
                 ".commit.verification.verified",
-            ],
+            ]
         )
         return (result.stdout or "").strip().lower() == "true"
-    except Exception as exc:  # logged, treated as unverified
+    except (CancelledError, subprocess.TimeoutExpired):
+        raise
+    except Exception as exc:
         _api.logger.warning("Could not confirm GitHub signature for %s: %s", oid[:10], exc)
         return False
 
 
-def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
-    """Raise if any commit on *branch* (since *base*) is unsigned or invalid.
+def _assert_branch_commits_signed(
+    branch: str,
+    *,
+    base: str,
+    run_git: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    verify_commit: Callable[[str], bool],
+) -> None:
+    """Reject commits that fail both local and GitHub signature checks.
 
-    Uses ``git log --format='%H %G?'`` to enumerate commits and their signature
-    status. The base ref is fetched first to ensure the range is meaningful in
-    detached/shallow clones; failure to fetch is non-fatal because the existing
-    local ref is sufficient when present.
-
-    A commit whose local status is *not* acceptable (e.g. ``N`` for an
-    SSH-signed commit the local checkout can't verify without
-    ``gpg.ssh.allowedSignersFile``) is re-checked against GitHub's commit
-    verification API before it is flagged — GitHub's ``verified`` flag is
-    authoritative at PR time. Only commits that fail BOTH the local check and
-    the API check are treated as policy violations.
+    The caller supplies repository-bound callbacks with one operation budget.
+    A failed base fetch can use an existing local ref. Try each supported
+    local or remote ref range before deferring an unresolved range to GitHub.
+    Cancellation and timeout stop the sequence.
     """
-    # Best-effort fetch of the base ref. Don't fail signing checks just because
-    # the operator is offline — the local base is usually fresh enough.
-    with contextlib.suppress(Exception):
-        _api.run(
-            ["git", "fetch", "origin", base, "--quiet"],
-            check=False,
-            timeout=_api.gh_cli_timeout(),
-        )
+    try:
+        run_git(["git", "fetch", "origin", base, "--quiet"])
+    except (CancelledError, subprocess.TimeoutExpired):
+        raise
+    except Exception:
+        pass
 
-    # Enumerate commits over the branch range. At PR-create time the branch
-    # typically exists only as origin/<branch> (its checkout lives in a separate
-    # worktree), so vary BOTH the base and branch sides and take the first range
-    # that resolves. A bare local <branch> is not guaranteed to exist in the
-    # coordinator's CWD (#2108, same class as #1795/#2047).
     candidate_ranges = (
         f"origin/{base}..origin/{branch}",
         f"origin/{base}..{branch}",
@@ -92,21 +83,12 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
     )
     result = None
     for rev_range in candidate_ranges:
-        attempt = _api.run(
-            ["git", "log", "--format=%H %G?", rev_range],
-            check=False,
-            timeout=_api.gh_cli_timeout(),
-        )
+        attempt = run_git(["git", "log", "--format=%H %G?", rev_range])
         if attempt.returncode == 0:
             result = attempt
             break
 
     if result is None:
-        # No range resolved locally — the branch ref is unavailable in this CWD
-        # (e.g. pushed to origin but checked out in a separate worktree). This is
-        # a resolution failure, NOT a policy violation: never crash create_pr and
-        # strand already-pushed, signed work. GitHub's server-side signature
-        # verification remains the authoritative server-side backstop. (#2108)
         _api.logger.warning(
             "Could not resolve any commit range for branch %r (vs %s); "
             "skipping local sign check and deferring to GitHub verification.",
@@ -124,10 +106,7 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
             continue
         oid, status = parts[0], parts[1].strip()
         if status not in _ACCEPTABLE_SIG_STATUSES:
-            # Local git couldn't bless it — but it may be SSH-signed and simply
-            # unverifiable here. Defer to GitHub's authoritative verdict before
-            # flagging it as a policy violation.
-            if _api._gh_commit_is_verified(oid):
+            if verify_commit(oid):
                 continue
             bad.append((oid, status))
 
@@ -145,10 +124,9 @@ def _find_open_prs_for_head(
 ) -> list[tuple[int, str]]:
     """Return every validated OPEN PR number and base branch for ``branch``.
 
-    Used by :func:`gh_pr_create` as an idempotency guard so a re-run on a
-    branch that already has an open PR reuses it rather than creating a
-    duplicate (issue #1018). A query or parse failure raises: treating an
-    unknown result as no PR could leave a pre-existing auto-merge arm uncontained.
+    The queue uses this lookup before it creates or reuses a PR. A query
+    or parse failure raises. An incomplete response must not become an
+    empty result that permits duplicate PR creation.
 
     Args:
         branch: Head branch name to look up.
@@ -217,165 +195,6 @@ def _select_open_pr_for_base(open_prs: list[tuple[int, str]], base: str) -> int 
     if len(matching_numbers) > 1:
         raise RuntimeError(f"could not verify existing PR state for base {base!r}")
     return matching_numbers[0] if matching_numbers else None
-
-
-def _find_open_pr_for_head(branch: str, base: str) -> int | None:
-    """Return the single OPEN PR from ``branch`` into ``base``.
-
-    This compatibility selector preserves the historical return type. Callers
-    that must contain every same-head PR should use
-    :func:`_find_open_prs_for_head` before selecting the requested base.
-    """
-    try:
-        return _select_open_pr_for_base(_find_open_prs_for_head(branch), base)
-    except RuntimeError as e:
-        raise RuntimeError(f"could not verify existing PR state for head {branch!r}") from e
-
-
-def gh_pr_create(
-    branch: str,
-    title: str,
-    body: str,
-    auto_merge: bool = False,
-    base: str = "main",
-) -> int:
-    """Create a pull request.
-
-    Enforces PR body and signing policy at creation time:
-
-    1. *body* must contain a literal ``Closes #N`` line.
-    2. Every commit on *branch* (vs *base*) must be cryptographically signed.
-
-    ``auto_merge`` is retained for API compatibility but ignored.  It does not
-    give this legacy helper or its callers automatic-merge authority.  Pending
-    the separately reviewed #2419 path, queue stages do not create, disable,
-    adopt, or poll automatic-merge requests.
-
-    The local signature guard and the active ``homeric-main-baseline`` ruleset
-    enforce cryptographic signatures. The CI gate re-checks the PR body,
-    Conventional Commit subjects, and DCO trailers.
-
-    Args:
-        branch: Branch name
-        title: PR title
-        body: PR description
-        auto_merge: Deprecated compatibility flag; ignored.  Queue
-        native auto-merge is prohibited; merge-wait conditionally merges
-        reviewed heads after final admission.
-        base: Base branch to compare against for signed-commit validation
-
-    Returns:
-        PR number
-
-    Raises:
-        ValueError: If *body* lacks ``Closes #N`` or *branch* has unsigned commits.
-        RuntimeError: If the underlying ``gh`` CLI call fails.
-
-    """
-    # Policy gate #1: PR body must reference the closing issue.
-    _api._assert_body_has_closes(body)
-
-    # Policy gate #2: every commit on the branch must be signed.
-    _api._assert_branch_commits_signed(branch, base=base)
-
-    # Idempotency guard: if an OPEN PR already exists on this head, reuse it
-    # instead of opening a duplicate. This is the single chokepoint that all
-    # PR-creation callers funnel through, so it prevents the duplicate-PR
-    # failure observed on issue #768 (issue #1018). A closed/merged-only head
-    # still gets a fresh PR — the issue may legitimately need new work, and the
-    # worktree manager already extends the remote branch's history.
-    discovery_error: OpenPrDiscoveryIncompleteError | None = None
-    try:
-        open_prs = _api._find_open_prs_for_head(branch)
-    except _api.OpenPrDiscoveryIncompleteError as exc:
-        open_prs = exc.open_prs
-        discovery_error = exc
-    containment_failures = defer_auto_merge_batch(
-        (open_pr_number for open_pr_number, _open_pr_base in open_prs),
-        lambda pr_number: defer_auto_merge(
-            pr_number, lambda args: _api._gh_call(args, check=False)
-        ),
-    )
-    if containment_failures:
-        raise RuntimeError(
-            "could not verify auto-merge disabled for existing PR(s): "
-            + "; ".join(containment_failures)
-        )
-    if discovery_error is not None:
-        raise RuntimeError(
-            f"could not verify existing PR state for head {branch!r}"
-        ) from discovery_error
-    existing_open_pr = _api._select_open_pr_for_base(open_prs, base)
-    if existing_open_pr is not None:
-        _api.logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)
-        return existing_open_pr
-
-    try:
-        # Create PR
-        with _api._body_file(body) as body_path:
-            result = _api._gh_call(
-                [
-                    "pr",
-                    "create",
-                    "--head",
-                    branch,
-                    "--base",
-                    base,
-                    "--title",
-                    # NUL in argv → ``ValueError: embedded null byte`` from gh's
-                    # subprocess call before the child runs (#1661).
-                    strip_null_bytes(title),
-                    "--body-file",
-                    body_path,
-                ]
-            )
-
-        # Extract PR number from URL in output
-        output = result.stdout.strip()
-        try:
-            # Try to extract number from URL (e.g., https://github.com/owner/repo/pull/123)
-            match = re.search(r"/pull/(\d+)", output)
-            pr_number = int(match.group(1)) if match else int(output.split("/")[-1])
-        except (ValueError, IndexError) as e:
-            raise RuntimeError(f"Failed to parse PR number from output: {output}") from e
-
-        _api.logger.info("Created PR #%s", pr_number)
-
-        if auto_merge:
-            _api.logger.warning(
-                "Ignoring auto_merge=True for PR #%s while the PR-review gate is unavailable",
-                pr_number,
-            )
-        if not defer_auto_merge(pr_number, lambda args: _api._gh_call(args, check=False)):
-            raise RuntimeError(f"could not verify auto-merge disabled for new PR #{pr_number}")
-
-        return pr_number
-
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to create PR: {e}") from e
-
-
-def fetch_open_prs() -> list[dict[str, Any]]:
-    """Return every open PR's metadata via ``gh pr list`` (no row limit).
-
-    Uses ``--limit 2147483647`` (INT_MAX) to honor the audit reviewer's
-    'ALL open PRs' contract on repos with >200 open PRs. The gh CLI
-    does not support a true no-cap sentinel; INT_MAX avoids pagination
-    overhead while accommodating any realistic repo size.
-    """
-    result = _api._gh_call(
-        [
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--json",
-            "number,title,headRefName,url,isDraft",
-            "--limit",
-            "2147483647",
-        ]
-    )
-    return cast(list[dict[str, Any]], json.loads(result.stdout or "[]"))
 
 
 def gh_pr_label_names(pr_number: int) -> list[str]:

@@ -1,10 +1,9 @@
 """Durable, head-gated implementation reply handoffs.
 
-The implementation and PR-review stages can each hold a validated response
-batch after the writer runs. This module is the single owner of the replay
-contract: preserve the exact thread snapshots and response prose, bind them to
-the pushed or unchanged reviewed head, then retry only that batch. A head or
-conversation that actually changed is never replayed.
+The implementation stage holds each validated response batch after the
+writer runs. Preserve its exact thread snapshots and response text. Bind the
+batch to the pushed or unchanged reviewed head. Retry only that batch. Do
+not replay it after its head or conversation changes.
 """
 
 from __future__ import annotations
@@ -284,9 +283,9 @@ def _journal_handoff_from_comment(
     raw = _strict_json_loads(payload.removeprefix("<!-- ").removesuffix(" -->"))
     if (
         not isinstance(raw, dict)
-        or raw.get("format") not in {1, 2}
+        or raw.get("format") != 2
         or raw.get("pr_number") != pr_number
-        or (raw.get("format") == 2 and raw.get("armed") is not True)
+        or raw.get("armed") is not True
     ):
         raise ValueError("implementation reply handoff journal identity is invalid")
     if raw.get("thread_snapshot_sha256") != _thread_snapshot_fingerprint(threads):
@@ -848,7 +847,7 @@ def _progress_is_monotonic(
     )
 
 
-def _legacy_batch_is_disjoint(
+def _unchanged_head_batch_is_disjoint(
     comment: IssueComment, match: re.Match[str], threads: list[dict[str, Any]]
 ) -> bool:
     """Exclude only a valid ordinary batch with no current thread IDs."""
@@ -857,7 +856,7 @@ def _legacy_batch_is_disjoint(
         or _thread_snapshot_fingerprint(threads) is None
         or any(any(char.isspace() or ord(char) < 32 for char in thread["id"]) for thread in threads)
     ):
-        raise ValueError("legacy reply journal current threads are incomplete")
+        raise ValueError("unchanged-head reply journal current threads are incomplete")
     _, separator, encoded = comment.body.lstrip().partition("\n")
     if (
         len(comment.body.encode("utf-8")) > REMEDIATION_JOURNAL_COMMENT_MAX_BYTES
@@ -865,7 +864,7 @@ def _legacy_batch_is_disjoint(
         or not encoded.startswith("<!-- ")
         or not encoded.endswith(" -->")
     ):
-        raise ValueError("legacy reply journal schema is malformed")
+        raise ValueError("unchanged-head reply journal schema is malformed")
     payload = _strict_json_loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
     required = {
         "format",
@@ -876,14 +875,12 @@ def _legacy_batch_is_disjoint(
         "replies",
     }
     if not isinstance(payload, dict) or type(payload.get("format")) is not int:
-        raise ValueError("legacy reply journal format is invalid")
-    version = payload["format"]
-    if version == 2:
-        required.add("armed")
+        raise ValueError("unchanged-head reply journal format is invalid")
+    required.add("armed")
     if (
-        version not in {1, 2}
+        payload["format"] != 2
         or set(payload) not in (required, required | {"progress"})
-        or (version == 2 and payload["armed"] is not True)
+        or payload.get("armed") is not True
         or type(payload.get("pr_number")) is not int
         or payload["pr_number"] != int(match.group("pr"))
         or payload.get("head_sha") != match.group("head")
@@ -891,7 +888,7 @@ def _legacy_batch_is_disjoint(
         or not isinstance(payload.get("thread_snapshot_sha256"), str)
         or _SHA256_RE.fullmatch(payload["thread_snapshot_sha256"]) is None
     ):
-        raise ValueError("legacy reply journal identity is invalid")
+        raise ValueError("unchanged-head reply journal identity is invalid")
     replies = payload["replies"]
     if (
         not isinstance(replies, dict)
@@ -907,7 +904,7 @@ def _legacy_batch_is_disjoint(
             for key, value in replies.items()
         )
     ):
-        raise ValueError("legacy reply journal replies are invalid")
+        raise ValueError("unchanged-head reply journal replies are invalid")
     if "progress" in payload:
         progress = ImplementationReplyProgress.from_dict(payload["progress"])
         if (
@@ -926,7 +923,7 @@ def _legacy_batch_is_disjoint(
                 if key in receipt
             )
         ):
-            raise ValueError("legacy reply journal progress is invalid")
+            raise ValueError("unchanged-head reply journal progress is invalid")
     return set(replies).isdisjoint(thread["id"] for thread in threads)
 
 
@@ -944,13 +941,13 @@ def _remediation_handoff_from_comment(
     marker, separator, encoded_payload = comment.body.lstrip().partition("\n")
     marker_match = _REMEDIATION_HANDOFF_JOURNAL_RE.fullmatch(marker)
     if marker_match is None:
-        legacy_match = _HANDOFF_JOURNAL_RE.fullmatch(marker)
-        if legacy_match is not None and (
-            int(legacy_match.group("pr")) == pr_number
-            and legacy_match.group("head") == current_remote_head
-            and not _legacy_batch_is_disjoint(comment, legacy_match, threads)
+        unchanged_head_match = _HANDOFF_JOURNAL_RE.fullmatch(marker)
+        if unchanged_head_match is not None and (
+            int(unchanged_head_match.group("pr")) == pr_number
+            and unchanged_head_match.group("head") == current_remote_head
+            and not _unchanged_head_batch_is_disjoint(comment, unchanged_head_match, threads)
         ):
-            raise ValueError("legacy reply journal cannot recover remediation")
+            raise ValueError("unchanged-head reply journal cannot recover remediation")
         return None
     if int(marker_match.group("pr")) != pr_number:
         raise ValueError("remediation journal PR identity is invalid")
@@ -1281,6 +1278,7 @@ def _consume_reply_post_result(  # noqa: C901
     if replied == expected_ids and len(receipts) == len(replied):
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
         return "completed"
     if bool(getattr(result, "visibility_lag", False)):
         if replied or receipts:
@@ -1291,6 +1289,9 @@ def _consume_reply_post_result(  # noqa: C901
             logger=logger,
         ):
             return "visibility_wait"
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
         return "stale"
     progress = getattr(result, "progress", None)
     if bool(getattr(result, "retryable", False)) and isinstance(
@@ -1327,6 +1328,7 @@ def _consume_reply_post_result(  # noqa: C901
     if not retryable_ids:
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
         return "stale"
     if not replied.issubset(expected_ids) or len(receipts) != len(replied):
         return "invalid"
@@ -1464,7 +1466,6 @@ def retry_pending_implementation_reply_handoff(  # noqa: C901
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             return "stale"
-        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
         if reconciliation_only:
             # A journal-recovered armed intent is read-only.  The accessor
             # owns the complete marker-bound reconciliation and has no
@@ -1478,6 +1479,7 @@ def retry_pending_implementation_reply_handoff(  # noqa: C901
             )
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             if bool(getattr(result, "outcome_unknown", False)) or bool(
                 getattr(result, "blocked_thread_ids", ())
             ):
@@ -1514,6 +1516,7 @@ def retry_pending_implementation_reply_handoff(  # noqa: C901
             # fall through to the ordinary mutation retry path.
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             logger.warning(
                 "reply_handoff:%s: reconciliation could not prove the armed reply (%s)",
                 issue_number,
@@ -1527,6 +1530,7 @@ def retry_pending_implementation_reply_handoff(  # noqa: C901
         )
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
         return "blocked"
 
     return _consume_reply_post_result(

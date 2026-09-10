@@ -55,6 +55,20 @@ PI_SMOKE_COMMAND_PREFIX = [
 ]
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_durable_model_selection_rejects_unversioned_metadata(provider: str) -> None:
+    """A durable model selection requires its current format marker."""
+    with pytest.raises(ValueError, match="invalid durable provider model selection"):
+        agent_runtime.validate_durable_model_selection(provider, "model", None)
+
+
+@pytest.mark.parametrize("provider", agent_runtime.AGENT_CHOICES)
+@pytest.mark.parametrize("model", ["", "model:medium"])
+def test_durable_model_selection_accepts_current_format_defaults(provider: str, model: str) -> None:
+    """The current format accepts provider defaults and explicit model selections."""
+    agent_runtime.validate_durable_model_selection(provider, model, 1)
+
+
 @pytest.fixture
 def private_pi_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Isolate prompt storage and ACL commands when a test mocks Pi itself."""
@@ -2777,26 +2791,6 @@ def test_run_codex_session_tracks_a_dedicated_process_group(tmp_path: Path) -> N
     assert tracker_events == [("enter", 2468), ("exit", 2468)]
 
 
-def test_run_claude_text_strips_null_byte_from_stdin(tmp_path: Path) -> None:
-    """#1661: a NUL in the prompt must not crash the Claude-text stdin path.
-
-    subprocess.run marshals ``input=`` as text stdin and raises
-    ``ValueError: embedded null byte`` on a stray NUL — the same crash the
-    claude_invoke chokepoint guards against, on a sibling runner path.
-    """
-    captured: dict[str, Any] = {}
-
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
-
-    with patch("hephaestus.agents.runtime.subprocess.run", side_effect=fake_run):
-        agent_runtime.run_claude_text("plan this\x00issue", cwd=tmp_path, timeout=30)
-
-    assert captured["input"] == "plan thisissue"
-    assert "\x00" not in captured["input"]
-
-
 def test_run_codex_session_strips_null_byte_from_stdin(tmp_path: Path) -> None:
     """#1661: a NUL in the prompt must not crash the Codex stdin path."""
     captured_input: list[str | None] = []
@@ -3486,14 +3480,6 @@ def test_codex_base_cmd_uses_tool_defaults_for_new_sessions(tmp_path: Path) -> N
 
     assert "--model" not in cmd
     assert not any(arg.startswith("model_reasoning_effort=") for arg in cmd)
-
-
-def test_claude_uses_the_model_without_an_inline_effort() -> None:
-    """Claude has no effort transport, so it uses the selected model default."""
-    assert (
-        agent_runtime.direct_agent_model("claude", "claude-sonnet-4-6:future-effort")
-        == "claude-sonnet-4-6"
-    )
 
 
 @pytest.mark.parametrize(
@@ -4366,7 +4352,6 @@ def test_opencode_registry_contract() -> None:
     assert capabilities.supports_approval is False
     assert capabilities.supports_sandbox is True
     assert agent_runtime.uses_direct_agent_runner("opencode") is True
-    assert agent_runtime.agent_supports_model_reasoning_effort("opencode") is True
 
 
 def test_opencode_base_cmd_passes_model_through_and_omits_empty(tmp_path: Path) -> None:
@@ -4799,30 +4784,6 @@ def test_resolve_agent_accepts_explicit_authenticated_opencode() -> None:
             assert agent_runtime.resolve_agent("opencode") == "opencode"
 
 
-def test_run_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
-    """The legacy public Pi session runner cannot bypass scoped dispatch."""
-    with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess(
-            ["pi", "--mode", "json"],
-            0,
-            stdout='{"type":"session","id":"pi-session-789"}',
-            stderr="",
-        )
-        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped run_pi_session"):
-            agent_runtime.run_pi_session("prompt", cwd=tmp_path, timeout=30)
-
-    run.assert_not_called()
-
-
-def test_run_pi_text_rejects_unadmitted_execution(tmp_path: Path) -> None:
-    """The legacy public Pi text runner cannot bypass scoped dispatch."""
-    with patch("hephaestus.agents.runtime._run_pi_command") as run:
-        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped run_pi_text"):
-            agent_runtime.run_pi_text("prompt", cwd=tmp_path, timeout=30)
-
-    run.assert_not_called()
-
-
 def test_private_pi_helpers_reject_unadmitted_execution(tmp_path: Path) -> None:
     """Reflective private-helper access cannot bypass the Pi admission boundary."""
     with (
@@ -4847,26 +4808,6 @@ def test_private_pi_helpers_reject_unadmitted_execution(tmp_path: Path) -> None:
                 cwd=tmp_path,
                 timeout=30,
                 sandbox="no-tools",
-            )
-
-    run.assert_not_called()
-
-
-def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
-    """The legacy public Pi resume runner cannot bypass scoped dispatch."""
-    with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess(
-            ["pi", "--mode", "json", "--session", "pi-session-789"],
-            0,
-            stdout='{"type":"session","id":"pi-session-789"}',
-            stderr="",
-        )
-        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped resume_pi_session"):
-            agent_runtime.resume_pi_session(
-                "pi-session-789",
-                "prompt",
-                cwd=tmp_path,
-                timeout=30,
             )
 
     run.assert_not_called()
@@ -6115,35 +6056,6 @@ def test_run_pi_smoke_session_disables_tools(
     assert "review prompt" not in captured_cmd
 
 
-def test_resume_pi_session_rejects_raw_resume_even_after_admission(tmp_path: Path) -> None:
-    """A raw session id cannot select a writable Pi resume path."""
-    with patch("hephaestus.agents.runtime._invoke_pi_session") as invoke:
-        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped resume_pi_session"):
-            agent_runtime.resume_pi_session(
-                "pi-session-789",
-                "private feedback content",
-                cwd=tmp_path,
-                timeout=30,
-                model="private-alias",
-                sandbox="read-only",
-            )
-
-    invoke.assert_not_called()
-
-
-def test_direct_agent_model_preserves_empty_explicit_value_and_default() -> None:
-    """Explicit values win and direct agents retain configured defaults."""
-    for agent in agent_runtime.AGENT_CHOICES:
-        assert agent_runtime.direct_agent_model(agent, "phase-model") == "phase-model"
-        assert agent_runtime.direct_agent_model(agent, "") == ""
-        assert agent_runtime.direct_agent_model(agent, None) == ""
-        expected = ""
-        assert (
-            agent_runtime.direct_agent_model(agent, None, codex_default="standalone-default")
-            == expected
-        )
-
-
 def test_agent_json_stdout_wraps_direct_agent_text() -> None:
     """Direct-agent text output should use a provider-neutral JSON wrapper."""
     assert agent_runtime.agent_json_stdout("learned", "pi-session") == (
@@ -6155,7 +6067,7 @@ def test_run_agent_text_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) ->
     """The shared text boundary requires a scoped execution request."""
     with (
         patch("hephaestus.agents.runtime._require_pi_automation_admission"),
-        patch("hephaestus.agents.runtime.run_pi_text") as run_pi_text,
+        patch("hephaestus.agents.runtime._run_pi_command") as run_pi_command,
     ):
         with pytest.raises(
             ExecutionPolicyError,
@@ -6163,14 +6075,14 @@ def test_run_agent_text_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) ->
         ):
             agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
 
-    run_pi_text.assert_not_called()
+    run_pi_command.assert_not_called()
 
 
 def test_run_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
     """The shared session boundary requires a scoped execution request."""
     with (
         patch("hephaestus.agents.runtime._require_pi_automation_admission"),
-        patch("hephaestus.agents.runtime.run_pi_session") as run_pi_session,
+        patch("hephaestus.agents.runtime._run_pi_command") as run_pi_command,
     ):
         with pytest.raises(
             ExecutionPolicyError,
@@ -6178,14 +6090,14 @@ def test_run_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path)
         ):
             agent_runtime.run_agent_session("pi", "prompt", cwd=tmp_path, timeout=30)
 
-    run_pi_session.assert_not_called()
+    run_pi_command.assert_not_called()
 
 
 def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
     """The shared resume boundary requires a scoped execution request."""
     with (
         patch("hephaestus.agents.runtime._require_pi_automation_admission"),
-        patch("hephaestus.agents.runtime.resume_pi_session") as resume_pi_session,
+        patch("hephaestus.agents.runtime._run_pi_command") as run_pi_command,
     ):
         with pytest.raises(
             ExecutionPolicyError,
@@ -6199,106 +6111,7 @@ def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Pa
                 timeout=30,
             )
 
-    resume_pi_session.assert_not_called()
-
-
-@pytest.mark.parametrize("model", ["sonnet", "gpt-6-astra", "MyPrivateModel", "vendor/Model"])
-def test_run_claude_text_builds_stage_command(tmp_path: Path, model: str) -> None:
-    """Claude stage execution should share the agents runtime boundary."""
-    captured: dict[str, Any] = {}
-
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
-        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
-
-    with patch("subprocess.run", side_effect=fake_run):
-        result = agent_runtime.run_claude_text(
-            "prompt",
-            cwd=tmp_path,
-            timeout=30,
-            model=f"{model}:future-effort",
-            sandbox="workspace-write",
-        )
-
-    assert result.stdout == "done"
-    assert captured["cmd"] == [
-        "claude",
-        "--print",
-        "--output-format",
-        "text",
-        "--model",
-        model,
-        "--permission-mode",
-        "dontAsk",
-        "--allowedTools",
-        "Read,Write,Edit,Glob,Grep,Bash",
-    ]
-    assert captured["kwargs"]["input"] == "prompt"
-    assert captured["kwargs"]["cwd"] == tmp_path
-    assert captured["kwargs"]["timeout"] == 30
-    assert captured["kwargs"]["check"] is False
-    assert captured["kwargs"]["env"]["CLAUDECODE"] == ""
-
-
-def test_run_claude_text_read_only_uses_explicit_non_mutating_policy(
-    tmp_path: Path,
-) -> None:
-    """Read-only Claude execution must receive a fixed, explicit policy."""
-    captured_cmd: list[str] = []
-
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured_cmd.extend(cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
-
-    with patch("subprocess.run", side_effect=fake_run):
-        agent_runtime.run_claude_text(
-            "prompt",
-            cwd=tmp_path,
-            timeout=30,
-            sandbox="read-only",
-        )
-
-    assert captured_cmd == [
-        "claude",
-        "--print",
-        "--output-format",
-        "text",
-        "--bare",
-        "--permission-mode",
-        "dontAsk",
-        "--tools",
-        "Read,Glob,Grep",
-        "--allowedTools",
-        "Read,Glob,Grep",
-        "--strict-mcp-config",
-    ]
-
-
-def test_run_claude_text_read_only_cannot_be_broadened_by_caller_tools(
-    tmp_path: Path,
-) -> None:
-    """Caller grants cannot expose write, edit, or shell tools in read-only mode."""
-    captured_cmd: list[str] = []
-
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured_cmd.extend(cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
-
-    with patch("subprocess.run", side_effect=fake_run):
-        agent_runtime.run_claude_text(
-            "prompt",
-            cwd=tmp_path,
-            timeout=30,
-            sandbox="read-only",
-            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-        )
-
-    tools = set(captured_cmd[captured_cmd.index("--tools") + 1].split(","))
-    allowed = set(captured_cmd[captured_cmd.index("--allowedTools") + 1].split(","))
-    assert tools == {"Read", "Glob", "Grep"}
-    assert allowed == tools
-    assert tools.isdisjoint({"Write", "Edit", "Bash"})
+    run_pi_command.assert_not_called()
 
 
 def test_resolve_agent_prefers_claude_when_both_are_authenticated() -> None:
@@ -6730,12 +6543,13 @@ def test_primary_review_uses_network_read_only_profile(tmp_path: Path, resume: b
 
 
 @pytest.mark.parametrize("resume", [False, True])
-@pytest.mark.parametrize("operation", [AgentOperation.REVIEW_VALIDATE, AgentOperation.AUDIT_REVIEW])
 def test_other_review_operations_do_not_inherit_network_profile(
-    tmp_path: Path, resume: bool, operation: AgentOperation
+    tmp_path: Path, resume: bool
 ) -> None:
     """A previous primary session cannot grant network to another operation."""
-    request = ExecutionRequest(AgentRole.PR_REVIEWER, operation, SessionLifecycle.ONE_SHOT)
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER, AgentOperation.REVIEW_VALIDATE, SessionLifecycle.ONE_SHOT
+    )
     with patch.object(
         agent_runtime,
         "_run_codex_command",
@@ -6854,3 +6668,10 @@ def test_primary_review_uses_a_new_profile_name_for_each_attempt(tmp_path: Path)
         assert len(name.removeprefix("hephaestus-review-")) == 32
         names.append(name)
     assert len(set(names)) == 3
+
+
+@pytest.mark.parametrize("name", ["agent_stage_execution_request", "_PI_AGENT_STAGE_REQUESTS"])
+def test_retired_direct_stage_policy_selector_is_unavailable(name: str) -> None:
+    """Generic direct stages have no alternate runtime dispatch path."""
+    with pytest.raises(AttributeError):
+        getattr(agent_runtime, name)

@@ -75,7 +75,7 @@ def test_preparation_creates_complete_bound_delivery_request(
     """Semantic intent becomes one validated, delivery-ready host request."""
     from types import SimpleNamespace
 
-    from hephaestus.automation.mnemosyne_skill_host import DefaultCorpusReader
+    from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
 
     monkeypatch.setattr(DefaultCorpusReader, "read", lambda *_: SimpleNamespace(blocks=()))
     binding = _binding(tmp_path)
@@ -479,7 +479,7 @@ def test_candidate_duplicate_defers_before_workspace_creation(
     from types import SimpleNamespace
 
     from hephaestus.automation.mnemosyne_corpus import MnemosyneSkillBlock
-    from hephaestus.automation.mnemosyne_skill_host import DefaultCorpusReader
+    from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
 
     monkeypatch.setattr(
         DefaultCorpusReader,

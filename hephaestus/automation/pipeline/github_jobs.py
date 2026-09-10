@@ -15,11 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
-from hephaestus.automation.host_verification_bootstrap import (
-    BootstrapProof,
-    is_process_bootstrap_proof,
-)
+from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
 from hephaestus.automation.pipeline.scope_retraction import (
+    is_safe_scope_retraction_path,
     scope_retraction_paths_from_body,
 )
 from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
@@ -27,8 +25,6 @@ from hephaestus.automation.scope_expansion_domain import (
     ScopeExpansion,
     normalize_scope_expansion,
 )
-
-from .rebase_review import RebaseReviewProof
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _JOURNAL_MARKER_RE = re.compile(
@@ -108,6 +104,84 @@ def _json_root(value: FrozenJson, expected: type[object], field_name: str) -> ob
     if not isinstance(root, expected):
         raise ValueError(f"{field_name} must contain a JSON {expected.__name__}")
     return root
+
+
+@dataclass(frozen=True)
+class ReadCurrentPlanScopeRequest:
+    """Read the current plan scope for one repository and issue."""
+
+    repository: str
+    issue_number: int
+    deadline_s: float
+
+    def __post_init__(self) -> None:
+        """Require a complete target identity and operation deadline."""
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository) is None
+        ):
+            raise ValueError("repository must be an owner/name identity")
+        _positive_identifier(self.issue_number, "issue_number")
+        if self.deadline_s is None:
+            raise ValueError("deadline_s is required for a plan scope read")
+        _deadline(self.deadline_s)
+
+
+@dataclass(frozen=True)
+class CurrentPlanScopeRead:
+    """Freeze the exact plan digest and declared paths for one completed read."""
+
+    request: ReadCurrentPlanScopeRequest
+    paths: tuple[str, ...]
+    plan_sha256: str
+
+    def __post_init__(self) -> None:
+        """Reject incomplete or noncanonical scope evidence."""
+        if not isinstance(self.request, ReadCurrentPlanScopeRequest):
+            raise ValueError("request must be a current plan scope read")
+        if (
+            not isinstance(self.paths, tuple)
+            or not self.paths
+            or not all(is_safe_scope_retraction_path(path) for path in self.paths)
+            or tuple(sorted(set(self.paths))) != self.paths
+        ):
+            raise ValueError("paths must contain sorted unique source paths")
+        if (
+            not isinstance(self.plan_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", self.plan_sha256) is None
+        ):
+            raise ValueError("plan_sha256 must be a full SHA256 digest")
+
+
+@dataclass(frozen=True)
+class ReadRateBudgetRequest:
+    """Read quota facts within one absolute monotonic deadline."""
+
+    deadline_s: float
+
+    def __post_init__(self) -> None:
+        """Require a finite, positive operation deadline."""
+        if self.deadline_s is None:
+            raise ValueError("deadline_s is required for a quota read")
+        _deadline(self.deadline_s)
+
+
+@dataclass(frozen=True)
+class RateBudgetRead:
+    """Return quota facts, or an explicit unavailable result."""
+
+    request: ReadRateBudgetRequest
+    remaining: int | None
+    reset_epoch: int | None
+
+    def __post_init__(self) -> None:
+        """Reject partial or invalid quota facts."""
+        if not isinstance(self.request, ReadRateBudgetRequest):
+            raise ValueError("request must be a quota read")
+        if self.remaining is None and self.reset_epoch is None:
+            return
+        if any(type(value) is not int or value < 0 for value in (self.remaining, self.reset_epoch)):
+            raise ValueError("quota facts must be non-negative integers or both unavailable")
 
 
 @dataclass(frozen=True)
@@ -368,7 +442,6 @@ class RunMergeWaitCycleRequest:
     cancellation: threading.Event
     issue_number: int | None = None
     queue_admitted: bool = False
-    bootstrap_proof: BootstrapProof | None = None
     rebase_proof: RebaseReviewProof | None = None
     rebase_record: RebaseReviewRecord | None = None
 
@@ -396,20 +469,12 @@ class RunMergeWaitCycleRequest:
             or self.rebase_proof.pr_number != self.pr_number
             or self.rebase_proof.issue_number != self.issue_number
             or self.rebase_proof.reviewed_head_sha != self.reviewed_head_sha
-            or self.bootstrap_proof is not None
         ):
             raise ValueError("rebase proof must match the original review and merge target")
 
     def __post_init__(self) -> None:
         """Validate the exact-head merge proof and readiness fingerprint."""
         self._validate_rebase_evidence()
-        if self.bootstrap_proof is not None and (
-            not is_process_bootstrap_proof(self.bootstrap_proof)
-            or self.bootstrap_proof.pr != self.pr_number
-            or self.bootstrap_proof.issue != self.issue_number
-            or self.bootstrap_proof.head_sha != self.reviewed_head_sha
-        ):
-            raise ValueError("bootstrap proof must match this process and merge target")
         _positive_identifier(self.pr_number, "pr_number")
         _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
         if (
@@ -761,7 +826,9 @@ class RebaseReviewPublished:
 
 
 type GitHubRequest = (
-    InspectAdoptedRemediationPrStateRequest
+    ReadRateBudgetRequest
+    | ReadCurrentPlanScopeRequest
+    | InspectAdoptedRemediationPrStateRequest
     | InspectDirtyDirectPrStateRequest
     | InspectRebaseConflictRequest
     | PublishRebaseReviewRequest
@@ -795,6 +862,8 @@ class GitHubJob:
         if not isinstance(
             self.request,
             (
+                ReadRateBudgetRequest,
+                ReadCurrentPlanScopeRequest,
                 InspectAdoptedRemediationPrStateRequest,
                 InspectDirtyDirectPrStateRequest,
                 InspectRebaseConflictRequest,
@@ -815,10 +884,11 @@ class GitHubJob:
             self.request,
             (
                 InspectDirtyDirectPrStateRequest,
-                InspectAdoptedRemediationPrStateRequest,
                 InspectRebaseConflictRequest,
                 PublishRebaseReviewRequest,
                 InspectRebaseReviewRequest,
+                InspectAdoptedRemediationPrStateRequest,
+                ReadCurrentPlanScopeRequest,
             ),
         ) and (self.request.repository.rsplit("/", 1)[-1].casefold() != self.repo.casefold()):
             raise ValueError("dirty direct request repository does not match the job")
@@ -1039,7 +1109,9 @@ class ScopeExpansionDependenciesReconciled:
 
 
 type GitHubReceipt = (
-    AdoptedRemediationPrStateRead
+    RateBudgetRead
+    | CurrentPlanScopeRead
+    | AdoptedRemediationPrStateRead
     | DirtyDirectPrStateRead
     | RebaseConflictInspected
     | RebaseReviewPublished
@@ -1058,6 +1130,17 @@ type GitHubReceipt = (
 class GitHubJobRunner(Protocol):
     """Executes closed GitHub requests with job-scoped accessors."""
 
-    def run(self, job: GitHubJob) -> GitHubReceipt:
+    @property
+    def gh_timeout(self) -> int:
+        """Return the operation timeout supplied by the runner."""
+        raise NotImplementedError
+
+    def run(
+        self,
+        job: GitHubJob,
+        *,
+        shutdown: threading.Event | None = None,
+        deadline_s: float | None = None,
+    ) -> GitHubReceipt:
         """Execute one closed GitHub request and return its immutable receipt."""
         raise NotImplementedError

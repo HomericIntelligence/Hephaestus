@@ -89,12 +89,9 @@ class TestCLITargetImportable:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_target_importable(self, command: str, module_path: str, attr: str) -> None:
-        # Several automation CLIs transitively import hephaestus.automation.curses_ui,
-        # which depends on the stdlib `curses` module. CPython does not ship curses on
-        # Windows, so these imports raise ModuleNotFoundError there. The CLIs are not
-        # intended for Windows operators; skip the parametrize entry on that platform.
+        # The agent runtime requires fcntl, which Windows does not provide.
         if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require curses (not bundled on Windows)")
+            pytest.skip("automation CLIs require fcntl, which is unavailable on Windows")
         mod = importlib.import_module(module_path)
         assert hasattr(mod, attr), f"{module_path} has no '{attr}' attribute"
         assert callable(getattr(mod, attr)), f"{module_path}.{attr} is not callable"
@@ -105,12 +102,9 @@ class TestCLIHelpFlag:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_help_flag(self, command: str, module_path: str, attr: str, require_cli: bool) -> None:
-        # Automation CLIs transitively import POSIX-only stdlib modules
-        # (`curses` for the UI, `fcntl` for cross-process locking in planner).
-        # CPython on Windows ships neither; the CLIs aren't intended for
-        # Windows operators. Skip the help-flag check on that platform.
+        # Queue commands require fcntl through the agent runtime.
         if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
+            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -145,7 +139,7 @@ class TestCLIJsonFlag:
         having to execute the CLI's main logic.
         """
         if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
+            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -178,7 +172,7 @@ class TestCLIVersionFlag:
     ) -> None:
         """``<cmd> --version`` must exit 0 and print a version line."""
         if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
+            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -205,7 +199,7 @@ class TestCLIVersionFlag:
     ) -> None:
         """``<cmd> -V`` must also work (short form of --version)."""
         if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
+            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(

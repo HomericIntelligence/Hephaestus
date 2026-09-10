@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any, Protocol
 
-    from hephaestus.automation.arming_state import ArmingStateStore
     from hephaestus.automation.operation_deadlines import OperationDeadlineHost
 
     class _PipelineGitHubHost(OperationDeadlineHost, Protocol):
@@ -21,7 +20,6 @@ if TYPE_CHECKING:
         repo: str | None
         dry_run: bool
         _repo_root: Path
-        _arming: ArmingStateStore
         _gh_timeout: int
 
         @property

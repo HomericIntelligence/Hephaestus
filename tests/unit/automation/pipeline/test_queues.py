@@ -10,6 +10,8 @@ from hephaestus.automation.pipeline import (
     StageQueue,
     WorkItem,
 )
+from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.job_results import JobHandle, JobResult
 
 
 class TestStageQueue:
@@ -142,8 +144,8 @@ class TestCompletionQueue:
     def test_completion_queue_put_get(self) -> None:
         """Put and get items from CompletionQueue."""
         cq = CompletionQueue()
-        item = WorkItem(repo="repo", kind=ItemKind.REPO)
-        data = (item, "completed")
+        job = GitJob(repo="repo", op="verify_issue_wave_ancestry", timeout_s=1)
+        data = (JobHandle(job=job, on_done_state="DONE"), JobResult(ok=True))
 
         cq.put(data)
         result = cq.get(timeout=1)

@@ -8,7 +8,8 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.agents.workspace import WorkspaceBinding
+from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
     AthenaSkillResult,
@@ -196,17 +197,29 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
     prepared: list[str] = []
 
     class SourceWorkspaces:
-        def prepare(
+        def prepare_bounded(
             self,
             _item_number: int,
             _lane: Any,
             target: str,
             *,
             branch: str | None = None,
+            deadline: Any,
         ) -> Any:
-            del branch
+            assert deadline.shutdown is not None
+            assert deadline.remaining() > 0
             prepared.append(target)
-            return SimpleNamespace(cwd=tmp_path, revision=target)
+            return WorkspaceBinding.source(
+                cwd=tmp_path,
+                reusable_root=tmp_path,
+                repository="test-repo",
+                ownership_key=f"test-repo:test:{_item_number}:{_lane.value}",
+                item_number=_item_number,
+                lane=_lane,
+                revision=target,
+                generation=1,
+                detached=branch is None,
+            )
 
     journal = LearningJournalStore(lambda: tmp_path)
     paths = SimpleNamespace(

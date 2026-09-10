@@ -30,17 +30,10 @@ automatic ``state:skip`` transition.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Literal
 
-from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
-from hephaestus.automation.github_api import (
-    fetch_issue_info,
-    gh_pr_label_names,
-    gh_pr_state,
-)
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
@@ -51,6 +44,7 @@ from hephaestus.automation.requirements_recovery import (
     verified_finalized_plan,
 )
 from hephaestus.automation.review_audit import is_clean_go_review
+from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
     STATE_BLOCKED,
@@ -61,9 +55,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
-    has_label,
     is_epic,
-    is_implementation_go,
 )
 
 LOG = logging.getLogger(__name__)
@@ -89,11 +81,8 @@ class IssueClassificationError(ValueError):
 def read_pending_implementation_go_audit(
     github: Any, pr_number: int
 ) -> PendingImplementationGoAudit | None:
-    """Read a typed pending receipt only from adapters that implement the API."""
-    reader = getattr(type(github), "pending_implementation_go_audit", None)
-    if not callable(reader):
-        return None
-    receipt = reader(github, pr_number)
+    """Read and validate the pending audit receipt from the repository adapter."""
+    receipt = github.pending_implementation_go_audit(pr_number)
     if receipt is not None and not isinstance(receipt, PendingImplementationGoAudit):
         raise IssueClassificationError("pending implementation-go audit receipt has invalid type")
     return receipt
@@ -101,11 +90,10 @@ def read_pending_implementation_go_audit(
 
 def read_review_rebase_record(github: Any, pr_number: int) -> RebaseReviewRecord | None:
     """Read retained facts without accepting a serialized process proof."""
-    reader = getattr(type(github), "read_review_rebase_record", None)
-    if not callable(reader):
-        return None
     try:
-        record = reader(github, pr_number)
+        record = github.read_review_rebase_record(pr_number)
+    except CommentJournalReadError:
+        raise
     except (ValueError, RuntimeError) as error:
         raise IssueClassificationError(f"rebase review recovery blocked: {error}") from error
     if record is not None and (
@@ -167,7 +155,7 @@ class IssueFacts:
         authority_sanitized: Whether title/body text required prompt-safe
             sanitization and therefore cannot serve as exact authority.
 
-    Invariants (established by :func:`seed_issue`'s tri-state fetch):
+    Invariants (established by :func:`seed_issue_from_github`'s tri-state fetch):
         - Exactly one of {no live PR, open PR, merged PR} holds:
           ``pr_number is None`` ⇔ ``not pr_is_open and not pr_is_merged``,
           and ``pr_is_open``/``pr_is_merged`` are mutually exclusive.
@@ -195,15 +183,8 @@ class IssueFacts:
 
 
 @dataclass(frozen=True)
-class EpicSkipTagObligation:
-    """A required durable ``state:skip`` write before an epic is excluded."""
-
-    issue: int
-
-
-@dataclass(frozen=True)
 class SeedEntry:
-    """One planned queue push produced by :func:`seed_from_cli`.
+    """One classified entry for a bounded source cursor.
 
     Attributes:
         kind: Source CLI scope of the entry (``repo`` / ``issue`` / ``pr``).
@@ -211,8 +192,7 @@ class SeedEntry:
         stage: Entry stage, or ``None`` when the item is excluded.
         reason: Human-readable classification reason (logged by the caller).
         pr_number: Open PR number for directly-seeded issue entries, when one
-            exists. Repo discovery carries this in products; direct ``--issues``
-            seeding needs the same value so downstream PR stages have context.
+            exists. Both repository and direct intake retain this PR identity.
         issue_number: Linked issue number for directly-seeded PR entries, when
             the PR body carries the repo-policy ``Closes #N`` line.
         issue_title: Issue title copied into the issue WorkItem payload for
@@ -246,7 +226,6 @@ class SeedEntry:
     issue_body: str = ""
     pr_description: str = ""
     passed: bool = True
-    skip_tag_obligation: EpicSkipTagObligation | None = None
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
     pending_review_rebase_record: RebaseReviewRecord | None = None
@@ -460,70 +439,6 @@ def classify_issue(facts: IssueFacts) -> Classification:
     return StageName.PLANNING, f"#{facts.number} {state_label or STATE_NEEDS_PLAN}"
 
 
-def seed_issue(issue_number: int) -> IssueFacts:
-    """Fetch and normalize GitHub state for a single issue (tri-state PR).
-
-    PR facts are a real tri-state fetch: the open-PR lookup
-    (:func:`find_pr_for_issue`) runs first; on a miss, the merged-PR lookup
-    (:func:`find_merged_pr_for_issue`) runs so merged work classifies as
-    finished instead of being re-queued after a restart. A PR that is neither
-    open nor merged (closed/abandoned) is invisible to both lookups and is
-    normalized to ``pr_number = None``, so :func:`classify_issue` only ever
-    sees a clean {no live PR | open PR | merged PR} tri-state.
-
-    Fail-closed: any GitHub error — from the issue fetch or either PR lookup —
-    propagates. Swallowing a PR-probe failure would misclassify toward
-    IMPLEMENTATION and cause duplicate-PR churn.
-
-    Args:
-        issue_number: GitHub issue number.
-
-    Returns:
-        Normalized GitHub state snapshot.
-
-    Raises:
-        Exception: Any GitHub API error from the issue fetch or the PR
-            lookups is re-raised (caller's responsibility to handle).
-
-    """
-    issue_info = fetch_issue_info(issue_number)
-    labels = set(issue_info.labels)
-    # Epic detection: label (epic/roadmap) OR title marker, per #1669.
-    epic = is_epic(issue_info.labels, issue_info.title)
-
-    # Tri-state PR fetch: open first, then merged; closed PRs surface in
-    # neither lookup (normalized to "no live PR"). No try/except: fail-closed.
-    pr_is_open = False
-    pr_is_merged = False
-    pr_has_implementation_go = False
-    pr_has_implementation_no_go = False
-    pr_number: int | None = find_pr_for_issue(issue_number)
-    if pr_number is not None:
-        pr_is_open = True
-        pr_labels = gh_pr_label_names(pr_number)
-        pr_has_implementation_go = is_implementation_go(pr_labels)
-        pr_has_implementation_no_go = has_label(pr_labels, STATE_IMPLEMENTATION_NO_GO)
-    else:
-        pr_number = find_merged_pr_for_issue(issue_number)
-        if pr_number is not None:
-            pr_is_merged = True
-
-    return IssueFacts(
-        number=issue_number,
-        title=issue_info.title,
-        is_epic=epic,
-        labels=labels,
-        body=issue_info.body,
-        pr_number=pr_number,
-        pr_is_open=pr_is_open,
-        pr_is_merged=pr_is_merged,
-        issue_is_closed=issue_info.state == IssueState.CLOSED,
-        pr_has_implementation_go=pr_has_implementation_go,
-        pr_has_implementation_no_go=pr_has_implementation_no_go,
-        authority_sanitized=issue_info.authority_sanitized,
-    )
-
-
 def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     """Fetch and normalize repo-scoped GitHub state for a single issue (tri-state PR).
 
@@ -617,26 +532,8 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
 
 
 def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
-    """Build one issue seed entry and its required durable-write obligation.
-
-    Seeding remains pure: it can declare, but never execute, the write that
-    makes an epic exclusion durable.  Callers must discharge the typed
-    obligation before they consume the resulting ``stage=None`` entry.
-
-    Args:
-        facts: Normalized GitHub state for one issue.
-
-    Returns:
-        The classified entry, with an epic skip-tag obligation only when the
-        issue is an untagged epic.
-
-    """
+    """Build one queue entry from the normalized issue facts."""
     stage, reason = classify_issue(facts)
-    obligation = (
-        EpicSkipTagObligation(issue=facts.number)
-        if facts.is_epic and STATE_SKIP not in facts.labels
-        else None
-    )
     return SeedEntry(
         kind="issue",
         identifier=facts.number,
@@ -645,7 +542,6 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
         pr_number=facts.pr_number if facts.pr_is_open else None,
         issue_title=facts.title,
         issue_body=facts.body,
-        skip_tag_obligation=obligation,
         pending_implementation_go_audit=facts.pending_implementation_go_audit,
         pending_review_rebase_record=facts.pending_review_rebase_record,
         pending_implementation_go_label_confirmed=bool(
@@ -654,146 +550,11 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
     )
 
 
-def seed_from_cli(
-    repos: Sequence[str],
-    issues: Sequence[int],
-    prs: Sequence[int],
-    github: Any | None = None,
-) -> list[SeedEntry]:
-    """Map CLI scope args (``--repos`` / ``--issues`` / ``--prs``) to queue pushes.
-
-    Pure planning plus thin fetch — no mutations:
-
-    - ``repos`` → one :attr:`StageName.REPO` entry each (discovery seeds).
-    - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
-    - ``prs`` → tri-state classification mirroring ``classify_issue``'s
-      open-PR routing: merged direct PR -> FINISHED (idempotent), closed PR ->
-      excluded, open PR with ``state:implementation-go`` -> MERGE_WAIT, open PR
-      without it -> PR_REVIEW. A failed state/label fetch reads as
-      "open, not yet reviewed" (-> pr_review), matching the existing
-      ``_review_existing_pr`` fail-open-to-review semantics.
-      When *github* is given (a repo-scoped accessor, e.g.
-      :class:`~hephaestus.automation.pipeline_github.PipelineGitHub`), both
-      the state read and the label read are scoped to that repo via
-      ``github.gh_pr_state`` / ``github.pr_has_implementation_state_label``
-      — the same accessor :func:`seed_issue_from_github` uses for
-      ``--issues`` — instead of the module-level
-      :func:`~hephaestus.automation.github_api.gh_pr_state` /
-      :func:`~hephaestus.automation.github_api.gh_pr_label_names`, which
-      resolve against the ambient/current repo and can misclassify a PR
-      number that collides across repos in a multi-repo run.
-
-    Args:
-        repos: Repository names to seed for discovery.
-        issues: Issue numbers to classify directly.
-        prs: PR numbers to route by merge/close state, then
-            implementation-review label.
-        github: Optional repo-scoped GitHub accessor for the ``prs`` state
-            and label reads. When ``None``, falls back to the ambient
-            :func:`~hephaestus.automation.github_api.gh_pr_state` /
-            :func:`~hephaestus.automation.github_api.gh_pr_label_names`.
-
-    Returns:
-        Planned queue pushes, in the given order (repos, issues, prs).
-
-    """
-    entries: list[SeedEntry] = [
-        SeedEntry(
-            kind="repo", identifier=repo, stage=StageName.REPO, reason=f"{repo} CLI repo seed"
-        )
-        for repo in repos
-    ]
-    for issue in issues:
-        facts = seed_issue(issue)
-        entries.append(seed_entry_from_facts(facts))
-    for pr in prs:
-        pr_state = github.gh_pr_state(pr) if github is not None else gh_pr_state(pr)
-        state = str((pr_state or {}).get("state") or "").upper()
-        if state == "MERGED" or (pr_state or {}).get("mergedAt"):
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.FINISHED,
-                    reason=f"PR #{pr} merged (idempotent)",
-                    pr_number=pr,
-                )
-            )
-            continue
-        if state == "CLOSED":
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=None,
-                    reason=f"PR #{pr} closed (not merged) — excluded",
-                    pr_number=pr,
-                )
-            )
-            continue
-
-        pending_audit = None
-        rebase_record = None
-        if github is not None:
-            has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
-            pending_audit = read_pending_implementation_go_audit(github, pr)
-            rebase_record = read_review_rebase_record(github, pr)
-        else:
-            has_go = is_implementation_go(gh_pr_label_names(pr))
-        if rebase_record is not None and not pending_review_supersedes_rebase(
-            pending_audit, rebase_record
-        ):
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.MERGE_WAIT,
-                    reason=f"PR #{pr} retained rebase requires host verification",
-                    pr_number=pr,
-                    pending_review_rebase_record=rebase_record,
-                )
-            )
-        elif pending_audit is not None:
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.PR_REVIEW,
-                    reason=f"PR #{pr} has a pending implementation-go audit",
-                    pr_number=pr,
-                    pending_implementation_go_audit=pending_audit,
-                    pending_implementation_go_label_confirmed=has_go,
-                )
-            )
-        elif has_go:
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.MERGE_WAIT,
-                    reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
-                    pr_number=pr,
-                )
-            )
-        else:
-            entries.append(
-                SeedEntry(
-                    kind="pr",
-                    identifier=pr,
-                    stage=StageName.PR_REVIEW,
-                    reason=f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
-                    pr_number=pr,
-                )
-            )
-    return entries
-
-
 __all__ = [
     "Classification",
     "IssueFacts",
     "SeedEntry",
     "classify_issue",
     "seed_entry_from_facts",
-    "seed_from_cli",
-    "seed_issue",
+    "seed_issue_from_github",
 ]

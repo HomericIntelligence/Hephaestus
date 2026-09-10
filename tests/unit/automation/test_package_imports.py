@@ -1,9 +1,4 @@
-"""Regression tests for automation package import side effects and public API contract.
-
-This module tests both import-side-effect safety and the public re-export surface.
-Issue #799: the package must re-export every reviewer class and option model at
-the root, so consumers do not need to reach into private-looking submodules.
-"""
+"""Test lazy queue exports and module import order."""
 
 from __future__ import annotations
 
@@ -17,24 +12,17 @@ import pytest
 import hephaestus.automation as automation
 
 EXPECTED_PUBLIC_SYMBOLS = {
-    "AuditReviewer": "hephaestus.automation.audit_reviewer",
-    "CIDriver": "hephaestus.automation.ci_driver",
-    "CIDriverOptions": "hephaestus.automation.models",
     "DependencyResolver": "hephaestus.automation.dependency_resolver",
-    "ImplementerOptions": "hephaestus.automation.models",
-    "IssueImplementer": "hephaestus.automation.implementer",
     "IssueInfo": "hephaestus.automation.models",
-    "PRReviewer": "hephaestus.automation.pr_reviewer",
-    "PlanReviewer": "hephaestus.automation.plan_reviewer",
-    "PlanReviewerOptions": "hephaestus.automation.models",
-    "PlannerOptions": "hephaestus.automation.models",
-    "ReviewerOptions": "hephaestus.automation.models",
+    "PipelineConfig": "hephaestus.automation.pipeline.coordinator_types",
+    "PipelineScope": "hephaestus.automation.pipeline.routing",
+    "StageName": "hephaestus.automation.pipeline.routing",
+    "run_pipeline": "hephaestus.automation.pipeline.coordinator",
 }
 
 _PHASE_ENTRYPOINTS = (
-    "hephaestus.automation.ci_driver",
+    "hephaestus.automation.loop_runner",
     "hephaestus.automation.implementer",
-    "hephaestus.automation.plan_reviewer",
     "hephaestus.automation.planner",
     "hephaestus.automation.pr_reviewer",
 )
@@ -110,17 +98,13 @@ def test_review_pipeline_modules_are_import_order_independent(
 def test_reply_handoff_and_stages_are_import_order_independent(
     modules: tuple[str, ...],
 ) -> None:
-    """Reply handoff and stages must load in either order with one progress type."""
+    """Reply handoff and stages must load in either order with the canonical progress type."""
     code = "import importlib\n" + "\n".join(
         f"importlib.import_module({module!r})" for module in modules
     )
     code += """
 from hephaestus.automation.pipeline.github_jobs import ImplementationReplyProgress
-from hephaestus.automation.pipeline.stages.base import (
-    ImplementationReplyProgress as StageImplementationReplyProgress,
-)
-if ImplementationReplyProgress is not StageImplementationReplyProgress:
-    raise SystemExit("stages.base does not re-export the canonical progress type")
+assert ImplementationReplyProgress.__module__ == "hephaestus.automation.pipeline.github_jobs"
 """
     result = _run_python(code)
 
@@ -155,23 +139,10 @@ def test_dir_includes_all_entries() -> None:
 
 
 def test_public_surface_pins_expected_symbols() -> None:
-    """Pin __all__ so silent omission of peer classes (e.g. issue #775) regresses loudly."""
+    """Keep the public API and lazy export table consistent."""
     import hephaestus.automation as automation
 
-    expected = {
-        "AuditReviewer",
-        "CIDriver",
-        "CIDriverOptions",
-        "DependencyResolver",
-        "ImplementerOptions",
-        "IssueImplementer",
-        "IssueInfo",
-        "PlanReviewer",
-        "PlanReviewerOptions",
-        "PlannerOptions",
-        "PRReviewer",
-        "ReviewerOptions",
-    }
+    expected = set(EXPECTED_PUBLIC_SYMBOLS)
     assert set(automation.__all__) == expected
     assert set(automation.__all__) <= set(automation._LAZY_EXPORTS), (
         "every __all__ entry must have a _LAZY_EXPORTS row"
@@ -182,8 +153,6 @@ def test_production_modules_import_timeout_config_from_agent_config() -> None:
     """Production automation modules must not depend on the timeout shim."""
     offenders = []
     for path in _AUTOMATION_ROOT.rglob("*.py"):
-        if path.name == "claude_timeouts.py":
-            continue
         text = path.read_text(encoding="utf-8")
         if (
             "from .claude_timeouts import" in text

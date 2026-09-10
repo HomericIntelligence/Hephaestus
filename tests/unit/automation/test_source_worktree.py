@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation import implementation_writer, source_worktree, worktree_manager
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
@@ -239,6 +239,124 @@ def test_bounded_prepare_times_out_stalled_git_without_receipt(
     assert calls == [10.0, 8.0]
     assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
     assert not manager.path_for(42, SourceLane.REVIEW).exists()
+
+
+def test_bounded_prepare_includes_final_workspace_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final validation must not renew an expired preparation deadline."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    clock = [0.0]
+    deadline = _PreparationDeadline(10.0, lambda: clock[0])
+    head_branch = manager._head_branch
+
+    def expire_after_branch_check(*args: Any, **kwargs: Any) -> str | None:
+        branch = head_branch(*args, **kwargs)
+        clock[0] = 11.0
+        return branch
+
+    monkeypatch.setattr(manager, "_head_branch", expire_after_branch_check)
+    with pytest.raises(SourceWorkspacePreparationError) as raised:
+        manager.prepare_bounded(42, SourceLane.REVIEW, second, deadline=deadline)
+
+    assert raised.value.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+    assert not manager._receipt_path(42, SourceLane.REVIEW).exists()
+
+
+@pytest.mark.parametrize("change", ["generation", "lane", "item", "path", "unrelated_file"])
+def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> None:
+    """A dirty operation must keep the exact source receipt and file scope."""
+    from hephaestus.agents.workspace import DirtySourceOperation
+
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(42, SourceLane.IMPLEMENTATION, second, branch="writer")
+    (binding.cwd / "tracked.txt").write_text("candidate\n")
+    if change == "generation":
+        binding = replace(binding, generation=binding.generation + 1)
+    elif change == "lane":
+        binding = replace(binding, lane=SourceLane.REVIEW)
+    elif change == "item":
+        binding = replace(binding, item_number=43)
+    elif change == "path":
+        binding = replace(binding, cwd=repo)
+    else:
+        (binding.cwd / "unrelated.txt").write_text("outside the approved scope\n")
+
+    with pytest.raises(SourceWorkspaceError):
+        with manager.acquire(
+            binding,
+            source_operation=DirtySourceOperation("test-fix", ("tracked.txt",)),
+        ):
+            pytest.fail("source drift received a lease")
+
+
+def test_dirty_operation_permit_ends_with_its_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful dirty lease must revoke its temporary validation permit."""
+    from hephaestus.agents.workspace import (
+        DirtySourceOperation,
+        WorkspaceBindingError,
+        validate_workspace_binding,
+    )
+
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(42, SourceLane.IMPLEMENTATION, second, branch="writer")
+    (binding.cwd / "tracked.txt").write_text("candidate\n")
+    validate = validate_workspace_binding
+    permits: list[object] = []
+
+    def capture_permit(*args: Any, **kwargs: Any) -> Path:
+        if kwargs.get("dirty_permit") is not None:
+            permits.append(kwargs["dirty_permit"])
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(source_worktree, "validate_workspace_binding", capture_permit)
+    with manager.acquire(
+        binding, source_operation=DirtySourceOperation("test-fix", ("tracked.txt",))
+    ) as leased:
+        assert leased == binding.cwd
+    assert permits
+    with pytest.raises(WorkspaceBindingError):
+        validate(binding, dirty_permit=permits[-1])
+
+
+@pytest.mark.parametrize("changed_pin", ["head", "index", "content"])
+def test_rebase_operation_rejects_changed_pause_pins(tmp_path: Path, changed_pin: str) -> None:
+    """The edit lease requires the exact host-captured paused rebase."""
+    from hephaestus.agents.workspace import DirtySourceOperation
+    from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
+
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(42, SourceLane.IMPLEMENTATION, first, branch="writer")
+    (binding.cwd / "tracked.txt").write_text("writer\n")
+    _git(binding.cwd, "commit", "-am", "writer")
+    binding = manager.prepare(
+        42, SourceLane.IMPLEMENTATION, _git(binding.cwd, "rev-parse", "HEAD"), branch="writer"
+    )
+    paused = subprocess.run(
+        ["git", "rebase", second], cwd=binding.cwd, capture_output=True, text=True, check=False
+    )
+    assert paused.returncode != 0
+    snapshot = _dirty_worktree_content_snapshot(binding.cwd, timeout=30)
+    if changed_pin == "index":
+        snapshot["index_sha256"] = "0" * 64
+    operation = DirtySourceOperation(
+        "rebase-conflict",
+        ("tracked.txt",),
+        content_snapshot=tuple(sorted(snapshot.items())),
+        paused_head_sha=second if changed_pin != "head" else first,
+    )
+    if changed_pin == "content":
+        (binding.cwd / "tracked.txt").write_text("changed after the host snapshot\n")
+    with pytest.raises(SourceWorkspaceError):
+        with manager.acquire(binding, source_operation=operation):
+            pytest.fail("changed rebase pins received a lease")
 
 
 @pytest.mark.skipif(
@@ -1780,7 +1898,12 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
     real_handoff = SourceWorkspaceManager.implementation_writer_handoff
 
     @contextmanager
-    def observed_handoff(manager: SourceWorkspaceManager, item_number: int):
+    def observed_handoff(
+        manager: SourceWorkspaceManager,
+        item_number: int,
+        *,
+        deadline: _PreparationDeadline | None = None,
+    ):
         try:
             with file_lock(
                 manager._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
@@ -1790,7 +1913,7 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
                 raise AssertionError("source lease was not held")
         except LockUnavailableError:
             contention_observed.set()
-        with real_handoff(manager, item_number) as handoff:
+        with real_handoff(manager, item_number, deadline=deadline) as handoff:
             yield handoff
 
     real_sync = pool._sync_worktree_to_remote_branch
@@ -1856,6 +1979,10 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
                 "dirty": False,
                 "status": "",
                 "diff": "",
+                "source_workspace": replace(binding, generation=binding.generation + 1).to_dict(),
+                "source_receipt": source_manager._require_receipt(
+                    9, SourceLane.IMPLEMENTATION
+                ).to_dict(),
             }
         rebound = source_manager.prepare(
             9,
@@ -2781,7 +2908,7 @@ def test_worker_publication_records_head_before_review_reuse(
         "_authenticated_remote_git_configuration",
         return_value=(build_git_child_env(), ("-c", "protocol.file.allow=always")),
     ):
-        created = pool._git_create_worktree(job)
+        created = pool._run_git(job)
     assert created.ok, created.error
     writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
     _git(writer, "push", "origin", "writer-branch")
@@ -2804,6 +2931,7 @@ def test_worker_publication_records_head_before_review_reuse(
         repo="example/project",
         op="commit_push",
         timeout_s=60,
+        workspace=WorkspaceBinding.from_dict(created.value["source_workspace"]),
         kwargs={
             "issue_number": 9,
             "branch": "writer-branch",
@@ -2831,7 +2959,7 @@ def test_worker_publication_records_head_before_review_reuse(
             if publication_failure
             else nullcontext()
         ):
-            result = pool._git_commit_push(publish)
+            result = pool._run_git(publish)
     assert result.ok is not publication_failure, result.error
     if publication_failure:
         assert result.value["publication_state"] == "remote_unchanged"
@@ -3444,88 +3572,3 @@ def test_prepared_same_identity_recovery_preserves_registered_predecessor(tmp_pa
     assert _git(writer.cwd, "rev-parse", "HEAD") == head
     assert _git(writer.cwd, "symbolic-ref", "--short", "HEAD") == "adopted-writer"
     assert _git(writer.cwd, "status", "--porcelain") == ""
-
-
-@pytest.mark.parametrize("failure", [None, "missing", "malformed", "symlink", "foreign"])
-def test_implementation_receipt_snapshot_preserves_source(
-    tmp_path: Path, failure: str | None
-) -> None:
-    """A locked snapshot cannot reconcile or change writer state."""
-    repo, _, head = _repository(tmp_path)
-    manager = SourceWorkspaceManager(repo, repository="example/project")
-    manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
-    receipt = manager._require_receipt(42, SourceLane.IMPLEMENTATION)
-    path = manager._receipt_path(42, SourceLane.IMPLEMENTATION)
-    if failure == "missing":
-        path.unlink()
-    elif failure == "malformed":
-        path.write_text("{invalid")
-    elif failure == "symlink":
-        target = tmp_path / "receipt-copy.json"
-        target.write_bytes(path.read_bytes())
-        path.unlink()
-        path.symlink_to(target)
-    elif failure == "foreign":
-        manager._write_receipt(replace(receipt, ownership_key="foreign"))
-    before = path.read_bytes() if path.exists() else None
-    registration = _git(repo, "worktree", "list", "--porcelain")
-    content = (receipt.path / "tracked.txt").read_bytes()
-    with (
-        patch.object(source_worktree, "file_lock", wraps=file_lock) as lock,
-        patch.object(manager, "_reconcile_writer_transition", side_effect=AssertionError),
-        patch.object(manager, "_write_receipt", side_effect=AssertionError),
-        patch.object(manager, "prepare", side_effect=AssertionError),
-    ):
-        if failure is None:
-            observed = manager.snapshot_implementation_receipt(42)
-            assert observed == receipt
-        else:
-            with pytest.raises(SourceWorkspaceError):
-                manager.snapshot_implementation_receipt(42)
-        lock.assert_called_once_with(
-            manager._lane_lock_path(42, SourceLane.IMPLEMENTATION), require_exclusive=True
-        )
-    assert (path.read_bytes() if path.exists() else None) == before
-    assert _git(repo, "worktree", "list", "--porcelain") == registration
-    assert (receipt.path / "tracked.txt").read_bytes() == content
-
-
-@pytest.mark.parametrize("item", [True, False, 0, -1, "42", 42.0])
-def test_implementation_receipt_snapshot_rejects_invalid_item(tmp_path: Path, item: object) -> None:
-    """Invalid identities cannot acquire a source lane lock."""
-    repo, _, _ = _repository(tmp_path)
-    manager = SourceWorkspaceManager(repo, repository="example/project")
-    with patch.object(source_worktree, "file_lock", side_effect=AssertionError):
-        with pytest.raises(SourceWorkspaceError):
-            manager.snapshot_implementation_receipt(cast(Any, item))
-
-
-def test_implementation_receipt_snapshot_keeps_prepared_transition(tmp_path: Path) -> None:
-    """Snapshot reads preserve a prepared transition and terminal evidence."""
-    repo, _, head = _repository(tmp_path)
-    manager = SourceWorkspaceManager(repo, repository="example/project")
-    manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
-    with pytest.raises(source_worktree.SourceWorkspaceTerminalError):
-        with manager.implementation_writer_handoff(42) as handoff:
-            manager.authorize_adopted_implementation_writer_transition(
-                42, branch="writer", expected_head=head, handoff=handoff
-            )
-            raise source_worktree.SourceWorkspaceTerminalError("test stop before adoption")
-    journal = manager._read_writer_transition(42)
-    assert journal is not None and journal.phase == "prepared"
-    paths = (
-        manager._receipt_path(42, SourceLane.IMPLEMENTATION),
-        manager._transition_path(42),
-        manager._terminal_path(42),
-        journal.predecessor.path / "tracked.txt",
-        journal.predecessor.path / ".git",
-    )
-    before = [path.read_bytes() for path in paths]
-    registration = _git(repo, "worktree", "list", "--porcelain")
-    with (
-        patch.object(manager, "_reconcile_writer_transition", side_effect=AssertionError),
-        patch.object(manager, "_write_receipt", side_effect=AssertionError),
-    ):
-        assert manager.snapshot_implementation_receipt(42) == journal.predecessor
-    assert [path.read_bytes() for path in paths] == before
-    assert _git(repo, "worktree", "list", "--porcelain") == registration

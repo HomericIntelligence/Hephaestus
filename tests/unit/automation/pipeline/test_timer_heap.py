@@ -10,28 +10,30 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import (
-    Coordinator,
-    PipelineConfig,
-)
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
+from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult, Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    claim_test_item,
+    fake_worker_factories,
+)
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -49,12 +51,17 @@ class FakeClock:
 def clocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Coordinator, FakeClock]:
     """Coordinator whose time module is replaced with a fake clock."""
     clock = FakeClock()
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
-    config = PipelineConfig(org="org", repos=["repo-a"], parallel_repos=3, projects_dir=tmp_path)
+    config = PipelineConfig(
+        org="org",
+        repos=["repo-a"],
+        parallel_repos=3,
+        projects_dir=tmp_path,
+        rate_guard_enabled=False,
+    )
     coordinator = Coordinator(
         config,
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
         monotonic=clock.monotonic,
         wall_time=lambda: clock.now,
@@ -74,11 +81,12 @@ class TestTimerHeap:
     ) -> None:
         """C=1 does not drop an expired timer when its source stage is full."""
         clock = FakeClock()
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+            PipelineConfig(
+                org="org", repos=["repo-a"], projects_dir=tmp_path, rate_guard_enabled=False
+            ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
             monotonic=clock.monotonic,
             wall_time=lambda: clock.now,
@@ -90,7 +98,7 @@ class TestTimerHeap:
         # but timer re-entry must still retain ownership instead of losing it.
         coordinator._push_item(waiting, StageName.PR_REVIEW, enter=True)
         assert coordinator._claim_item(StageName.PR_REVIEW) is waiting
-        coordinator._timer_park(waiting, 0.0)
+        coordinator._timer_park(claim_test_item(coordinator, waiting), 0.0)
         blocker = _item(2)
         coordinator.queues[StageName.PR_REVIEW].push(blocker)
 
@@ -114,10 +122,11 @@ class TestTimerHeap:
         assert ctx_now() == clock.now
         clock.now += 1.0
         assert ctx_now() == clock.now
-        coordinator._timer_park(_item(1), 50.0)
-        coordinator._timer_park(_item(2), 10.0)
-        coordinator._timer_park(_item(3), 30.0)
+        coordinator._timer_park(claim_test_item(coordinator, _item(1)), 50.0)
+        coordinator._timer_park(claim_test_item(coordinator, _item(2)), 10.0)
+        coordinator._timer_park(claim_test_item(coordinator, _item(3)), 30.0)
 
+        coordinator.event_log.clear()
         clock.now += 60.0
         coordinator._wake_timers()
 
@@ -127,8 +136,8 @@ class TestTimerHeap:
     def test_wake_moves_only_expired_entries(self, clocked: tuple[Coordinator, FakeClock]) -> None:
         """Unexpired timers stay parked."""
         coordinator, clock = clocked
-        coordinator._timer_park(_item(1), 10.0)
-        coordinator._timer_park(_item(2), 100.0)
+        coordinator._timer_park(claim_test_item(coordinator, _item(1)), 10.0)
+        coordinator._timer_park(claim_test_item(coordinator, _item(2)), 100.0)
 
         clock.now += 20.0
         coordinator._wake_timers()
@@ -141,9 +150,12 @@ class TestTimerHeap:
     ) -> None:
         """Two identical wake timestamps must not compare WorkItems (FIFO wins)."""
         coordinator, clock = clocked
-        coordinator._timer_park(_item(1), 5.0)
-        coordinator._timer_park(_item(2), 5.0)  # would raise without the seq tie-break
+        coordinator._timer_park(claim_test_item(coordinator, _item(1)), 5.0)
+        coordinator._timer_park(
+            claim_test_item(coordinator, _item(2)), 5.0
+        )  # would raise without the seq tie-break
 
+        coordinator.event_log.clear()
         clock.now += 6.0
         coordinator._wake_timers()
 
@@ -160,7 +172,9 @@ class TestRetryDelayConsumption:
         item = _item(9)
         item.payload["retry_delay_s"] = 42.0
 
-        coordinator._route(item, StageOutcome(Disposition.RETRY, "ci pending"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.RETRY, "ci pending")
+        )
 
         assert "retry_delay_s" not in item.payload  # consumed, not stale
         assert len(coordinator.timers) == 1
@@ -175,7 +189,9 @@ class TestRetryDelayConsumption:
         coordinator, _clock = clocked
         item = _item(10)
 
-        coordinator._route(item, StageOutcome(Disposition.RETRY, "transient"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.RETRY, "transient")
+        )
 
         assert coordinator.timers == []
         assert len(coordinator.queues[StageName.PR_REVIEW]) == 1
@@ -186,7 +202,9 @@ class TestRetryDelayConsumption:
         item = _item(11)
         item.payload["retry_delay_s"] = 1.0
 
-        coordinator._route(item, StageOutcome(Disposition.RETRY, "poll"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.RETRY, "poll")
+        )
         clock.now += 2.0
         coordinator._wake_timers()
 
@@ -203,7 +221,6 @@ class TestRetryDelayConsumption:
             def __init__(self) -> None:
                 super().__init__(
                     pr_impl_state=(True, False),
-                    learn_terminal=True,
                     pr_state={
                         "state": "OPEN",
                         "headRefOid": "a" * 40,
@@ -240,7 +257,16 @@ class TestRetryDelayConsumption:
         assert isinstance(pool, FakeWorkerPool)
 
         class Runner:
-            def run(self, job: GitHubJob) -> MergeWaitCycleCompleted:
+            gh_timeout = 120
+
+            def run(
+                self,
+                job: GitHubJob,
+                *,
+                shutdown: Event | None = None,
+                deadline_s: float | None = None,
+            ) -> MergeWaitCycleCompleted:
+                del shutdown, deadline_s
                 assert isinstance(job, GitHubJob)
                 assert isinstance(job.request, RunMergeWaitCycleRequest)
                 return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
@@ -264,7 +290,7 @@ class TestRetryDelayConsumption:
             },
         )
 
-        coordinator._run_item(item)
+        coordinator._run_item(claim_test_item(coordinator, item))
         coordinator._drain_completions()
 
         assert github.puts == 0
@@ -291,7 +317,6 @@ class TestRetryDelayConsumption:
             def __init__(self) -> None:
                 super().__init__(
                     pr_impl_state=(True, False),
-                    learn_terminal=True,
                     pr_state={
                         "state": "OPEN",
                         "headRefOid": "a" * 40,
@@ -328,7 +353,16 @@ class TestRetryDelayConsumption:
         assert isinstance(pool, FakeWorkerPool)
 
         class Runner:
-            def run(self, job: GitHubJob) -> MergeWaitCycleCompleted:
+            gh_timeout = 120
+
+            def run(
+                self,
+                job: GitHubJob,
+                *,
+                shutdown: Event | None = None,
+                deadline_s: float | None = None,
+            ) -> MergeWaitCycleCompleted:
+                del shutdown, deadline_s
                 assert isinstance(job, GitHubJob)
                 assert isinstance(job.request, RunMergeWaitCycleRequest)
                 return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
@@ -345,7 +379,7 @@ class TestRetryDelayConsumption:
             payload={"reviewed_pr_head_sha": "a" * 40},
         )
 
-        coordinator._run_item(item)
+        coordinator._run_item(claim_test_item(coordinator, item))
         coordinator._drain_completions()
 
         assert github.puts == 1
@@ -377,7 +411,7 @@ class TestStepWatchdog:
         """A 60-second step remains within the coordinator contract."""
         coordinator, clock = clocked
 
-        class WithinContractStage:
+        class WithinContractStage(Stage):
             def on_enter(self, item: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -391,7 +425,7 @@ class TestStepWatchdog:
         coordinator.stages[StageName.PR_REVIEW] = WithinContractStage()
 
         with caplog.at_level("WARNING"):
-            coordinator._run_item(_item(11))
+            coordinator._run_item(claim_test_item(coordinator, _item(11)))
 
         assert not any("stage.step stalled" in record.message for record in caplog.records)
 
@@ -403,7 +437,7 @@ class TestStepWatchdog:
         """A step exceeding _STEP_WATCHDOG_S logs the stall warning."""
         coordinator, clock = clocked
 
-        class SlowStage:
+        class SlowStage(Stage):
             def on_enter(self, item: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -418,7 +452,7 @@ class TestStepWatchdog:
         item = _item(12)
 
         with caplog.at_level("WARNING"):
-            coordinator._run_item(item)
+            coordinator._run_item(claim_test_item(coordinator, item))
 
         assert any("stage.step stalled" in record.message for record in caplog.records)
 
@@ -430,7 +464,7 @@ class TestStepWatchdog:
         """A fast step logs no stall warning."""
         coordinator, _clock = clocked
 
-        class FastStage:
+        class FastStage(Stage):
             def on_enter(self, item: WorkItem, ctx: Any) -> Any:
                 return None
 
@@ -443,7 +477,7 @@ class TestStepWatchdog:
         coordinator.stages[StageName.PR_REVIEW] = FastStage()
 
         with caplog.at_level("WARNING"):
-            coordinator._run_item(_item(13))
+            coordinator._run_item(claim_test_item(coordinator, _item(13)))
 
         assert not any("stalled" in record.message for record in caplog.records)
 
@@ -473,12 +507,14 @@ class TestStepWatchdog:
         run_git("commit", "-m", "initial")
         revision = run_git("rev-parse", "HEAD")
 
-        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        config = PipelineConfig(
+            org="org", repos=["repo-a"], projects_dir=tmp_path, rate_guard_enabled=False
+        )
         pool = FakeWorkerPool()
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
-            pool=pool,
+            **fake_worker_factories(pool, None),
             install_signals=False,
         )
         manager = SourceWorkspaceManager(repo, repository="org/repo-a")
@@ -496,7 +532,7 @@ class TestStepWatchdog:
             require_exclusive=True,
         ):
             with caplog.at_level("WARNING"):
-                coordinator._run_item(item)
+                coordinator._run_item(claim_test_item(coordinator, item))
 
         assert pool.submitted == []
         assert item.attempts["source_workspace"] == 1

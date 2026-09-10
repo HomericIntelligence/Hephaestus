@@ -8,7 +8,7 @@ Usage::
     python scripts/show_prompt.py --issue 1170 --stage implementation
 
 Supported stages: planning, plan-review, plan-loop-review, implementation,
-impl-review, impl-resume, pr-review, address-review, follow-up, advise.
+impl-review, impl-resume, pr-review, address-review.
 """
 
 from __future__ import annotations
@@ -42,8 +42,6 @@ STAGES = (
     "impl-resume",
     "pr-review",
     "address-review",
-    "follow-up",
-    "advise",
 )
 
 
@@ -150,8 +148,6 @@ def build_prompt(
     Calls the appropriate Hephaestus prompt builder function from
     ``hephaestus.automation.prompts``.
     """
-    from hephaestus.automation.prompts.advise import get_advise_prompt
-    from hephaestus.automation.prompts.follow_up import get_follow_up_prompt
     from hephaestus.automation.prompts.implementation import (
         get_impl_loop_review_prompt,
         get_impl_resume_feedback_prompt,
@@ -266,18 +262,6 @@ def build_prompt(
             issue_number=issue_number,
             worktree_path=worktree_path,
             threads_json=threads_json,
-        )
-
-    # -- Other stages -------------------------------------------------------
-    if stage == "follow-up":
-        return get_follow_up_prompt(issue_number)
-
-    if stage == "advise":
-        return get_advise_prompt(
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            marketplace_path="",
         )
 
     raise AssertionError(f"Unhandled stage: {stage!r}")  # pragma: no cover

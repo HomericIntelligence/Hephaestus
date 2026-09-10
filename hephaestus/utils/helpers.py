@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from contextlib import suppress
@@ -228,6 +229,34 @@ def _tail_for_log(value: str, limit: int = _LOG_STREAM_TAIL_MAX) -> str:
     return f"...({omitted} earlier chars){value[-limit:]}"
 
 
+def _communicate_until_deadline(
+    process: subprocess.Popen[str],
+    *,
+    cmd: list[str],
+    timeout: float | None,
+    deadline: float | None,
+    shutdown: threading.Event | None,
+) -> tuple[str, str]:
+    """Wait for child output within one deadline and cancellation request."""
+    while True:
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("subprocess cancelled")
+        remaining = deadline - time.monotonic() if deadline is not None else None
+        if remaining is not None and remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd, float(timeout or 0))
+        wait_s = remaining
+        if shutdown is not None:
+            wait_s = min(0.1, remaining) if remaining is not None else 0.1
+        try:
+            stdout, stderr = process.communicate(timeout=wait_s)
+            if shutdown is not None and shutdown.is_set():
+                raise InterruptedError("subprocess cancelled")
+            return stdout, stderr
+        except subprocess.TimeoutExpired:
+            if shutdown is None:
+                raise
+
+
 def _run_tracked_process_group(
     cmd: list[str],
     *,
@@ -235,11 +264,13 @@ def _run_tracked_process_group(
     timeout: float | None,
     check: bool,
     env: dict[str, str],
+    shutdown: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one command and terminate its full process group on timeout."""
+    """Run one command and stop its process group on timeout or cancellation."""
     from hephaestus.utils import subprocess_registry
 
-    if not subprocess_registry.supported():
+    group_supported = subprocess_registry.supported()
+    if not group_supported and shutdown is None:
         return subprocess.run(
             cmd,
             cwd=cwd,
@@ -251,6 +282,9 @@ def _run_tracked_process_group(
             env=env,
         )
 
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    if shutdown is not None and shutdown.is_set():
+        raise InterruptedError("subprocess cancelled before start")
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -259,19 +293,32 @@ def _run_tracked_process_group(
         stderr=subprocess.PIPE,
         text=True,
         env=env,
-        start_new_session=True,
+        start_new_session=group_supported,
     )
     with subprocess_registry.track_process_group(process.pid):
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = _communicate_until_deadline(
+                process, cmd=cmd, timeout=timeout, deadline=deadline, shutdown=shutdown
+            )
         except subprocess.TimeoutExpired:
-            stdout, stderr = _stop_process_group(process)
+            if group_supported:
+                stdout, stderr = _stop_process_group(process)
+            else:
+                process.kill()
+                stdout, stderr = process.communicate()
             raise subprocess.TimeoutExpired(
                 cmd,
                 float(timeout or 0),
                 output=stdout,
                 stderr=stderr,
             ) from None
+        except BaseException:
+            if group_supported:
+                _stop_process_group(process)
+            else:
+                process.kill()
+                process.communicate()
+            raise
     result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     if check and result.returncode:
         raise subprocess.CalledProcessError(
@@ -293,6 +340,7 @@ def run_subprocess(
     dry_run: bool = False,
     log_on_error: bool = True,
     track_process_group: bool = False,
+    shutdown: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
@@ -307,6 +355,7 @@ def run_subprocess(
         env: Exact environment dict replacing the current process environment.
         track_process_group: Run the child in a tracked POSIX process group so
             an owning host can stop active work during forced shutdown.
+        shutdown: Optional cancellation event. Stop the child when it is set.
 
     Returns:
         Completed process object
@@ -329,13 +378,14 @@ def run_subprocess(
         effective_env["GH_TRACE_ID"] = cid
 
     try:
-        if track_process_group:
+        if track_process_group or shutdown is not None:
             result = _run_tracked_process_group(
                 cmd,
                 cwd=cwd,
                 timeout=timeout,
                 check=check,
                 env=effective_env,
+                shutdown=shutdown,
             )
         else:
             result = subprocess.run(

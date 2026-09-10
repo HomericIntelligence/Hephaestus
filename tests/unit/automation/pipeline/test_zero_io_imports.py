@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import hephaestus.automation.pipeline as pkg
 
 _PIPELINE_DIR = Path(pkg.__file__).parent
@@ -49,26 +51,16 @@ _ALLOWLIST = frozenset(
     }
 )
 
-# Capability-scoped exemptions: seeding.py and admission.py are the sanctioned
-# "thin fetch over github_api" layer (epic #1809 PR-4): they READ GitHub facts
-# for the classifier/serializer but perform no mutations (the AST mutator guard
-# in test_pipeline_architecture.py still applies to them). Their exemption is
-# NOT module-wide — only the read-seam prefixes below are permitted, so a
-# direct `import subprocess` / `import os` in either file still trips the
-# guard.
-_THIN_FETCH_PREFIXES = (
-    "hephaestus.automation.github_api",
-    "hephaestus.automation._review_utils",
-    "hephaestus.automation.state_labels",
-    "hephaestus.automation.dependency_resolver",
-)
-# Each exemption maps a permitted prefix to an allowed-symbols set, or None
-# for an unscoped (whole-prefix) exemption. A symbol-scoped prefix only
-# permits `from <prefix...> import <allowed symbol>` — a bare
-# `import <prefix>` or a from-import of any other symbol still trips.
-_CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
-    "seeding.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
-    "admission.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
+# The queue uses its repository adapter for reads. Only the existing pure
+# dependency parser and named error classes need direct imports here.
+# Each exception names one module and its permitted symbols. A module import
+# or any other symbol remains forbidden.
+_CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str]]] = {
+    "admission.py": {"subprocess": frozenset({"SubprocessError"})},
+    "coordinator_sources.py": {
+        "hephaestus.automation.github_api.issues": frozenset({"parse_issue_dependencies"}),
+    },
+    "plan_review.py": {"subprocess": frozenset({"SubprocessError"})},
 }
 
 
@@ -78,46 +70,25 @@ def _forbidden(name: str) -> bool:
     return root in _FORBIDDEN_MODULES or name.startswith(_FORBIDDEN_PREFIXES)
 
 
-def _matching_prefix(module: str, exempt: dict[str, frozenset[str] | None]) -> str | None:
-    """Return the exempt prefix that covers *module*, or None."""
-    for prefix in exempt:
-        if module.startswith(prefix):
-            return prefix
-    return None
-
-
-def _import_violations(
-    node: ast.Import, filename: str, exempt: dict[str, frozenset[str] | None]
-) -> list[str]:
-    """Violations for a plain ``import X`` statement.
-
-    Only an UNscoped exemption can permit a whole-module import: a bare
-    import of a symbol-scoped prefix exposes the whole module surface.
-    """
-    violations = []
-    for alias in node.names:
-        if not _forbidden(alias.name):
-            continue
-        prefix = _matching_prefix(alias.name, exempt)
-        if prefix is not None and exempt[prefix] is None:
-            continue
-        violations.append(f"{filename}:{node.lineno}: import {alias.name}")
-    return violations
+def _import_violations(node: ast.Import, filename: str) -> list[str]:
+    """Reject each direct import of a forbidden module."""
+    return [
+        f"{filename}:{node.lineno}: import {alias.name}"
+        for alias in node.names
+        if _forbidden(alias.name)
+    ]
 
 
 def _import_from_violations(
-    node: ast.ImportFrom, filename: str, exempt: dict[str, frozenset[str] | None]
+    node: ast.ImportFrom, filename: str, exempt: dict[str, frozenset[str]]
 ) -> list[str]:
     """Violations for a ``from X import Y`` statement (symbol scoping applies)."""
     mod = node.module or ""
     if not _forbidden(mod):
         return []
-    prefix = _matching_prefix(mod, exempt)
-    if prefix is None:
+    if mod not in exempt:
         return [f"{filename}:{node.lineno}: from {mod} import ..."]
-    allowed = exempt[prefix]
-    if allowed is None:
-        return []  # unscoped exemption: whole prefix permitted
+    allowed = exempt[mod]
     return [
         f"{filename}:{node.lineno}: from {mod} import {alias.name} "
         f"(symbol not in allowed set {sorted(allowed)})"
@@ -127,20 +98,17 @@ def _import_from_violations(
 
 
 def _collect_violations(
-    tree: ast.AST, filename: str, exempt: dict[str, frozenset[str] | None]
+    tree: ast.AST, filename: str, exempt: dict[str, frozenset[str]]
 ) -> list[str]:
-    """Walk *tree* and return forbidden-import violations, honoring *exempt*.
+    """Return forbidden imports except for the specified module and symbol pairs.
 
-    ``exempt`` maps permitted module prefixes to an allowed-symbols set
-    (``None`` = whole prefix permitted). Symbol scoping applies to
-    ``from X import Y`` only: each imported name must be in the allowed set.
-    A plain ``import X`` of a symbol-scoped prefix exposes the whole module
-    surface, so it is always a violation.
+    Direct imports of forbidden modules remain violations. Each permitted
+    from-import must name the exact module and one allowed symbol.
     """
     violations: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            violations.extend(_import_violations(node, filename, exempt))
+            violations.extend(_import_violations(node, filename))
         elif isinstance(node, ast.ImportFrom):
             violations.extend(_import_from_violations(node, filename, exempt))
     return violations
@@ -153,9 +121,8 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
     inside function bodies), not just at the top level. This catches
     conditional and lazy imports that a text-scan would miss.
 
-    Exceptions: the two closed worker pools and the shared cleanup helper
-    execute I/O. Seeding and admission get a capability-scoped exemption for
-    their sanctioned read seams only (see ``_CAPABILITY_EXEMPT``).
+    The listed worker modules execute I/O. Other exceptions permit only
+    named error classes and the existing pure dependency parser.
     """
     violations: list[str] = []
     # rglob so future pipeline/ subpackages (e.g. stages/) stay guarded.
@@ -189,32 +156,67 @@ def test_pipeline_package_import_stays_lazy() -> None:
     assert json.loads(result.stdout) == []
 
 
-def test_capability_scope_still_blocks_io_in_seeding() -> None:
-    """The seeding/admission exemption is capability-scoped, not module-wide.
-
-    A synthetic seeding.py that imports subprocess/os alongside its sanctioned
-    read seams must still be flagged for the I/O modules — only imports under
-    the ``_THIN_FETCH_PREFIXES`` capability prefixes escape the guard.
-    """
+def test_seeding_cannot_import_direct_io_helpers() -> None:
+    """Seeding must use its repository adapter for external reads."""
     synthetic_source = (
         "import subprocess\n"
         "import os\n"
         "from hephaestus.automation.github_api import fetch_issue_info\n"
-        "from hephaestus.automation._review_utils import find_pr_for_issue\n"
         "from hephaestus.automation.state_labels import is_epic\n"
         "from hephaestus.automation.dependency_resolver import DependencyResolver\n"
-        "import hephaestus.utils.helpers\n"  # NOT a sanctioned seam — must trip
+        "import hephaestus.utils.helpers\n"
     )
     tree = ast.parse(synthetic_source, filename="<synthetic-seeding>")
-    violations = _collect_violations(tree, "seeding.py", _CAPABILITY_EXEMPT["seeding.py"])
+    violations = _collect_violations(tree, "seeding.py", _CAPABILITY_EXEMPT.get("seeding.py", {}))
 
     assert any("import subprocess" in v for v in violations)
     assert any("import os" in v for v in violations)
     assert any("hephaestus.utils.helpers" in v for v in violations)
-    assert not any("github_api" in v for v in violations)
-    assert not any("_review_utils" in v for v in violations)
+    assert any("github_api" in v for v in violations)
     assert not any("state_labels" in v for v in violations)
     assert not any("dependency_resolver" in v for v in violations)
+
+
+@pytest.mark.parametrize("filename", ["admission.py", "plan_review.py"])
+def test_error_class_import_does_not_allow_process_execution(filename: str) -> None:
+    """Permit the error class without permitting process runners."""
+    tree = ast.parse(
+        "from subprocess import SubprocessError\n"
+        "import subprocess\n"
+        "from subprocess import run, Popen\n"
+        "from subprocess import *\n"
+        "from hephaestus.automation.github_api import gh_call\n"
+    )
+    violations = _collect_violations(tree, filename, _CAPABILITY_EXEMPT[filename])
+
+    assert len(violations) == 5
+    assert not any("import SubprocessError" in violation for violation in violations)
+    assert any("import subprocess" in violation for violation in violations)
+    assert any("import run " in violation for violation in violations)
+    assert any("import Popen " in violation for violation in violations)
+    assert any("import * " in violation for violation in violations)
+    assert any("github_api" in violation for violation in violations)
+
+
+def test_dependency_parser_import_does_not_allow_github_io() -> None:
+    """Permit dependency parsing without permitting GitHub readers or runners."""
+    tree = ast.parse(
+        "from hephaestus.automation.github_api.issues import parse_issue_dependencies\n"
+        "import hephaestus.automation.github_api.issues\n"
+        "from hephaestus.automation.github_api.issues import fetch_issue_info\n"
+        "from hephaestus.automation.github_api.issues import *\n"
+        "from hephaestus.automation.github_api import gh_call\n"
+    )
+    violations = _collect_violations(
+        tree, "coordinator_sources.py", _CAPABILITY_EXEMPT["coordinator_sources.py"]
+    )
+
+    assert len(violations) == 4
+    assert not any("import parse_issue_dependencies" in violation for violation in violations)
+    assert any("import hephaestus.automation.github_api.issues" in v for v in violations)
+    assert any("import fetch_issue_info " in violation for violation in violations)
+    assert any("import * " in violation for violation in violations)
+    assert any("from hephaestus.automation.github_api import" in v for v in violations)
 
 
 def test_plan_review_rejects_direct_agent_runner_imports() -> None:

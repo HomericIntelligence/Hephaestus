@@ -4,38 +4,28 @@ from __future__ import annotations
 
 import pytest
 
+from hephaestus.automation.agent_config import (
+    AGENT_IMPLEMENTER,
+    AGENT_PLAN_REVIEWER,
+    AGENT_PLANNER,
+    AGENT_PR_REVIEWER,
+)
 from hephaestus.automation.pipeline.tool_scopes import (
     AGENT_TOOL_SCOPES,
     DEFAULT_TOOL_SCOPE,
     ToolScope,
     tool_scope_for,
 )
-from hephaestus.automation.session_naming import (
-    AGENT_ADDRESS_REVIEW,
-    AGENT_ADVISE,
-    AGENT_CI_DRIVER,
-    AGENT_COMMENT_CLASSIFIER,
-    AGENT_IMPLEMENTER,
-    AGENT_LEARNINGS,
-    AGENT_PLAN_REVIEWER,
-    AGENT_PLANNER,
-    AGENT_PR_REVIEWER,
-)
 
 # Every distinct session_agent= constant used at the pipeline stage call sites.
 _STAGE_AGENTS = [
-    AGENT_ADVISE,
     AGENT_PLANNER,
     AGENT_PLAN_REVIEWER,
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
-    AGENT_COMMENT_CLASSIFIER,
-    AGENT_ADDRESS_REVIEW,
-    AGENT_CI_DRIVER,
-    AGENT_LEARNINGS,
 ]
-_REVIEWERS = [AGENT_PLAN_REVIEWER, AGENT_PR_REVIEWER, AGENT_COMMENT_CLASSIFIER]
-_WRITERS = [AGENT_IMPLEMENTER, AGENT_ADDRESS_REVIEW, AGENT_CI_DRIVER, AGENT_LEARNINGS]
+_REVIEWERS = [AGENT_PLAN_REVIEWER, AGENT_PR_REVIEWER]
+_WRITERS = [AGENT_IMPLEMENTER]
 
 
 @pytest.mark.parametrize("agent", _STAGE_AGENTS)
@@ -46,14 +36,14 @@ def test_every_stage_agent_has_explicit_scope(agent: str) -> None:
 
 @pytest.mark.parametrize("agent", _REVIEWERS)
 def test_reviewer_scopes_grant_no_write_or_exec(agent: str) -> None:
-    """Reviewers and classifiers are strictly read-only (no Write/Edit/Bash)."""
+    """Reviewer scopes grant only Read, Glob, and Grep."""
     tools = set(AGENT_TOOL_SCOPES[agent].allowed_tools.split(","))
     assert tools == {"Read", "Glob", "Grep"}
 
 
 @pytest.mark.parametrize("agent", _WRITERS)
 def test_writer_scopes_grant_write_and_exec(agent: str) -> None:
-    """Implementer-class roles keep their legacy Write/Edit/Bash grant."""
+    """The implementation scope permits source changes and shell commands."""
     tools = set(AGENT_TOOL_SCOPES[agent].allowed_tools.split(","))
     assert {"Read", "Write", "Edit", "Bash"} <= tools
 

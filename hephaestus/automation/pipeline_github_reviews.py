@@ -12,30 +12,6 @@ __all__ = ["reply_recovery"]
 class PipelineGitHubReviews(_PipelineGitHubHost):
     """Own review-thread snapshots, replies, reconciliation, and evidence."""
 
-    @staticmethod
-    def _mutation_payload(result: object, operation: str) -> dict[str, Any]:
-        """Normalize legacy test doubles while production returns typed receipts."""
-        if isinstance(result, dict) and isinstance(result.get("data"), dict):
-            payload = result["data"].get(operation)
-            if not isinstance(payload, dict):
-                return {}
-            if operation == "addPullRequestReviewThreadReply":
-                comment = payload.get("comment")
-                return comment if isinstance(comment, dict) else {}
-            if operation in {"addPullRequestReview", "submitPullRequestReview"}:
-                review = payload.get("pullRequestReview")
-                return review if isinstance(review, dict) else {}
-            if operation == "resolveReviewThread":
-                thread = payload.get("thread")
-                if not isinstance(thread, dict):
-                    return {}
-                return {
-                    **thread,
-                    "clientMutationId": payload.get("clientMutationId") or "legacy-receipt",
-                }
-            return payload
-        return result if isinstance(result, dict) else {}
-
     def _repo_review_thread_receipts_for_review(
         self,
         pr_number: int,
@@ -456,7 +432,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             pending_review_id=pending_review_id,
             expected_head_sha=expected_head_sha,
         )
-        return self._mutation_payload(self._graphql(spec), spec.operation)
+        return self._graphql(spec)
 
     def _add_reviewer_feedback_reply(
         self,
@@ -471,7 +447,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             body,
             expected_head_sha=expected_head_sha,
         )
-        return self._mutation_payload(self._graphql(spec), spec.operation)
+        return self._graphql(spec)
 
     def _create_pending_implementation_review(
         self, pull_request_id: str, head_sha: str, batch_nonce: str
@@ -479,7 +455,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         """Create one pending review envelope for an implementation reply batch."""
         body = reply_recovery.implementation_review_body(pull_request_id, head_sha, batch_nonce)
         spec = github_api.create_pending_review_mutation(pull_request_id, head_sha, body)
-        receipt = self._mutation_payload(self._graphql(spec), spec.operation)
+        receipt = self._graphql(spec)
         review_id = receipt.get("id") if isinstance(receipt, dict) else None
         return review_id if isinstance(review_id, str) and review_id else None
 
@@ -488,7 +464,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
     ) -> bool:
         """Submit a complete pending implementation reply review as a comment."""
         spec = github_api.submit_review_mutation(review_id, pull_request_id, expected_head_sha)
-        receipt = self._mutation_payload(self._graphql(spec), spec.operation)
+        receipt = self._graphql(spec)
         return bool(isinstance(receipt, dict) and receipt.get("id") == review_id)
 
     def _review_thread_snapshot(  # noqa: C901 - GraphQL response validation is fail-closed
@@ -1318,10 +1294,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                     # the mutation.  The typed receipt is therefore the only
                     # mutation result accepted before the readback proof.
                     resolve_spec = github_api.resolve_thread_mutation(thread_id)
-                    resolve_receipt = self._graphql(resolve_spec)
-                    resolved_thread = self._mutation_payload(
-                        resolve_receipt, resolve_spec.operation
-                    )
+                    resolved_thread = self._graphql(resolve_spec)
                     post_resolution = self._review_thread_snapshot(pr_number, thread_id)
                     resolution_proven = bool(
                         isinstance(resolved_thread, dict)
@@ -1397,7 +1370,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         threads: list[dict[str, Any]],
         *,
         expected_head_sha: str,
-        review_diff: str | None = None,
+        review_diff: str,
     ) -> list[dict[str, Any]]:
         """Post one source-anchored review batch for an immutable snapshot."""
         # GitHub renders a review-level ``body`` as an unanchored general
@@ -1411,13 +1384,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
         if self._repo_slug is not None:
-            snapshot_diff = review_diff
-            if snapshot_diff is None:
-                # Direct callers that do not own a detached checkout retain
-                # compatibility. The review stage always supplies its local
-                # snapshot, so its anchors never move with the remote PR.
-                snapshot_diff = self._gh(["pr", "diff", str(pr_number)], check=False).stdout or ""
-            postable_threads = github_api._filter_comments_to_diff(threads, snapshot_diff)
+            postable_threads = github_api._filter_comments_to_diff(threads, review_diff)
             if len(postable_threads) != len(threads):
                 raise RuntimeError(
                     "review-thread batch contains an anchor outside the reviewed diff"
@@ -1441,7 +1408,7 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 }
             )
             with github_api._body_file(request_body) as input_path:
-                result = gh_call(
+                result = self._deadline_gh_call(
                     [
                         "api",
                         "-X",

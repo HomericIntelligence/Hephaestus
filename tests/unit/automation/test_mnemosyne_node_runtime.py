@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation import mnemosyne_learning_preparation as preparation
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
+from hephaestus.automation.mnemosyne_node_runtime import node_runtime_files
 
 
 def test_node_runtime_collects_rpath_and_transitive_libraries(tmp_path: Path) -> None:
@@ -33,9 +33,7 @@ def test_node_runtime_collects_rpath_and_transitive_libraries(tmp_path: Path) ->
             output = f"{source}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1)\n"
         return subprocess.CompletedProcess(argv, 0, output)
 
-    resolve = getattr(preparation, "node_runtime_files", None)
-    assert callable(resolve)
-    assert set(resolve(node, runner=runner)) == {node, library, dependency}
+    assert set(node_runtime_files(node, runner=runner)) == {node, library, dependency}
 
 
 def test_node_runtime_rejects_unresolved_library(tmp_path: Path) -> None:
@@ -47,7 +45,5 @@ def test_node_runtime_rejects_unresolved_library(tmp_path: Path) -> None:
         output = f"{node}:\n\t@rpath/missing.dylib (compatibility version 1)\n"
         return subprocess.CompletedProcess(argv, 0, output if argv[1] == "-L" else "")
 
-    resolve = getattr(preparation, "node_runtime_files", None)
-    assert callable(resolve)
     with pytest.raises(LearnDeliveryError, match="Node runtime dependency"):
-        resolve(node, runner=runner)
+        node_runtime_files(node, runner=runner)

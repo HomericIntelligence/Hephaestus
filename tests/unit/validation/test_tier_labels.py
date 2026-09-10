@@ -328,6 +328,13 @@ class TestScanRepository:
         result = scan_repository(tmp_path)
         assert len(result) == 2
 
+    def test_scan_root_parent_is_not_an_excluded_directory(self, tmp_path: Path) -> None:
+        """Inspect the scan root even when its parent has an excluded name."""
+        repo = tmp_path / "build" / "repo"
+        repo.mkdir(parents=True)
+        (repo / "a.md").write_text("T3/Tooling bad\n", encoding="utf-8")
+        assert len(scan_repository(repo)) == 1
+
     def test_excludes_default_dirs(self, tmp_path: Path) -> None:
         """Files under excluded directories are skipped."""
         build = tmp_path / "build"

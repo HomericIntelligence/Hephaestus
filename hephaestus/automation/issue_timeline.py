@@ -25,10 +25,6 @@ from hephaestus.automation.review_journal import (
     HISTORY_MARKER_PREFIX,
     HISTORY_RE,
     IssueComment,
-    archived_new_plan,
-    archived_old_plan,
-    comment_revision,
-    extract_current_plan,
     has_exact_leading_marker,
     is_plan_comment,
     is_plan_review_comment,
@@ -131,73 +127,18 @@ def _latest_owned_role(comments: Sequence[IssueComment], marker: str) -> IssueCo
     return matches[-1] if matches else None
 
 
-def _deletable_history_ids(
-    owned: Sequence[IssueComment],
-    *,
-    target_plan: IssueComment | None,
-    target_review: IssueComment | None,
-) -> set[int]:
-    """Return history IDs proven by one contiguous chain to canonical state."""
-    if target_plan is None or (current_revision := comment_revision(target_plan.body)) is None:
-        return set()
-
-    plans: dict[int, IssueComment] = {}
-    reviews: dict[int, IssueComment] = {}
-    for comment in owned:
-        match = HISTORY_RE.match(comment.body)
-        if match is None:
-            continue
-        revision = int(match.group("revision"))
-        (plans if match.group("kind") == "plan" else reviews)[revision] = comment
-
-    proven_revisions: list[int] = []
-    expected_plan = extract_current_plan(target_plan.body)
-    for revision in range(current_revision - 1, 0, -1):
-        archive = plans.get(revision)
-        if archive is None or archived_new_plan(archive.body) != expected_plan:
-            break
-        proven_revisions.append(revision)
-        expected_plan = archived_old_plan(archive.body)
-
-    if not proven_revisions:
-        return set()
-    paired_reviews = [revision for revision in proven_revisions if revision in reviews]
-    if paired_reviews and (
-        target_review is None or comment_revision(target_review.body) != current_revision
-    ):
-        return set()
-
-    deletable: set[int] = set()
-    for revision in proven_revisions:
-        for archive in (plans[revision], reviews.get(revision)):
-            if archive is not None and archive.database_id is not None:
-                deletable.add(archive.database_id)
-    return deletable
-
-
 def _obsolete_comment_ids(
     owned: Sequence[IssueComment],
     *,
     keep_ids: set[int],
-    target_plan: IssueComment | None,
-    target_review: IssueComment | None,
 ) -> list[int]:
     """Return owned obsolete IDs whose canonical replacement is durable."""
-    deletable_history_ids = _deletable_history_ids(
-        owned,
-        target_plan=target_plan,
-        target_review=target_review,
-    )
     delete_ids: list[int] = []
     for comment in owned:
         if not _is_obsolete_automation_comment(comment.body) or comment.database_id in keep_ids:
             continue
-        if HISTORY_RE.match(comment.body) is not None and (
-            comment.database_id not in deletable_history_ids
-        ):
-            # A legacy archive is the sole recoverable representation of its
-            # artifact until a canonical pointer exists. Retain it rather than
-            # compacting history into data loss.
+        if HISTORY_RE.match(comment.body) is not None:
+            # Retired archives remain stored but supply no current authority.
             continue
         if comment.database_id is None:
             raise RuntimeError("owned obsolete automation comment has no database id")
@@ -260,11 +201,6 @@ def plan_issue_timeline_compaction(
     prior_fingerprints = list(snapshot.prior_plan_fingerprints)
     for comment in plan_comments[:-1]:
         prior_fingerprints.append(plan_fingerprint(comment.body))
-    for artifact in snapshot.history:
-        if artifact.kind == "plan":
-            for plan in (archived_old_plan(artifact.body), archived_new_plan(artifact.body)):
-                if plan:
-                    prior_fingerprints.append(plan_fingerprint(plan))
 
     plan_body = (
         render_current_plan(
@@ -294,8 +230,6 @@ def plan_issue_timeline_compaction(
     delete_ids = _obsolete_comment_ids(
         owned,
         keep_ids=keep_ids,
-        target_plan=target_plan,
-        target_review=target_review,
     )
 
     # Canonical target bodies are PATCHed in place by the caller. Prefixing is

@@ -834,7 +834,16 @@ def test_format_three_rejects_duplicate_json_members(nested: bool) -> None:
         )
 
 
-def test_remediation_recovery_rejects_legacy_or_incomplete_records() -> None:
+@pytest.mark.parametrize(
+    ("version", "message"),
+    [
+        (1, "unchanged-head reply journal identity is invalid"),
+        (2, "unchanged-head reply journal cannot recover remediation"),
+    ],
+)
+def test_remediation_recovery_rejects_non_remediation_or_incomplete_records(
+    version: int, message: str
+) -> None:
     """Formats 1 and 2 cannot act as remediation restart authority."""
     normal = implementation_reply_handoff(
         "c" * 40,
@@ -843,12 +852,18 @@ def test_remediation_recovery_rejects_legacy_or_incomplete_records() -> None:
         "d" * 32,
     )
     assert normal is not None
-    legacy = implementation_reply_handoff_journal_entry(3010, normal)
-    assert legacy is not None
+    ordinary = implementation_reply_handoff_journal_entry(3010, normal)
+    assert ordinary is not None
+    marker, encoded = ordinary[1].split("\n", 1)
+    payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
+    if version == 1:
+        payload["format"] = 1
+        del payload["armed"]
+    body = marker + "\n<!-- " + json.dumps(payload) + " -->"
     review_input = _review_input()
-    with pytest.raises(ValueError, match="legacy"):
+    with pytest.raises(ValueError, match=message):
         journaled_implementation_remediation_reply_handoff(
-            [IssueComment(body=legacy[1], viewer_did_author=True)],
+            [IssueComment(body=body, viewer_did_author=True)],
             repository=review_input.repository,
             issue_number=review_input.issue_number,
             pr_number=review_input.pr_number,
@@ -874,7 +889,7 @@ def test_remediation_recovery_rejects_legacy_or_incomplete_records() -> None:
         )
 
 
-def test_remediation_recovery_ignores_a_legacy_record_for_an_old_head() -> None:
+def test_remediation_recovery_ignores_an_ordinary_journal_for_an_old_head() -> None:
     """An old normal journal does not hide the current format-3 record."""
     review_input = _review_input()
     normal = implementation_reply_handoff(
@@ -1380,7 +1395,7 @@ def test_pretest_refresh_accepts_equal_result_digest_from_new_job(tmp_path: Path
     assert store.load_pretest_candidate(repo_root=tmp_path, pr_number=10) == refreshed
 
 
-def _disjoint_legacy_body() -> str:
+def _disjoint_unchanged_head_body() -> str:
     """Render an ordinary journal for a different thread at the current head."""
     old = _threads()
     old[0]["id"] = "old-thread"
@@ -1391,7 +1406,7 @@ def _disjoint_legacy_body() -> str:
     return entry[1]
 
 
-def _read_legacy_batch(body: str, threads: list[dict[str, Any]] | None = None) -> object:
+def _read_unchanged_head_batch(body: str, threads: list[dict[str, Any]] | None = None) -> object:
     """Read an ordinary journal through the public remediation selector."""
     inputs = _review_input()
     return journaled_implementation_remediation_reply_handoff(
@@ -1405,25 +1420,15 @@ def _read_legacy_batch(body: str, threads: list[dict[str, Any]] | None = None) -
     )
 
 
-def test_disjoint_current_head_legacy_batch_is_not_recovery_authority() -> None:
+def test_disjoint_unchanged_head_batch_is_not_recovery_authority() -> None:
     """An ordinary old batch cannot block a different live thread batch."""
-    assert _read_legacy_batch(_disjoint_legacy_body()) is None
+    assert _read_unchanged_head_batch(_disjoint_unchanged_head_body()) is None
 
 
-@pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize("position", ["only", "before", "after"])
-def test_valid_disjoint_legacy_keeps_exact_current_format_three(
-    version: int, position: str
-) -> None:
-    """Legacy selection does not alter a current format-three recovery result."""
-    marker, encoded = _disjoint_legacy_body().split("\n", 1)
-    payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
-    payload["format"] = version
-    if version == 1:
-        del payload["armed"]
-    legacy = IssueComment(
-        body=marker + "\n<!-- " + json.dumps(payload) + " -->", viewer_did_author=True
-    )
+def test_disjoint_format_two_keeps_exact_current_format_three(position: str) -> None:
+    """A disjoint format-2 journal does not alter current remediation recovery."""
+    ordinary = IssueComment(body=_disjoint_unchanged_head_body(), viewer_did_author=True)
     inputs = _review_input()
     handoff = implementation_remediation_reply_handoff(inputs, _reply_result(inputs), "e" * 32)
     assert handoff is not None
@@ -1440,11 +1445,11 @@ def test_valid_disjoint_legacy_keeps_exact_current_format_three(
     }
     expected = journaled_implementation_remediation_reply_handoff([current], **kwargs)
     comments = (
-        [legacy]
+        [ordinary]
         if position == "only"
-        else [legacy, current]
+        else [ordinary, current]
         if position == "before"
-        else [current, legacy]
+        else [current, ordinary]
     )
     actual = journaled_implementation_remediation_reply_handoff(comments, **kwargs)
     assert actual == (None if position == "only" else expected)
@@ -1454,6 +1459,7 @@ def test_valid_disjoint_legacy_keeps_exact_current_format_three(
     "case",
     [
         "bool_format",
+        "retired_format",
         "unknown_format",
         "bool_pr",
         "wrong_pr",
@@ -1477,12 +1483,13 @@ def test_valid_disjoint_legacy_keeps_exact_current_format_three(
         "progress_extra",
     ],
 )
-def test_malformed_disjoint_legacy_cannot_be_ignored(case: str) -> None:
-    """Invalid legacy evidence must stop selection even for different IDs."""
-    marker, encoded = _disjoint_legacy_body().split("\n", 1)
+def test_malformed_disjoint_unchanged_head_batch_cannot_be_ignored(case: str) -> None:
+    """Invalid unchanged-head evidence must stop selection even for different IDs."""
+    marker, encoded = _disjoint_unchanged_head_body().split("\n", 1)
     payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
     edits: dict[str, tuple[str, object]] = {
         "bool_format": ("format", True),
+        "retired_format": ("format", 1),
         "unknown_format": ("format", 4),
         "bool_pr": ("pr_number", True),
         "wrong_pr": ("pr_number", 3011),
@@ -1528,11 +1535,13 @@ def test_malformed_disjoint_legacy_cannot_be_ignored(case: str) -> None:
     if case in edits:
         key, value = edits[case]
         payload[key] = value
+    if case == "retired_format":
+        del payload["armed"]
     body = json.dumps(payload)
     if case == "duplicate_json":
         body = body.replace('"format": 2', '"format": 2, "format": 2')
     with pytest.raises(ValueError):
-        _read_legacy_batch(marker + "\n<!-- " + body + " -->")
+        _read_unchanged_head_batch(marker + "\n<!-- " + body + " -->")
 
 
 @pytest.mark.parametrize(
@@ -1548,8 +1557,8 @@ def test_malformed_disjoint_legacy_cannot_be_ignored(case: str) -> None:
         "spaced_id",
     ],
 )
-def test_legacy_disjointness_requires_complete_nonoverlapping_threads(case: str) -> None:
-    """Changed or incomplete live snapshots cannot hide legacy authority."""
+def test_unchanged_head_disjointness_requires_complete_nonoverlapping_threads(case: str) -> None:
+    """Changed or incomplete live snapshots cannot hide an unchanged-head batch."""
     threads = _threads()
     if case in {"overlap", "changed_body"}:
         old = deepcopy(threads[0])
@@ -1570,12 +1579,12 @@ def test_legacy_disjointness_requires_complete_nonoverlapping_threads(case: str)
     else:
         threads[0]["id"] = " " if case == "blank_id" else " thread-1 "
     with pytest.raises(ValueError):
-        _read_legacy_batch(_disjoint_legacy_body(), threads)
+        _read_unchanged_head_batch(_disjoint_unchanged_head_body(), threads)
 
 
-def test_disjoint_legacy_progress_is_retained_without_mutation() -> None:
+def test_disjoint_unchanged_head_progress_is_retained_without_mutation() -> None:
     """Valid progress stays in its original journal while selection ignores it."""
-    marker, encoded = _disjoint_legacy_body().split("\n", 1)
+    marker, encoded = _disjoint_unchanged_head_body().split("\n", 1)
     payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
     payload["progress"] = ImplementationReplyProgress(
         phase="post_replies",
@@ -1584,14 +1593,14 @@ def test_disjoint_legacy_progress_is_retained_without_mutation() -> None:
         receipts=({"id": "old-thread"},),
     ).as_dict()
     body = marker + "\n<!-- " + json.dumps(payload) + " -->"
-    assert _read_legacy_batch(body) is None
+    assert _read_unchanged_head_batch(body) is None
     assert body == marker + "\n<!-- " + json.dumps(payload) + " -->"
 
 
 @pytest.mark.parametrize("alternate", [[], {}, None, 1, "", " old-thread", "old thread"])
-def test_legacy_progress_rejects_invalid_alternate_thread_id(alternate: object) -> None:
+def test_unchanged_head_progress_rejects_invalid_alternate_thread_id(alternate: object) -> None:
     """An invalid alternate receipt ID raises a controlled validation error."""
-    marker, encoded = _disjoint_legacy_body().split("\n", 1)
+    marker, encoded = _disjoint_unchanged_head_body().split("\n", 1)
     payload = json.loads(encoded.removeprefix("<!-- ").removesuffix(" -->"))
     payload["progress"] = ImplementationReplyProgress(
         phase="post_replies",
@@ -1600,5 +1609,5 @@ def test_legacy_progress_rejects_invalid_alternate_thread_id(alternate: object) 
         receipts=({"id": "old-thread", "thread_id": alternate},),
     ).as_dict()
     body = marker + "\n<!-- " + json.dumps(payload) + " -->"
-    with pytest.raises(ValueError, match="legacy reply journal progress is invalid"):
-        _read_legacy_batch(body)
+    with pytest.raises(ValueError, match="unchanged-head reply journal progress is invalid"):
+        _read_unchanged_head_batch(body)

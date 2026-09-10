@@ -41,8 +41,7 @@ _PRECOMMIT_TEST_FILES = {
     "tests/unit/agents/test_model_selection.py",
     "tests/unit/agents/test_runtime.py",
     "tests/unit/automation/test_agent_config.py",
-    "tests/unit/automation/test_agent_stage.py",
-    "tests/unit/automation/test_planner_main.py",
+    "tests/unit/automation/test_pipeline_cli.py",
     "tests/unit/automation/test_protocol.py",
     "tests/unit/automation/test_state_labels.py",
     "tests/unit/ci/test_precommit.py",
@@ -281,7 +280,7 @@ def _agents_authenticated_by_default(
     # Patch at the runtime module and at every automation module that imported
     # ``resolve_agent`` by value (``from ...runtime import resolve_agent``).
     monkeypatch.setattr("hephaestus.agents.runtime.resolve_agent", _stub_resolve_agent)
-    for mod in ("implementer", "loop_runner", "planner", "pr_reviewer", "audit_reviewer"):
+    for mod in ("pipeline_cli",):
         target = f"hephaestus.automation.{mod}.resolve_agent"
         # A module that does not import resolve_agent by value has nothing to patch.
         with contextlib.suppress(AttributeError):

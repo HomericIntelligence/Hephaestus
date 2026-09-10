@@ -52,7 +52,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
         "already_implementation_go_pr",
         "review_retained_after_rebase",
     },
-    StageName.PR_REVIEW: {"agent_error", "implementation_remediation"},
+    StageName.PR_REVIEW: {"agent_error", "empty_pr_diff", "implementation_remediation"},
     StageName.MERGE_WAIT: {"reviewed_head_missing"},
 }
 

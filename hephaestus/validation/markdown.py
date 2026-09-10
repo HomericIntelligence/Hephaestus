@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
+from hephaestus.scripts_lib.check_cli_table_sync import has_accepted_adr_status
 
 logger = get_logger(__name__)
 
@@ -655,8 +656,26 @@ def validate_file_links(file_path: Path, repo_root: Path, verbose: bool = False)
     return result
 
 
+def _is_accepted_adr_body(file_path: Path, repo_root: Path) -> bool:
+    """Return whether the file is a numbered, accepted decision body."""
+    try:
+        relative_path = file_path.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return False
+    if not re.fullmatch(r"docs/adr/[0-9]{4}-[a-z0-9-]+\.md", relative_path.as_posix()):
+        return False
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return has_accepted_adr_status(content)
+
+
 def validate_all_links(directory: Path, repo_root: Path, verbose: bool = False) -> dict[str, Any]:
-    """Validate links in all markdown files under a directory.
+    """Validate links in current markdown files under a directory.
+
+    Skip accepted, numbered decision bodies in ``docs/adr``. Check links from
+    current documents to those files.
 
     Args:
         directory: Directory to scan for markdown files.
@@ -680,6 +699,8 @@ def validate_all_links(directory: Path, repo_root: Path, verbose: bool = False) 
         return results
 
     for md_file in md_files:
+        if _is_accepted_adr_body(md_file, repo_root):
+            continue
         file_result = validate_file_links(md_file, repo_root, verbose)
         results["total_links"] += file_result["total_links"]
         results["broken_links"] += len(file_result["broken_links"])

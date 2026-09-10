@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.cli.utils import add_json_arg, create_parser, emit_json_status
-from hephaestus.github.git_ops import run_git
+from hephaestus.utils.git import run_git
 
 
 def _git_output(cwd: Path, *arguments: str, accepted_codes: tuple[int, ...] = (0,)) -> str:

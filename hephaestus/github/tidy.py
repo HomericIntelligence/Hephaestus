@@ -41,14 +41,14 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
-from hephaestus.github.git_ops import (
+from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
+from hephaestus.utils.git import (
+    git_remote_url,
     in_git_repo as _shared_in_git_repo,
     repo_root as _shared_repo_root,
     run_git,
     working_tree_clean as _shared_working_tree_clean,
 )
-from hephaestus.github.pr_merge import detect_repo_from_remote
-from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,34 @@ _WORKTREE_LIST_Z_MIN_GIT = "2.36"
 
 class WorktreeInventoryError(RuntimeError):
     """Raised when Git cannot supply an unambiguous worktree inventory."""
+
+
+def _detect_repo_from_remote() -> str | None:
+    """Return the GitHub repository name from the origin remote, if available."""
+    try:
+        remote_url = git_remote_url()
+        if not remote_url:
+            logger.warning("Could not read GitHub repo from origin remote")
+            return None
+
+        # Parse github.com:owner/repo.git or https://github.com/owner/repo.git
+        patterns = [
+            r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$",
+            r"github\.com/([^/]+)/([^/]+?)(?:\.git)?$",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, remote_url)
+            if match:
+                owner, repo = match.groups()
+                return f"{owner}/{repo}"
+
+        logger.warning("Could not parse GitHub repo from remote URL: %s", remote_url)
+        return None
+
+    except Exception as e:  # broad catch intentional: git subprocess can fail in many ways
+        logger.warning("Could not detect repo from git remote: %s", e)
+        return None
 
 
 def _detect_default_branch(override: str | None, *, gh_timeout: int = DEFAULT_GH_TIMEOUT) -> str:
@@ -617,7 +645,7 @@ def _validate_environment() -> tuple[str, str, Path] | None:
         )
         return None
 
-    repo_slug = detect_repo_from_remote()
+    repo_slug = _detect_repo_from_remote()
     if not repo_slug:
         logger.error(
             "Could not detect GitHub repo from git remote. Is 'origin' set to a GitHub URL?",

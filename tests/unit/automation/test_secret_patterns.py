@@ -1,10 +1,10 @@
-"""Tests for the secret-file detection constants in pr_manager."""
+"""Tests for the secret-file detection constants in the queue commit path."""
 
 from __future__ import annotations
 
 import pytest
 
-from hephaestus.automation.pr_manager import (
+from hephaestus.automation.commit_paths import (
     SECRET_FILE_EXTENSIONS,
     SECRET_FILE_NAMES,
 )

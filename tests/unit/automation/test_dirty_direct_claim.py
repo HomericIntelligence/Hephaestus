@@ -1,5 +1,7 @@
 """Tests for durable one-use dirty writer claims."""
 
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -98,7 +100,6 @@ def test_dirty_job_rejects_changed_inputs_before_turn(tmp_path: Path, change: st
         cwd=original.cwd,
         timeout_s=30,
         workspace=binding,
-        retryable=False,
         dirty_plan=inputs,
     )
     if change == "issue":
@@ -106,7 +107,9 @@ def test_dirty_job_rejects_changed_inputs_before_turn(tmp_path: Path, change: st
     elif change == "repository":
         job = replace(job, repo="foreign")
     with pytest.raises(SourceWorkspaceError):
-        with _agent_workspace_lease(job):
+        with _agent_workspace_lease(
+            job, deadline_s=time.monotonic() + job.timeout_s, shutdown=threading.Event()
+        ):
             pytest.fail("changed inputs reached the provider turn")
     stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
     assert stored.dirty_claim is not None and stored.dirty_claim.state == "armed"
@@ -601,7 +604,6 @@ def test_native_dirty_codex_turn_keeps_one_use_claim(tmp_path: Path, outcome: st
         cwd=original.cwd,
         timeout_s=30,
         workspace=binding,
-        retryable=False,
         dirty_plan=inputs,
         resume_session_id=resume_id,
         resume_selection=("codex", "gpt-6-astra:low") if resume_id else None,

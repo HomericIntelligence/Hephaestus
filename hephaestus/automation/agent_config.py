@@ -1,13 +1,8 @@
 """Agent configuration for the automation pipeline.
 
-Merges the formerly-separate ``claude_models``, ``claude_timeouts``, and
-``session_naming`` modules (#1441): model selection, subprocess timeouts, and
-deterministic Claude-session naming all answer one question — "how is an
-agent invocation configured?" ``claude_invoke.py`` (subprocess logic) stays
-separate and imports session naming from here.
-
-The three original module paths are retained as thin re-export shims so
-existing callers keep working unchanged.
+Model selection, timeout defaults, and deterministic session identities share
+one configuration owner. Claude subprocess execution remains in
+``claude_invoke.py``.
 
 Model selection
 ---------------
@@ -26,12 +21,8 @@ and its default effort.
 
 Timeouts
 --------
-Timeouts are typed CLI/configuration values. The compatibility accessors below
-return deterministic defaults and never inspect process-global state.
-
-If an env var is set but not an integer, the default is used and a warning is
-logged on first read; we never crash on a malformed timeout because the cost
-of a runtime startup error is higher than the cost of falling back.
+Timeouts are typed CLI/configuration values. The default accessors return
+fixed values and do not read process environment variables.
 
 Session naming
 --------------
@@ -106,12 +97,7 @@ def planner_model(value: str | None = None, *, agent: str = "claude") -> str:
 
 
 def implementer_model(value: str | None = None, *, agent: str = "claude") -> str:
-    """Model used by the implementer worker that runs ``claude`` in a worktree.
-
-    Also used for any phase that resumes the implementer's session
-    (e.g. address-review, ci-driver), since ``claude --resume`` is locked
-    to the model that created the session.
-    """
+    """Return the model for implementation and its resumed repair sessions."""
     return _resolve_model(value, agent=agent)
 
 
@@ -121,27 +107,13 @@ def reviewer_model(value: str | None = None, *, agent: str = "claude") -> str:
 
 
 def advise_model(value: str | None = None, *, agent: str = "claude") -> str:
-    """Return an explicit legacy advice model or the tool default."""
+    """Return an explicit host advice model or the tool default."""
     return _resolve_model(value, agent=agent)
-
-
-def codex_advise_model() -> str:
-    """Use the tool default for legacy advice callers."""
-    return ""
 
 
 def learn_model(value: str | None = None, *, agent: str = "claude") -> str:
-    """Model used by /learn and follow-up issue filing."""
+    """Return an explicit host learning model or the tool default."""
     return _resolve_model(value, agent=agent)
-
-
-def git_message_model() -> str:
-    """Use the tool default for standalone message generation.
-
-    The automation loop passes its CLI-resolved implementation model directly;
-    this compatibility helper deliberately has no environment override.
-    """
-    return ""
 
 
 def fallback_model(value: str | None = None, *, agent: str = "claude") -> str:
@@ -156,17 +128,12 @@ def fallback_model(value: str | None = None, *, agent: str = "claude") -> str:
 
 # ── Subprocess timeouts ──────────────────────────────────────────────────────
 
-PLAN_STAGE_TIMEOUT = 7200
 
-# Defaults for the explicit CLI timeout options (#1657). The non-phase-
-# differentiated agent phases (advise, address-review, ci-driver, follow-up)
-# and the options-object fallbacks default to DEFAULT_AGENT_TIMEOUT; per-phase
-# timeouts keep their #1642 values via the AGENT_* constants in
-# ``hephaestus.constants``.
+# The shared invocation timeout is separate from each stage's default.
+# Stage defaults use the AGENT_* values from ``hephaestus.constants``.
 DEFAULT_AGENT_TIMEOUT: int = 7200
 DEFAULT_THROUGHPUT_TIMEOUT: int = 1200
 DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT: int = DEFAULT_THROUGHPUT_TIMEOUT
-DEFAULT_CI_POLL_MAX_WAIT: int = DEFAULT_THROUGHPUT_TIMEOUT
 
 
 def agent_default_timeout() -> int:
@@ -184,11 +151,6 @@ def agent_default_timeout() -> int:
 def planner_claude_timeout() -> int:
     """Timeout for planner agent calls (default 1200s)."""
     return AGENT_PLAN_TIMEOUT
-
-
-def plan_stage_timeout() -> int:
-    """Timeout for the outer ``hephaestus-plan-issues`` stage (default 7200s)."""
-    return PLAN_STAGE_TIMEOUT
 
 
 def plan_reviewer_claude_timeout() -> int:
@@ -211,39 +173,14 @@ def pr_reviewer_claude_timeout() -> int:
     return AGENT_REVIEW_TIMEOUT
 
 
-def address_review_claude_timeout() -> int:
-    """Timeout for the address-review fix session (default 7200s)."""
-    return 7200
-
-
-def ci_driver_claude_timeout() -> int:
-    """Timeout for the CI-driver fix session (default 7200s)."""
-    return 7200
-
-
 def learn_claude_timeout() -> int:
     """Timeout for ``/learn`` agent calls (default 1200s)."""
     return AGENT_LEARN_TIMEOUT
 
 
-def follow_up_claude_timeout() -> int:
-    """Timeout for the follow-up-issue agent session (default 7200s)."""
-    return 7200
-
-
 def git_message_agent_timeout() -> int:
     """Timeout for the lightweight commit/PR message writer (default 1200s)."""
     return DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
-
-
-def ci_poll_max_wait() -> int:
-    """Wall-clock seconds for the CI-driver poll loops (default 1200s).
-
-    Bounds the exponential-backoff wait in :mod:`ci_driver` while CI checks
-    are still pending. Re-read on each invocation so tests and operators can
-    tune it through typed CLI configuration.
-    """
-    return DEFAULT_CI_POLL_MAX_WAIT
 
 
 # Re-exported from hephaestus.github.client so the gh-adapter timeout lives
@@ -252,45 +189,28 @@ from hephaestus.github.client import gh_cli_timeout  # noqa: E402
 
 # ── Session naming ───────────────────────────────────────────────────────────
 
-# Agent identifiers — keep in sync with phase modules.
+# Session identifiers for the queue workers.
 AGENT_PLANNER = "planner"
 AGENT_PLAN_REVIEWER = "plan-reviewer"
-AGENT_ADVISE = "advise"
-AGENT_LEARNINGS = "learnings"
 AGENT_IMPLEMENTER = "implementer"
 AGENT_PR_REVIEWER = "pr-reviewer"
-AGENT_ADDRESS_REVIEW = "address-review"
-AGENT_CI_DRIVER = "ci-driver"
-# Lightweight read-only metadata writers. They are deliberately separate from
-# implementer/reviewer sessions so commit and PR text generation cannot inherit
-# or mutate a code-producing transcript.
+# Commit-message generation uses a separate session. It must not inherit or
+# change an implementation transcript.
 AGENT_COMMIT_MESSAGE = "commit-message"
-AGENT_PR_MESSAGE = "pr-message"
-# #1083: cheap read-only sub-agent that labels each review comment's fix
-# difficulty (simple/medium/hard) to pick the per-comment fixer's model tier.
-AGENT_COMMENT_CLASSIFIER = "comment-classifier"
 
 _ALL_AGENTS = frozenset(
     {
         AGENT_PLANNER,
         AGENT_PLAN_REVIEWER,
-        AGENT_ADVISE,
-        AGENT_LEARNINGS,
         AGENT_IMPLEMENTER,
         AGENT_PR_REVIEWER,
-        AGENT_ADDRESS_REVIEW,
-        AGENT_CI_DRIVER,
         AGENT_COMMIT_MESSAGE,
-        AGENT_PR_MESSAGE,
-        AGENT_COMMENT_CLASSIFIER,
     }
 )
 
-# Reviewer agents that get a *fresh* session per loop iteration (see
-# reviewer_agent). The plan/impl reviewers must stay unbiased across the
-# review loop, so each iteration uses a distinct session UUID rather than
-# resuming the prior iteration's transcript. Implementer/planner/ci-driver
-# deliberately do NOT appear here — they resume one session across their stage.
+# Each reviewer iteration has a separate session UUID. This prevents a review
+# from inheriting the previous verdict. Planning and implementation resume
+# their stage sessions.
 _PER_ITERATION_REVIEWERS = frozenset({AGENT_PLAN_REVIEWER, AGENT_PR_REVIEWER})
 _GIT_REPO_ENV_KEYS = (
     "GIT_DIR",
@@ -468,39 +388,6 @@ def session_uuid(
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
 
-def short_githash(repo_path: Path) -> str:
-    """Return ``git -C <repo_path> rev-parse --short=7 HEAD`` or ``"unknown"``.
-
-    Used by the loop driver to capture the trunk SHA once per repo
-    iteration so all phases in that iteration share a session family.
-    """
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_path), "rev-parse", "--short=7", "HEAD"],
-            check=True,
-            capture_output=True,
-            env=_repo_scoped_git_env(),
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-        return "unknown"
-    return out.stdout.strip() or "unknown"
-
-
-def current_trunk_githash(
-    repo_path: Path | None = None, *, trunk_githash: str | None = None
-) -> str:
-    """Return the trunk SHA every phase should use for session naming.
-
-    A loop may pass its captured trunk SHA explicitly so all phases within one
-    iteration share the same value. Otherwise this falls back to live Git.
-    """
-    if trunk_githash:
-        return trunk_githash
-    return short_githash(repo_path if repo_path is not None else Path.cwd())
-
-
 _AUTO_IMPL_BRANCH_SUFFIX = "-auto-impl"
 
 
@@ -587,41 +474,26 @@ def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
 
 __all__ = [
     # Session naming
-    "AGENT_ADDRESS_REVIEW",
-    "AGENT_ADVISE",
-    "AGENT_CI_DRIVER",
-    "AGENT_COMMENT_CLASSIFIER",
     "AGENT_COMMIT_MESSAGE",
     "AGENT_IMPLEMENTER",
     # Timeouts
     "AGENT_IMPL_TIMEOUT",
-    "AGENT_LEARNINGS",
     "AGENT_LEARN_TIMEOUT",
     "AGENT_PLANNER",
     "AGENT_PLAN_REVIEWER",
     "AGENT_PLAN_TIMEOUT",
-    "AGENT_PR_MESSAGE",
     "AGENT_PR_REVIEWER",
     "AGENT_REVIEW_TIMEOUT",
     # Model selection
     "DEFAULT_AGENT_TIMEOUT",
-    "DEFAULT_CI_POLL_MAX_WAIT",
     "DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT",
     "DEFAULT_THROUGHPUT_TIMEOUT",
-    "PLAN_STAGE_TIMEOUT",
-    "address_review_claude_timeout",
     "advise_claude_timeout",
     "advise_model",
     "agent_default_timeout",
-    "ci_driver_claude_timeout",
-    "ci_poll_max_wait",
-    "codex_advise_model",
-    "current_trunk_githash",
     "fallback_model",
-    "follow_up_claude_timeout",
     "gh_cli_timeout",
     "git_message_agent_timeout",
-    "git_message_model",
     "implementer_claude_timeout",
     "implementer_model",
     "issue_auto_impl_branch_name",
@@ -631,7 +503,6 @@ __all__ = [
     "normalize_model_reference",
     "parse_model_selection",
     "plan_reviewer_claude_timeout",
-    "plan_stage_timeout",
     "planner_claude_timeout",
     "planner_model",
     "pr_reviewer_claude_timeout",
@@ -641,5 +512,4 @@ __all__ = [
     "session_jsonl_path",
     "session_name",
     "session_uuid",
-    "short_githash",
 ]

@@ -9,7 +9,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline import ROUTES
-from hephaestus.automation.pipeline.coordinator import PipelineConfig
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stages import (
     PlanningStage,
@@ -36,7 +36,7 @@ class TestStageContext:
 
     def _bare_ctx(self, **overrides: Any) -> StageContext:
         defaults: dict[str, Any] = {
-            "config": PipelineConfig(org="test-org", repos=["test-repo"]),
+            "config": PipelineConfig(org="test-org", repos=["test-repo"], rate_guard_enabled=False),
             "org": "test-org",
             "dry_run": False,
             "github": object(),
@@ -117,9 +117,7 @@ class TestAgentProvider:
     def _ctx(self, agent: str | None = None) -> StageContext:
         """Build a minimal stage context for provider selection tests."""
         config = PipelineConfig(
-            org="test-org",
-            repos=["test-repo"],
-            agent=agent or "",
+            org="test-org", repos=["test-repo"], agent=agent or "", rate_guard_enabled=False
         )
         return TestStageContext()._bare_ctx(config=config)
 

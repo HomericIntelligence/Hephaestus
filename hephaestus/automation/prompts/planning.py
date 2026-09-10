@@ -4,6 +4,8 @@ Contains the plan-generation prompt, the standalone plan-review prompt, and
 the iteration-aware plan-loop review prompt.
 """
 
+from hephaestus.prompts import PromptCatalog
+
 from ._review_rubric import (
     get_full_sweep_suffix,
     get_plan_loop_review_rubric,
@@ -17,7 +19,6 @@ from ._shared import (
     fence_content,
     get_terse_output_directive,
 )
-from .catalog import PromptCatalog
 
 _PLAN_REVIEW_TERMINAL_OUTPUT_CONTRACT = (
     "For plan review, do not add a separate conclusion line. Follow the "

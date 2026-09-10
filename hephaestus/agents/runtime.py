@@ -102,7 +102,6 @@ CODEX_AUTH_MAX_BYTES = 1024 * 1024
 CODEX_ATHENA_MAX_BYTES = 32 * 1024 * 1024
 CODEX_PRESERVED_STATE_MAX_FILES = 100_000
 CODEX_PRESERVED_STATE_MAX_BYTES = 2 * 1024 * 1024 * 1024
-CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_SETTINGS_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "settings.json"
@@ -141,14 +140,6 @@ AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     # "0 credentials" on fully working setups; credential-count parsing would
     # false-negative those. Deeper authentication is verified by the run itself.
     "opencode": (("opencode", "providers", "list"),),
-}
-
-_PI_AGENT_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLifecycle]] = {
-    "plan": (AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW),
-    "plan-review": (AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT),
-    "implement": (AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW),
-    "pr-review": (AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT),
-    "learn": (AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW),
 }
 
 
@@ -216,11 +207,6 @@ def _platform_child_env() -> dict[str, str]:
     return read_approved_parent_env()
 
 
-def _claude_child_env() -> dict[str, str]:
-    """Return the named allowlisted environment for Claude."""
-    return build_claude_child_env()
-
-
 def _codex_child_env() -> dict[str, str]:
     """Return the named allowlisted environment for Codex."""
     return build_codex_child_env()
@@ -286,17 +272,6 @@ class PiIsolationAdapter(Protocol):
         raise NotImplementedError
 
 
-def agent_stage_execution_request(agent: str, stage: str) -> ExecutionRequest | None:
-    """Return the provider policy request for a generic direct stage."""
-    if not is_pi(agent):
-        return None
-    try:
-        role, operation, lifecycle = _PI_AGENT_STAGE_REQUESTS[stage]
-    except KeyError as exc:
-        raise ValueError(f"Pi agent-stage operation is unsupported: {stage!r}") from exc
-    return ExecutionRequest(role, operation, lifecycle)
-
-
 def agent_compaction_resume(
     agent: str,
     *,
@@ -329,7 +304,7 @@ def _pi_role_for_session_agent(session_agent: str) -> AgentRole:
         return AgentRole.PLANNER
     if session_agent == "plan-reviewer":
         return AgentRole.PLAN_REVIEWER
-    if session_agent in {"pr-reviewer", "comment-classifier"}:
+    if session_agent == "pr-reviewer":
         return AgentRole.PR_REVIEWER
     return AgentRole.IMPLEMENTER
 
@@ -872,11 +847,7 @@ def validate_durable_model_selection(
         raise ValueError("invalid durable provider model selection")
     if not isinstance(model, str) or model != model.strip():
         raise ValueError("invalid durable provider model selection")
-    if selection_format is None:
-        # Older Claude and Codex journals required an explicit model.
-        if provider not in {"claude", "codex"} or not model:
-            raise ValueError("invalid durable provider model selection")
-    elif type(selection_format) is not int or selection_format != 1:
+    if type(selection_format) is not int or selection_format != 1:
         raise ValueError("invalid durable provider model selection")
     parse_model_selection(model)
 
@@ -1005,23 +976,6 @@ def reject_pi_unsupported_surface(agent: str, reason: str) -> None:
         raise AgentExecutionError(f"Pi is not supported by this surface: {reason}")
 
 
-def require_supported_direct_surface(
-    agent: str,
-    *,
-    surface: str,
-    pi_supported: bool,
-    reason: str,
-) -> None:
-    """Validate a direct entry point's explicit Pi support disposition."""
-    if is_pi(agent) and not pi_supported:
-        reject_pi_unsupported_surface(agent, f"{surface}: {reason}")
-
-
-def agent_supports_model_reasoning_effort(agent: str) -> bool:
-    """Return whether an agent accepts a model reasoning selector."""
-    return is_codex(agent) or is_opencode(agent) or is_pi(agent)
-
-
 def agent_uses_configured_model_default(agent: str) -> bool:
     """Return whether the provider owns its model default."""
     return agent in AGENT_CHOICES
@@ -1038,26 +992,6 @@ def uses_direct_agent_runner(agent: str) -> bool:
     if agent not in AGENT_CAPABILITIES:
         return False
     return AGENT_CAPABILITIES[agent].direct_runner
-
-
-def direct_agent_model(
-    agent: str,
-    model_value: str | None = None,
-    *,
-    codex_default: str = "",
-) -> str:
-    """Return a provider-neutral direct-runner model default.
-
-    The caller supplies model_value explicitly. The deprecated codex_default
-    argument does not select a model. Pi reads only its trusted operator-global
-    settings at the execution boundary.
-    """
-    if model_value is not None:
-        selection = parse_model_selection(model_value)
-        if not agent_supports_model_reasoning_effort(agent):
-            return selection.model
-        return selection.reference
-    return ""
 
 
 def agent_cli_name(agent: str) -> str:
@@ -1499,69 +1433,6 @@ def session_agent_matches(session_agent: object, selected_agent: str) -> bool:
         and session_agent in AGENT_CHOICES
         and selected_agent in AGENT_CHOICES
         and session_agent == selected_agent
-    )
-
-
-def run_claude_text(
-    prompt: str,
-    *,
-    cwd: Path,
-    timeout: int,
-    model: str = "",
-    sandbox: str = "workspace-write",
-    allowed_tools: str = "Read,Write,Edit,Glob,Grep,Bash",
-) -> subprocess.CompletedProcess[str]:
-    """Run Claude Code with an explicit tool policy for read-only calls."""
-    cmd = ["claude", "--print", "--output-format", "text"]
-    selection = parse_model_selection(model)
-    if selection.model:
-        cmd.extend(["--model", selection.model])
-
-    if sandbox == "read-only":
-        # --allowedTools only pre-approves tools; --tools fixes the model-visible
-        # built-in surface. Bare mode and strict MCP mode without a supplied
-        # config prevent ambient configuration from adding executable paths.
-        cmd.extend(
-            [
-                "--bare",
-                "--permission-mode",
-                "dontAsk",
-                "--tools",
-                CLAUDE_READ_ONLY_TOOLS,
-                "--allowedTools",
-                CLAUDE_READ_ONLY_TOOLS,
-                "--strict-mcp-config",
-            ]
-        )
-    else:
-        cmd.extend(
-            [
-                "--permission-mode",
-                "dontAsk",
-                "--allowedTools",
-                allowed_tools,
-            ]
-        )
-
-    env = _claude_child_env()
-    from hephaestus.logging.utils import get_current_correlation_id
-
-    cid = get_current_correlation_id()
-    if cid:
-        env["GH_TRACE_ID"] = cid
-    # A NUL in the prompt would make subprocess.run raise ``ValueError: embedded
-    # null byte`` while marshaling text stdin, before the child runs (#1661). The
-    # prompt is assembled from untrusted multi-source text; strip defensively.
-    return subprocess.run(
-        cmd,
-        input=strip_null_bytes(prompt),
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-        env=env,
-        check=False,
     )
 
 
@@ -5325,28 +5196,6 @@ def _run_pi_command(
                 shutil.rmtree(private_temp_dir)
 
 
-def run_pi_text(
-    prompt: str,
-    *,
-    cwd: Path,
-    timeout: int,
-    model: str = "",
-    sandbox: str = "workspace-write",
-    approval: str = "never",
-) -> subprocess.CompletedProcess[str]:
-    """Reject the legacy raw Pi entry point.
-
-    Pi automation is dispatched only through :func:`run_agent_text`, which
-    resolves an immutable :class:`ExecutionRequest` before invoking the
-    provider.  Retaining this compatibility symbol as an executable runner
-    would let callers select an unscoped sandbox.
-    """
-    del prompt, cwd, timeout, model, sandbox, approval
-    raise AgentExecutionError(
-        "Unscoped run_pi_text is disabled; use run_agent_text with an ExecutionRequest"
-    )
-
-
 def _invoke_pi_session(
     prompt: str,
     *,
@@ -5396,27 +5245,6 @@ def _invoke_pi_session(
     )
 
 
-def run_pi_session(
-    prompt: str,
-    *,
-    cwd: Path,
-    timeout: int,
-    model: str = "",
-    sandbox: str = "workspace-write",
-    approval: str = "never",
-) -> AgentRunResult:
-    """Reject the legacy raw Pi session entry point.
-
-    New Pi sessions must begin via :func:`run_agent_session` with a resolved
-    execution policy.  A raw session cannot bind its tool, filesystem, and
-    network privileges to an operation.
-    """
-    del prompt, cwd, timeout, model, sandbox, approval
-    raise AgentExecutionError(
-        "Unscoped run_pi_session is disabled; use run_agent_session with an ExecutionRequest"
-    )
-
-
 def run_pi_smoke_session(
     prompt: str,
     *,
@@ -5445,28 +5273,6 @@ def run_pi_smoke_session(
         stdout=redact_pi_private_values(result.stdout, session_tokens),
         stderr=redact_pi_private_values(result.stderr, session_tokens),
         session_id=None,
-    )
-
-
-def resume_pi_session(
-    session_id: str,
-    prompt: str,
-    *,
-    cwd: Path,
-    timeout: int,
-    model: str = "",
-    sandbox: str = "workspace-write",
-    approval: str = "never",
-) -> AgentRunResult:
-    """Reject the legacy raw Pi resume entry point.
-
-    Resumption must use :func:`resume_agent_session`, which requires a
-    validated session binding and a resume-only execution request.
-    """
-    del session_id, prompt, cwd, timeout, model, sandbox, approval
-    raise AgentExecutionError(
-        "Unscoped resume_pi_session is disabled; use resume_agent_session with "
-        "an ExecutionRequest and AgentSessionBinding"
     )
 
 

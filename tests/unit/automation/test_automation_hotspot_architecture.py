@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 _ROOT = Path(__file__).parents[3]
@@ -18,7 +19,8 @@ _PREDECOMPOSITION_LINES = {
 
 _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/coordinator.py": 1_100,
-    "hephaestus/automation/pipeline/coordinator_contract.py": 225,
+    # Explicit type-only method signatures replace the unrestricted fallback.
+    "hephaestus/automation/pipeline/coordinator_contract.py": 450,
     "hephaestus/automation/pipeline/coordinator_types.py": 500,
     "hephaestus/automation/pipeline/coordinator_issue_classification.py": 125,
     "hephaestus/automation/pipeline/coordinator_runtime.py": 1_400,
@@ -48,7 +50,8 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/stages/pr_review_threads.py": 850,
     "hephaestus/automation/pipeline/stages/pr_review_diagnostics.py": 150,
     "hephaestus/automation/pipeline/stages/pr_review_repository.py": 100,
-    "hephaestus/automation/pipeline/stages/pr_review_receipts.py": 100,
+    # Receipt storage moved here when the bootstrap stage helper was removed.
+    "hephaestus/automation/pipeline/stages/pr_review_receipts.py": 150,
     "hephaestus/automation/pipeline/stages/pr_review_verification.py": 250,
     # The GraphQL contract helpers added by #2393 bring this collaborator to
     # 1,403 lines; keep the explicit cap just above the measured source size.
@@ -228,13 +231,28 @@ def test_coordinator_types_has_no_shared_namespace_all() -> None:
     assert violations == []
 
 
+def _runtime_nodes(node: ast.AST) -> Iterator[ast.AST]:
+    """Inspect executable syntax and omit declarations under TYPE_CHECKING."""
+    yield node
+    if (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "TYPE_CHECKING"
+    ):
+        for branch in node.orelse:
+            yield from _runtime_nodes(branch)
+        return
+    for child in ast.iter_child_nodes(node):
+        yield from _runtime_nodes(child)
+
+
 def test_contract_methods_do_not_use_no_effect_ellipsis_statements() -> None:
     """Keep executable contract modules free of analyzer-visible no-op expressions."""
     violations: list[str] = []
     for relative in _CONTRACT_MODULES:
         path = _ROOT / relative
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
+        for node in _runtime_nodes(tree):
             if (
                 isinstance(node, ast.Expr)
                 and isinstance(node.value, ast.Constant)

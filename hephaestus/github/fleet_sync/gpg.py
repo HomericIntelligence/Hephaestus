@@ -6,7 +6,7 @@ import shlex
 import subprocess
 
 from hephaestus.config.child_environments import build_git_signing_env
-from hephaestus.github.git_ops import git_config_get
+from hephaestus.utils.git import git_config_get
 
 DEFAULT_METADATA_TIMEOUT = 10
 

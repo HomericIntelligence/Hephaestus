@@ -26,15 +26,18 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.address_review_core import _parse_addressed_block
+from hephaestus.automation.agent_config import AGENT_IMPLEMENTER
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
+    CurrentPlanScopeRead,
     DeliverReplyHandoffRequest,
     FrozenJson,
     GitHubJob,
     ImplementationReplyProgress,
+    ReadCurrentPlanScopeRequest,
     RecoverRemediationReplyJournalRequest,
     RecoverReplyJournalRequest,
     RemediationReplyJournalRecovered,
@@ -76,6 +79,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_test_fix_prompt,
 )
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _codex_implementation_grants
+from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.remediation_recovery import (
     RemediationRecoveryReceipt,
@@ -84,7 +88,7 @@ from hephaestus.automation.remediation_recovery import (
     encode_remediation_review_input,
 )
 from hephaestus.automation.review_journal import PlanDiscoveryResult
-from hephaestus.automation.session_naming import AGENT_IMPLEMENTER
+from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
     STATE_NEEDS_PLAN,
@@ -95,7 +99,10 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
-from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+from tests.unit.automation.pipeline.stages.conftest import (
+    FakeSourceWorkspaceManager,
+    FakeStageGitHub,
+)
 
 _DIRTY_CONTENT_SNAPSHOT = {
     "index_sha256": "1" * 64,
@@ -103,6 +110,138 @@ _DIRTY_CONTENT_SNAPSHOT = {
     "untracked_sha256": "3" * 64,
 }
 _IMPLEMENTATION_PLATFORM = "hephaestus.automation.pipeline.stages.implementation.sys.platform"
+_WRITER_PLAN = "## Files to Modify\n- `a.py`\n"
+
+
+class _PlannedWriterGitHub(FakeStageGitHub):
+    """Supply the current plan scope for writer and test-fix jobs."""
+
+    def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Return an approved scope with one source file."""
+        return PlanDiscoveryResult.found(_WRITER_PLAN)
+
+
+def _writer_binding(
+    item: Any,
+    *,
+    path: str | None = None,
+    revision: str = "a" * 40,
+) -> WorkspaceBinding:
+    """Build the source authority for one prepared test writer."""
+    return WorkspaceBinding.source(
+        cwd=Path(path or item.worktree or f"/tmp/repo/build/.worktrees/auto-{item.issue}-impl"),
+        reusable_root=Path("/tmp/repo"),
+        repository=item.repo,
+        ownership_key=f"{item.repo}:test:{item.issue}:impl",
+        item_number=item.issue,
+        lane=SourceLane.IMPLEMENTATION,
+        revision=revision,
+        generation=1,
+        detached=False,
+    )
+
+
+def _prepared_writer(item: Any, *, revision: str = "a" * 40) -> WorkspaceBinding:
+    """Start a test after the writer preparation receipt was accepted."""
+    binding = _writer_binding(item, revision=revision)
+    item.worktree = str(binding.cwd)
+    item.branch = item.branch or f"{item.issue}-auto-impl"
+    item.payload["_impl_source_workspace"] = binding.to_dict()
+    item.payload["_impl_source_revision"] = revision
+    item.payload["_impl_source_receipt"] = _writer_receipt(item, binding)
+    return binding
+
+
+def _writer_receipt(item: Any, binding: WorkspaceBinding) -> SourceWorkspaceReceipt:
+    """Return the immutable receipt that matches the test writer binding."""
+    assert binding.repository is not None
+    assert binding.ownership_key is not None
+    assert binding.item_number is not None
+    assert binding.lane is not None
+    assert binding.revision is not None
+    assert binding.generation is not None
+    return SourceWorkspaceReceipt(
+        repository=binding.repository,
+        repository_identity=binding.repository + ":test",
+        ownership_key=binding.ownership_key,
+        item_number=binding.item_number,
+        lane=binding.lane,
+        path=binding.cwd,
+        revision=binding.revision,
+        generation=binding.generation,
+        detached=binding.detached,
+        branch=item.branch or f"{item.issue}-auto-impl",
+    )
+
+
+def _worktree_receipt(
+    item: Any,
+    *,
+    path: str | None = None,
+    revision: str = "a" * 40,
+    **details: object,
+) -> dict[str, object]:
+    """Return a complete worker result for a prepared source workspace."""
+    item.branch = item.branch or f"{item.issue}-auto-impl"
+    binding = _writer_binding(item, path=path, revision=revision)
+    return {
+        "path": str(binding.cwd),
+        "source_workspace": binding.to_dict(),
+        "source_receipt": _writer_receipt(item, binding).to_dict(),
+        "impl_source_revision": revision,
+        "dirty": False,
+        "status": "",
+        "diff": "",
+        **details,
+    }
+
+
+def _complete_plan_scope_read(
+    stage: ImplementationStage, item: Any, ctx: Any, request: JobRequest
+) -> None:
+    """Complete the queued scope read with the configured GitHub facts."""
+    assert isinstance(request.job, GitHubJob)
+    assert isinstance(request.job.request, ReadCurrentPlanScopeRequest)
+    assert request.on_done_state == item.state
+    stage.on_job_done(item, _plan_scope_result(request.job.request, ctx), ctx)
+    item.state = request.on_done_state
+
+
+def _plan_scope_result(request: ReadCurrentPlanScopeRequest, ctx: Any) -> JobResult:
+    """Read fixture plan facts through the worker's current scope adapter."""
+    try:
+        receipt = PipelineGitHubJobRunner._read_current_plan_scope(request, ctx.github)
+        assert isinstance(receipt, CurrentPlanScopeRead)
+        assert receipt.request == request
+        return JobResult(ok=True, value=receipt)
+    except Exception as error:
+        return JobResult(ok=False, error=f"{type(error).__name__}: {error}")
+
+
+def _step_after_plan_scope(stage: ImplementationStage, item: Any, ctx: Any) -> Any:
+    """Complete one scope read before returning the next stage request."""
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest)
+    _complete_plan_scope_read(stage, item, ctx, request)
+    return stage.step(item, ctx)
+
+
+def _create_after_empty_probe(stage: Any, item: Any, ctx: Any) -> Any:
+    """Complete the dirty-writer probe before a fresh worktree request."""
+    probe = stage.step(item, ctx)
+    assert isinstance(probe, JobRequest)
+    assert isinstance(probe.job, GitJob)
+    assert probe.job.op == "claim_dirty_direct_continuation"
+    stage.on_job_done(
+        item,
+        JobResult(ok=True, value={"dirty_direct_not_applicable": True}),
+        ctx,
+    )
+    item.state = probe.on_done_state
+    route = stage.step(item, ctx)
+    assert route == Continue(next_state="WORKTREE_WAIT")
+    item.state = route.next_state
+    return stage.step(item, ctx)
 
 
 def _committed_runner_fixture(tmp_path: Path, source: str) -> tuple[Path, str]:
@@ -229,6 +368,10 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             item.state = result.next_state
             continue
         if isinstance(result, JobRequest):
+            if isinstance(result.job, GitHubJob) and isinstance(
+                result.job.request, ReadCurrentPlanScopeRequest
+            ):
+                pool._scripted.appendleft(_plan_scope_result(result.job.request, ctx))
             pool.submit(result.job, result.on_done_state)
             _handle, job_result = pool.completion_q.get_nowait()
             assert not job_result.interrupted  # on_job_done contract precondition
@@ -278,7 +421,9 @@ def _drive_github_jobs(
             return result
         request = result.job.request
         try:
-            if isinstance(request, RecoverRemediationReplyJournalRequest):
+            if isinstance(request, ReadCurrentPlanScopeRequest):
+                receipt = PipelineGitHubJobRunner._read_current_plan_scope(request, ctx.github)
+            elif isinstance(request, RecoverRemediationReplyJournalRequest):
                 threads = request.threads.thaw()
                 assert isinstance(threads, list)
                 handoff = journaled_implementation_remediation_reply_handoff(
@@ -316,7 +461,7 @@ def _drive_github_jobs(
             elif isinstance(request, DeliverReplyHandoffRequest):
                 receipt = attempt_reply_handoff(request, ctx.github)
                 assert isinstance(receipt, ReplyHandoffAttempted)
-            else:  # pragma: no cover - the implementation stage has exactly three operations
+            else:  # pragma: no cover - reject an unknown stage operation
                 raise AssertionError(f"unexpected request: {request!r}")
             job_result = JobResult(ok=True, value=receipt)
         except Exception as error:
@@ -568,7 +713,7 @@ class TestGate:
 
         github.plan_text = "# Implementation Plan\n\n## Files to Modify\n\n- `src/new.py`\n"
         github.labels[3019] = {STATE_PLAN_GO}
-        second = ImplementationStage().step(item, ctx)
+        second = _step_after_plan_scope(ImplementationStage(), item, ctx)
 
         assert isinstance(second, Continue)
         scope = implementation_module._codex_publication_kwargs(item, ctx, "a" * 40)
@@ -747,6 +892,7 @@ class TestGate:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="GATE")
         item.payload["post_review_rebase_required"] = True
+        item.payload["rebase_reason"] = "review_conflict"
 
         result = stage.step(item, ctx)
 
@@ -756,7 +902,7 @@ class TestGate:
         item.payload["worktree_dirty"] = False
         assert stage.step(item, ctx) == Continue(next_state="REBASE_WAIT")
 
-    def test_scope_dependency_sync_requires_exact_ancestor_and_aborts_conflict(
+    def test_dependency_sync_does_not_authorize_rebase(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """An old dependency-sync state does not authorize a rebase."""
@@ -773,6 +919,7 @@ class TestGate:
             }
         )
 
+        _prepared_writer(item)
         request = stage.step(item, ctx)
 
         assert request == StageOutcome(Disposition.FINISH_FAIL, "rebase_reason_unavailable")
@@ -1004,13 +1151,15 @@ class TestGate:
     def test_adopted_dirty_worktree_salvages_then_advances(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A dirty adopted worktree runs the salvage decision, then rebases."""
+        """A dirty adopted worktree runs the salvage decision before review."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
         item.payload["existing_pr"] = True
         item.payload["worktree_dirty"] = True
 
+        _prepared_writer(item)
+        item.payload["worktree_content_snapshot"] = _DIRTY_CONTENT_SNAPSHOT
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
@@ -1028,26 +1177,32 @@ class TestGate:
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/implementation-writer"
 
+        binding = _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert result.job.op == "rebase"
         assert result.job.descr == "rebase_implementation_writer"
         assert result.job.kwargs == {
             "cwd": Path("/tmp/implementation-writer"),
+            "repo_root": "/tmp/repo",
+            "issue_number": 1,
             "base_branch": "main",
             "remote": "origin",
             "publish_rebased_head": True,
             "branch": "1-auto-impl",
             "expected_remote_sha": "a" * 40,
             "rebase_reason": "manual",
-            "issue_number": 1,
-            "repo_root": "/tmp/repo",
             "pr_number": 1001,
         }
 
-        stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=_worktree_receipt(item, rebased=True)),
+            ctx,
+        )
         assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
     def test_successful_rebase_persists_published_head_for_remediation(
@@ -1062,19 +1217,29 @@ class TestGate:
                 "reviewed_pr_head_sha": "a" * 40,
             }
         )
+        _prepared_writer(item)
 
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"rebased": True, "head_sha": "b" * 40}),
+            JobResult(
+                ok=True,
+                value=_worktree_receipt(item, revision="b" * 40, rebased=True, head_sha="b" * 40),
+            ),
             make_ctx(),
         )
 
         assert item.payload["_impl_source_revision"] == "b" * 40
+        receipt = item.payload["_impl_source_receipt"]
+        assert isinstance(receipt, SourceWorkspaceReceipt)
+        assert receipt.revision == "b" * 40
+        assert receipt.to_binding(Path("/tmp/repo")) == WorkspaceBinding.from_dict(
+            item.payload["_impl_source_workspace"]
+        )
 
     def test_remediation_prefers_persisted_rebase_head(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The source workspace request uses the current writer revision."""
+        """The worker receipt supplies the current writer revision."""
         stage = ImplementationStage()
         item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
         item.branch = "1-auto-impl"
@@ -1087,14 +1252,13 @@ class TestGate:
                 "_worktree_cleanup_head_sha": "c" * 40,
             }
         )
-        prepared: list[str] = []
+        item.worktree = "/tmp/current-writer"
+        binding = _prepared_writer(item, revision="b" * 40)
 
-        def prepare(*args: Any, **_kwargs: Any) -> SimpleNamespace:
-            revision = str(args[2])
-            prepared.append(revision)
-            return SimpleNamespace(cwd=Path("/tmp/current-writer"), revision=revision)
+        def prepare(*args: Any, **kwargs: Any) -> WorkspaceBinding:
+            raise AssertionError("The stage must use its accepted source receipt.")
 
-        manager = SimpleNamespace(prepare=prepare)
+        manager = SimpleNamespace(prepare_bounded=prepare)
         paths = SimpleNamespace(
             repo_root="/tmp/repo",
             worktree="/tmp/repo/worktree",
@@ -1104,12 +1268,14 @@ class TestGate:
         with patch.object(
             implementation_module, "_new_pretest_input", return_value=_routing_pretest_input(item)
         ):
-            result = stage.step(item, make_ctx(paths=paths))
+            result = _step_after_plan_scope(
+                stage, item, make_ctx(paths=paths, github=_PlannedWriterGitHub())
+            )
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.cwd == Path("/tmp/current-writer")
-        assert prepared == ["b" * 40]
+        assert result.job.workspace == binding
         assert item.payload["_impl_source_revision"] == "b" * 40
 
     def test_rebase_conflict_uses_edit_only_agent_and_separate_budget(
@@ -1122,6 +1288,7 @@ class TestGate:
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        _prepared_writer(item)
         item.payload["rebase_reason"] = "manual"
         result = JobResult(
             ok=False,
@@ -1129,6 +1296,7 @@ class TestGate:
                 "rebased": False,
                 "conflict_paths": ("hephaestus/example.py",),
                 "conflict_snapshot": {"hephaestus/example.py": "before"},
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                 "conflict_index_snapshot": "1" * 64,
                 "paused_head_sha": "c" * 40,
                 "base_sha": "b" * 40,
@@ -1208,6 +1376,9 @@ class TestGate:
                 "rebase_conflict_paths": ("hephaestus/example.py",),
             }
         )
+        _prepared_writer(item)
+        item.payload["rebase_content_snapshot"] = _DIRTY_CONTENT_SNAPSHOT
+        item.payload["rebase_paused_head_sha"] = "a" * 40
         item.attempts["implement"] = ctx.budget("implement")
 
         assert stage.step(item, ctx) == Continue(next_state="REBASE_CONFLICT_WAIT")
@@ -1230,6 +1401,7 @@ class TestGate:
         item.attempts["implement"] = ctx.budget("implement")
         item.attempts["rebase_conflict"] = 1
 
+        _prepared_writer(item)
         stage.on_job_done(
             item,
             JobResult(
@@ -1237,6 +1409,7 @@ class TestGate:
                 value={
                     "conflict_paths": ("hephaestus/example.py",),
                     "conflict_snapshot": {"hephaestus/example.py": "after first pass"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                     "conflict_index_snapshot": "2" * 64,
                     "paused_head_sha": "d" * 40,
                     "base_sha": "b" * 40,
@@ -1342,6 +1515,7 @@ class TestGate:
         item.payload.update(
             {
                 "post_review_rebase_required": True,
+                "rebase_reason": "manual",
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("hephaestus/example.py",),
                 "rebase_conflict_snapshot": {"hephaestus/example.py": "before"},
@@ -1352,6 +1526,7 @@ class TestGate:
             }
         )
 
+        binding = _prepared_writer(item)
         stage.on_job_done(item, JobResult(ok=True, value="resolved"), ctx)
 
         assert item.payload["rebase_conflict"] is True
@@ -1363,6 +1538,7 @@ class TestGate:
 
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, GitJob)
+        assert request.job.workspace == binding
         assert request.job.op == "continue_rebase"
         assert request.job.kwargs["expected_remote_sha"] == "a" * 40
         assert request.job.kwargs["conflict_index_snapshot"] == "1" * 64
@@ -1378,6 +1554,7 @@ class TestGate:
         item.payload.update(
             {
                 "post_review_rebase_required": True,
+                "rebase_reason": "manual",
                 "rebase_complete": True,
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("hephaestus/example.py",),
@@ -1903,7 +2080,9 @@ class TestGitErrorRetryCap:
         item = make_work_item(issue=1, state="WORKTREE_WAIT")
         item.payload["git_error_retries"] = GIT_ERROR_RETRY_CAP
 
-        stage.on_job_done(item, JobResult(ok=True, value="/tmp/wt"), ctx)
+        stage.on_job_done(
+            item, JobResult(ok=True, value=_worktree_receipt(item, path="/tmp/wt")), ctx
+        )
 
         assert "git_error_retries" not in item.payload
 
@@ -1930,7 +2109,6 @@ class TestWorktreeAndAdvise:
         promoted_path = Path("/tmp/promoted-direct-writer")
         source_revision = "b" * 40
         branch = "1-auto-impl-direct-abcdef"
-        prepared: list[tuple[int, SourceLane, str, str | None]] = []
 
         def prepare(
             item_number: int,
@@ -1938,14 +2116,14 @@ class TestWorktreeAndAdvise:
             revision: str,
             *,
             branch: str | None = None,
-        ) -> SimpleNamespace:
-            prepared.append((item_number, lane, revision, branch))
-            return SimpleNamespace(cwd=promoted_path, revision=revision)
+            deadline: object = None,
+        ) -> WorkspaceBinding:
+            raise AssertionError("The stage must use its accepted source receipt.")
 
         paths = SimpleNamespace(
             repo_root="/tmp/repo",
             worktree="/tmp/repo/worktree",
-            source_workspaces=SimpleNamespace(prepare=prepare),
+            source_workspaces=SimpleNamespace(prepare_bounded=prepare),
         )
         ctx = make_ctx(paths=paths)
         item = make_work_item(issue=1, state="WORKTREE_WAIT")
@@ -1956,14 +2134,15 @@ class TestWorktreeAndAdvise:
             item,
             JobResult(
                 ok=True,
-                value={
-                    "path": str(promoted_path),
-                    "impl_source_revision": source_revision,
-                    "direct_scope_reservation": {
+                value=_worktree_receipt(
+                    item,
+                    path=str(promoted_path),
+                    revision=source_revision,
+                    direct_scope_reservation={
                         "branch": branch,
                         "base_sha": source_revision,
                     },
-                },
+                ),
             ),
             ctx,
         )
@@ -1976,7 +2155,7 @@ class TestWorktreeAndAdvise:
         assert request.job.cwd == promoted_path
         assert request.job.workspace is not None
         assert request.job.workspace.revision == source_revision
-        assert prepared == [(1, SourceLane.IMPLEMENTATION, source_revision, branch)]
+        assert item.payload["_impl_source_receipt"].revision == source_revision
         assert item.payload["_impl_source_revision"] == source_revision
 
     def test_worktree_wait_dispatches_to_handler(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -2001,7 +2180,7 @@ class TestWorktreeAndAdvise:
         item = make_work_item(issue=1, state="WORKTREE_WAIT")
         item.branch = "1-auto-impl"
 
-        result = stage.step(item, ctx)
+        result = _create_after_empty_probe(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
@@ -2056,18 +2235,19 @@ class TestWorktreeAndAdvise:
             item,
             JobResult(
                 ok=True,
-                value={
-                    "path": inspection["worktree_path"],
-                    "impl_source_revision": inspection["head_sha"],
-                    "branch": item.branch,
-                    "head_sha": inspection["head_sha"],
-                    "dirty": True,
-                    "status": status,
-                    "diff": diff,
-                    "content_snapshot": snapshot,
-                    "incomplete_remediation_inspection": inspection,
-                    "remediation_batch_nonce": "4" * 32,
-                },
+                value=_worktree_receipt(
+                    item,
+                    path=inspection["worktree_path"],
+                    revision=inspection["head_sha"],
+                    branch=item.branch,
+                    head_sha=inspection["head_sha"],
+                    dirty=True,
+                    status=status,
+                    diff=diff,
+                    content_snapshot=snapshot,
+                    incomplete_remediation_inspection=inspection,
+                    remediation_batch_nonce="4" * 32,
+                ),
             ),
             ctx,
         )
@@ -2097,16 +2277,19 @@ class TestWorktreeAndAdvise:
             }
         )
 
+        binding = _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert result.job.op == "inspect_implementation_worktree"
         assert result.job.kwargs == {
             "repo_root": "/tmp/repo",
             "worktree_path": "/tmp/implementation-writer",
             "branch": "1-auto-impl",
             "expected_head": "a" * 40,
+            "issue_number": 1,
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
         assert item.payload["remediation_reply_inspection_required"] is True
@@ -2151,6 +2334,7 @@ class TestWorktreeAndAdvise:
             }
         )
 
+        binding = _prepared_writer(item)
         result = stage.step(item, make_ctx())
 
         assert result == Continue(next_state="DIRTY_DECISION_WAIT")
@@ -2166,6 +2350,7 @@ class TestWorktreeAndAdvise:
         rebase = stage.step(item, make_ctx())
         assert isinstance(rebase, JobRequest)
         assert isinstance(rebase.job, GitJob)
+        assert rebase.job.workspace == binding
         assert rebase.job.kwargs["sync_to_expected_remote_head"] is True
         assert rebase.job.kwargs["pr_number"] == 1001
 
@@ -2632,7 +2817,7 @@ class TestWorktreeAndAdvise:
         item.branch = "1-auto-impl"
         item.payload["_direct_scope_base_sha"] = "a" * 40
 
-        result = stage.step(item, ctx)
+        result = _create_after_empty_probe(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
@@ -2662,7 +2847,7 @@ class TestWorktreeAndAdvise:
             }
         )
 
-        result = stage.step(item, ctx)
+        result = _create_after_empty_probe(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
@@ -2725,13 +2910,14 @@ class TestWorktreeAndAdvise:
         item = make_work_item(issue=1, state="WORKTREE_WAIT")
         result = JobResult(
             ok=True,
-            value={
-                "path": "/tmp/wt",
-                "dirty": True,
-                "status": "M x.py",
-                "diff": "+x",
-                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-            },
+            value=_worktree_receipt(
+                item,
+                path="/tmp/wt",
+                dirty=True,
+                status="M x.py",
+                diff="+x",
+                content_snapshot=_DIRTY_CONTENT_SNAPSHOT,
+            ),
         )
 
         stage.on_job_done(item, result, ctx)
@@ -2782,13 +2968,14 @@ class TestWorktreeAndAdvise:
         item.payload["_direct_scope_base_sha"] = "a" * 40
         result = JobResult(
             ok=True,
-            value={
-                "path": "/tmp/wt",
-                "direct_scope_reservation": {
+            value=_worktree_receipt(
+                item,
+                path="/tmp/wt",
+                direct_scope_reservation={
                     "branch": "1-auto-impl",
                     "base_sha": "a" * 40,
                 },
-            },
+            ),
         )
 
         stage.on_job_done(item, result, ctx)
@@ -2842,7 +3029,7 @@ class TestWorktreeAndAdvise:
             item,
             JobResult(
                 ok=True,
-                value={"path": "/tmp/wt", "impl_source_revision": "b" * 40},
+                value=_worktree_receipt(item, path="/tmp/wt", revision="b" * 40),
             ),
             make_ctx(),
         )
@@ -2860,7 +3047,9 @@ class TestWorktreeAndAdvise:
         item.branch = "1-auto-impl"
         item.payload["_direct_scope_base_sha"] = "a" * 40
 
-        stage.on_job_done(item, JobResult(ok=True, value={"path": "/tmp/wt"}), ctx)
+        stage.on_job_done(
+            item, JobResult(ok=True, value=_worktree_receipt(item, path="/tmp/wt")), ctx
+        )
 
         assert item.worktree == ""
         assert item.payload["git_error"] is True
@@ -2882,12 +3071,7 @@ class TestWorktreeAndAdvise:
             item,
             JobResult(
                 ok=True,
-                value={
-                    "path": "/tmp/wt",
-                    "dirty": False,
-                    "status": "",
-                    "diff": "",
-                },
+                value=_worktree_receipt(item, path="/tmp/wt", dirty=False, status="", diff=""),
             ),
             ctx,
         )
@@ -2898,15 +3082,18 @@ class TestWorktreeAndAdvise:
         item.state = "DIRTY_DECISION_WAIT"
         assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
-    def test_worktree_string_result_stores_path(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A plain string worktree result is the worktree path."""
+    def test_worktree_string_result_cannot_authorize_a_writer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A path without source authority cannot start a writer job."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="WORKTREE_WAIT")
 
         stage.on_job_done(item, JobResult(ok=True, value="/tmp/wt2"), ctx)
 
-        assert item.worktree == "/tmp/wt2"
+        assert item.worktree == ""
+        assert item.payload["git_error"] is True
 
     def test_clean_worktree_retry_clears_a_prior_dirty_snapshot(
         self, make_ctx: Any, make_work_item: Any
@@ -2925,12 +3112,16 @@ class TestWorktreeAndAdvise:
             }
         )
 
-        stage.on_job_done(item, JobResult(ok=True, value="/tmp/clean-wt"), make_ctx())
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=_worktree_receipt(item, path="/tmp/clean-wt")),
+            make_ctx(),
+        )
 
         assert item.worktree == "/tmp/clean-wt"
-        assert "worktree_dirty" not in item.payload
-        assert "worktree_status" not in item.payload
-        assert "worktree_diff" not in item.payload
+        assert item.payload["worktree_dirty"] is False
+        assert item.payload["worktree_status"] == ""
+        assert item.payload["worktree_diff"] == ""
         assert "worktree_content_snapshot" not in item.payload
         assert "worktree_branch" not in item.payload
         assert "worktree_head_sha" not in item.payload
@@ -3033,6 +3224,8 @@ class TestWorktreeAndAdvise:
         item.payload["worktree_dirty"] = True
         item.payload["worktree_status"] = "M x.py"
 
+        _prepared_writer(item)
+        item.payload["worktree_content_snapshot"] = _DIRTY_CONTENT_SNAPSHOT
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
@@ -3084,6 +3277,7 @@ class TestWorktreeAndAdvise:
             }
         )
 
+        binding = _prepared_writer(item)
         stage.on_job_done(
             item,
             JobResult(ok=True, value="Inspecting the changes.\n\nCOMMIT\n"),
@@ -3094,6 +3288,7 @@ class TestWorktreeAndAdvise:
         assert item.payload["dirty_decision"] == "COMMIT"
         assert isinstance(recovery, JobRequest)
         assert isinstance(recovery.job, GitJob)
+        assert recovery.job.workspace == binding
         assert recovery.job.op == "recover_dirty_worktree"
         assert recovery.on_done_state == "DIRTY_RECOVERY_WAIT"
         assert recovery.job.kwargs["pre_action_head"] == "a" * 40
@@ -3382,6 +3577,8 @@ class TestWorktreeAndAdvise:
         ctx = make_ctx()
         item = make_work_item(issue=1, state="ADVISE_WAIT")
 
+        _prepared_writer(item)
+
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
@@ -3431,7 +3628,7 @@ class TestImplementBudget:
     ) -> None:
         """Review findings are fixed by the implementation stage, never pr_review."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(github=_PlannedWriterGitHub())
         item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
         item.branch = "review-branch"
         item.worktree = "/tmp/implementation-writer"
@@ -3446,10 +3643,11 @@ class TestImplementBudget:
             }
         )
 
+        _prepared_writer(item)
         with patch.object(
             implementation_module, "_new_pretest_input", return_value=_routing_pretest_input(item)
         ):
-            result = stage.step(item, ctx)
+            result = _step_after_plan_scope(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
@@ -3473,9 +3671,8 @@ class TestImplementBudget:
     ) -> None:
         """Scope-control findings are checked by the writer before publishing."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(github=_PlannedWriterGitHub())
         item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
-        item.worktree = "/tmp/implementation-writer"
         item.payload.update(
             {
                 "implementation_remediation": True,
@@ -3497,13 +3694,17 @@ class TestImplementBudget:
             }
         )
 
+        _prepared_writer(item)
         with patch.object(
             implementation_module, "_new_pretest_input", return_value=_routing_pretest_input(item)
         ):
-            result = stage.step(item, ctx)
+            result = _step_after_plan_scope(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
+        assert result.job.workspace == WorkspaceBinding.from_dict(
+            item.payload["_impl_source_workspace"]
+        )
         assert result.job.prompt_kwargs["scope_retraction_paths"] == ("out-of-scope.py",)
         item.payload.update(
             {
@@ -3528,6 +3729,7 @@ class TestImplementBudget:
         push = stage.step(item, ctx)
         assert isinstance(push, JobRequest)
         assert isinstance(push.job, GitJob)
+        assert push.job.workspace == result.job.workspace
         assert push.job.kwargs["scope_retraction_paths"] == ("out-of-scope.py",)
         assert push.job.kwargs["scope_retraction_base_sha"] == "a" * 40
 
@@ -3540,6 +3742,8 @@ class TestImplementBudget:
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
         item.branch = "1-auto-impl"
         item.payload["advise_findings"] = "use helpers"
+
+        _prepared_writer(item)
 
         result = stage.step(item, ctx)
 
@@ -3565,6 +3769,8 @@ class TestImplementBudget:
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
         item.session_ids["implementer"] = "implement-session-id"
 
+        _prepared_writer(item)
+
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
@@ -3587,6 +3793,8 @@ class TestImplementBudget:
             }
         )
         item = make_work_item(issue=3019, state="IMPLEMENT_WAIT")
+
+        _prepared_writer(item)
 
         result = ImplementationStage().step(item, ctx)
 
@@ -3612,7 +3820,7 @@ class TestImplementBudget:
         ctx = make_ctx(config_overrides={"agent": "codex"}, github=github)
         item = make_work_item(issue=3019, state="GATE")
 
-        result = ImplementationStage().step(item, ctx)
+        result = _step_after_plan_scope(ImplementationStage(), item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
@@ -3626,6 +3834,8 @@ class TestImplementBudget:
         """A non-Codex implement job cannot receive Codex adapter authority."""
         ctx = make_ctx(config_overrides={"agent": "claude"})
         item = make_work_item(issue=3019, state="IMPLEMENT_WAIT")
+
+        _prepared_writer(item)
 
         result = ImplementationStage().step(item, ctx)
 
@@ -3645,6 +3855,8 @@ class TestImplementBudget:
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
         item.payload["implement_error"] = True  # stale attempt-1 failure
         item.payload["implement_summary"] = "old summary"
+
+        _prepared_writer(item)
 
         result = stage.step(item, ctx)
 
@@ -3681,13 +3893,13 @@ class TestImplementBudget:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
         assert result.note == "agent_error"
-        assert item.state == "IMPLEMENT_WAIT"
+        assert item.state == "WORKTREE_WAIT"
 
         retry = stage.step(item, ctx)
 
         assert isinstance(retry, JobRequest)
-        assert isinstance(retry.job, AgentJob)
-        assert retry.job.descr == "implement"
+        assert isinstance(retry.job, GitJob)
+        assert retry.job.descr == "claim_dirty_direct_continuation"
         assert item.attempts["implement"] == 1
 
     def test_codex_inventory_uncertainty_finishes_without_reusing_the_worktree(
@@ -3812,6 +4024,8 @@ class TestImplementBudget:
         ctx = replace(make_ctx(), budget_fn=lambda name: 5)
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
         item.attempts["implement"] = 2  # would exhaust under the default budget
+
+        _prepared_writer(item)
 
         result = stage.step(item, ctx)
 
@@ -4509,7 +4723,7 @@ class TestTestsAndFix:
         )
         try:
             with patch(
-                "hephaestus.automation.pipeline.worker_pool.subprocess.run",
+                "hephaestus.automation.pipeline.worker_pool.run_subprocess",
                 side_effect=FileNotFoundError("runner executable is absent"),
             ):
                 result = pool._run(request.job)
@@ -4569,8 +4783,9 @@ class TestTestsAndFix:
     ) -> None:
         """A test fix reruns the fixed native command, not the container command."""
         stage = ImplementationStage()
-        ctx = make_ctx(org="HomericIntelligence")
+        ctx = make_ctx(github=_PlannedWriterGitHub(), org="HomericIntelligence")
         item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        _prepared_writer(item)
         stage.step(item, ctx)
         with patch(_IMPLEMENTATION_PLATFORM, "darwin"):
             stage.on_job_done(
@@ -4595,7 +4810,7 @@ class TestTestsAndFix:
         item.state = "COMMIT_PUSH_WAIT"
         assert stage.step(item, ctx) == Continue(next_state="TESTFIX_WAIT")
         item.state = "TESTFIX_WAIT"
-        fix = stage.step(item, ctx)
+        fix = _step_after_plan_scope(stage, item, ctx)
         assert isinstance(fix, JobRequest)
         stage.on_job_done(item, JobResult(ok=True, value="fixed"), ctx)
         item.state = "TEST_WAIT"
@@ -4634,11 +4849,14 @@ class TestTestsAndFix:
     def test_testfix_requests_resume_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """TESTFIX_WAIT submits the composed test-failure resume job."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(
+            github=_PlannedWriterGitHub(),
+        )
         item = make_work_item(issue=1, state="TESTFIX_WAIT")
+        _prepared_writer(item)
         item.payload["test_output"] = "FAILED test_y"
 
-        result = stage.step(item, ctx)
+        result = _step_after_plan_scope(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)  # narrow the job union
@@ -4659,8 +4877,9 @@ class TestTestsAndFix:
     ) -> None:
         """A red one-shot gate is fixed and rerun before commit, push, or PR creation."""
         stage = ImplementationStage()
-        ctx = make_ctx(org="HomericIntelligence")
+        ctx = make_ctx(github=_PlannedWriterGitHub(), org="HomericIntelligence")
         item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        _prepared_writer(item)
         item.payload.update({"issue_title": "Repair tests", "issue_body": ""})
 
         first_gate = stage.step(item, ctx)
@@ -4678,7 +4897,7 @@ class TestTestsAndFix:
         assert failed_gate.next_state == "TESTFIX_WAIT"
 
         item.state = failed_gate.next_state
-        fixer = stage.step(item, ctx)
+        fixer = _step_after_plan_scope(stage, item, ctx)
         assert isinstance(fixer, JobRequest)
         assert isinstance(fixer.job, AgentJob)
         assert fixer.job.descr == "test_fix"
@@ -4702,11 +4921,12 @@ class TestTestsAndFix:
     ) -> None:
         """A test repair continues the implementation conversation."""
         stage = ImplementationStage()
-        ctx = make_ctx(config_overrides={"agent": "codex"})
+        ctx = make_ctx(github=_PlannedWriterGitHub(), config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, state="TESTFIX_WAIT")
+        _prepared_writer(item)
         item.session_ids["implementer"] = "implement-session-id"
 
-        result = stage.step(item, ctx)
+        result = _step_after_plan_scope(stage, item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
@@ -4910,6 +5130,24 @@ class TestCommitPushAndPrCreate:
         assert ImplementationStage().step(item, make_ctx()) == expected
         assert "remediation_writer_inspection" not in item.payload
         assert "remediation_recovery_commit_sha" not in item.payload
+
+    def test_stale_reply_result_cannot_advance_with_actionable_pending_handoff(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Implementation must settle pending replies before review starts."""
+        item = make_work_item(issue=1, pr=1001, state="PR_CREATE")
+        item.payload.update(
+            {
+                implementation_module._REPLY_HANDOFF_RESULT: "stale",
+                "pending_implementation_reply_handoff": {"pending": True},
+                "implementation_remediation": True,
+            }
+        )
+
+        assert ImplementationStage().step(item, make_ctx()) == Continue(
+            next_state="REPLY_HANDOFF_WAIT"
+        )
+        assert item.payload["implementation_remediation"] is True
 
     def test_remediation_reply_handoff_waits_for_github_head_visibility(
         self, make_ctx: Any, make_work_item: Any
@@ -5149,7 +5387,7 @@ class TestCommitPushAndPrCreate:
     ) -> None:
         """A recovered initial journal safely delivers its exact reply once."""
 
-        class TransientReadGitHub(FakeStageGitHub):
+        class TransientReadGitHub(_PlannedWriterGitHub):
             def __init__(self) -> None:
                 super().__init__()
                 self._states = deque(
@@ -5258,7 +5496,7 @@ class TestCommitPushAndPrCreate:
 
         resumed = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
         resumed.branch = "fix/restart"
-        resumed.payload["_impl_source_revision"] = "b" * 40
+        _prepared_writer(resumed, revision="b" * 40)
         # The restarted read sees the writer's new head but the exact source
         # review thread and its anchor stay unchanged.
         post_push_snapshots = [
@@ -5289,7 +5527,7 @@ class TestCommitPushAndPrCreate:
 
         stale = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
         stale.branch = "fix/restart"
-        stale.payload["_impl_source_revision"] = "c" * 40
+        _prepared_writer(stale, revision="c" * 40)
         changed_head_snapshots = [
             {
                 **post_push_snapshots[0],
@@ -5323,7 +5561,7 @@ class TestCommitPushAndPrCreate:
     ) -> None:
         """A new coordinator resumes only from a linked progress journal."""
 
-        class PartialReplyGitHub(FakeStageGitHub):
+        class PartialReplyGitHub(_PlannedWriterGitHub):
             def __init__(self) -> None:
                 super().__init__(
                     pr_state={
@@ -5449,6 +5687,7 @@ class TestCommitPushAndPrCreate:
 
         resumed = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
         resumed.branch = item.branch
+        _prepared_writer(resumed, revision="b" * 40)
         current_pr_state = {
             "state": "OPEN",
             "headRefOid": "b" * 40,
@@ -5631,6 +5870,7 @@ class TestCommitPushAndPrCreate:
             }
         )
 
+        _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
@@ -5638,6 +5878,7 @@ class TestCommitPushAndPrCreate:
         assert result.job.op == "commit_push"
         assert result.job.kwargs == {
             "source_lane": "impl",
+            "publish_base_sha": "a" * 40,
             "issue_number": 1,
             "issue_title": "Keep commit metadata closed",
             "issue_body": "Do not fetch issue data from a Git worker.",
@@ -5675,10 +5916,12 @@ class TestCommitPushAndPrCreate:
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
 
+        binding = _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert result.job.kwargs["pi_dir"] == "/tmp/operator-pi"
 
     @pytest.mark.parametrize("role_model", ["", "Literal:medium"])
@@ -5699,10 +5942,12 @@ class TestCommitPushAndPrCreate:
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
 
+        binding = _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert result.job.kwargs["agent"] == "opencode"
         assert result.job.kwargs["agent_model"] == (role_model or "Global:max")
 
@@ -5732,12 +5977,17 @@ class TestCommitPushAndPrCreate:
         with patch.object(
             ctx.github, "discover_plan", return_value=PlanDiscoveryResult.found(plan)
         ):
+            scope_read = implementation_module._capture_codex_publication_scope(item, ctx)
+            assert isinstance(scope_read, JobRequest)
+            _complete_plan_scope_read(stage, item, ctx, scope_read)
             assert implementation_module._capture_codex_publication_scope(item, ctx) is None
 
+        binding = _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert result.job.kwargs["agent_model"] == "sol:medium"
         assert result.job.kwargs["scope_history_base_sha"] == "a" * 40
         assert result.job.kwargs["allowed_paths"] == (
@@ -5755,10 +6005,12 @@ class TestCommitPushAndPrCreate:
         item.worktree = "/tmp/wt"
         item.payload["_impl_source_revision"] = "a" * 40
 
+        binding = _prepared_writer(item)
         result = stage.step(item, make_ctx())
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert result.job.kwargs["publish_base_sha"] == "a" * 40
 
     def test_direct_scope_commit_push_carries_its_remote_reservation_pin(
@@ -5772,10 +6024,12 @@ class TestCommitPushAndPrCreate:
         item.worktree = "/tmp/wt"
         item.payload["_direct_scope_base_sha"] = "a" * 40
 
+        binding = _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert result.job.kwargs["expected_remote_sha"] == "a" * 40
 
     def test_adopted_direct_commit_push_uses_its_pr_branch_without_a_fresh_pin(
@@ -5790,10 +6044,12 @@ class TestCommitPushAndPrCreate:
         item.payload["existing_pr"] = True
         item.payload["_direct_scope_base_sha"] = "a" * 40
 
+        binding = _prepared_writer(item)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
+        assert result.job.workspace == binding
         assert "expected_remote_sha" not in result.job.kwargs
 
     def test_commit_push_no_commit_sets_skip_payload(
@@ -6092,6 +6348,7 @@ class TestCommitPushAndPrCreate:
         item.branch = "9-auto-impl"
         item.worktree = "/tmp/wt"
 
+        binding = _prepared_writer(item)
         stage.on_job_done(item, JobResult(ok=False, error="remote hung up"), ctx)
         item.state = "PR_CREATE"
         retry = stage.step(item, ctx)
@@ -6104,6 +6361,7 @@ class TestCommitPushAndPrCreate:
 
         assert isinstance(retry_job, JobRequest)
         assert isinstance(retry_job.job, GitJob)
+        assert retry_job.job.workspace == binding
         assert retry_job.job.op == "commit_push"
         assert github.mutation_log == []
 
@@ -6282,12 +6540,9 @@ class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""
 
     def test_happy_path_walk(self, make_ctx: Any, make_work_item: Any) -> None:
-        """GATE -> worktree -> advise -> implement -> tests -> push -> PR.
-
-        Asserts the exact job order and PR creation journal.
-        """
+        """Initial rebase precedes advice, implementation, tests, and publication."""
         stage = ImplementationStage()
-        github = FakeStageGitHub(labels=["state:plan-go"])
+        github = _PlannedWriterGitHub(labels=["state:plan-go"])
         ctx = make_ctx(
             github=github,
             config_overrides={"run_pre_pr_tests": True},
@@ -6298,12 +6553,24 @@ class TestFullWalks:
 
         pool = FakeWorkerPool()
         pool.script(
+            JobResult(ok=True, value={"dirty_direct_not_applicable": True}),
+            JobResult(ok=True, value=_worktree_receipt(item)),  # worktree
             JobResult(
                 ok=True,
-                value={"path": "/tmp/wt5", "dirty": False, "impl_source_revision": "a" * 40},
-            ),
-            JobResult(ok=True, value={"head_sha": "a" * 40}),  # worktree
-            JobResult(ok=True, value="prior learnings"),  # advise
+                value=_worktree_receipt(
+                    item,
+                    head_sha="a" * 40,
+                    implementation_started=True,
+                    rebased=False,
+                    published=False,
+                ),
+            ),  # initial rebase
+            JobResult(
+                ok=True,
+                value=AthenaSkillResult(
+                    kind="advise", context="prior learnings", receipt={"binding": "ok"}
+                ),
+            ),  # advise
             JobResult(ok=True, value="Implemented the widget."),  # implement
             JobResult(ok=True, value=0),  # pre-PR tests green
             JobResult(ok=True, value=True),  # commit_push
@@ -6314,6 +6581,7 @@ class TestFullWalks:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert [h.job.descr for h in pool.submitted] == [
+            "claim_dirty_direct_continuation",
             "create_worktree",
             "rebase_implementation_writer",
             "advise",
@@ -6321,7 +6589,7 @@ class TestFullWalks:
             "pre_pr_tests",
             "commit_push",
         ]
-        assert item.worktree == "/tmp/wt5"
+        assert item.worktree == "/tmp/repo/build/.worktrees/auto-5-impl"
         assert item.attempts["implement"] == 1
         assert item.pr == 1001
         assert [name for name, _ in github.mutation_log] == ["gh_pr_create"]
@@ -6329,7 +6597,7 @@ class TestFullWalks:
     def test_walk_with_red_tests_and_one_fix(self, make_ctx: Any, make_work_item: Any) -> None:
         """A red test run earns exactly one test_fix attempt, then converges."""
         stage = ImplementationStage()
-        github = FakeStageGitHub(labels=["state:plan-go"])
+        github = _PlannedWriterGitHub(labels=["state:plan-go"])
         ctx = make_ctx(
             github=github,
             config_overrides={"no_advise": True, "run_pre_pr_tests": True},
@@ -6339,11 +6607,18 @@ class TestFullWalks:
 
         pool = FakeWorkerPool()
         pool.script(
+            JobResult(ok=True, value={"dirty_direct_not_applicable": True}),
+            JobResult(ok=True, value=_worktree_receipt(item)),  # worktree
             JobResult(
                 ok=True,
-                value={"path": "/tmp/wt6", "dirty": False, "impl_source_revision": "a" * 40},
-            ),
-            JobResult(ok=True, value={"head_sha": "a" * 40}),  # worktree
+                value=_worktree_receipt(
+                    item,
+                    head_sha="a" * 40,
+                    implementation_started=True,
+                    rebased=False,
+                    published=False,
+                ),
+            ),  # initial rebase
             JobResult(ok=True, value="done"),  # implement
             JobResult(ok=False, value=1, stdout_tail="FAILED test_z"),  # tests red
             JobResult(ok=True, value="fixed"),  # test_fix resume
@@ -6356,10 +6631,12 @@ class TestFullWalks:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert [h.job.descr for h in pool.submitted] == [
+            "claim_dirty_direct_continuation",
             "create_worktree",
             "rebase_implementation_writer",
             "implement",
             "pre_pr_tests",
+            "read_current_plan_scope",
             "test_fix",
             "pre_pr_tests",
             "commit_push",
@@ -6371,9 +6648,14 @@ class TestFullWalks:
     ) -> None:
         """A complete handoff uses native checks before commit and PR creation."""
         stage = ImplementationStage()
-        github = FakeStageGitHub(labels=["state:plan-go"])
+        github = _PlannedWriterGitHub(labels=["state:plan-go"])
         ctx = make_ctx(
             org="HomericIntelligence",
+            paths=SimpleNamespace(
+                repo_root="/tmp/repo",
+                worktree="/tmp/repo/worktree",
+                source_workspaces=FakeSourceWorkspaceManager(repository="Hephaestus"),
+            ),
             github=github,
             config_overrides={
                 "no_advise": True,
@@ -6384,11 +6666,18 @@ class TestFullWalks:
         item.payload.update({"issue_title": "Repair publication", "issue_body": ""})
         pool = FakeWorkerPool()
         pool.script(
+            JobResult(ok=True, value={"dirty_direct_not_applicable": True}),
+            JobResult(ok=True, value=_worktree_receipt(item)),
             JobResult(
                 ok=True,
-                value={"path": "/tmp/wt7", "dirty": False, "impl_source_revision": "a" * 40},
+                value=_worktree_receipt(
+                    item,
+                    head_sha="a" * 40,
+                    implementation_started=True,
+                    rebased=False,
+                    published=False,
+                ),
             ),
-            JobResult(ok=True, value={"head_sha": "a" * 40}),
             JobResult(ok=True, value="implemented"),
             JobResult(
                 ok=False,
@@ -6408,6 +6697,7 @@ class TestFullWalks:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert [handle.job.descr for handle in pool.submitted] == [
+            "claim_dirty_direct_continuation",
             "create_worktree",
             "rebase_implementation_writer",
             "implement",
@@ -6415,9 +6705,9 @@ class TestFullWalks:
             "pre_pr_tests_native_fallback",
             "commit_push",
         ]
-        assert pool.submitted[3].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
-        assert pool.submitted[3].job.verified_runner_source_revision == "a" * 40
-        assert pool.submitted[4].job.argv == PRE_PR_TEST_ARGV
+        assert pool.submitted[4].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[4].job.verified_runner_source_revision == "a" * 40
+        assert pool.submitted[5].job.argv == PRE_PR_TEST_ARGV
         assert item.pr == 1001
         assert (
             "`uv run pytest tests -q --tb=short` — passed "
@@ -6439,13 +6729,23 @@ class TestFullWalks:
 
         for expected_attempts in (1, 2):
             pool = FakeWorkerPool()
-            results = [
-                JobResult(ok=True, value={"path": "/tmp/wt8", "impl_source_revision": "a" * 40})
-            ]
+            if not item.payload.get("dirty_direct_checked"):
+                pool.script(JobResult(ok=True, value={"dirty_direct_not_applicable": True}))
+            pool.script(JobResult(ok=True, value=_worktree_receipt(item)))
             if expected_attempts == 1:
-                results.append(JobResult(ok=True, value={"head_sha": "a" * 40}))
-            results.append(JobResult(ok=False, error="529 overload"))
-            pool.script(*results)
+                pool.script(
+                    JobResult(
+                        ok=True,
+                        value=_worktree_receipt(
+                            item,
+                            head_sha="a" * 40,
+                            implementation_started=True,
+                            rebased=False,
+                            published=False,
+                        ),
+                    )
+                )
+            pool.script(JobResult(ok=False, error="529 overload"))
             outcome = _drive(stage, item, ctx, pool)
             assert isinstance(outcome, StageOutcome)
             assert outcome.disposition == Disposition.RETRY
@@ -6454,7 +6754,7 @@ class TestFullWalks:
             item.state = "ENTER"  # coordinator RETRY re-enters the stage
 
         pool = FakeWorkerPool()
-        pool.script(JobResult(ok=True, value={"path": "/tmp/wt8"}))  # worktree
+        pool.script(JobResult(ok=True, value=_worktree_receipt(item)))  # worktree
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
@@ -6743,6 +7043,7 @@ class TestWriterPublicationRefresh:
         item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
         item.branch = "9-auto-impl"
         item.worktree = "/tmp/wt"
+        binding = _prepared_writer(item)
         stage.on_job_done(item, JobResult(ok=False, value=self.receipt("remote_changed")), ctx)
         expected = {"phase": "rebase", "source_sha": "b" * 40, "expected_remote_sha": "c" * 40}
         assert item.payload["_commit_push_refresh"] == expected
@@ -6750,6 +7051,8 @@ class TestWriterPublicationRefresh:
         assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "commit_push failed")
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.workspace == binding
         assert request.job.kwargs["writer_refresh"] == expected
         assert ctx.github.mutation_log == []
 
@@ -6811,6 +7114,7 @@ class TestWriterPublicationRefresh:
         }
         receipt = self.receipt(state, phase="publish")
         receipt["observed_remote_sha"] = "a" * 40 if state == "remote_unchanged" else None
+        binding = _prepared_writer(item)
         stage.on_job_done(item, JobResult(ok=False, value=receipt), ctx)
         assert item.payload["_commit_push_refresh"] == {
             "phase": "publish",
@@ -6823,6 +7127,8 @@ class TestWriterPublicationRefresh:
         assert retry.disposition is Disposition.RETRY
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.workspace == binding
         assert request.job.kwargs["writer_refresh"]["phase"] == "publish"
 
     @pytest.mark.parametrize("failure", ["conflict", "invalid"])
@@ -6946,6 +7252,8 @@ def test_successful_adopted_dirty_candidate_is_persisted_before_tests(
             }
         ],
         _impl_source_revision=head,
+        _impl_source_workspace=binding.to_dict(),
+        _impl_source_receipt=SourceWorkspaceReceipt.from_dict(json.loads(receipt_before)),
     )
     ctx = make_ctx(
         org="HomericIntelligence", paths=SimpleNamespace(repo_root=repo, source_workspaces=manager)
@@ -6955,6 +7263,9 @@ def test_successful_adopted_dirty_candidate_is_persisted_before_tests(
         "discover_plan",
         return_value=PlanDiscoveryResult.found("## Files to Modify\n- `tracked.txt`\n"),
     ):
+        scope_read = implementation_module._require_plan_scope(item, ctx)
+        assert isinstance(scope_read, JobRequest)
+        _complete_plan_scope_read(stage, item, ctx, scope_read)
         item.payload["remediation_pretest_input"] = implementation_module._new_pretest_input(
             item, ctx
         )
@@ -6996,17 +7307,31 @@ def _pretest_stage_item(tmp_path: Path, make_work_item: Any) -> Any:
         candidate.thread_snapshot_json,
         candidate.batch_nonce,
         ("a.py",),
-        "a" * 64,
+        hashlib.sha256(_WRITER_PLAN.encode()).hexdigest(),
         1,
         None,
     )
     item = make_work_item(repo="project", issue=9, pr=10, state="IMPLEMENT_WAIT")
     item.branch = candidate.branch
     item.worktree = candidate.worktree_path
+    source = candidate.source_receipt
+    binding = WorkspaceBinding.source(
+        cwd=source.path,
+        reusable_root=tmp_path,
+        repository=source.repository,
+        ownership_key=source.ownership_key,
+        item_number=source.item_number,
+        lane=source.lane,
+        revision=source.revision,
+        generation=source.generation,
+        detached=source.detached,
+    )
     item.payload.update(
         implementation_remediation=True,
         remediation_thread_snapshots=json.loads(candidate.thread_snapshot_json),
         _impl_source_revision=candidate.expected_remote_sha,
+        _impl_source_workspace=binding.to_dict(),
+        _impl_source_receipt=source,
         remediation_pretest_input=inputs,
         remediation_pretest_nonce="f" * 32,
     )
@@ -7082,20 +7407,9 @@ def _routing_pretest_input(item: Any) -> Any:
         canonical_source_receipt_json,
         source_receipt_digest,
     )
-    from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 
-    receipt = SourceWorkspaceReceipt(
-        repository=item.repo,
-        repository_identity=item.repo + ":fixture",
-        ownership_key=f"{item.repo}:fixture:{item.issue}:impl",
-        item_number=item.issue,
-        lane=SourceLane.IMPLEMENTATION,
-        path=Path(item.worktree or "/tmp/repo/worktree"),
-        revision=item.payload.get("_impl_source_revision", "a" * 40),
-        generation=1,
-        detached=False,
-        branch=item.branch or "fixture-branch",
-    )
+    receipt = item.payload["_impl_source_receipt"]
+    assert isinstance(receipt, SourceWorkspaceReceipt)
     threads = [
         {"id": "thread-1", "comments": [{"id": "comment-1", "author": "reviewer", "body": "Fix."}]}
     ]
@@ -7110,7 +7424,7 @@ def _routing_pretest_input(item: Any) -> Any:
         RemediationReviewInput.canonical_thread_snapshot(threads),
         "a" * 32,
         ("a.py",),
-        "b" * 64,
+        hashlib.sha256(_WRITER_PLAN.encode()).hexdigest(),
         1,
         None,
     )
@@ -7124,7 +7438,7 @@ def test_pretest_testfix_replaces_input_after_invalidation_and_persists_none_res
 
     stage = ImplementationStage()
     item = _pretest_stage_item(tmp_path, make_work_item)
-    ctx = make_ctx(paths=SimpleNamespace(repo_root=tmp_path))
+    ctx = make_ctx(github=_PlannedWriterGitHub(), paths=SimpleNamespace(repo_root=tmp_path))
     previous = item.payload["remediation_pretest_input"]
     replies = {"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}}
     item.payload.update(
@@ -7139,7 +7453,7 @@ def test_pretest_testfix_replaces_input_after_invalidation_and_persists_none_res
         item, JobResult(ok=True, value={"record_sha256": "d" * 64, "sequence": 1}), ctx
     )
     item.state = invalidation.on_done_state
-    fix = stage.step(item, ctx)
+    fix = _step_after_plan_scope(stage, item, ctx)
     assert isinstance(fix, JobRequest) and isinstance(fix.job, AgentJob)
     assert fix.job.parse is None
     assert fix.job.remediation_pretest_input is not None
@@ -7207,7 +7521,20 @@ def test_pretest_recovery_routes_only_exact_worker_evidence_to_tests(
         cast(dict[str, Any], envelope["source_receipt"])["generation"] = 7
     item.state = "WORKTREE_WAIT"
     ctx = make_ctx(org="example", config_overrides={"run_pre_pr_tests": True})
-    value = {"path": item.worktree, "successful_remediation_pretest_recovery": envelope}
+    current_source = {
+        **item.payload["_impl_source_workspace"],
+        "revision": item.payload["_impl_source_revision"],
+    }
+    value = {
+        "path": item.worktree,
+        "source_workspace": current_source,
+        "source_receipt": {
+            **item.payload["_impl_source_receipt"].to_dict(),
+            "revision": current_source["revision"],
+        },
+        "impl_source_revision": current_source["revision"],
+        "successful_remediation_pretest_recovery": envelope,
+    }
     stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
     item.state = "DIRTY_DECISION_WAIT"
     route = stage.step(item, ctx)
@@ -7273,7 +7600,9 @@ def test_pretest_clean_completion_keeps_normal_test_route(
     from dataclasses import replace
 
     item = _pretest_stage_item(tmp_path, make_work_item)
-    ctx = make_ctx(org="example", config_overrides={"run_pre_pr_tests": True})
+    ctx = make_ctx(
+        org="example", github=_PlannedWriterGitHub(), config_overrides={"run_pre_pr_tests": True}
+    )
     stage = ImplementationStage()
     replies = {"addressed": ["thread-1"], "replies": {"thread-1": "No change needed."}}
     stage.on_job_done(item, JobResult(ok=True, value=replies), ctx)
@@ -7310,7 +7639,7 @@ def test_pretest_clean_completion_keeps_normal_test_route(
     assert "remediation_pretest_input" not in item.payload
     assert implementation_module._pretest_commit_kwargs(item) == {}
     item.state = "TESTFIX_WAIT"
-    fix = stage.step(item, ctx)
+    fix = _step_after_plan_scope(stage, item, ctx)
     assert isinstance(fix, JobRequest) and isinstance(fix.job, AgentJob)
     assert "remediation_pretest_clean_completion" not in item.payload
     assert fix.job.remediation_pretest_input is None
@@ -7318,3 +7647,71 @@ def test_pretest_clean_completion_keeps_normal_test_route(
     item.state = "TEST_WAIT"
     again = stage.step(item, ctx)
     assert isinstance(again, JobRequest) and isinstance(again.job, BuildTestJob)
+
+
+@pytest.mark.parametrize("operation", ["inspect", "rebase-conflict", "test-fix"])
+def test_dirty_agent_job_keeps_current_source_authority(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, operation: str
+) -> None:
+    """Each dirty agent job carries its source binding and closed operation."""
+    from hephaestus.agents.workspace import WorkspaceBinding
+
+    states = {
+        "inspect": "DIRTY_DECISION_WAIT",
+        "rebase-conflict": "REBASE_CONFLICT_WAIT",
+        "test-fix": "TESTFIX_WAIT",
+    }
+    item = make_work_item(issue=1, pr=1001, state=states[operation])
+    item.worktree = str(tmp_path / "build" / ".worktrees" / "auto-1-impl")
+    item.branch = "fixture-branch"
+    binding = WorkspaceBinding.source(
+        cwd=Path(item.worktree),
+        reusable_root=tmp_path,
+        repository=item.repo,
+        ownership_key="fixture:1:impl",
+        item_number=1,
+        lane=SourceLane.IMPLEMENTATION,
+        revision="a" * 40,
+        generation=7,
+        detached=False,
+    )
+    item.payload.update(
+        {
+            "_impl_source_workspace": binding.to_dict(),
+            "_impl_source_revision": binding.revision,
+            "_impl_source_receipt": _writer_receipt(item, binding),
+            "worktree_dirty": True,
+            "worktree_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            "rebase_conflict": operation == "rebase-conflict",
+            "rebase_conflict_paths": ("a.py",),
+            "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            "rebase_paused_head_sha": "b" * 40,
+        }
+    )
+    stage = ImplementationStage()
+    ctx = make_ctx(github=_PlannedWriterGitHub())
+    result = (
+        _step_after_plan_scope(stage, item, ctx)
+        if operation == "test-fix"
+        else stage.step(item, ctx)
+    )
+    assert isinstance(result, JobRequest) and isinstance(result.job, AgentJob)
+    assert result.job.workspace == binding
+    assert result.job.source_operation is not None
+    assert result.job.source_operation.kind == operation
+    if operation != "inspect":
+        assert result.job.source_operation.allowed_paths == ("a.py",)
+
+
+def test_failed_implementation_reconciles_source_before_another_turn(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A failed turn returns to host source inspection before provider retry."""
+    item = make_work_item(issue=1, state="TEST_WAIT")
+    item.payload["implement_error"] = True
+    item.attempts["implement"] = 1
+    result = ImplementationStage().step(item, make_ctx())
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.RETRY
+    assert item.state == "WORKTREE_WAIT"
+    assert item.attempts["implement"] == 1

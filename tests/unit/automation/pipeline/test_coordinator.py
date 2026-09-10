@@ -16,25 +16,19 @@ import subprocess
 import threading
 import uuid
 from collections import deque
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
-from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
-from hephaestus.automation.pipeline.coordinator import (
-    Coordinator,
-    PipelineConfig,
-)
-from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP, PipelineConfig
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -57,7 +51,7 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.pipeline.stages.base import JobRequest
+from hephaestus.automation.pipeline.stages.base import JobRequest, Stage
 from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
@@ -72,7 +66,12 @@ from hephaestus.resilience import (
     get_circuit_breaker,
     reset_all_circuit_breakers,
 )
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    claim_test_item,
+    fake_worker_factories,
+    script_source_passes,
+)
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -118,7 +117,7 @@ def _writer_repository(tmp_path: Path) -> tuple[Path, str]:
     return repo, revision
 
 
-class StubStage:
+class StubStage(Stage):
     """Scripted stage: each step() pops the next scripted StepResult."""
 
     def __init__(self, *results: Any, enter: Any = None) -> None:
@@ -162,7 +161,6 @@ def make_coordinator(
     dry_run: bool = False,
     serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
-    rate_budget_ok: Callable[[], tuple[bool, float]] | None = None,
     github_job_runner: Any | None = None,
     enable_learn: bool = True,
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
@@ -178,17 +176,14 @@ def make_coordinator(
         serialize_file_overlap=serialize_file_overlap,
         enable_learn=enable_learn,
         projects_dir=tmp_path,
+        rate_guard_enabled=False,
     )
     gh = github or FakeStageGitHub()
     pool = FakeWorkerPool(github_job_runner=github_job_runner)
-    passes = deque(seed_entries or [[]])
-
-    def fake_seed(repos_arg: Any, issues_arg: Any, prs_arg: Any) -> list[SeedEntry]:
-        return list(passes.popleft()) if passes else []
-
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
-    coordinator = Coordinator(config, github=gh, pool=pool, install_signals=False)
-    coordinator._rate_budget_ok = rate_budget_ok or (lambda: (True, 0.0))  # type: ignore[method-assign]
+    coordinator = Coordinator(
+        config, github=gh, **fake_worker_factories(pool, None), install_signals=False
+    )
+    script_source_passes(coordinator, monkeypatch, seed_entries or [[]])
     return coordinator, pool, gh
 
 
@@ -212,9 +207,10 @@ class TestCoordinatorHealth:
                 repos=["repo-a"],
                 projects_dir=tmp_path,
                 alert_queue_depth_threshold=0,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
@@ -241,9 +237,10 @@ class TestCoordinatorHealth:
                 projects_dir=tmp_path,
                 alert_queue_depth_threshold=0,
                 circuit_breaker_snapshot_provider=lambda: breakers,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
@@ -264,9 +261,10 @@ class TestCoordinatorHealth:
                 repos=["repo-a"],
                 projects_dir=tmp_path,
                 alert_queue_depth_threshold=0,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator.queues[StageName.PLANNING].push(_issue_item(44, StageName.PLANNING))
@@ -290,9 +288,10 @@ class TestCoordinatorHealth:
                 repos=["repo-a"],
                 projects_dir=tmp_path,
                 circuit_breaker_snapshot_provider=failing_provider,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
@@ -329,6 +328,7 @@ def test_github_receipt_applies_before_on_done_state_and_routing(
     item.state = "POST"
     job, request = _github_append_job(tmp_path)
     handle = JobHandle(job=job, on_done_state="POST_APPLY")
+    claim_test_item(coordinator, item)
     coordinator.in_flight[handle] = item
     coordinator.inflight_per_repo[item.repo] = 1
 
@@ -361,6 +361,7 @@ def test_dirty_recovery_completion_is_stored_before_recovery_state_routing(
     )
     job = GitJob(repo="repo-a", op="recover_dirty_worktree", timeout_s=60)
     handle = JobHandle(job=job, on_done_state=DIRTY_RECOVERY_WAIT)
+    claim_test_item(coordinator, item)
     coordinator.in_flight[handle] = item
     coordinator.inflight_per_repo[item.repo] = 1
     receipt = {
@@ -391,6 +392,7 @@ def test_interrupted_github_job_never_applies_a_receipt(
     item.state = "POST"
     job, _request = _github_append_job(tmp_path)
     handle = JobHandle(job=job, on_done_state="POST_APPLY")
+    claim_test_item(coordinator, item)
     coordinator.in_flight[handle] = item
     coordinator.inflight_per_repo[item.repo] = 1
 
@@ -422,10 +424,11 @@ class TestQuiescence:
             issues=[617],
             loops=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         nonce_one = uuid.UUID(int=1)
         nonce_two = uuid.UUID(int=2)
@@ -436,7 +439,7 @@ class TestQuiescence:
         first = Coordinator(
             config,
             github=FakeStageGitHub(labels=["state:plan-go"]),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         first._begin_direct_issue_source("repo-a", base_sha)
@@ -452,7 +455,7 @@ class TestQuiescence:
         second = Coordinator(
             config,
             github=FakeStageGitHub(labels=["state:plan-go"]),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         second._begin_direct_issue_source("repo-a", base_sha)
@@ -480,15 +483,16 @@ class TestQuiescence:
             issues=[617],
             loops=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(labels=["state:plan-go"], open_pr=812),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator._begin_direct_issue_source("repo-a", "a" * 40)
@@ -510,15 +514,16 @@ class TestQuiescence:
             issues=[617, 617],
             loops=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(labels=["state:plan-go"]),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator._begin_direct_issue_source("repo-a", "a" * 40)
@@ -538,20 +543,21 @@ class TestQuiescence:
             loops=1,
             max_workers=2,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         plans = {22: {"shared.py"}, 23: {"independent.py"}}
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
             lambda issue, **_kwargs: plans[issue],
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(labels=["state:plan-go"]),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         active = _issue_item(21, StageName.IMPLEMENTATION)
@@ -577,10 +583,11 @@ class TestQuiescence:
             loops=1,
             max_workers=2,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         fetches: list[int] = []
 
@@ -589,25 +596,25 @@ class TestQuiescence:
             return {"shared.py"}
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
             planned,
         )
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(labels=["state:plan-go"]),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         active = _issue_item(21, StageName.IMPLEMENTATION)
         assert coordinator._try_acquire_work_permit(active)
-        handle = _fake_in_flight_item(coordinator, active, claimed_files={"shared.py"})
+        _fake_in_flight_item(coordinator, active, claimed_files={"shared.py"})
         coordinator._begin_direct_issue_source("repo-a", "a" * 40)
 
         assert coordinator._drain_direct_issue_source() == 0
         assert coordinator._drain_direct_issue_source() == 0
         assert fetches == [22]
 
-        coordinator._inflight_implementation_claims.pop(handle)
+        coordinator._park_resumable(active)
         assert coordinator._drain_direct_issue_source() == 1
         assert fetches == [22, 22]
 
@@ -633,11 +640,17 @@ class TestQuiescence:
                 self.stopped = True
 
         monkeypatch.setattr(server_mod, "MetricsHTTPServer", FakeMetricsServer)
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            PipelineConfig(org="org", repos=[], loops=1, projects_dir=tmp_path, metrics_port=9123),
+            PipelineConfig(
+                org="org",
+                repos=[],
+                loops=1,
+                projects_dir=tmp_path,
+                metrics_port=9123,
+                rate_guard_enabled=False,
+            ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
@@ -656,68 +669,24 @@ class TestQuiescence:
             issues=[1850],
             loops=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         )
         gh = FakeStageGitHub(merged_pr=1851, issue_state="CLOSED")
 
-        def fake_seed(
-            repos_arg: list[str], issues_arg: list[int], prs_arg: list[int]
-        ) -> list[SeedEntry]:
-            assert repos_arg == []
-            assert issues_arg == []
-            assert prs_arg == []
-            return []
-
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         coordinator = Coordinator(
             config,
             github=gh,
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
         assert coordinator.run() == 0
         assert [item.issue for item in coordinator.items] == [1850]
         assert all(item.kind is not ItemKind.REPO for item in coordinator.items)
-
-    def test_repo_products_flow_to_finished(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A repo seed's products traverse their entry stages into the ledger."""
-        seed = [SeedEntry(kind="repo", identifier="repo-a", stage=StageName.REPO, reason="seed")]
-        # The repo item and its one actionable product are both live until
-        # each reaches the finished sink.
-        coordinator, pool, _ = make_coordinator(
-            tmp_path, monkeypatch, seed_entries=[seed], max_workers=2
-        )
-
-        class ProducingRepoStage(StubStage):
-            def step(self, item: WorkItem, ctx: Any) -> Any:
-                item.payload["products"] = [
-                    {"kind": "issue", "number": 11, "stage": StageName.PLANNING, "reason": "r"},
-                    {"kind": "issue", "number": 12, "stage": None, "reason": "excluded"},
-                ]
-                return StageOutcome(Disposition.FINISH_PASS, "seeded:1")
-
-        coordinator.stages[StageName.REPO] = ProducingRepoStage()
-        coordinator.stages[StageName.PLANNING] = StubStage(
-            StageOutcome(Disposition.ADVANCE, "planned")
-        )
-        coordinator.stages[StageName.PLAN_REVIEW] = StubStage(
-            StageOutcome(Disposition.FINISH_PASS, "done")
-        )
-
-        exit_code = coordinator.run()
-
-        assert exit_code == 0
-        assert len(coordinator.ledger) == 2  # repo item + issue item
-        assert all(result.passed for result in coordinator.ledger)
-        assert len(pool.submitted) == 0
-        keys = [key for kind, *key in coordinator.event_log if kind == "push"]
-        assert ["planning", "repo-a#11"] in [list(k) for k in keys]
 
     def test_zero_work_convergence_exits_before_loop_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -865,7 +834,7 @@ class TestQuiescence:
             payload={"_enter_pending": True},
         )
 
-        coordinator._run_item(item)
+        coordinator._run_item(claim_test_item(coordinator, item))
         coordinator._drain_completions()
         coordinator._drain_queues()
         coordinator._drain_completions()
@@ -900,13 +869,29 @@ class TestQuiescence:
     def test_direct_unlinked_pr_finishes_failed_before_review(self, tmp_path: Path) -> None:
         """A PR number cannot substitute for linked issue requirements."""
         coordinator = Coordinator(
-            PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path),
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                prs=[701],
+                projects_dir=tmp_path,
+                rate_guard_enabled=False,
+            ),
             github=FakeStageGitHub(pr_issue=None),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = [
+            coordinator._seed_direct_pr_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.prs
+        ] + [
+            coordinator._seed_direct_issue_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.issues
+        ]
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.FINISHED
@@ -927,12 +912,27 @@ class TestQuiescence:
                 "pr_base_branch": "main",
             },
         )
-        config = PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path)
+        config = PipelineConfig(
+            org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path, rate_guard_enabled=False
+        )
         coordinator = Coordinator(
-            config, github=github, pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=github,
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = [
+            coordinator._seed_direct_pr_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.prs
+        ] + [
+            coordinator._seed_direct_issue_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.issues
+        ]
         item = coordinator._entry_to_item(entries[0], "repo-a")
 
         assert entries[0].stage is StageName.PR_REVIEW
@@ -964,18 +964,76 @@ def _fake_in_flight_item(
         ),
         on_done_state=item.stage,
     )
+    claim_test_item(coordinator, item)
     coordinator.in_flight[handle] = item
     if claimed_files:
         repo = (coordinator.config.org, item.repo)
-        coordinator._inflight_implementation_claims[handle] = {
+        item.payload["_implementation_file_claims"] = frozenset(
             (repo, path) for path in claimed_files
-        }
+        )
     coordinator.inflight_per_repo[item.repo] += 1
     return handle
 
 
 class TestFatalTeardown:
     """Fatal-exception exit must reap the pool + park in-flight items (#2059)."""
+
+    def test_fatal_teardown_keeps_ownership_until_both_lanes_stop(self, tmp_path: Path) -> None:
+        """Fatal teardown must not clear ownership while a lane is active."""
+
+        class BlockingShutdownPool(FakeWorkerPool):
+            def __init__(self) -> None:
+                super().__init__()
+                self.shutdown_started = threading.Event()
+                self.release_shutdown = threading.Event()
+
+            def shutdown(self, *, mark_interrupted: bool = True) -> None:
+                super().shutdown(mark_interrupted=mark_interrupted)
+                self.shutdown_started.set()
+                assert self.release_shutdown.wait(timeout=2)
+
+        main = BlockingShutdownPool()
+        auxiliary = BlockingShutdownPool()
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(main, auxiliary),
+            install_signals=False,
+        )
+        main_item = _issue_item(41, StageName.IMPLEMENTATION)
+        _fake_in_flight_item(coordinator, main_item)
+        auxiliary_item = _issue_item(42, StageName.LEARNING)
+        auxiliary_handle = JobHandle(
+            job=GitJob(repo="repo-a", op="remove_worktree", timeout_s=1),
+            on_done_state="DONE",
+        )
+        claim_test_item(coordinator, auxiliary_item)
+        coordinator.auxiliary_in_flight[auxiliary_handle] = auxiliary_item
+        coordinator._fatal = True
+
+        shutdown_thread = threading.Thread(target=coordinator._shutdown_pool)
+        shutdown_thread.start()
+        try:
+            assert main.shutdown_started.wait(timeout=1)
+            assert main_item in coordinator.in_flight.values()
+            assert auxiliary_item in coordinator.auxiliary_in_flight.values()
+            main.release_shutdown.set()
+            assert auxiliary.shutdown_started.wait(timeout=1)
+            assert main_item in coordinator.in_flight.values()
+            assert auxiliary_item in coordinator.auxiliary_in_flight.values()
+        finally:
+            main.release_shutdown.set()
+            auxiliary.release_shutdown.set()
+            shutdown_thread.join(timeout=2)
+
+        assert not shutdown_thread.is_alive()
+        assert coordinator.in_flight == {}
+        assert coordinator.auxiliary_in_flight == {}
 
     def test_fatal_exception_shuts_down_pool_and_parks_in_flight(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -998,8 +1056,10 @@ class TestFatalTeardown:
 
         exit_code = coordinator.run()
 
-        # Fatal, not interrupt: shutdown must NOT be set (would mis-report 130).
+        # Fatal teardown must signal active workers without reporting exit 130.
+        assert pool.shutdown_event.is_set()
         assert not coordinator.shutdown.is_set()
+        assert coordinator.force_shutdown_event.is_set()
         assert coordinator._fatal is True
         assert exit_code == 1
         # Pool reaped exactly once; in-flight maps cleared.
@@ -1010,6 +1070,22 @@ class TestFatalTeardown:
         assert in_flight.result is not None
         assert not in_flight.result.passed
         assert in_flight.result.reason == "resumable at implementation"
+
+    def test_fatal_during_signal_shutdown_preserves_interrupt_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fatal error after an operator signal must keep exit 130."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+
+        def interrupt_then_boom() -> None:
+            coordinator.shutdown.set()
+            raise RuntimeError("fatal after interrupt")
+
+        monkeypatch.setattr(coordinator, "_seed_pass", interrupt_then_boom)
+
+        assert coordinator.run() == 130
+        assert coordinator._fatal is True
+        assert coordinator.shutdown.is_set()
 
     def test_signal_teardown_shuts_down_pool_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1266,30 +1342,6 @@ class TestReviewedHeadRestart:
         assert item.result.passed is True
 
 
-class TestRateBudget:
-    """The non-blocking rate gate parks agent jobs on the timer heap."""
-
-    def test_low_budget_parks_instead_of_submitting(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Low GraphQL budget: the AgentJob is timer-parked, never submitted."""
-        coordinator, pool, _ = make_coordinator(
-            tmp_path,
-            monkeypatch,
-            rate_budget_ok=lambda: (False, 60.0),
-        )
-        coordinator.stages[StageName.PLANNING] = StubStage(
-            JobRequest(_agent_job(), on_done_state="VERIFY")
-        )
-        coordinator._push_item(_issue_item(1), StageName.PLANNING, enter=True)
-
-        coordinator._drain_queues()
-
-        assert pool.submitted == []
-        assert len(coordinator.timers) == 1
-        assert any(entry[0] == "timer_park" for entry in coordinator.event_log)
-
-
 class TestDryRun:
     """Dry-run: stages' JobRequests are logged-and-advanced; _submit asserts."""
 
@@ -1322,7 +1374,7 @@ class TestDryRun:
         request = JobRequest(_agent_job(), on_done_state="VERIFY")
 
         with pytest.raises(AssertionError, match="dry-run must never submit"):
-            coordinator._submit(_issue_item(1), request)
+            coordinator._submit(claim_test_item(coordinator, _issue_item(1)), request)
 
 
 class TestFailBackRouting:
@@ -1339,7 +1391,7 @@ class TestFailBackRouting:
 
         coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
         coordinator._route(
-            item,
+            claim_test_item(coordinator, item),
             StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads"),
         )
 
@@ -1444,7 +1496,9 @@ class TestFailBackRouting:
         coordinator._push_item(item, StageName.PR_REVIEW, enter=False)
         coordinator.event_log.clear()
 
-        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.FAIL_BACK, "agent_error")
+        )
 
         assert item.stage is StageName.IMPLEMENTATION
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
@@ -1458,7 +1512,9 @@ class TestFailBackRouting:
         item.payload["empty_diff_reimplementation"] = True
         coordinator._push_item(item, StageName.PR_REVIEW, enter=False)
 
-        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff")
+        )
 
         assert item.stage is StageName.IMPLEMENTATION
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
@@ -1471,7 +1527,9 @@ class TestFailBackRouting:
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
         item = _issue_item(5, StageName.PLANNING)
 
-        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "mystery"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.FAIL_BACK, "mystery")
+        )
 
         # planning "*" -> finished(fail)
         assert item.stage is StageName.FINISHED
@@ -1482,7 +1540,7 @@ class TestFailBackRouting:
     ) -> None:
         """A poisoned item whose stage is not in the run's routes finishes failed (#2294).
 
-        Under a partial ``--phases`` scope, ``trimmed_routes`` can omit
+        Under a partial ``--stages`` scope, ``trimmed_routes`` can omit
         ``StageName.REPO`` even though the seeder always pushes a REPO item.
         Routing a poisoned REPO item must fail closed to the sink, not raise
         ``KeyError`` and crash the whole run.
@@ -1498,7 +1556,10 @@ class TestFailBackRouting:
             repo="repo-a", kind=ItemKind.REPO, issue=None, stage=StageName.REPO, state="ENTER"
         )
 
-        coordinator._route(item, StageOutcome(Disposition.FINISH_FAIL, "poisoned: boom"))
+        coordinator._route(
+            claim_test_item(coordinator, item),
+            StageOutcome(Disposition.FINISH_FAIL, "poisoned: boom"),
+        )
 
         assert item.stage is StageName.FINISHED
         assert item.result is not None and not item.result.passed
@@ -1520,7 +1581,7 @@ class TestFailBackRouting:
         item.payload["dirty_recovery_receipt"] = receipt
 
         coordinator._route(
-            item,
+            claim_test_item(coordinator, item),
             StageOutcome(
                 Disposition.FINISH_FAIL,
                 "dirty_recovery_remote_postflight_drift",
@@ -1543,7 +1604,9 @@ class TestFailBackRouting:
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, dry_run=True)
         item = _issue_item(7, StageName.IMPLEMENTATION)
 
-        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "plan_not_go"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+        )
 
         assert item.stage is StageName.FINISHED
         assert item.result is not None
@@ -1557,7 +1620,9 @@ class TestFailBackRouting:
         item = _issue_item(6, StageName.PR_REVIEW)
         item.payload["_fail_backs"] = _FAIL_BACK_CAP
 
-        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.FAIL_BACK, "agent_error")
+        )
 
         assert item.stage is StageName.FINISHED
         assert item.result is not None
@@ -1571,29 +1636,22 @@ class TestImplementationAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A promoted direct writer reaches the bound implementation agent."""
+        repo, base_revision = _writer_repository(tmp_path)
         coordinator, _pool, _ = make_coordinator(
             tmp_path,
             monkeypatch,
             serialize_file_overlap=False,
         )
-        base_revision = "a" * 40
         nonce = "b" * 32
         branch = f"7-auto-impl-direct-{nonce}"
-        writer_path = tmp_path / "repo-a" / "build" / ".worktrees" / "source" / "issue-7-impl"
-        writer_path.mkdir(parents=True)
-        binding = WorkspaceBinding.source(
-            cwd=writer_path,
-            reusable_root=tmp_path / "repo-a",
-            repository="repo-a",
-            ownership_key="repo-a:7:impl",
-            item_number=7,
-            lane=SourceLane.IMPLEMENTATION,
-            revision=base_revision,
-            generation=2,
-            detached=False,
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        binding = source_manager.prepare_bounded(
+            7, SourceLane.IMPLEMENTATION, base_revision, branch=branch
         )
-        prepare_source = MagicMock(return_value=binding)
-        source_manager = SimpleNamespace(prepare=prepare_source)
+        writer_path = binding.cwd
+        receipt = source_manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+        prepare_source = MagicMock(wraps=source_manager.prepare_bounded)
+        monkeypatch.setattr(source_manager, "prepare_bounded", prepare_source)
         item = WorkItem(
             repo="repo-a",
             kind=ItemKind.ISSUE,
@@ -1607,17 +1665,27 @@ class TestImplementationAdmission:
                 "issue_body": "Dispatch from the promoted workspace.",
             },
         )
-        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        paths = coordinator._ctx_for(item).paths
+        paths.repo_root = repo
+        paths.source_workspaces = source_manager
         worktree_job = GitJob(
             repo="repo-a",
             op="create_worktree",
             timeout_s=60,
-            kwargs={"issue_number": 7, "branch_name": branch},
+            kwargs={
+                "issue_number": 7,
+                "branch_name": branch,
+                "repo_root": str(repo),
+                "source_lane": "impl",
+                "base_sha": base_revision,
+                "direct_worktree_nonce": nonce,
+            },
         )
         worktree_handle = JobHandle(
             job=worktree_job,
             on_done_state="DIRTY_DECISION_WAIT",
         )
+        claim_test_item(coordinator, item)
         coordinator.in_flight[worktree_handle] = item
         coordinator.inflight_per_repo[item.repo] = 1
 
@@ -1628,6 +1696,8 @@ class TestImplementationAdmission:
                 value={
                     "path": str(writer_path),
                     "impl_source_revision": base_revision,
+                    "source_workspace": binding.to_dict(),
+                    "source_receipt": receipt.to_dict(),
                     "direct_scope_reservation": {
                         "branch": branch,
                         "base_sha": base_revision,
@@ -1638,6 +1708,8 @@ class TestImplementationAdmission:
 
         assert item.worktree == str(writer_path)
         assert item.payload["_impl_source_revision"] == base_revision
+        assert item.payload["_impl_source_workspace"] == binding.to_dict()
+        assert item.payload["_impl_source_receipt"] == receipt
         assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == {
             "branch": branch,
             "base_sha": base_revision,
@@ -1660,6 +1732,8 @@ class TestImplementationAdmission:
         advice_handle, advice_result = coordinator.completion_q.get_nowait()
         assert coordinator.in_flight[advice_handle] is item
         assert isinstance(advice_handle.job, AthenaSkillJob)
+        assert advice_handle.job.request.workspace == binding
+        assert advice_handle.job.request.cwd == writer_path
 
         coordinator._handle_completion(advice_handle, advice_result)
 
@@ -1670,13 +1744,9 @@ class TestImplementationAdmission:
         assert implementation_handle.job.cwd == writer_path
         assert implementation_handle.job.workspace == binding
         assert implementation_handle.job.workspace.revision == base_revision
-        expected_prepare = call(
-            7,
-            SourceLane.IMPLEMENTATION,
-            base_revision,
-            branch=branch,
-        )
-        assert prepare_source.call_args_list == [expected_prepare, expected_prepare]
+        assert item.payload["_impl_source_receipt"] == receipt
+        assert source_manager._require_receipt(7, SourceLane.IMPLEMENTATION) == receipt
+        prepare_source.assert_not_called()
         assert item.state == "IMPLEMENT_WAIT"
         assert item.result is None
 
@@ -1728,8 +1798,8 @@ class TestImplementationAdmission:
                 "_authenticated_remote_git_configuration",
                 return_value=({}, ("-c", "credential.helper=")),
             ):
-                assert worker._git_create_worktree(first_job).ok is True
-                restarted_result = worker._git_create_worktree(second_job)
+                assert worker._run_git(first_job).ok is True
+                restarted_result = worker._run_git(second_job)
         finally:
             worker.shutdown(mark_interrupted=False)
 
@@ -1755,6 +1825,7 @@ class TestImplementationAdmission:
         )
         coordinator._ctx_for(item).paths.source_workspaces = source_manager
         worktree_handle = JobHandle(job=second_job, on_done_state="DIRTY_DECISION_WAIT")
+        claim_test_item(coordinator, item)
         coordinator.in_flight[worktree_handle] = item
         coordinator.inflight_per_repo[item.repo] = 1
 
@@ -1827,8 +1898,8 @@ class TestImplementationAdmission:
                 ),
                 patch.object(worker, "_sync_worktree_to_remote_branch"),
             ):
-                assert worker._git_create_worktree(job).ok is True
-                restarted_result = worker._git_create_worktree(job)
+                assert worker._run_git(job).ok is True
+                restarted_result = worker._run_git(job)
         finally:
             worker.shutdown(mark_interrupted=False)
 
@@ -1853,6 +1924,7 @@ class TestImplementationAdmission:
         )
         coordinator._ctx_for(item).paths.source_workspaces = source_manager
         worktree_handle = JobHandle(job=job, on_done_state="DIRTY_DECISION_WAIT")
+        claim_test_item(coordinator, item)
         coordinator.in_flight[worktree_handle] = item
         coordinator.inflight_per_repo[item.repo] = 1
 
@@ -1931,6 +2003,7 @@ class TestImplementationAdmission:
         sibling_pr: int,
     ) -> None:
         """A collision waits for its owner completion, for either shared-head topology."""
+        repo, revision = _writer_repository(tmp_path)
         coordinator, _pool, _ = make_coordinator(
             tmp_path,
             monkeypatch,
@@ -1938,8 +2011,12 @@ class TestImplementationAdmission:
             serialize_file_overlap=False,
         )
         shared_branch = "shared-head"
-        owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-2268"
-        owner_path.mkdir(parents=True)
+        source_manager = SourceWorkspaceManager(repo, repository="repo-a")
+        binding = source_manager.prepare_bounded(
+            2268, SourceLane.IMPLEMENTATION, revision, branch=shared_branch
+        )
+        owner_path = binding.cwd
+        receipt = source_manager._require_receipt(2268, SourceLane.IMPLEMENTATION)
         owner = WorkItem(
             repo="repo-a",
             kind=ItemKind.ISSUE,
@@ -1960,6 +2037,10 @@ class TestImplementationAdmission:
             branch=shared_branch,
             payload={"existing_pr": True},
         )
+        for item in (owner, sibling):
+            paths = coordinator._ctx_for(item).paths
+            paths.repo_root = repo
+            paths.source_workspaces = source_manager
         coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
         coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
         owner_lease = coordinator._claim_item(StageName.IMPLEMENTATION)
@@ -1980,7 +2061,9 @@ class TestImplementationAdmission:
         )
         owner_handle = JobHandle(job=owner_job, on_done_state="DIRTY_DECISION_WAIT")
         sibling_handle = JobHandle(job=sibling_job, on_done_state="DIRTY_DECISION_WAIT")
+        claim_test_item(coordinator, owner)
         coordinator.in_flight[owner_handle] = owner
+        claim_test_item(coordinator, sibling)
         coordinator.in_flight[sibling_handle] = sibling
         coordinator.inflight_per_repo["repo-a"] = 2
 
@@ -2015,7 +2098,15 @@ class TestImplementationAdmission:
             owner_handle,
             JobResult(
                 ok=True,
-                value={"path": str(owner_path), "dirty": False, "status": "", "diff": ""},
+                value={
+                    "path": str(owner_path),
+                    "source_workspace": binding.to_dict(),
+                    "source_receipt": receipt.to_dict(),
+                    "impl_source_revision": binding.revision,
+                    "dirty": False,
+                    "status": "",
+                    "diff": "",
+                },
             ),
         )
         _deadline, sequence, parked_item = coordinator.timers[0]
@@ -2023,7 +2114,7 @@ class TestImplementationAdmission:
         coordinator._wake_timers()
         claimed = coordinator._claim_item(StageName.IMPLEMENTATION)
         assert claimed is sibling
-        coordinator._run_item(sibling)
+        coordinator._run_item(claim_test_item(coordinator, sibling))
 
         assert owner.pr == owner_pr
         assert sibling.pr == sibling_pr
@@ -2085,7 +2176,7 @@ class TestImplementationAdmission:
         item.state = "DIRTY_DECISION_WAIT"
         outcome = stage.step(item, coordinator._ctx_for(item))
         assert isinstance(outcome, StageOutcome)
-        coordinator._route(item, outcome)
+        coordinator._route(claim_test_item(coordinator, item), outcome)
 
         assert item.result is not None and not item.result.passed
         assert item.result.reason == "branch_worktree_owner_unverified"
@@ -2146,7 +2237,9 @@ class TestImplementationAdmission:
             ),
             on_done_state="DIRTY_DECISION_WAIT",
         )
+        claim_test_item(coordinator, owner)
         coordinator.in_flight[owner_handle] = owner
+        claim_test_item(coordinator, sibling)
         coordinator.in_flight[sibling_handle] = sibling
         coordinator.inflight_per_repo["repo-a"] = 2
 
@@ -2169,7 +2262,7 @@ class TestImplementationAdmission:
         coordinator._wake_timers()
         claimed = coordinator._claim_item(StageName.IMPLEMENTATION, index=1)
         assert claimed is sibling
-        coordinator._run_item(sibling)
+        coordinator._run_item(claim_test_item(coordinator, sibling))
 
         assert sibling.result is not None and not sibling.result.passed
         assert sibling.result.reason == "branch_worktree_owner_unverified"
@@ -2231,7 +2324,9 @@ class TestImplementationAdmission:
             ),
             on_done_state="DIRTY_DECISION_WAIT",
         )
+        claim_test_item(coordinator, owner)
         coordinator.in_flight[owner_handle] = owner
+        claim_test_item(coordinator, sibling)
         coordinator.in_flight[sibling_handle] = sibling
         coordinator.inflight_per_repo["repo-a"] = 2
 
@@ -2259,7 +2354,7 @@ class TestImplementationAdmission:
         coordinator._wake_timers()
         claimed = coordinator._claim_item(StageName.IMPLEMENTATION, index=1)
         assert claimed is sibling
-        coordinator._run_item(sibling)
+        coordinator._run_item(claim_test_item(coordinator, sibling))
 
         assert sibling.result is not None and sibling.result.passed
         assert "superseded" in sibling.result.reason
@@ -2325,7 +2420,7 @@ class TestImplementationAdmission:
         coordinator._push_item(deferred, StageName.IMPLEMENTATION, enter=True)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"shared.py"},
+            lambda _issue, **_kwargs: {"shared.py"},
         )
 
         coordinator._drain_implementation()
@@ -2347,7 +2442,7 @@ class TestImplementationAdmission:
         # No real plan comment exists for the fake issue; fail open (None) so
         # the overlap selector dispatches without a GitHub fetch (#1952).
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
             lambda issue, **_kwargs: None,
         )
         ran: list[int] = []
@@ -2405,7 +2500,7 @@ class TestImplementationAdmission:
         # No real plan comments exist for the fake issues; fail open (None) so
         # the overlap selector dispatches without a GitHub fetch (#2057).
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
             lambda issue, **_kwargs: None,
         )
         ran: list[str] = []
@@ -2447,7 +2542,7 @@ class TestImplementationAdmission:
         # No real plan comment exists for the fake issue; fail open (None) so
         # the overlap selector dispatches without a GitHub fetch (#2057).
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
             lambda issue, **_kwargs: None,
         )
         ran: list[int] = []
@@ -2568,6 +2663,7 @@ class TestImplementationAdmission:
         """A (repo, issue) held in in_flight blocks a new seed of the same key."""
         coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
         live = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        claim_test_item(coordinator, live)
         coordinator.in_flight[cast(Any, "h1")] = live  # simulate dispatched/in-flight
         reseed = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
         coordinator._push_item(reseed, StageName.IMPLEMENTATION, enter=True)
@@ -2592,10 +2688,10 @@ class TestImplementationAdmission:
         item_b = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
         coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
-        seen_fetches: list[tuple[int, tuple[str, str] | None]] = []
+        seen_fetches: list[tuple[int, object]] = []
 
-        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
-            seen_fetches.append((issue, repo))
+        def _planned_files(issue: int, **_kwargs: Any) -> set[str]:
+            seen_fetches.append((issue, _kwargs["github"]))
             return {"shared.py"}
 
         monkeypatch.setattr(
@@ -2607,7 +2703,10 @@ class TestImplementationAdmission:
 
         assert run_order == [22]  # dependency first; 21 deferred by overlap
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
-        assert seen_fetches == [(22, ("org", "repo-a")), (21, ("org", "repo-a"))]
+        assert seen_fetches == [
+            (22, coordinator._ctx_for_repo("repo-a").github),
+            (21, coordinator._ctx_for_repo("repo-a").github),
+        ]
 
     def test_aged_dependent_never_overtakes_its_queued_prerequisite(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2630,7 +2729,7 @@ class TestImplementationAdmission:
         coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda issue, repo=None: {f"planned-{issue}.py"},
+            lambda issue, **_kwargs: {f"planned-{issue}.py"},
         )
 
         coordinator._drain_implementation()
@@ -2654,8 +2753,7 @@ class TestImplementationAdmission:
         coordinator._push_item(second, StageName.IMPLEMENTATION, enter=True)
         fetches: list[int] = []
 
-        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
-            del repo
+        def _planned_files(issue: int, **_kwargs: Any) -> set[str]:
             fetches.append(issue)
             if fetches.count(issue) > 1:
                 raise AssertionError("submission must reuse the admission snapshot")
@@ -2670,12 +2768,7 @@ class TestImplementationAdmission:
 
         assert fetches == [21, 22]
         assert len(pool.submitted) == 2
-        assert len(coordinator._inflight_implementation_claims) == 2
-        assert {
-            claim
-            for claims in coordinator._inflight_implementation_claims.values()
-            for claim in claims
-        } == {
+        assert coordinator._active_implementation_file_claims() == {
             (("org", "repo-a"), "planned-21.py"),
             (("org", "repo-a"), "planned-22.py"),
         }
@@ -2699,8 +2792,7 @@ class TestImplementationAdmission:
         )
         fetches: list[int] = []
 
-        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str] | None:
-            del repo
+        def _planned_files(issue: int, **_kwargs: Any) -> set[str] | None:
             fetches.append(issue)
             if issue == 21:
                 if fetches.count(issue) > 1:
@@ -2724,7 +2816,7 @@ class TestImplementationAdmission:
         """Worktree/agent/test/push turns share one admission snapshot (#2309)."""
         coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
 
-        class MultiJobStage:
+        class MultiJobStage(Stage):
             completed = 0
 
             def on_enter(self, item: WorkItem, ctx: Any) -> None:
@@ -2748,8 +2840,7 @@ class TestImplementationAdmission:
         coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
         fetches: list[int] = []
 
-        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
-            del repo
+        def _planned_files(issue: int, **_kwargs: Any) -> set[str]:
             fetches.append(issue)
             if len(fetches) > 1:
                 raise AssertionError(
@@ -2768,7 +2859,6 @@ class TestImplementationAdmission:
 
         assert len(pool.submitted) == 2
         assert fetches == [21]
-        assert id(item) not in coordinator._implementation_file_claims
         assert "_implementation_file_claims" not in item.payload
 
     def test_reviewed_pr_realized_diff_blocks_overlapping_direct_issue(
@@ -2789,12 +2879,12 @@ class TestImplementationAdmission:
         assert coordinator._push_item(active, StageName.PR_REVIEW, enter=True)
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
         plans = {22: {"AGENTS.md"}, 23: {"independent.py"}}
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
             lambda issue, **_kwargs: plans[issue],
         )
         coordinator._begin_direct_issue_source("repo-a", "a" * 40)
@@ -2838,8 +2928,10 @@ class TestImplementationAdmission:
         assert coordinator._push_item(returning, StageName.PR_REVIEW, enter=True)
         returning.payload["_implementation_file_claims"] = {plan_claim}
         returning.payload["review_changed_paths"] = ["shared.py"]
-        coordinator._implementation_file_claims[id(returning)] = {plan_claim}
-        coordinator._route(returning, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+        coordinator._route(
+            claim_test_item(coordinator, returning),
+            StageOutcome(Disposition.FAIL_BACK, "agent_error"),
+        )
         assert returning.stage is StageName.IMPLEMENTATION
         overlapping = _issue_item(22, StageName.IMPLEMENTATION)
         overlapping.payload["_implementation_file_claims"] = {realized_claim}
@@ -2847,32 +2939,21 @@ class TestImplementationAdmission:
         independent_claim = (("org", "repo-a"), "independent.py")
         independent.payload["_implementation_file_claims"] = {independent_claim}
 
-        dispatch, snapshots = coordinator._select_file_overlap_implementation_items(
+        dispatch = coordinator._select_file_overlap_implementation_items(
             [(returning, "#21"), (overlapping, "#22"), (independent, "#23")]
         )
 
         assert dispatch == [returning, independent]
-        assert snapshots == {
-            id(returning): {plan_claim, realized_claim},
-            id(independent): {independent_claim},
-        }
+        assert independent.payload["_implementation_file_claims"] == frozenset({independent_claim})
         assert returning.payload["_implementation_file_claims"] == {
             plan_claim,
             realized_claim,
         }
-        assert coordinator._implementation_file_claims[id(returning)] == {
-            plan_claim,
-            realized_claim,
-        }
-        assert coordinator._capture_implementation_file_claims(returning) == {
-            plan_claim,
-            realized_claim,
-        }
-        later_dispatch, _ = coordinator._select_file_overlap_implementation_items(
+        later_dispatch = coordinator._select_file_overlap_implementation_items(
             [(overlapping, "#22")]
         )
         assert later_dispatch == []
-        assert overlapping.payload["file_overlap_deferrals"] == 2
+        assert overlapping.payload["file_overlap_deferrals"] == 1
 
     def test_remediation_candidate_still_honors_same_claim_owned_by_peer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2882,15 +2963,11 @@ class TestImplementationAdmission:
         claim = (("org", "repo-a"), "shared.py")
         returning = _issue_item(21, StageName.IMPLEMENTATION)
         returning.payload["_implementation_file_claims"] = {claim}
-        coordinator._implementation_file_claims[id(returning)] = {claim}
         peer = _issue_item(20, StageName.PR_REVIEW)
         peer.payload["_implementation_file_claims"] = {claim}
-        coordinator._implementation_file_claims[id(peer)] = {claim}
         assert coordinator._push_item(peer, StageName.PR_REVIEW, enter=True)
 
-        dispatch, _snapshots = coordinator._select_file_overlap_implementation_items(
-            [(returning, "#21")]
-        )
+        dispatch = coordinator._select_file_overlap_implementation_items([(returning, "#21")])
 
         assert dispatch == []
         assert returning.payload["file_overlap_deferrals"] == 1
@@ -2913,14 +2990,13 @@ class TestImplementationAdmission:
         }
         for item in (first, second, third):
             item.payload["_implementation_file_claims"] = claims_by_item[id(item)]
-        coordinator._implementation_file_claims.update(claims_by_item)
 
-        dispatch, snapshots = coordinator._select_file_overlap_implementation_items(
+        dispatch = coordinator._select_file_overlap_implementation_items(
             [(first, "#21"), (second, "#22"), (third, "#23")]
         )
 
         assert dispatch == [first]
-        assert snapshots == {id(first): {claim_ab, claim_ca}}
+        assert first.payload["_implementation_file_claims"] == frozenset({claim_ab, claim_ca})
         assert second.payload["file_overlap_deferrals"] == 1
         assert third.payload["file_overlap_deferrals"] == 1
 
@@ -2932,19 +3008,15 @@ class TestImplementationAdmission:
         item = _issue_item(21, StageName.IMPLEMENTATION)
         claim = (("org", "repo-a"), "shared.py")
         item.payload["_implementation_file_claims"] = {claim}
-        coordinator._implementation_file_claims[id(item)] = {claim}
 
         coordinator._clear_implementation_file_claims_on_exit(item, StageName.PR_REVIEW)
-        assert coordinator._implementation_file_claims[id(item)] == {claim}
         assert item.payload["_implementation_file_claims"] == {claim}
 
         item.stage = StageName.PR_REVIEW
         coordinator._clear_implementation_file_claims_on_exit(item, StageName.MERGE_WAIT)
-        assert coordinator._implementation_file_claims[id(item)] == {claim}
 
         item.stage = StageName.MERGE_WAIT
         coordinator._clear_implementation_file_claims_on_exit(item, StageName.FINISHED)
-        assert id(item) not in coordinator._implementation_file_claims
         assert "_implementation_file_claims" not in item.payload
 
     @pytest.mark.parametrize(
@@ -2973,17 +3045,20 @@ class TestImplementationAdmission:
             ),
         )
 
-        coordinator._submit(item, JobRequest(_agent_job(item.repo, item.issue or 0), item.stage))
+        coordinator._submit(
+            claim_test_item(coordinator, item),
+            JobRequest(_agent_job(item.repo, item.issue or 0), item.stage),
+        )
 
         assert len(pool.submitted) == 1
-        assert coordinator._implementation_file_claims == {}
-        assert coordinator._inflight_implementation_claims == {}
 
     def test_overlap_gate_checks_ambiguous_numbers_against_active_claims(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A cross-repo number collision cannot bypass same-repo reservations."""
-        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, parallel_repos=2
+        )
         run_repos: list[str] = []
 
         class RecordingStage(StubStage):
@@ -3001,9 +3076,10 @@ class TestImplementationAdmission:
         repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
         coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        repo_b.payload["_implementation_file_claims"] = frozenset({(("org", "repo-b"), "other.py")})
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+            lambda _issue, **_kwargs: {"shared.py"},
         )
 
         coordinator._drain_implementation()
@@ -3016,7 +3092,7 @@ class TestImplementationAdmission:
     ) -> None:
         """A same-number item ages while blocked and runs when its repo claim releases."""
         coordinator, _pool, _ = make_coordinator(
-            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2, parallel_repos=2
         )
         run_repos: list[str] = []
 
@@ -3035,9 +3111,10 @@ class TestImplementationAdmission:
         repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
         coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        repo_b.payload["_implementation_file_claims"] = frozenset({(("org", "repo-b"), "other.py")})
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+            lambda _issue, **_kwargs: {"shared.py"},
         )
 
         coordinator._drain_implementation()
@@ -3075,7 +3152,7 @@ class TestImplementationAdmission:
         coordinator._push_item(blocked, StageName.IMPLEMENTATION, enter=True)
         fetches = 0
 
-        def fetch_planned_files(_issue: int, repo: tuple[str, str]) -> set[str]:
+        def fetch_planned_files(_issue: int, **_kwargs: Any) -> set[str]:
             nonlocal fetches
             fetches += 1
             return {"shared.py"}
@@ -3132,9 +3209,12 @@ class TestImplementationAdmission:
         ambiguous_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
         coordinator._push_item(ambiguous_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(ambiguous_b, StageName.IMPLEMENTATION, enter=True)
+        ambiguous_b.payload["_implementation_file_claims"] = frozenset(
+            {(("org", "repo-b"), "other.py")}
+        )
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+            lambda _issue, **_kwargs: {"shared.py"},
         )
 
         coordinator._drain_implementation()
@@ -3178,7 +3258,7 @@ class TestImplementationAdmission:
     ) -> None:
         """Ambiguous overlap deferrals use the normal INFO-to-WARNING boundary."""
         coordinator, _pool, _ = make_coordinator(
-            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2, parallel_repos=2
         )
         _fake_in_flight_item(
             coordinator,
@@ -3190,9 +3270,10 @@ class TestImplementationAdmission:
         repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
         coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        repo_b.payload["_implementation_file_claims"] = frozenset({(("org", "repo-b"), "other.py")})
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+            lambda _issue, **_kwargs: {"shared.py"},
         )
 
         with caplog.at_level(logging.INFO, logger="hephaestus.automation.pipeline.coordinator"):
@@ -3227,8 +3308,7 @@ class TestImplementationAdmission:
         queued = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
         fetches: list[int] = []
 
-        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
-            del repo
+        def _planned_files(issue: int, **_kwargs: Any) -> set[str]:
             fetches.append(issue)
             if issue == 21 and fetches.count(21) > 1:
                 raise AssertionError("an active plan must not be fetched after submission")
@@ -3238,7 +3318,12 @@ class TestImplementationAdmission:
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
             _planned_files,
         )
-        coordinator._submit(active, JobRequest(_agent_job("repo-a", 21), StageName.IMPLEMENTATION))
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage(
+            JobRequest(_agent_job("repo-a", 21), StageName.IMPLEMENTATION)
+        )
+        assert coordinator._push_item(active, StageName.IMPLEMENTATION, enter=True)
+        coordinator._drain_implementation()
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
         coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
 
         coordinator._drain_implementation()
@@ -3251,7 +3336,7 @@ class TestImplementationAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A deferred hot-file issue outranks a newly queued peer once released."""
-        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=3)
         run_order: list[int] = []
 
         class RecordingStage(StubStage):
@@ -3270,7 +3355,7 @@ class TestImplementationAdmission:
         coordinator._push_item(starved, StageName.IMPLEMENTATION, enter=True)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"hephaestus/automation/pipeline/coordinator.py"},
+            lambda _issue, **_kwargs: {"hephaestus/automation/pipeline/coordinator.py"},
         )
 
         coordinator._drain_implementation()
@@ -3311,7 +3396,7 @@ class TestImplementationAdmission:
         coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"hephaestus/automation/pipeline/coordinator.py"},
+            lambda _issue, **_kwargs: {"hephaestus/automation/pipeline/coordinator.py"},
         )
 
         coordinator._drain_implementation()
@@ -3345,7 +3430,7 @@ class TestImplementationAdmission:
         coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: {"hephaestus/automation/pipeline/coordinator.py"},
+            lambda _issue, **_kwargs: {"hephaestus/automation/pipeline/coordinator.py"},
         )
 
         coordinator._drain_implementation()
@@ -3378,7 +3463,7 @@ class TestImplementationAdmission:
         coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            lambda _issue, repo=None: (_ for _ in ()).throw(
+            lambda _issue, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("overlap lookup must be disabled")
             ),
         )
@@ -3429,10 +3514,13 @@ class TestDurableEventLog:
             event_log_path=event_log_path,
             package_version="1.2.3",
             source_revision="a" * 40,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
         coordinator.run()
@@ -3454,9 +3542,10 @@ class TestDurableEventLog:
                 projects_dir=tmp_path,
                 metrics_port=9123,
                 circuit_breaker_snapshot_provider=lambda: snapshots,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
@@ -3479,9 +3568,10 @@ class TestDurableEventLog:
                 projects_dir=tmp_path,
                 metrics_port=9123,
                 circuit_breaker_snapshot_provider=lambda: snapshots,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
 
@@ -3502,9 +3592,10 @@ class TestDurableEventLog:
                 repos=["repo-a"],
                 projects_dir=tmp_path,
                 metrics_port=9123,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator.inflight_per_repo["repo-a"] = 1
@@ -3530,10 +3621,13 @@ class TestDurableEventLog:
             metrics_port=9123,
             alert_queue_depth_threshold=0,
             circuit_breaker_snapshot_provider=all_circuit_breaker_snapshots,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
         coordinator.queues[StageName.PLANNING].push(_issue_item(44, StageName.PLANNING))
         breaker = get_circuit_breaker("github-observed", failure_threshold=1)
@@ -3570,9 +3664,10 @@ class TestDurableEventLog:
                 repos=["repo-a"],
                 projects_dir=tmp_path,
                 metrics_port=9123,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator._stalled_ticks = 2
@@ -3595,20 +3690,23 @@ class TestDurableEventLog:
                 repos=["repo-a"],
                 projects_dir=tmp_path,
                 metrics_port=9123,
+                max_workers=2,
+                learning_queue_capacity=2,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
-            auxiliary_pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
             install_signals=False,
         )
-        coordinator.queues[StageName.PLANNING].push(_issue_item(10, StageName.PLANNING))
-        coordinator.queues[StageName.LEARNING].push(_issue_item(11, StageName.LEARNING))
+        coordinator._push_item(_issue_item(10, StageName.PLANNING), StageName.PLANNING, enter=False)
+        coordinator._push_item(_issue_item(11, StageName.LEARNING), StageName.LEARNING, enter=False)
         _fake_in_flight_item(coordinator, _issue_item(12, StageName.IMPLEMENTATION))
         auxiliary_item = _issue_item(13, StageName.LEARNING)
         auxiliary_handle = JobHandle(
-            job=GitJob(repo="repo-a", op="push", timeout_s=1),
+            job=GitJob(repo="repo-a", op="remove_worktree", timeout_s=1),
             on_done_state="DONE",
         )
+        claim_test_item(coordinator, auxiliary_item)
         coordinator.auxiliary_in_flight[auxiliary_handle] = auxiliary_item
         coordinator.stages[StageName.LEARNING] = StubStage()
 
@@ -3646,9 +3744,10 @@ class TestDurableEventLog:
                 max_workers=2,
                 projects_dir=tmp_path,
                 metrics_port=9123,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
@@ -3677,9 +3776,10 @@ class TestDurableEventLog:
                 repos=["repo-a"],
                 projects_dir=tmp_path,
                 metrics_port=9123,
+                rate_guard_enabled=False,
             ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
@@ -3695,9 +3795,11 @@ class TestDurableEventLog:
     def test_completion_persists_direct_agent_session_by_logical_role(self, tmp_path: Path) -> None:
         """The next loop turn can resume the direct agent's saved context."""
         coordinator = Coordinator(
-            PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+            PipelineConfig(
+                org="org", repos=["repo-a"], projects_dir=tmp_path, rate_guard_enabled=False
+            ),
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
@@ -3715,6 +3817,7 @@ class TestDurableEventLog:
             ),
             on_done_state=StageName.IMPLEMENTATION,
         )
+        claim_test_item(coordinator, item)
         coordinator.in_flight[handle] = item
         coordinator.inflight_per_repo[item.repo] += 1
 
@@ -3733,10 +3836,13 @@ class TestDurableEventLog:
             loops=1,
             projects_dir=tmp_path,
             event_log_path=event_log_path,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
         item = _issue_item(44, StageName.PLANNING)
 
@@ -3758,10 +3864,13 @@ class TestDurableEventLog:
             loops=1,
             projects_dir=tmp_path,
             event_log_path=event_log_path,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
         @dataclass(frozen=True)
@@ -3785,20 +3894,21 @@ class TestDurableEventLog:
             loops=1,
             projects_dir=tmp_path,
             event_log_path=event_log_path,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         stage = StubStage()
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             stages={StageName.PLANNING: stage},
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
         item = _issue_item(44, StageName.PLANNING)
 
-        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(issue=44), "REVIEWED")
+        )
         coordinator._drain_completions()
 
         records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
@@ -3831,23 +3941,24 @@ class TestDurableEventLog:
             loops=1,
             projects_dir=tmp_path,
             event_log_path=event_log_path,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         pool = FakeWorkerPool()
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
-            pool=pool,
+            **fake_worker_factories(pool, None),
             stages={StageName.PLANNING: StubStage()},
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
         result = JobResult(ok=True, value="done")
         object.__setattr__(result, "worker_id", "hephaestus-pipeline-worker_0")
         pool.queue_result(result)
         item = _issue_item(45, StageName.PLANNING)
 
-        coordinator._submit(item, JobRequest(_agent_job(issue=45), "REVIEWED"))
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(issue=45), "REVIEWED")
+        )
         coordinator._drain_completions()
 
         records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
@@ -3894,8 +4005,8 @@ class TestDurableEventLog:
             loops=1,
             projects_dir=tmp_path,
             event_log_path=event_log_path,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         pool = FakeWorkerPool()
         pool.queue_result(
             JobResult(
@@ -3914,14 +4025,14 @@ class TestDurableEventLog:
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
-            pool=pool,
+            **fake_worker_factories(pool, None),
             stages={StageName.PLANNING: StubStage()},
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
 
         coordinator._submit(
-            _issue_item(47, StageName.PLANNING), JobRequest(_agent_job(issue=47), "REVIEWED")
+            claim_test_item(coordinator, _issue_item(47, StageName.PLANNING)),
+            JobRequest(_agent_job(issue=47), "REVIEWED"),
         )
         coordinator._drain_completions()
 
@@ -3936,24 +4047,21 @@ class TestDurableEventLog:
     ) -> None:
         """Submitted jobs carry item/stage context for worker-claim logging."""
         config = PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            loops=1,
-            projects_dir=tmp_path,
+            org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, rate_guard_enabled=False
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         pool = FakeWorkerPool()
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
-            pool=pool,
+            **fake_worker_factories(pool, None),
             stages={StageName.PLANNING: StubStage()},
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
         item = _issue_item(46, StageName.PLANNING)
 
-        coordinator._submit(item, JobRequest(_agent_job(issue=46), "REVIEWED"))
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(issue=46), "REVIEWED")
+        )
 
         assert pool.submitted_claims == [("repo-a#46", "planning")]
 
@@ -3968,22 +4076,23 @@ class TestDurableEventLog:
             loops=1,
             projects_dir=tmp_path,
             event_log_path=event_log_path,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         stage = StubStage()
         pool = FakeWorkerPool()
         pool.queue_result(JobResult(ok=False, error="token=secret private-endpoint"))
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
-            pool=pool,
+            **fake_worker_factories(pool, None),
             stages={StageName.PLANNING: stage},
             install_signals=False,
         )
-        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
         item = _issue_item(44, StageName.PLANNING)
 
-        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(issue=44), "REVIEWED")
+        )
         coordinator._drain_completions()
 
         records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
@@ -4004,12 +4113,12 @@ class TestDurableEventLog:
             loops=1,
             projects_dir=tmp_path,
             event_log_path=event_log_path,
+            rate_guard_enabled=False,
         )
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
             config,
             github=FakeStageGitHub(),
-            pool=FakeWorkerPool(),
+            **fake_worker_factories(FakeWorkerPool(), None),
             install_signals=False,
         )
         item = _issue_item(44, StageName.PR_REVIEW)
@@ -4025,7 +4134,6 @@ class TestDurableEventLog:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """RESUMABLE parking should not accumulate hidden coordinator state."""
-        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
         item = _issue_item(44, StageName.PR_REVIEW)
         item.state = "REVIEW_WAIT"
@@ -4085,8 +4193,8 @@ class TestPipelineScopeWiring:
     def _stub_open_issue_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Keep scope-wiring tests unit-local; filter behavior has its own test."""
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-            lambda _repo, issues: list(issues),
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
+            lambda _repo, issues, **_kwargs: list(issues),
         )
 
     def _scoped_config(
@@ -4107,13 +4215,17 @@ class TestPipelineScopeWiring:
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
             force=force,
+            rate_guard_enabled=False,
         )
 
     def test_scoped_routes_include_finished_sink(self, tmp_path: Path) -> None:
         """A scoped run's route table always carries the FINISHED sink row."""
         config = self._scoped_config(tmp_path, issues=[1])
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
         # Auxiliary learning and the FINISHED sink are implicit in every scope.
@@ -4137,9 +4249,14 @@ class TestPipelineScopeWiring:
         """
         from hephaestus.automation.pipeline.routing import ROUTES
 
-        config = PipelineConfig(org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path)
+        config = PipelineConfig(
+            org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, rate_guard_enabled=False
+        )
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
         assert coordinator._routes == ROUTES
@@ -4153,9 +4270,24 @@ class TestPipelineScopeWiring:
             issue_body="Use the real issue body.",
         )
         config = self._scoped_config(tmp_path, issues=[1881])
-        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = [
+            coordinator._seed_direct_pr_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.prs
+        ] + [
+            coordinator._seed_direct_issue_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.issues
+        ]
         item = coordinator._entry_to_item(entries[0], "repo-a")
 
         assert entries[0].issue_title == "Hydrate planner context"
@@ -4177,23 +4309,32 @@ class TestPipelineScopeWiring:
                 self.issue_json_calls.append(issue_number)
                 return super().gh_issue_json(issue_number)
 
-        def fake_filter(repo: tuple[str, str], issue_numbers: list[int]) -> list[int]:
+        def fake_filter(
+            repo: tuple[str, str], issue_numbers: list[int], **_kwargs: Any
+        ) -> list[int]:
             assert repo == ("org", "repo-a")
             assert issue_numbers == [1, 2, 3]
             return [1, 3]
 
         gh = RecordingGitHub()
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            "hephaestus.automation.pipeline.admission._filter_open_issues",
             fake_filter,
         )
         config = self._scoped_config(tmp_path, issues=[1, 2, 3], parallel_repos=2)
-        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
 
         assert coordinator._seed_pass() == 1
         coordinator._drain_queues()
         coordinator._drain_completions()
         coordinator._drain_completions()
+        coordinator._drain_direct_pr_source()
+        coordinator._drain_direct_issue_source()
         assert [item.issue for item in coordinator.items] == [1, 3]
         assert gh.issue_json_calls == [1, 3]
 
@@ -4201,7 +4342,12 @@ class TestPipelineScopeWiring:
         """A plan-go issue classifies to IMPLEMENTATION; the scope clamps it to FINISHED-pass."""
         gh = FakeStageGitHub(labels=["state:plan-go"])
         config = self._scoped_config(tmp_path, issues=[1])
-        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
 
         assert coordinator.run() == 0
         assert len(coordinator.ledger) == 1
@@ -4215,9 +4361,24 @@ class TestPipelineScopeWiring:
         """--force re-routes an at-or-past-plan-go issue back to the scope's first stage."""
         gh = FakeStageGitHub(labels=["state:plan-go"])
         config = self._scoped_config(tmp_path, issues=[1], force=True)
-        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = [
+            coordinator._seed_direct_pr_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.prs
+        ] + [
+            coordinator._seed_direct_issue_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.issues
+        ]
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.PLANNING
@@ -4227,9 +4388,24 @@ class TestPipelineScopeWiring:
         """An existing PR cannot suppress an explicitly requested fresh plan epoch."""
         gh = FakeStageGitHub(labels=["state:plan-go"], open_pr=77)
         config = self._scoped_config(tmp_path, issues=[1], force=True)
-        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = [
+            coordinator._seed_direct_pr_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.prs
+        ] + [
+            coordinator._seed_direct_issue_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.issues
+        ]
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.PLANNING
@@ -4240,10 +4416,13 @@ class TestPipelineScopeWiring:
         config = self._scoped_config(tmp_path, issues=[1], force=True)
 
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
-        assert coordinator._stage_config.force is True
+        assert coordinator._ctx_for_repo("repo-a").config.force is True
 
     def test_codex_isolation_inputs_are_propagated_to_stage_context(self, tmp_path: Path) -> None:
         """The stage receives each typed Codex isolation input."""
@@ -4259,15 +4438,24 @@ class TestPipelineScopeWiring:
             codex_isolation_adapter="production",
             codex_isolation_deployment_lock=lock_path,
             codex_isolation_deployment_lock_sha256=digest,
+            rate_guard_enabled=False,
         )
 
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
-        assert coordinator._stage_config.codex_isolation_adapter == "production"
-        assert coordinator._stage_config.codex_isolation_deployment_lock == lock_path
-        assert coordinator._stage_config.codex_isolation_deployment_lock_sha256 == digest
+        assert coordinator._ctx_for_repo("repo-a").config.codex_isolation_adapter == "production"
+        assert (
+            coordinator._ctx_for_repo("repo-a").config.codex_isolation_deployment_lock == lock_path
+        )
+        assert (
+            coordinator._ctx_for_repo("repo-a").config.codex_isolation_deployment_lock_sha256
+            == digest
+        )
 
     def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
         """--force must NOT pull a PRE-scope stage forward into the scope.
@@ -4282,12 +4470,16 @@ class TestPipelineScopeWiring:
         config = self._scoped_config(tmp_path, issues=[1], force=True)
         config = replace(config, scope=scope)
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
-        stage, reason = coordinator._clamp_seed_stage_to_scope(
-            1, StageName.PLANNING, "needs-plan", scope.stages
+        entry = coordinator._seed_direct_issue_entry(
+            "repo-a", 1, github=coordinator._ctx_for_repo("repo-a").github
         )
+        stage, reason = entry.stage, entry.reason
 
         assert stage is StageName.PLANNING  # left untouched, NOT forced to IMPLEMENTATION
         assert "force re-plan" not in reason
@@ -4296,9 +4488,24 @@ class TestPipelineScopeWiring:
         """An in-scope PLANNING classification is preserved (no clamp)."""
         gh = FakeStageGitHub(labels=["state:needs-plan"])
         config = self._scoped_config(tmp_path, issues=[1])
-        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
 
-        entries = coordinator._seed_direct_scope("repo-a")
+        entries = [
+            coordinator._seed_direct_pr_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.prs
+        ] + [
+            coordinator._seed_direct_issue_entry(
+                "repo-a", number, github=coordinator._ctx_for_repo("repo-a").github
+            )
+            for number in coordinator.config.issues
+        ]
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.PLANNING
@@ -4314,9 +4521,13 @@ class TestConfigWiring:
             repos=["repo-a"],
             projects_dir=tmp_path,
             budget_overrides={"merge": 3},
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
         ctx = coordinator._ctx_for_repo("repo-a")
 
@@ -4331,12 +4542,14 @@ class TestConfigWiring:
             no_advise=True,
             enable_learn=False,
             nitpick=True,
-            include_bot_prs=False,
-            include_all_authors=True,
             reset_plan_review_sessions=frozenset({42}),
+            rate_guard_enabled=False,
         )
         coordinator = Coordinator(
-            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+            config,
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
 
         ctx = coordinator._ctx_for_repo("repo-a")
@@ -4345,8 +4558,6 @@ class TestConfigWiring:
         assert ctx.config.enable_advise is False
         assert ctx.config.enable_learn is False
         assert ctx.config.nitpick is True
-        assert ctx.config.include_bot_prs is False
-        assert ctx.config.include_all_authors is True
         # Caller-owned configuration stays immutable; the per-run consumption
         # copy lives on the StageContext (POLA).
         assert ctx.config.reset_plan_review_sessions == frozenset({42})
@@ -4416,7 +4627,7 @@ def test_update_plan_runs_once_and_follows_manual_rebase(
     coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, issues=[8])
     coordinator.config = replace(coordinator.config, rebase=rebase, update_plan=True)
     stage, reason, _ = coordinator._scope_seed_decision(
-        8, StageName.IMPLEMENTATION, "plan approved", None
+        8, StageName.IMPLEMENTATION, "plan approved", None, repo="repo-a"
     )
     assert stage is StageName.PLANNING
     entry = SeedEntry("issue", 8, stage, reason)
@@ -4429,7 +4640,7 @@ def test_update_plan_runs_once_and_follows_manual_rebase(
         assert item.stage is StageName.PLANNING
     assert coordinator._push_item(item, item.stage, enter=True)
     repeated_stage, _, _ = coordinator._scope_seed_decision(
-        8, StageName.IMPLEMENTATION, "plan approved", None
+        8, StageName.IMPLEMENTATION, "plan approved", None, repo="repo-a"
     )
     assert repeated_stage is StageName.IMPLEMENTATION
     repeated = coordinator._prepare_direct_item(
@@ -4445,7 +4656,7 @@ def test_update_plan_preserves_excluded_and_terminal_items(
     """A plan update does not reopen excluded or complete work."""
     coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, issues=[8])
     coordinator.config = replace(coordinator.config, update_plan=True)
-    selected, _, _ = coordinator._scope_seed_decision(8, stage, "closed", None)
+    selected, _, _ = coordinator._scope_seed_decision(8, stage, "closed", None, repo="repo-a")
     assert selected is stage
 
 
@@ -4455,7 +4666,9 @@ def test_update_plan_does_not_change_unselected_pr_issue(
     """A selected PR does not expand the plan-update issue selection."""
     coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, issues=[8])
     coordinator.config = replace(coordinator.config, update_plan=True, prs=[19])
-    selected, _, _ = coordinator._scope_seed_decision(9, StageName.PR_REVIEW, "PR selected", None)
+    selected, _, _ = coordinator._scope_seed_decision(
+        9, StageName.PR_REVIEW, "PR selected", None, repo="repo-a"
+    )
     assert selected is StageName.PR_REVIEW
     item = coordinator._prepare_direct_item(
         SeedEntry("pr", 19, selected, "PR selected", issue_number=9), "repo-a", ""
@@ -4475,7 +4688,7 @@ def test_update_plan_request_survives_full_queue(
     with patch.object(coordinator.queues[item.stage], "offer", return_value=False):
         assert not coordinator._push_item(item, item.stage, enter=True, defer_if_full=True)
     selected, _, _ = coordinator._scope_seed_decision(
-        8, StageName.IMPLEMENTATION, "plan approved", frozenset({StageName.PLANNING})
+        8, StageName.IMPLEMENTATION, "plan approved", frozenset({StageName.PLANNING}), repo="repo-a"
     )
     assert selected is StageName.PLANNING
 

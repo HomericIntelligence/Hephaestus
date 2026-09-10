@@ -7,21 +7,31 @@ import json
 import os
 import re
 import stat
+import subprocess
+import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.git_runtime import (
+    current_operation_shutdown,
+    remaining_operation_timeout,
+)
 from hephaestus.automation.git_utils import (
     delete_local_branch_if_unchanged,
     delete_reserved_branch_if_unchanged,
     run,
 )
-from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspacePreparationError,
+)
 from hephaestus.automation.worktree_manager import WorktreeManager
-from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import is_expected_managed_worktree_path
 
@@ -1126,6 +1136,8 @@ def _run_source_lane_cleanup(
             expected_detached=expected_detached,
             physical_cleanup=physical_cleanup,
         )
+    except SourceWorkspacePreparationError:
+        return JobResult(ok=False, error="timeout")
     except SourceWorkspaceError as exc:
         return JobResult(ok=False, error=str(exc))
     return JobResult(ok=True)
@@ -1163,6 +1175,33 @@ def _release_branch_reservation(
         revalidate_remote=revalidate_remote,
     )
     return JobResult(ok=True, value=released)
+
+
+@contextlib.contextmanager
+def _cleanup_metadata_lock(path: Path, job: GitJob) -> Iterator[None]:
+    """Wait for metadata within the current job's deadline and cancellation."""
+    deadline_s = time.monotonic() + job.timeout_s
+    if job.deadline_s is not None:
+        deadline_s = min(deadline_s, job.deadline_s)
+    shutdown = current_operation_shutdown()
+    while True:
+        remaining = cast(float, remaining_operation_timeout(deadline_s - time.monotonic()))
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("cleanup metadata lock", 0)
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(file_lock(path, blocking=False, require_exclusive=True))
+            except LockUnavailableError:
+                wait_s = min(0.1, remaining)
+                if shutdown is None:
+                    time.sleep(wait_s)
+                else:
+                    shutdown.wait(wait_s)
+                continue
+            if cast(float, remaining_operation_timeout(deadline_s - time.monotonic())) <= 0:
+                raise subprocess.TimeoutExpired("cleanup metadata lock", 0)
+            yield
+            return
 
 
 def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable receipts
@@ -1216,7 +1255,7 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
                 remote_config=remote_config,
                 revalidate_remote=revalidate_remote,
             )
-        with file_lock(worktree_manager_type.git_metadata_lock_path(repo_root)):
+        with _cleanup_metadata_lock(worktree_manager_type.git_metadata_lock_path(repo_root), job):
             record = _worktree_record(
                 worktree_path,
                 repo_root=repo_root,
@@ -1305,11 +1344,4 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
             if local_result is not None:
                 return local_result
         return JobResult(ok=True)
-    fallback_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
-    fallback_kwargs = dict(job.kwargs)
-    fallback_kwargs.pop("repo_root", None)
-    worktree_manager_type(repo_root=fallback_root).remove_worktree(
-        **fallback_kwargs,
-        timeout=job.timeout_s,
-    )
-    return JobResult(ok=True)
+    return JobResult(ok=False, error="cleanup requires an exact worktree path")

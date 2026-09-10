@@ -1,6 +1,8 @@
 """Check exact rebase trees and host publication evidence."""
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -129,11 +131,19 @@ def test_restart_rebuilds_proof_from_remote_and_original_tree(
         return run(cmd, **kwargs)
 
     pool = object.__new__(WorkerPool)
+    pool._shutdown = threading.Event()
+    deadline = time.monotonic() + 30
+    inspections = 0
     from unittest.mock import MagicMock
 
-    def inspect(job: Any) -> object:
+    def inspect(job: Any, *, shutdown: threading.Event, deadline_s: float | None) -> object:
         from hephaestus.automation.pipeline.github_jobs import RebaseReviewInspected
 
+        nonlocal inspections
+        assert shutdown is pool._shutdown
+        assert deadline_s == deadline
+        assert job.request.record == record
+        inspections += 1
         return RebaseReviewInspected(job.request, failure != "audit_changed")
 
     pool._github_job_runner = MagicMock(run=inspect)
@@ -147,6 +157,7 @@ def test_restart_rebuilds_proof_from_remote_and_original_tree(
                 expected_repository="test/repo",
                 op="verify_rebase_review",
                 timeout_s=30,
+                deadline_s=deadline,
                 kwargs={"record": record, "repo_root": str(cwd)},
             )
         )
@@ -155,3 +166,6 @@ def test_restart_rebuilds_proof_from_remote_and_original_tree(
         assert isinstance(restored.value, RebaseReviewProof)
         assert restored.value.reviewed_head_sha == reviewed
         assert restored.value.resulting_head_sha == result
+        assert inspections == 2
+    else:
+        assert inspections == 1

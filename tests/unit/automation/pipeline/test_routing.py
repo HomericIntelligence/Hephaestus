@@ -20,6 +20,7 @@ from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER,
     _pipeline_order,
 )
+from hephaestus.automation.pipeline_cli import parse_args
 
 _ROUTE_CASES = tuple(pytest.param(stage, route, id=stage.value) for stage, route in ROUTES.items())
 _SCOPE_CASES = tuple(
@@ -260,13 +261,10 @@ class TestROUTES:
         assert ROUTES[StageName.PR_REVIEW].next is StageName.MERGE_WAIT
         assert "ci_fix" not in routing.budget_keys()
 
-    def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
-        """#1902: merge-budget provenance should not pin volatile line numbers."""
-        assert routing.__file__ is not None
-        source = Path(routing.__file__).read_text(encoding="utf-8")
-        assert "loop_runner.py:" not in source
-        assert "LoopConfig.drive_green_loops" in source
-        assert "--drive-green-loops" in source
+    def test_merge_budget_matches_cli_default(self) -> None:
+        """Direct queue use and CLI dispatch start with the same merge budget."""
+        assert ROUTES[StageName.MERGE_WAIT].budgets["merge"] == routing.DEFAULT_MERGE_ATTEMPTS
+        assert parse_args([]).merge_attempts == routing.DEFAULT_MERGE_ATTEMPTS
 
 
 class TestPipelineScope:

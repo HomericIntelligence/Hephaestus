@@ -2,8 +2,8 @@
 
 The journal is provider-neutral.  It records the opaque provider session id
 before model output is interpreted and keeps review/amendment artifacts in an
-append-only, digest-checked transcript.  A missing or corrupt active record is
-therefore a recovery error, never permission to start a replacement session.
+append-only transcript with digest checks. The queue owns bounded recovery
+when an active record is missing or invalid.
 """
 
 from __future__ import annotations
@@ -125,17 +125,10 @@ class PlanReviewSessionStore:
             else:
                 current = self.recover_active(repo=repo, issue=issue)
             if current is not None and not reset:
-                requested_config = dict(reviewer_config)
-                stored_config = dict(current.reviewer_config)
-                # Format 1 also permits configured defaults. It does not change
-                # the identity of a legacy explicit model selection.
-                for config_value in (requested_config, stored_config):
-                    config_value.pop("model_selection_format", None)
-                    config_value.setdefault("reasoning_effort", "")
                 if (
                     current.provider != provider
                     or current.reviewer_model != model
-                    or stored_config != requested_config
+                    or current.reviewer_config != dict(reviewer_config)
                     or current.canonical_cwd != str(Path(cwd).resolve())
                 ):
                     raise PlanReviewSessionLostError(
@@ -258,7 +251,7 @@ class PlanReviewSessionStore:
         if not isinstance(record.reviewer_config, dict):
             raise PlanReviewSessionLostError("reviewer configuration is invalid")
         selection_format = record.reviewer_config.get("model_selection_format")
-        if selection_format is not None and (
+        if (
             not isinstance(selection_format, int)
             or isinstance(selection_format, bool)
             or selection_format != 1

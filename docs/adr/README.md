@@ -29,21 +29,21 @@ numbered, and listed here.
 | [0014](0014-conditional-normal-merge.md) | Conditional normal merge after loop-owned review | Accepted (historical; superseded by 0015) |
 | [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
 | [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted (merge-authorization boundary superseded by 0024) |
-| [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
+| [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Superseded by 0050 (historical) |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
-| [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Partly superseded by ADR-0025, ADR-0035, and ADR-0036 |
+| [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Partly superseded by ADR-0025, ADR-0035, ADR-0036, and ADR-0050 (retired commands and direct-provider surfaces) |
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Superseded by ADR-0031 |
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
 | [0024](0024-explicit-operator-merge-authorization.md) | Explicit operator authorization before queue merge | Accepted (historical; superseded by 0038) |
 | [0025](0025-athena-mnemosyne-pi-semantics.md) | Provider-neutral Athena and Mnemosyne semantics | Accepted |
 | [0026](0026-auxiliary-host-learning-lane.md) | Auxiliary host-learning lane | Accepted |
-| [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Accepted |
+| [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Partly superseded by ADR-0050 where legacy reconstruction conflicts with current-record policy |
 | [0028](0028-source-reading-agent-workspace-isolation.md) | Deterministic source-reading agent workspace isolation | Accepted (planning assignment superseded in part by 0040) |
 | [0029](0029-explicit-pi-isolation-adapter-bootstrap.md) | Explicit Pi isolation-adapter bootstrap | Accepted |
 | [0030](0030-autonomous-issue-requirements-recovery.md) | Autonomous issue requirements recovery precedes planning | Accepted |
-| [0031](0031-bounded-recovery-artifact-roles.md) | Bounded recovery artifact roles on issue timelines | Accepted |
+| [0031](0031-bounded-recovery-artifact-roles.md) | Bounded recovery artifact roles on issue timelines | Partly superseded by ADR-0050 where legacy session interpretation conflicts with current-record policy |
 | [0032](0032-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |
 | [0033](0033-graphql-response-error-contract.md) | GraphQL response-error and mutation-proof contract | Accepted |
 | [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |
@@ -58,7 +58,8 @@ numbered, and listed here.
 | [0043](0043-optional-codex-adapter-until-production-ready.md) | Optional Codex adapter until production readiness | Accepted |
 | [0044](0044-independent-tool-model-selection.md) | Independent tool and model selection | Accepted |
 | [0045](0045-one-use-dirty-direct-writer-continuation.md) | One-use dirty direct-writer continuation | Draft |
-| [0046](0046-review-host-verification-bootstrap.md) | Target-specific source-review bootstrap | Accepted |
+| [0046](0046-review-host-verification-bootstrap.md) | Target-specific source-review bootstrap | Superseded by 0050 (historical) |
 | [0047](0047-ci-owned-full-pytest-suites.md) | CI owns full pytest suite execution | Partly superseded by 0049 |
 | [0048](0048-automation-rebase-triggers.md) | Automation rebase triggers | Accepted |
 | [0049](0049-fast-pr-nightly-tests.md) | Fast PR tests and nightly full validation | Accepted |
+| [0050](0050-queue-owned-automation-cutover.md) | Queue-owned automation cutover | Accepted |

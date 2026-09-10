@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +21,11 @@ from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.pi_session import AgentSessionBinding
-from hephaestus.agents.workspace import WorkspaceBinding, validate_workspace_binding
+from hephaestus.agents.workspace import (
+    DirtySourceOperation,
+    WorkspaceBinding,
+    validate_workspace_binding,
+)
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
 from .job_results import JobHandle, JobResult
@@ -225,8 +230,8 @@ class AgentJob:
     session_checkpoint: Callable[[str, AgentSessionBinding | None], None] | None = None
     descr: str = ""
     deadline_s: float | None = None
-    retryable: bool = True
     dirty_plan: DirtyDirectPlanInput | None = None
+    source_operation: DirtySourceOperation | None = None
     remediation_pretest_nonce: str | None = None
     remediation_pretest_input: RemediationPretestInput | None = None
 
@@ -249,29 +254,29 @@ class AgentJob:
             raise ValueError("deadline_s must be a finite positive monotonic time")
 
 
-def validate_job_workspace(job: AgentJob, *, dirty_permit: object | None = None) -> Path:
+def validate_job_workspace(
+    job: AgentJob,
+    *,
+    dirty_permit: object | None = None,
+    remaining_timeout: Callable[[], float] | None = None,
+    shutdown: threading.Event | None = None,
+) -> Path:
     """Resolve and fail-closed validate an agent job's execution directory."""
     tools = job.allowed_tools
     if tools is None and job.sandbox in {"read-only", "workspace-write"}:
         tools = "Read,Glob,Grep,Write,Edit,Bash"
     if job.workspace is not None:
         canonical = validate_workspace_binding(
-            job.workspace, allowed_tools=tools or "", dirty_permit=dirty_permit
+            job.workspace,
+            allowed_tools=tools or "",
+            dirty_permit=dirty_permit,
+            remaining_timeout=remaining_timeout,
+            shutdown=shutdown,
         )
         if canonical != job.cwd.resolve(strict=True):
             raise JobWorkspaceError("job cwd does not match its workspace binding")
         return canonical
-    canonical = job.cwd.resolve(strict=True)
-    source_capable = bool(
-        {"Read", "Glob", "Grep", "Write", "Edit", "Bash"}
-        & {value.strip() for value in (tools or "").split(",") if value.strip()}
-    )
-    # A primary checkout has a .git directory. Linked worktrees have a .git
-    # file, so legacy isolated callers remain compatible while every ambient
-    # reusable-root invocation fails before provider resolution.
-    if source_capable and (canonical / ".git").is_dir():
-        raise JobWorkspaceError("source-reading agent cannot use the reusable repository root")
-    return job.cwd
+    raise JobWorkspaceError("agent job requires a workspace binding")
 
 
 @dataclass(frozen=True)

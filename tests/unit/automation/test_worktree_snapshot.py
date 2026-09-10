@@ -1,10 +1,75 @@
 """Tests for the shared dirty worktree content identity."""
 
+import os
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.worktree_snapshot import _path_content_identity
+from hephaestus.automation import git_utils
+from hephaestus.automation.worktree_snapshot import _path_content_identity, _run_bounded_git_output
+
+
+def test_content_hash_uses_the_remaining_operation_deadline(tmp_path: Path) -> None:
+    """File hashing must not start a new timeout after the Git deadline."""
+    (tmp_path / "file").write_text("content")
+    with (
+        git_utils.operation_deadline(10.0),
+        patch("hephaestus.automation.worktree_snapshot.time.monotonic", return_value=11.0),
+        pytest.raises(subprocess.TimeoutExpired),
+    ):
+        _path_content_identity(tmp_path, "file\0", timeout=30)
+
+
+@pytest.mark.parametrize("selector_supported", [True, False])
+def test_snapshot_child_stops_during_cancellation(tmp_path: Path, selector_supported: bool) -> None:
+    """Both pipe readers must stop a cancelled capture child."""
+    shutdown = threading.Event()
+    timer = threading.Timer(0.1, shutdown.set)
+    started = time.monotonic()
+    timer.start()
+    try:
+        with (
+            patch(
+                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                return_value=selector_supported,
+            ),
+            pytest.raises(InterruptedError),
+        ):
+            _run_bounded_git_output(
+                (sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=30,
+                max_bytes=1024,
+                retain_text=True,
+                shutdown=shutdown,
+            )
+    finally:
+        timer.cancel()
+        timer.join()
+    assert time.monotonic() - started < 5
+
+
+def test_content_hash_stops_during_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation must stop a file hash between bounded reads."""
+    (tmp_path / "file").write_bytes(b"x" * (128 * 1024))
+    shutdown = threading.Event()
+    read = os.read
+
+    def cancel_after_read(descriptor: int, size: int) -> bytes:
+        data = read(descriptor, size)
+        shutdown.set()
+        return data
+
+    monkeypatch.setattr(os, "read", cancel_after_read)
+    with pytest.raises(InterruptedError):
+        _path_content_identity(tmp_path, "file\0", timeout=30, shutdown=shutdown)
 
 
 @pytest.mark.parametrize("paths", ["file", "file\0\0", "./file\0", "dir//file\0", "../file\0"])

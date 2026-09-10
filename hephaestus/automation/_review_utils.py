@@ -1,75 +1,33 @@
-"""Shared helpers for automation review and discovery.
-
-Extracts utilities used by the queue pipeline and its thin CLI wrappers.
-
-Provides:
-- ``DEFAULT_STATE_DIR`` / ``ensure_state_dir``: Canonical automation state
-  directory path and creation helper.
-- ``parse_json_block``: Extract the last ```json``` block from Claude output.
-- ``_discover_prs_simple``: Shared issue-to-PR discovery loop for callers
-  that supply their own single-issue lookup function.
-- ``find_pr_for_issue``: Locate the open PR for a GitHub issue (two or three
-  lookup strategies depending on the caller's needs).
-- ``setup_review_logging``: Standard logging configuration for review CLIs.
-- ``print_worker_summary``: Standard worker-run summary logging for reviewer
-  and driver classes (#1381 dedupe).
-- ``drain_completed_futures``: Shared concurrent-futures drain loop with
-  exponential backoff and WARNING logging on ``wait()`` failure (#1463 dedupe).
-- ``ensure_state_dir``: Create and return the canonical automation state directory.
-- ``build_automation_parser``: Argparse parser builder for automation CLIs
-  with opt-in common flags (#1392 dedupe).
-- ``build_review_parser``: Argparse parser builder for ``pr_reviewer``.
-- ``instance_log``: Shared body of the per-instance ``_log`` helper.
-- ``load_impl_session_id``: Shared implementer-session state loader for
-  drive-green.
-- ``log_file_path``: Standard per-issue automation log filename builder.
-- ``load_state_file``: Generic state file loader (raw dict or Pydantic model).
-- ``save_state_file``: Generic secure state file writer.
-- ``write_work_report``: Write a phase's work-unit count to an explicit report path.
-- ``work_report_context``: Context manager that writes a work report on exit
-  when the loop runner requested one (#613).
-"""
+"""Provide current queue parsing, state directories, and GitHub query helpers."""
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import logging
 import os
 import re
-import threading
-import time
-from collections.abc import Callable, Iterator, Mapping
-from concurrent.futures import FIRST_COMPLETED, Future, wait
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, overload
+from typing import Any
 
-from pydantic import BaseModel
-
-from hephaestus.agents.runtime import add_agent_argument, session_agent_matches
-from hephaestus.automation.prompts.catalog import add_prompt_dir_argument
+from hephaestus.agents.runtime import add_agent_argument
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
     add_json_arg,
     add_logging_args,
     add_version_arg,
-    configure_cli_logging,
 )
-from hephaestus.io.utils import write_secure
+from hephaestus.prompts import add_prompt_dir_argument
 
 from .git_utils import issue_auto_impl_branch_name
 from .github_api import _gh_call
 from .models import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
 
-if TYPE_CHECKING:
-    from .models import WorkerResult
-
 logger = logging.getLogger(__name__)
 
-ParseJsonErrorCallback = Callable[[str, Path | None, OSError | None], None]
 
 _JSON_BLOCK_RE = re.compile(
     r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*\r?$",
@@ -89,121 +47,6 @@ def has_exact_closing_line(body: str, issue_number: int) -> bool:
     suffixed issue references that GitHub's text search can otherwise return.
     """
     return re.search(rf"^Closes #{issue_number}\r?$", body, re.MULTILINE) is not None
-
-
-@overload
-def load_state_file[StateModelT: BaseModel](
-    state_dir: Path,
-    prefix: str,
-    issue_number: int,
-    model_class: type[StateModelT],
-    *,
-    state_logger: logging.Logger | None = None,
-) -> StateModelT | None:
-    pass
-
-
-@overload
-def load_state_file(
-    state_dir: Path,
-    prefix: str,
-    issue_number: int,
-    model_class: None = None,
-    *,
-    state_logger: logging.Logger | None = None,
-) -> dict[str, Any] | None:
-    pass
-
-
-def load_state_file[StateModelT: BaseModel](
-    state_dir: Path,
-    prefix: str,
-    issue_number: int,
-    model_class: type[StateModelT] | None = None,
-    *,
-    state_logger: logging.Logger | None = None,
-) -> StateModelT | dict[str, Any] | None:
-    """Load ``<prefix>-<issue_number>.json`` as a JSON object or Pydantic model.
-
-    Args:
-        state_dir: Directory containing state files.
-        prefix: File prefix, such as ``"issue"`` or ``"review"``.
-        issue_number: GitHub issue number used in the filename.
-        model_class: Optional Pydantic model class used to validate the JSON object.
-        state_logger: Optional logger for malformed-file warnings.
-
-    Returns:
-        A raw JSON object dict, a validated Pydantic model, or ``None`` when the
-        file is absent or invalid.
-
-    """
-    target_logger = state_logger or logger
-    state_file = state_dir / f"{prefix}-{issue_number}.json"
-    if not state_file.exists():
-        return None
-
-    try:
-        payload = json.loads(state_file.read_text())
-    except (OSError, ValueError) as exc:
-        target_logger.warning(
-            "Malformed %s state for issue #%d at %s: %s",
-            prefix,
-            issue_number,
-            state_file,
-            exc,
-        )
-        return None
-
-    if not isinstance(payload, dict):
-        target_logger.warning(
-            "Malformed %s state for issue #%d at %s: expected JSON object, got %s",
-            prefix,
-            issue_number,
-            state_file,
-            type(payload).__name__,
-        )
-        return None
-
-    if model_class is None:
-        return payload
-
-    try:
-        return model_class.model_validate(payload)
-    except ValueError as exc:
-        target_logger.warning(
-            "Malformed %s state for issue #%d at %s: %s",
-            prefix,
-            issue_number,
-            state_file,
-            exc,
-        )
-        return None
-
-
-def save_state_file(state_dir: Path, prefix: str, issue_number: int, state: BaseModel) -> None:
-    """Securely persist ``state`` to ``<prefix>-<issue_number>.json``.
-
-    Args:
-        state_dir: Directory where the state file should be written.
-        prefix: File prefix, such as ``"issue"`` or ``"review"``.
-        issue_number: GitHub issue number used in the filename.
-        state: Pydantic model to serialize.
-
-    """
-    state_file = state_dir / f"{prefix}-{issue_number}.json"
-    write_secure(state_file, state.model_dump_json(indent=2))
-
-
-def setup_review_logging(verbose: bool = False, log_format: str = "text") -> None:
-    """Configure root logging for the reviewer CLIs.
-
-    Centralizes the review CLI's logging configuration.
-
-    Args:
-        verbose: Enable DEBUG-level logging (otherwise INFO).
-
-    """
-    configure_cli_logging(verbose=verbose, log_format=log_format)
 
 
 def ensure_state_dir(repo_root: Path, subdir: str = DEFAULT_STATE_DIR) -> Path:
@@ -280,86 +123,6 @@ def add_gh_extra_path_root_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def print_worker_summary(
-    title: str,
-    results: dict[int, WorkerResult],
-    *,
-    count_noun: str = "issues",
-    failed_header: str = "Failed issues:",
-) -> None:
-    """Log the standard worker-run summary.
-
-    Args:
-        title: Summary banner to log between separator lines.
-        results: Mapping of issue or PR number to worker result.
-        count_noun: Noun used in the total-count line.
-        failed_header: Header logged before the per-failure list.
-
-    """
-    total = len(results)
-    successful = sum(1 for result in results.values() if result.success)
-    failed = total - successful
-
-    logger.info("=" * 60)
-    logger.info(title)
-    logger.info("=" * 60)
-    logger.info("Total %s: %s", count_noun, total)
-    logger.info("Successful: %s", successful)
-    logger.info("Failed: %s", failed)
-
-    if failed > 0:
-        logger.info(failed_header)
-        for issue_num, result in results.items():
-            if not result.success:
-                logger.info("  #%s: %s", issue_num, result.error)
-
-
-def drain_completed_futures(
-    futures: Mapping[Future[Any], int],
-    *,
-    timeout: float = 1.0,
-) -> Iterator[Future[Any]]:
-    """Yield completed futures, backing off on repeated ``wait()`` failures.
-
-    Encapsulates the drain scaffold previously duplicated across the four
-    worker loops (#1463). The canonical exponential-backoff-with-logging
-    behavior avoids the prior bare ``except Exception: time.sleep(0.1);
-    continue`` busy-loop pattern.
-
-    The caller retains ownership of ``futures`` and MUST ``pop`` each yielded
-    future from its own dict; this generator stops when ``futures`` is empty,
-    so the caller's pops drive termination exactly as before.
-
-    Args:
-        futures: Live mapping of in-flight ``Future`` to issue number. The
-            caller mutates this (popping completed futures) between yields.
-        timeout: Per-``wait()`` poll timeout in seconds.
-
-    Yields:
-        Each ``Future`` reported done by ``concurrent.futures.wait``.
-
-    """
-    # Backoff on repeated wait() failures so a flapping condition doesn't
-    # busy-loop silently. Resets to 0.1s on the first successful wait().
-    wait_backoff = 0.1
-    while futures:
-        try:
-            done, _pending = wait(futures.keys(), timeout=timeout, return_when=FIRST_COMPLETED)
-            wait_backoff = 0.1
-        except Exception as exc:
-            logger.warning(
-                "futures.wait() raised %s: %s — backing off %.1fs",
-                type(exc).__name__,
-                exc,
-                wait_backoff,
-            )
-            time.sleep(wait_backoff)
-            wait_backoff = min(wait_backoff * 2, 5.0)
-            continue
-
-        yield from done
-
-
 def _automation_parser_kwargs(
     description: str,
     epilog: str | None,
@@ -387,14 +150,11 @@ def build_automation_parser(
     add_max_workers: bool = True,
     max_workers_default: int = DEFAULT_WORKER_COUNT,
     max_workers_help: str = "Maximum number of parallel workers, 1-32 (default: 3)",
-    add_parallel: bool = False,
-    parallel_help: str = "Number of parallel workers, 1-32 (default: 3)",
     add_github_throttle: bool = False,
     add_gh_extra_path_root: bool = False,
     add_dry_run: bool = True,
     dry_run_prefix: str | None = None,
     dry_run_help: str | None = None,
-    add_no_ui: bool = False,
     add_json: bool = True,
     add_version: bool = True,
     add_verbose: bool = True,
@@ -411,14 +171,11 @@ def build_automation_parser(
         add_max_workers: Add the common validated ``--max-workers`` flag.
         max_workers_default: Default worker count when ``--max-workers`` is omitted.
         max_workers_help: Help text for ``--max-workers``.
-        add_parallel: Add the planner-style ``--parallel`` worker flag.
-        parallel_help: Help text for ``--parallel``.
         add_github_throttle: Add GitHub global-throttle flags.
         add_gh_extra_path_root: Add the explicit trusted ``ROOT/bin/gh`` selector.
         add_dry_run: Add ``--dry-run``.
         dry_run_prefix: Prefix passed to the canonical dry-run helper.
         dry_run_help: Raw ``--dry-run`` help text; bypasses the canonical caveat.
-        add_no_ui: Add ``--no-ui``.
         add_json: Add ``--json``.
         add_version: Add ``-V`` / ``--version``.
         add_verbose: Add ``-v`` / ``--verbose``.
@@ -437,15 +194,6 @@ def build_automation_parser(
     add_prompt_dir_argument(parser)
     if add_max_workers:
         add_max_workers_arg(parser, default=max_workers_default, help_text=max_workers_help)
-    if add_parallel:
-        parser.add_argument(
-            "--parallel",
-            type=int,
-            default=3,
-            choices=range(1, 33),
-            metavar="N",
-            help=parallel_help,
-        )
     if add_github_throttle:
         add_github_throttle_args(parser)
     if add_gh_extra_path_root:
@@ -455,12 +203,6 @@ def build_automation_parser(
             parser.add_argument("--dry-run", action="store_true", help=dry_run_help)
         else:
             add_dry_run_arg(parser, prefix=dry_run_prefix)
-    if add_no_ui:
-        parser.add_argument(
-            "--no-ui",
-            action="store_true",
-            help="Disable curses UI (use plain logging instead)",
-        )
     if add_verbose:
         add_logging_args(parser)
     if add_json:
@@ -471,310 +213,27 @@ def build_automation_parser(
     return parser
 
 
-def build_review_parser(
-    description: str,
-    epilog: str | None = None,
-    *,
-    issues_help: str,
-    dry_run_prefix: str,
-    add_gh_extra_path_root: bool = False,
-) -> argparse.ArgumentParser:
-    """Build the argparse parser used by the PR-review CLI wrapper.
-
-    Args:
-        description: Parser description text.
-        epilog: Parser epilog text (typically an Examples block).
-        issues_help: Help text for the ``--issues`` argument.
-        dry_run_prefix: Prefix string for the ``--dry-run`` help text, appended
-            with ``DRY_RUN_HELP_CAVEAT``.
-        add_gh_extra_path_root: Add the explicit trusted ``ROOT/bin/gh`` selector.
-
-    Returns:
-        Configured ``argparse.ArgumentParser`` — caller invokes ``parse_args``.
-
-    """
-    parser = build_automation_parser(
-        description=description,
-        epilog=epilog,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_github_throttle=True,
-        add_gh_extra_path_root=add_gh_extra_path_root,
-        dry_run_prefix=dry_run_prefix,
-        add_no_ui=True,
-        add_version=False,
-    )
-
-    parser.add_argument(
-        "--issues",
-        type=int,
-        nargs="+",
-        required=True,
-        help=issues_help,
-    )
-    return parser
-
-
-def instance_log(
-    log_manager: Any,
-    level: str,
-    msg: str,
-    thread_id: int | None = None,
-    *,
-    caller_logger: logging.Logger | None = None,
-) -> None:
-    """Log to both the caller's module logger and the per-thread UI buffer.
-
-    ``caller_logger`` defaults to this module's logger so callers that do not
-    need a specific provenance can omit it.
-
-    Args:
-        log_manager: A ``ThreadLogManager`` exposing ``.log(thread_id, msg)``.
-        level: Log level name — ``"error"``, ``"warning"``, or ``"info"``.
-        msg: Message to log.
-        thread_id: Thread ID for the UI buffer (defaults to current thread).
-        caller_logger: Logger used for the stdlib log record. Defaults to
-            this module's logger.
-
-    """
-    target_logger = caller_logger if caller_logger is not None else logger
-    getattr(target_logger, level)(msg)
-    tid = thread_id or threading.get_ident()
-    prefix = {"error": "ERROR", "warning": "WARN", "info": ""}.get(level, "")
-    ui_msg = f"{prefix}: {msg}" if prefix else msg
-    log_manager.log(tid, ui_msg)
-
-
-def log_file_path(
-    state_dir: Path,
-    prefix: str,
-    issue_number: int,
-    *,
-    iteration: int | None = None,
-) -> Path:
-    """Return the standard per-issue automation log path."""
-    stem = f"{prefix}-{issue_number}"
-    if iteration is not None:
-        stem = f"{stem}-r{iteration}"
-    return state_dir / f"{stem}.log"
-
-
 def _copy_default(default: Mapping[str, Any]) -> dict[str, Any]:
     return deepcopy(dict(default))
 
 
-def _format_parse_error(exc: Exception) -> str:
-    if isinstance(exc, json.JSONDecodeError):
-        return f"json.JSONDecodeError: {exc}"
-    return f"{type(exc).__name__}: {exc}"
+def parse_json_block(text: str, *, default: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Read the last JSON object in fenced agent output.
 
-
-def _write_json_parse_trace(
-    *,
-    trace_dir: Path,
-    trace_name: str,
-    reason: str,
-    text: str,
-    last_block: str | None,
-) -> tuple[Path, OSError | None]:
-    trace_path = trace_dir / trace_name
-    try:
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        write_secure(
-            trace_path,
-            "\n".join(
-                [
-                    f"reason: {reason}",
-                    "",
-                    "=== last fenced block (if any) ===",
-                    last_block or "(none)",
-                    "",
-                    "=== full response ===",
-                    text,
-                ]
-            ),
-        )
-        return trace_path, None
-    except OSError as exc:
-        return trace_path, exc
-
-
-def parse_json_block(
-    text: str,
-    *,
-    default: Mapping[str, Any] | None = None,
-    parse_error_default: Mapping[str, Any] | None = None,
-    trace_dir: Path | None = None,
-    trace_name: str = "parse-error.log",
-    raw_json_fallback: bool = False,
-    use_last_block: bool = True,
-    on_error: ParseJsonErrorCallback | None = None,
-) -> dict[str, Any]:
-    """Extract a JSON object from an agent response.
-
-    Args:
-        text: Agent response text.
-        default: Result shape for missing JSON, and for parse errors unless
-            ``parse_error_default`` is supplied.
-        parse_error_default: Result shape for malformed/non-object JSON.
-        trace_dir: Optional directory for parse-failure diagnostics.
-        trace_name: Diagnostic filename when ``trace_dir`` is supplied.
-        raw_json_fallback: Try parsing the full response as raw JSON.
-        use_last_block: When true, parse the last fenced block; otherwise the
-            first. Reviewers use the last block, CI repair uses the first.
-        on_error: Optional callback receiving the reason, trace path, and trace
-            write error.
-
-    Returns:
-        Parsed dict, or a caller-provided/default dict on failure.
-
+    Return a copy of the supplied default when the object is absent or
+    malformed. Without a supplied default, return the review error shape.
     """
-    missing_default = _REVIEW_PARSE_MISSING if default is None else default
-    if parse_error_default is not None:
-        failed_default = parse_error_default
-    elif default is None:
-        failed_default = _REVIEW_PARSE_FAILED
-    else:
-        failed_default = missing_default
-
-    def record_error(reason: str, last_block: str | None) -> None:
-        trace_path: Path | None = None
-        trace_error: OSError | None = None
-        if trace_dir is not None:
-            trace_path, trace_error = _write_json_parse_trace(
-                trace_dir=trace_dir,
-                trace_name=trace_name,
-                reason=reason,
-                text=text,
-                last_block=last_block,
-            )
-        if on_error is not None:
-            on_error(reason, trace_path, trace_error)
-
     matches = _JSON_BLOCK_RE.findall(text)
-    if matches:
-        block = matches[-1 if use_last_block else 0]
-        try:
-            return dict(json.loads(block))
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            if raw_json_fallback:
-                with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
-                    return dict(json.loads(text))
-            record_error(_format_parse_error(exc), block)
-            return _copy_default(failed_default)
-
-    if raw_json_fallback:
-        try:
-            return dict(json.loads(text))
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            record_error(_format_parse_error(exc), None)
-            return _copy_default(failed_default)
-
-    record_error("no fenced ```json block found in response", None)
-    return _copy_default(missing_default)
-
-
-def _discover_prs_simple(
-    issue_numbers: list[int],
-    find_fn: Callable[[int], int | None],
-    *,
-    on_missing: Callable[[int], None] | None = None,
-) -> dict[int, int]:
-    """Map issue numbers to open PR numbers using ``find_fn``.
-
-    Args:
-        issue_numbers: Issue numbers to resolve.
-        find_fn: Callable that returns a PR number for one issue, or ``None``.
-        on_missing: Optional callback invoked for each issue without an open PR.
-
-    Returns:
-        Mapping of issue number to PR number for found PRs.
-
-    """
-    pr_map: dict[int, int] = {}
-    for issue_num in issue_numbers:
-        pr_number = find_fn(issue_num)
-        if pr_number is not None:
-            pr_map[issue_num] = pr_number
-        elif on_missing is not None:
-            on_missing(issue_num)
-    return pr_map
-
-
-def load_impl_session_id(state_dir: Path, issue_number: int, agent: str) -> str | None:
-    """Load the implementer's agent session ID from on-disk state.
-
-    The implementer persists its state to ``issue-<n>.json`` (see
-    ``ImplementationStateManager.save``), not ``state-<n>.json``. A stored
-    session is only returned when its ``session_agent`` explicitly names a
-    supported provider compatible with the selected ``agent``. Missing,
-    malformed, unknown, and cross-provider metadata is not resumable.
-
-    Args:
-        state_dir: Directory holding the implementer state files.
-        issue_number: GitHub issue number.
-        agent: Selected agent for the current run.
-
-    Returns:
-        Session ID string, or ``None`` if the file is absent, unreadable, has
-        no ``session_id``, or belongs to a different agent.
-
-    """
-    state_file = state_dir / f"issue-{issue_number}.json"
-    if not state_file.exists():
-        logger.debug("No implementer state file for issue #%s", issue_number)
-        return None
-
+    if not matches:
+        return _copy_default(_REVIEW_PARSE_MISSING if default is None else default)
     try:
-        data = json.loads(state_file.read_text())
-        if not isinstance(data, dict):
-            raise ValueError("expected JSON object")
-
-        session_id = data.get("session_id")
-        session_agent = data.get("session_agent")
-        if not isinstance(session_id, str) or not session_id:
-            return None
-        if not session_agent_matches(session_agent, agent):
-            logger.info(
-                "Skipping impl session for issue #%s: provider metadata is %r, "
-                "selected provider is %s",
-                issue_number,
-                session_agent,
-                agent,
-            )
-            return None
-        return session_id
-    except Exception as e:
-        logger.warning("Could not load impl session for #%s: %s", issue_number, e)
-        return None
+        return dict(json.loads(matches[-1]))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _copy_default(_REVIEW_PARSE_FAILED if default is None else default)
 
 
-def find_pr_for_issue(
-    issue_number: int,
-    *,
-    extra_strategies: bool = False,
-    _load_review_state_fn: Any = None,
-) -> int | None:
-    """Find the open PR for a single issue.
-
-    Always tries two strategies:
-
-    1. Branch name lookup (``{issue}-auto-impl``).
-    2. PR-body text search (``#{issue} in:body``).
-
-    When ``extra_strategies=True`` a third strategy is attempted between 1
-    and 2: the stored ``pr_number`` from caller-provided state is checked via
-    ``gh pr view``.
-
-    Args:
-        issue_number: GitHub issue number.
-        extra_strategies: When True, also check the on-disk review state.
-        _load_review_state_fn: Callable returning state with a ``pr_number``
-            attribute, used when ``extra_strategies=True``.
-
-    Returns:
-        PR number if found, ``None`` otherwise.
-
-    """
+def find_pr_for_issue(issue_number: int) -> int | None:
+    """Find an open PR by its branch or exact issue-closing line."""
     # Strategy 1: branch-name lookup
     branch_name = issue_auto_impl_branch_name(issue_number)
     try:
@@ -801,34 +260,7 @@ def find_pr_for_issue(
     except Exception as e:
         logger.debug("Branch-name lookup failed for issue #%d: %s", issue_number, e)
 
-    # Strategy 2 (optional): on-disk review state
-    if extra_strategies and _load_review_state_fn is not None:
-        review_state = _load_review_state_fn()
-        if review_state is not None and review_state.pr_number:
-            try:
-                result = _gh_call(
-                    [
-                        "pr",
-                        "view",
-                        str(review_state.pr_number),
-                        "--json",
-                        "number,state",
-                    ],
-                    check=False,
-                )
-                pr_data = json.loads(result.stdout or "{}")
-                if pr_data.get("state", "").upper() == "OPEN":
-                    pr_number = int(review_state.pr_number)
-                    logger.info(
-                        "Found PR #%d for issue #%d via review state",
-                        pr_number,
-                        issue_number,
-                    )
-                    return pr_number
-            except Exception as e:
-                logger.debug("Review state PR lookup failed for issue #%d: %s", issue_number, e)
-
-    # Strategy 3: PR-body text search.
+    # Use an exact closing line to reject substring and grouped matches.
     # Search for the canonical "Closes #N" link, then *verify* via regex that
     # the matching PR's body really contains ``Closes #N`` on its own line —
     # GitHub's full-text search returns substring matches, so a PR whose body
@@ -1006,90 +438,3 @@ def get_pr_head_branch(pr_number: int) -> str | None:
     except Exception as e:
         logger.warning("Could not fetch head branch for PR #%d: %s", pr_number, e)
         return None
-
-
-def pr_head_is_writable(pr_number: int, repository: tuple[str, str] | None) -> bool:
-    """Return whether a PR head belongs to the repository being automated.
-
-    A fork head is a valid read-only review target, but binding a guard to its
-    branch name would make the base repository create a duplicate production
-    branch. Missing or malformed repository identity therefore fails closed.
-    """
-    if repository is None:
-        return False
-    owner, repo_name = repository
-    try:
-        result = _gh_call(
-            [
-                "pr",
-                "view",
-                str(pr_number),
-                "--json",
-                "headRepository,headRepositoryOwner",
-                "--repo",
-                f"{owner}/{repo_name}",
-            ],
-            check=False,
-        )
-        data = json.loads(result.stdout or "{}")
-    except Exception as exc:
-        logger.debug("Could not verify writable head for PR #%d: %s", pr_number, exc)
-        return False
-    if not isinstance(data, dict):
-        return False
-    head_repository = data.get("headRepository")
-    head_owner = data.get("headRepositoryOwner")
-    head_name = head_repository.get("name") if isinstance(head_repository, dict) else None
-    owner_login = head_owner.get("login") if isinstance(head_owner, dict) else None
-    return (
-        isinstance(head_name, str)
-        and isinstance(owner_login, str)
-        and head_name.casefold() == repo_name.casefold()
-        and owner_login.casefold() == owner.casefold()
-    )
-
-
-def write_work_report(work_units: int, path: Path | None = None) -> None:
-    """Write the phase's work-unit count to an explicit path.
-
-    Phases that receive a report path write their work-unit count there; the
-    parent reads it after the subprocess returns to measure convergence.
-
-    Args:
-        work_units: The number of work units (e.g., issues planned or reviewed).
-
-    Note:
-        No-op when the env var is unset (phase run outside the loop runner).
-
-    """
-    if path is None:
-        return
-    # best-effort; absence ⇒ "unknown" ⇒ treated as work
-    with contextlib.suppress(OSError):
-        write_secure(path, str(int(work_units)))
-
-
-@contextlib.contextmanager
-def work_report_context(
-    work_units_fn: Callable[[], int], path: Path | None = None
-) -> Iterator[None]:
-    """Write a work report when the loop runner requested one.
-
-    The report path remains optional so phases still run outside a parent
-    runner. When it is present on entry, the work-unit callback is evaluated on
-    exit and written through write_work_report().
-
-    Args:
-        work_units_fn: Callback returning the work-unit count to report.
-
-    """
-    if path is None:
-        yield
-        return
-
-    try:
-        yield
-    finally:
-        # Best-effort reporting: suppress reporting failures without masking the block's exception.
-        with contextlib.suppress(Exception):
-            write_work_report(work_units_fn(), path)

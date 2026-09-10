@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import hephaestus.automation.github_api as _github_api_module
+import hephaestus.automation.github_api.prs as prs_module
 import hephaestus.github.client as client_module
 from hephaestus.automation.github_api import (
     GitHubRateLimitError,
@@ -32,7 +33,6 @@ from hephaestus.automation.github_api import (
     gh_list_labels,
     gh_list_open_issues,
     gh_pr_checks,
-    gh_pr_create,
     gh_pr_inline_comment_index,
     gh_pr_review_post,
     is_issue_closed,
@@ -1947,16 +1947,8 @@ class TestGhListOpenIssues:
             gh_list_open_issues()
 
 
-_POLICY_BODY = "## Summary\nfoo\n\nCloses #1\n"
-
-
-def _unarmed_pr_state() -> Mock:
-    """Build the verified unarmed state returned after PR creation."""
-    return Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None}))
-
-
-class TestGhPrCreate:
-    """Tests for gh_pr_create function."""
+class TestOpenPrDiscovery:
+    """Test complete head lookups and unique base selection."""
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_empty_successful_output(self, mock_gh_call: Any) -> None:
@@ -1964,36 +1956,7 @@ class TestGhPrCreate:
         mock_gh_call.return_value = Mock(stdout="")
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_fresh_pr_creation_contains_open_prs_on_other_bases(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """A head branch's other-base PR is contained before a fresh PR is created."""
-        mock_gh_call.side_effect = [
-            Mock(stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "release"}])),
-            Mock(
-                returncode=0,
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
-            ),
-            Mock(returncode=0, stdout="", stderr=""),
-            Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})),
-            Mock(stdout="https://github.com/owner/repo/pull/456"),
-            _unarmed_pr_state(),
-        ]
-
-        assert gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY) == 456
-
-        calls = [call.args[0] for call in mock_gh_call.call_args_list]
-        assert "--base" not in calls[0]
-        assert calls[1:4] == [
-            ["pr", "view", "962", "--json", "state,autoMergeRequest"],
-            ["pr", "merge", "962", "--disable-auto"],
-            ["pr", "view", "962", "--json", "state,autoMergeRequest"],
-        ]
-        assert calls[4][0:2] == ["pr", "create"]
+            _github_api_module._find_open_prs_for_head("768-auto-impl")
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_multiple_open_prs_on_the_requested_base(
@@ -2010,34 +1973,9 @@ class TestGhPrCreate:
         )
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_ambiguous_target_prs_are_contained_before_creation_is_refused(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """Ambiguity never skips containment of the already-open PRs."""
-        mock_gh_call.side_effect = [
-            Mock(
-                stdout=json.dumps(
-                    [
-                        {"number": 962, "state": "OPEN", "baseRefName": "main"},
-                        {"number": 963, "state": "OPEN", "baseRefName": "main"},
-                    ]
-                )
-            ),
-            _unarmed_pr_state(),
-            _unarmed_pr_state(),
-        ]
-
-        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY)
-
-        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
-            ["pr", "view", "962"],
-            ["pr", "view", "963"],
-        ]
+            _github_api_module._select_open_pr_for_base(
+                _github_api_module._find_open_prs_for_head("768-auto-impl"), "main"
+            )
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_unknown_state(self, mock_gh_call: Any) -> None:
@@ -2047,11 +1985,11 @@ class TestGhPrCreate:
         )
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
+            _github_api_module._find_open_prs_for_head("768-auto-impl")
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_blank_base_name(self, mock_gh_call: Any) -> None:
-        """A blank base cannot be used to select or contain an existing PR."""
+        """A blank base cannot identify the target of an existing PR."""
         mock_gh_call.return_value = Mock(
             stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "  "}])
         )
@@ -2063,7 +2001,7 @@ class TestGhPrCreate:
     def test_existing_pr_lookup_retains_valid_rows_on_a_malformed_sibling(
         self, mock_gh_call: Any
     ) -> None:
-        """Known PRs survive an incomplete lookup so callers can contain them."""
+        """An incomplete lookup retains known PRs in its error details."""
         mock_gh_call.return_value = Mock(
             stdout=json.dumps(
                 [
@@ -2097,533 +2035,193 @@ class TestGhPrCreate:
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_a_full_page(self, mock_gh_call: Any) -> None:
-        """A capped head query cannot claim every existing PR was contained."""
+        """A full page cannot prove that the lookup includes every PR."""
         mock_gh_call.return_value = Mock(
             stdout=json.dumps([{"state": "CLOSED", "baseRefName": "release"}] * 1000)
         )
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            _github_api_module._find_open_pr_for_head("768-auto-impl", "main")
+            _github_api_module._find_open_prs_for_head("768-auto-impl")
 
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_successful_pr_creation_defers_auto_merge(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """Test successful PR creation."""
-        list_result = Mock()
-        list_result.stdout = "[]"  # no existing PR on the head
-        mock_create_result = Mock()
-        mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
-        mock_gh_call.side_effect = [list_result, mock_create_result, _unarmed_pr_state()]
-
-        pr_number = gh_pr_create(
-            branch="feature-branch",
-            title="Test PR",
-            body=_POLICY_BODY,
-        )
-
-        assert pr_number == 456
-        # Pre-flight `pr list`, creation, then verified unarmed read-back.
-        assert mock_gh_call.call_count == 3
-        assert "--base" in mock_gh_call.call_args_list[1].args[0]
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_fresh_pr_creation_propagates_a_failed_auto_merge_readback(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """A fresh compatibility PR is not returned without verified containment."""
-        mock_gh_call.side_effect = [
-            Mock(stdout="[]"),
-            Mock(stdout="https://github.com/owner/repo/pull/456"),
-            Mock(
-                returncode=0,
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
-            ),
-            Mock(returncode=0, stdout="", stderr=""),
-            Mock(
-                returncode=0,
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "still"}}),
-            ),
-        ]
-
-        with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
-            gh_pr_create(branch="feature-branch", title="Test PR", body=_POLICY_BODY)
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_pr_lookup_rejects_an_open_pr_without_a_numeric_number(
-        self, mock_gh_call: Any, _mock_signed: Any
+        self, mock_gh_call: Any
     ) -> None:
-        """A malformed open-PR lookup cannot fall through to fresh creation."""
-        mock_gh_call.return_value = Mock(stdout=json.dumps([{"state": "OPEN", "number": None}]))
+        """An open PR must have a valid number."""
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps([{"state": "OPEN", "number": None, "baseRefName": "main"}])
+        )
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            gh_pr_create(branch="feature-branch", title="Test PR", body=_POLICY_BODY)
+            _github_api_module._find_open_prs_for_head("feature-branch")
 
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_existing_pr_lookup_rejects_a_record_without_state(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
+    def test_existing_pr_lookup_rejects_a_record_without_state(self, mock_gh_call: Any) -> None:
         """A partially parsed existing PR cannot be reinterpreted as no PR."""
-        mock_gh_call.return_value = Mock(stdout=json.dumps([{"number": 962}]))
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps([{"number": 962, "baseRefName": "main"}])
+        )
 
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            gh_pr_create(branch="feature-branch", title="Test PR", body=_POLICY_BODY)
+            _github_api_module._find_open_prs_for_head("feature-branch")
 
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_pr_creation_without_auto_merge(self, mock_gh_call: Any, _mock_signed: Any) -> None:
-        """Test PR creation without auto-merge."""
-        list_result = Mock()
-        list_result.stdout = "[]"  # no existing PR on the head
-        mock_result = Mock()
-        mock_result.stdout = "https://github.com/owner/repo/pull/789"
-        mock_gh_call.side_effect = [list_result, mock_result, _unarmed_pr_state()]
 
-        pr_number = gh_pr_create(
-            branch="feature-branch",
-            title="Test PR",
-            body=_POLICY_BODY,
-            auto_merge=False,
-        )
+@pytest.mark.parametrize(
+    ("open_prs", "expected"),
+    [
+        ([], None),
+        ([(1, "main")], 1),
+        ([(1, "release")], None),
+        ([(1, "release"), (2, "main")], 2),
+    ],
+)
+def test_select_open_pr_for_base(open_prs: list[tuple[int, str]], expected: int | None) -> None:
+    """Select only the PR that targets the requested base."""
+    assert _github_api_module._select_open_pr_for_base(open_prs, "main") == expected
 
-        assert pr_number == 789
-        # Pre-flight dedup list + create + verified unarmed read-back.
-        assert mock_gh_call.call_count == 3
 
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_pr_creation_with_fallback_parsing(self, mock_gh_call: Any, _mock_signed: Any) -> None:
-        """Test PR number extraction fallback."""
-        mock_result = Mock()
-        # URL without /pull/ pattern
-        mock_result.stdout = "https://github.com/owner/repo/123"
-        list_result = Mock(stdout="[]")
-        mock_gh_call.side_effect = [list_result, mock_result, _unarmed_pr_state()]
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Summary\nNo issue link here\n",
+        "## Summary\nfix\n\nFixes #1\n",
+        "## Summary\nfix\n\nResolves #1\n",
+        "## Summary\nfix\n\ncloses #1\n",
+        "## Summary\nfix\n\nCloses: #1\n",
+        "## Summary\nfix\n\nSee Closes #1 mid-line\n",
+    ],
+)
+def test_pr_body_requires_the_exact_closing_line(body: str) -> None:
+    """Only the required issue-closing line satisfies the PR body policy."""
+    with pytest.raises(ValueError, match="Closes #N"):
+        _github_api_module._assert_body_has_closes(body)
 
-        pr_number = gh_pr_create(
-            branch="feature-branch",
-            title="Test PR",
-            body=_POLICY_BODY,
-            auto_merge=False,
-        )
 
-        assert pr_number == 123
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_gh_pr_create_returns_existing_open_pr_without_creating(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """An OPEN PR already on the head is reused, not duplicated (issue #1018)."""
-        list_result = Mock()
-        list_result.stdout = json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "main"}])
-        state_result = Mock()
-        state_result.returncode = 0
-        state_result.stdout = json.dumps({"state": "OPEN", "autoMergeRequest": None})
-        mock_gh_call.side_effect = [list_result, state_result]
-
-        pr_number = gh_pr_create(
-            branch="768-auto-impl",
-            title="Test PR",
-            body=_POLICY_BODY,
-        )
-
-        assert pr_number == 962
-        # The pre-flight `pr list` and containment read ran; no `pr create`.
-        assert mock_gh_call.call_count == 2
-        for call in mock_gh_call.call_args_list:
-            assert "create" not in call.args[0]
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_gh_pr_create_disables_auto_merge_before_reusing_existing_pr(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """Reusing a pre-#2054 PR contains any existing auto-merge arm first."""
-        list_result = Mock(
-            stdout=json.dumps([{"number": 962, "state": "OPEN", "baseRefName": "main"}])
-        )
-        mock_gh_call.side_effect = [
-            list_result,
-            Mock(
-                returncode=0,
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
-            ),
-            Mock(returncode=0, stdout="", stderr=""),
-            Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})),
+@pytest.mark.parametrize("status", ["N", "B"])
+def test_branch_signing_rejects_unverified_commits(status: str) -> None:
+    """Reject a commit when local and GitHub signature checks both fail."""
+    run_git = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, f"aaa111bbb {status}\n", ""),
         ]
-
-        assert gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY) == 962
-        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
-            ["pr", "view", "962"],
-            ["pr", "merge", "962"],
-            ["pr", "view", "962"],
-        ]
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_gh_pr_create_contains_later_siblings_after_a_failed_readback(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """A failed sibling containment still probes every known PR on the head."""
-        mock_gh_call.side_effect = [
-            Mock(
-                stdout=json.dumps(
-                    [
-                        {"number": 962, "state": "OPEN", "baseRefName": "main"},
-                        {"number": 963, "state": "OPEN", "baseRefName": "release"},
-                    ]
-                )
-            ),
-            Mock(
-                returncode=0,
-                stdout=json.dumps({"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}),
-            ),
-            Mock(returncode=1, stdout="", stderr="disable failed"),
-            Mock(returncode=0, stdout=json.dumps({"state": "OPEN", "autoMergeRequest": None})),
-        ]
-
-        with pytest.raises(RuntimeError, match="#962"):
-            gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY)
-
-        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
-            ["pr", "view", "962"],
-            ["pr", "merge", "962"],
-            ["pr", "view", "963"],
-        ]
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_gh_pr_create_contains_valid_prs_before_rejecting_malformed_discovery(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """An incomplete head lookup cannot hide a known PR from containment."""
-        mock_gh_call.side_effect = [
-            Mock(
-                stdout=json.dumps(
-                    [
-                        {"number": 962, "state": "OPEN", "baseRefName": "main"},
-                        "malformed",
-                    ]
-                )
-            ),
-            _unarmed_pr_state(),
-        ]
-
-        with pytest.raises(RuntimeError, match="could not verify existing PR state"):
-            gh_pr_create(branch="768-auto-impl", title="Test PR", body=_POLICY_BODY)
-
-        assert [call.args[0][:3] for call in mock_gh_call.call_args_list[1:]] == [
-            ["pr", "view", "962"],
-        ]
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_gh_pr_create_proceeds_when_only_closed_pr_exists(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """A closed-only head still gets a fresh PR (issue #1018)."""
-        list_result = Mock()
-        list_result.stdout = json.dumps([{"number": 942, "state": "CLOSED", "baseRefName": "main"}])
-        create_result = Mock()
-        create_result.stdout = "https://github.com/owner/repo/pull/967"
-        mock_gh_call.side_effect = [list_result, create_result, _unarmed_pr_state()]
-
-        pr_number = gh_pr_create(
-            branch="768-auto-impl",
-            title="Test PR",
-            body=_POLICY_BODY,
-        )
-
-        assert pr_number == 967
-        # The create call WAS made.
-        assert any("create" in c.args[0] for c in mock_gh_call.call_args_list)
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_gh_pr_create_proceeds_when_no_existing_pr(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """No PR on the head → create as usual (issue #1018)."""
-        list_result = Mock()
-        list_result.stdout = "[]"
-        create_result = Mock()
-        create_result.stdout = "https://github.com/owner/repo/pull/100"
-        mock_gh_call.side_effect = [list_result, create_result, _unarmed_pr_state()]
-
-        pr_number = gh_pr_create(
-            branch="feature-branch",
-            title="Test PR",
-            body=_POLICY_BODY,
-        )
-
-        assert pr_number == 100
-        assert any("create" in c.args[0] for c in mock_gh_call.call_args_list)
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_pr_creation_with_auto_merge_flag_remains_unarmed(
-        self, mock_gh_call: Any, _mock_signed: Any
-    ) -> None:
-        """The deprecated compatibility flag cannot bypass queue review."""
-        list_result = Mock()
-        list_result.stdout = "[]"  # no existing PR on the head
-        mock_create_result = Mock()
-        mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
-
-        mock_gh_call.side_effect = [list_result, mock_create_result, _unarmed_pr_state()]
-
-        assert (
-            gh_pr_create(
-                branch="feature-branch",
-                title="Test PR",
-                body=_POLICY_BODY,
-                auto_merge=True,
-            )
-            == 456
-        )
-        assert mock_gh_call.call_count == 3
-
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_rejects_body_without_closes(self, mock_gh_call: Any, _mock_signed: Any) -> None:
-        """A PR body lacking 'Closes #N' must raise before any gh call."""
-        with pytest.raises(ValueError, match="Closes #N"):
-            gh_pr_create(
-                branch="feature-branch",
-                title="Test PR",
-                body="## Summary\nNo issue link here\n",
-                auto_merge=True,
-            )
-        mock_gh_call.assert_not_called()
-
-    @pytest.mark.parametrize(
-        "body",
-        [
-            "## Summary\nfix\n\nFixes #1\n",
-            "## Summary\nfix\n\nResolves #1\n",
-            "## Summary\nfix\n\ncloses #1\n",
-            "## Summary\nfix\n\nCloses: #1\n",
-            "## Summary\nfix\n\nSee Closes #1 mid-line\n",
-        ],
     )
-    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_rejects_close_variants(self, mock_gh_call: Any, _mock_signed: Any, body: str) -> None:
-        """Only the literal 'Closes #N' on its own line satisfies policy."""
-        with pytest.raises(ValueError, match="Closes #N"):
-            gh_pr_create(
-                branch="feature-branch",
-                title="Test PR",
-                body=body,
-                auto_merge=True,
-            )
-        mock_gh_call.assert_not_called()
-
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified", return_value=False)
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_rejects_unsigned_commit(
-        self, mock_gh_call: Any, mock_run: Any, _mock_verified: Any
-    ) -> None:
-        """An 'N' commit that GitHub also reports unverified must abort PR creation."""
-        # First run() call: git fetch (best-effort, contextlib.suppress); ignored
-        # Second run() call: git log --format='%H %G?' against origin/<base>
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        log_result = Mock(returncode=0, stdout="aaa111bbb N\nccc222ddd G\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_result]
-
-        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
-            gh_pr_create(
-                branch="feature-branch",
-                title="Test PR",
-                body=_POLICY_BODY,
-                auto_merge=True,
-            )
-        # PR creation (_gh_call) must not run once signing fails.
-        mock_gh_call.assert_not_called()
-
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified", return_value=False)
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_rejects_bad_signature(
-        self, mock_gh_call: Any, mock_run: Any, _mock_verified: Any
-    ) -> None:
-        """A 'B' commit that GitHub also reports unverified must abort PR creation."""
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        log_result = Mock(returncode=0, stdout="aaa111bbb B\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_result]
-
-        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
-            gh_pr_create(
-                branch="feature-branch",
-                title="Test PR",
-                body=_POLICY_BODY,
-                auto_merge=True,
-            )
-        mock_gh_call.assert_not_called()
-
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_accepts_good_untrusted_signature(self, mock_gh_call: Any, mock_run: Any) -> None:
-        """'U' (good sig, untrusted key) is accepted; GitHub re-validates server-side."""
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        log_result = Mock(returncode=0, stdout="aaa111bbb U\nccc222ddd G\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_result]
-
-        list_result = Mock(stdout="[]")  # no existing PR on the head
-        mock_create_result = Mock(stdout="https://github.com/owner/repo/pull/42")
-        mock_gh_call.side_effect = [list_result, mock_create_result, _unarmed_pr_state()]
-
-        pr_number = gh_pr_create(
-            branch="feature-branch",
-            title="Test PR",
-            body=_POLICY_BODY,
+    with pytest.raises(ValueError, match="Unsigned or invalid commits"):
+        prs_module._assert_branch_commits_signed(
+            "feature-branch", base="main", run_git=run_git, verify_commit=lambda _oid: False
         )
-        assert pr_number == 42
-        # Pre-flight dedup list + create + verified unarmed read-back.
-        assert mock_gh_call.call_count == 3
+
+
+def test_branch_signing_accepts_good_untrusted_signatures() -> None:
+    """Accept good signatures with trusted or untrusted keys."""
+    run_git = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "aaa111bbb U\nccc222ddd G\n", ""),
+        ]
+    )
+    verified = Mock(side_effect=AssertionError("unexpected API check"))
+    prs_module._assert_branch_commits_signed(
+        "feature-branch", base="main", run_git=run_git, verify_commit=verified
+    )
+    verified.assert_not_called()
 
 
 class TestAssertBranchCommitsSignedApiFallback:
-    """SSH-signed commits the local checkout can't verify must not false-NOGO.
+    """GitHub can verify a signature that the local checkout cannot verify."""
 
-    When a commit is SSH-signed but ``gpg.ssh.allowedSignersFile`` is not
-    configured locally, ``git log --format=%G?`` returns ``N`` (or ``E``) even
-    though GitHub has authoritatively verified the signature. The local check
-    must consult the GitHub commit-verification API before declaring a policy
-    violation, since GitHub's ``verified`` flag is the source of truth at PR
-    time (the same rationale that makes ``U`` acceptable). Regression for the
-    implementer false-NOGO on pre-existing SSH-signed branches.
-    """
+    @pytest.mark.parametrize("status", ["N", "E"])
+    def test_local_unverifiable_but_github_verified_is_accepted(self, status: str) -> None:
+        """Accept remote verification for a locally unverified signature."""
+        run_git = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, f"aaa111bbb {status}\n", ""),
+            ]
+        )
+        verified = Mock(return_value=True)
+        prs_module._assert_branch_commits_signed(
+            "feature-branch", base="main", run_git=run_git, verify_commit=verified
+        )
+        verified.assert_called_once_with("aaa111bbb")
 
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
-    @patch("hephaestus.automation.github_api.run")
-    def test_local_unverifiable_but_github_verified_is_accepted(
-        self, mock_run: Any, mock_verified: Any
-    ) -> None:
-        from hephaestus.automation.github_api import _assert_branch_commits_signed
+    @pytest.mark.parametrize("resolved_index", range(4))
+    def test_local_and_remote_ranges_remain_available(self, resolved_index: int) -> None:
+        """Try the supported local and remote ranges in their defined order."""
+        ranges = [
+            "origin/main..origin/feature-branch",
+            "origin/main..feature-branch",
+            "main..origin/feature-branch",
+            "main..feature-branch",
+        ]
+        run_git = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "", ""),
+                *[
+                    subprocess.CompletedProcess([], 128, "", "unknown ref")
+                    for _ in range(resolved_index)
+                ],
+                subprocess.CompletedProcess([], 0, "aaa111bbb G\n", ""),
+            ]
+        )
+        verified = Mock(side_effect=AssertionError("unexpected API check"))
+        prs_module._assert_branch_commits_signed(
+            "feature-branch", base="main", run_git=run_git, verify_commit=verified
+        )
+        assert [call.args[0][-1] for call in run_git.call_args_list[1:]] == ranges[
+            : resolved_index + 1
+        ]
+        verified.assert_not_called()
 
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        # Local can't verify the SSH signature -> 'N'.
-        log_result = Mock(returncode=0, stdout="aaa111bbb N\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_result]
-        # GitHub says it's verified.
-        mock_verified.return_value = True
+    def test_no_range_resolves_defers_without_crashing(self) -> None:
+        """An unavailable local range defers to server policy without a local verdict."""
+        run_git = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "", ""),
+                *[subprocess.CompletedProcess([], 128, "", "unknown ref") for _ in range(4)],
+            ]
+        )
+        verified = Mock(side_effect=AssertionError("unexpected API check"))
+        prs_module._assert_branch_commits_signed(
+            "feature-branch", base="main", run_git=run_git, verify_commit=verified
+        )
+        assert run_git.call_count == 5
+        verified.assert_not_called()
 
-        # Must NOT raise.
-        _assert_branch_commits_signed("feature-branch", base="main")
-        mock_verified.assert_called_once_with("aaa111bbb")
-
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
-    @patch("hephaestus.automation.github_api.run")
-    def test_local_unverifiable_and_github_unverified_still_raises(
-        self, mock_run: Any, mock_verified: Any
-    ) -> None:
-        from hephaestus.automation.github_api import _assert_branch_commits_signed
-
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        log_result = Mock(returncode=0, stdout="aaa111bbb N\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_result]
-        # GitHub also says unverified (genuinely unsigned) -> policy violation.
-        mock_verified.return_value = False
-
-        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
-            _assert_branch_commits_signed("feature-branch", base="main")
-
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
-    @patch("hephaestus.automation.github_api.run")
-    def test_good_local_signature_skips_api_call(self, mock_run: Any, mock_verified: Any) -> None:
-        from hephaestus.automation.github_api import _assert_branch_commits_signed
-
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        log_result = Mock(returncode=0, stdout="aaa111bbb G\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_result]
-
-        _assert_branch_commits_signed("feature-branch", base="main")
-        # 'G' is locally good — no API round-trip needed.
-        mock_verified.assert_not_called()
-
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
-    @patch("hephaestus.automation.github_api.run")
-    def test_branch_only_resolvable_as_origin_ref_does_not_crash(
-        self, mock_run: Any, mock_verified: Any
-    ) -> None:
-        """Regression #2108: bare <branch> absent, origin/<branch> present."""
-        from hephaestus.automation.github_api import _assert_branch_commits_signed
-
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        # First candidate origin/main..origin/branch resolves; commits are signed.
-        log_ok = Mock(returncode=0, stdout="5eb2be44 G\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_ok]
-
-        # Must NOT raise CalledProcessError or ValueError.
-        _assert_branch_commits_signed("2107-auto-impl", base="main")
-        mock_verified.assert_not_called()
-
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
-    @patch("hephaestus.automation.github_api.run")
-    def test_no_range_resolves_defers_without_crashing(
-        self, mock_run: Any, mock_verified: Any
-    ) -> None:
-        """Regression #2108: no candidate range resolves -> warn, no crash."""
-        from hephaestus.automation.github_api import _assert_branch_commits_signed
-
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        fail = Mock(returncode=128, stdout="", stderr="fatal: ambiguous argument")
-        # fetch + 4 candidate ranges all fail.
-        mock_run.side_effect = [fetch_result, fail, fail, fail, fail]
-
-        # Must NOT raise; defers to GitHub verification.
-        _assert_branch_commits_signed("2107-auto-impl", base="main")
-        mock_verified.assert_not_called()
-
-    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
-    @patch("hephaestus.automation.github_api.run")
-    def test_genuinely_unsigned_still_raises_after_resolution(
-        self, mock_run: Any, mock_verified: Any
-    ) -> None:
-        """Unsigned commits on a resolvable range still raise (unchanged)."""
-        from hephaestus.automation.github_api import _assert_branch_commits_signed
-
-        fetch_result = Mock(returncode=0, stdout="", stderr="")
-        log_bad = Mock(returncode=0, stdout="deadbeef N\n", stderr="")
-        mock_run.side_effect = [fetch_result, log_bad]
-        mock_verified.return_value = False
-
-        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
-            _assert_branch_commits_signed("2107-auto-impl", base="main")
+    def test_failed_fetch_uses_an_existing_local_range(self) -> None:
+        """An ordinary fetch failure can use a valid local base and branch."""
+        run_git = Mock(
+            side_effect=[OSError("offline"), subprocess.CompletedProcess([], 0, "abc123 G\n", "")]
+        )
+        prs_module._assert_branch_commits_signed(
+            "feature-branch", base="main", run_git=run_git, verify_commit=lambda _oid: False
+        )
+        assert run_git.call_count == 2
 
 
 class TestGhCommitIsVerified:
-    """``_gh_commit_is_verified`` fail-safe behavior (#1426)."""
+    """The remote signature check uses the explicit repository and runner."""
 
-    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_returns_true_when_github_reports_verified(self, mock_gh: Any, _mock_info: Any) -> None:
-        from hephaestus.automation.github_api import _gh_commit_is_verified
+    @pytest.mark.parametrize(("stdout", "verified"), [("true\n", True), ("false\n", False)])
+    def test_uses_the_supplied_repository(self, stdout: str, verified: bool) -> None:
+        """Read verification from the selected repository without ambient Git lookup."""
+        run_gh = Mock(return_value=subprocess.CompletedProcess([], 0, stdout, ""))
+        assert (
+            prs_module._gh_commit_is_verified(
+                "deadbeef", repository=("owner", "repo"), run_gh=run_gh
+            )
+            is verified
+        )
+        run_gh.assert_called_once_with(
+            ["api", "repos/owner/repo/commits/deadbeef", "--jq", ".commit.verification.verified"]
+        )
 
-        mock_gh.return_value = Mock(stdout="true\n")
-        assert _gh_commit_is_verified("deadbeef") is True
-
-    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
-    @patch(
-        "hephaestus.automation.github_api._gh_call",
-        side_effect=RuntimeError("api down"),
-    )
-    def test_returns_false_on_lookup_failure(self, _mock_gh: Any, _mock_info: Any) -> None:
-        """#1426: a gh lookup failure is logged and fail-safe returns False.
-
-        Covers the formerly ``# pragma: no cover`` fallback handler; the caller
-        falls back to the strict local verdict (treated as unverified).
-        """
-        from hephaestus.automation.github_api import _gh_commit_is_verified
-
-        assert _gh_commit_is_verified("deadbeef") is False
+    def test_returns_false_on_lookup_failure(self) -> None:
+        """A failed API read cannot supply positive signature evidence."""
+        run_gh = Mock(side_effect=RuntimeError("api down"))
+        assert not prs_module._gh_commit_is_verified(
+            "deadbeef", repository=("owner", "repo"), run_gh=run_gh
+        )
 
 
 class TestWriteSecureCompatibility:

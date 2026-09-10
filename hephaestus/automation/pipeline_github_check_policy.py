@@ -11,8 +11,6 @@ from threading import Event
 from typing import cast
 from urllib.parse import quote
 
-import hephaestus.automation.github_api as github_api
-
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_merge_rules import (
     RequiredCheck as RequiredCheck,
@@ -78,10 +76,12 @@ def _request(
     remaining = deadline_s - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("merge-policy read deadline expired")
-    return github_api.gh_call(
+    return host._deadline_gh_call(
         argv,
         check=False,
         timeout=min(float(host._gh_timeout), remaining),
+        deadline_s=deadline_s,
+        shutdown=cancellation,
     )
 
 

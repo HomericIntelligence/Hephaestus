@@ -12,7 +12,7 @@ import pytest
 from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.agents.model_selection import AgentModelSelection
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.plan_journal import publish_plan_revision
 from hephaestus.automation.pipeline.routing import Disposition
@@ -36,9 +36,8 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.review_journal import (
-    HISTORY_MARKER,
-    archive_plan_body,
-    archive_review_body,
+    IssueComment,
+    journal_snapshot,
     plan_fingerprint,
     render_current_plan,
     render_current_review,
@@ -86,6 +85,22 @@ def _seed_canonical_plan(github: FakeStageGitHub, issue: int, plan: str = "Durab
         render_current_plan(plan),
         render_pending_review(revision=1),
     ]
+
+
+def _review_item(make_work_item: Any, github: FakeStageGitHub, **kwargs: Any) -> Any:
+    """Create an EVAL fixture with an admitted canonical plan identity."""
+    item = make_work_item(**kwargs)
+    try:
+        snapshot = journal_snapshot(github.issue_comments(item.issue))
+    except RuntimeError:
+        # The test exercises rejection of this invalid journal in the stage.
+        return item
+    if not snapshot.current_plan:
+        _seed_canonical_plan(github, item.issue)
+        snapshot = journal_snapshot(github.issue_comments(item.issue))
+    item.payload.setdefault("plan_text", snapshot.current_plan)
+    item.payload.setdefault("plan_revision", snapshot.revision)
+    return item
 
 
 def _fence_present(prompt: str, label: str) -> bool:
@@ -164,10 +179,13 @@ def test_amend_history_excludes_superseded_review_artifacts() -> None:
     """Amend context does not revive an archived NOGO critique."""
     history = plan_review._plan_history(
         [
-            "<!-- hephaestus-plan-history:revision=1:kind=plan -->\nPlan v1",
-            "<!-- hephaestus-plan-history:revision=1:kind=review -->\nReview v1",
-            render_current_plan("Plan v2", revision=2),
-            render_current_review("Review v1", revision=1),
+            IssueComment(body=body, viewer_did_author=True)
+            for body in (
+                "<!-- hephaestus-plan-history:revision=1:kind=plan -->\nPlan v1",
+                "<!-- hephaestus-plan-history:revision=1:kind=review -->\nReview v1",
+                render_current_plan("Plan v2", revision=2),
+                render_current_review("Review v1", revision=1),
+            )
         ]
     )
 
@@ -290,29 +308,6 @@ class TestPlanReviewStageOnEnter:
         assert item.payload["plan_text"] == "Durable plan"
         assert item.payload["plan_revision"] == 4
 
-    def test_restart_reconciles_legacy_archive_without_appending_review(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        stage = PlanReviewStage()
-        github = FakeStageGitHub()
-        github.comments[2] = [
-            render_current_plan("Plan 1", revision=1),
-            render_current_review("Needs tests.\n\nstate:plan-no-go", revision=1),
-            archive_plan_body(1, "Plan 1", "Plan 2 with tests"),
-        ]
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=2, state="ENTER")
-
-        assert stage.on_enter(item, ctx) is None
-
-        assert item.payload["plan_text"] == "Plan 2 with tests"
-        assert item.payload["plan_revision"] == 2
-        assert not any(
-            body.startswith(HISTORY_MARKER.format(revision=1, kind="review"))
-            for body in github.comments[2]
-        )
-        assert "Review pending for implementation plan revision 2" in github.comments[2][1]
-
     def test_reconciliation_failure_leaves_new_canonical_plan_retryable(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -340,9 +335,8 @@ class TestPlanReviewStageOnEnter:
         stage = PlanReviewStage()
         github = FailOnceGitHub()
         github.comments[3] = [
-            render_current_plan("Plan 1", revision=1),
+            render_current_plan("Plan 2 with tests", revision=2),
             render_current_review("Needs tests.\n\nstate:plan-no-go", revision=1),
-            archive_plan_body(1, "Plan 1", "Plan 2 with tests"),
         ]
         ctx = make_ctx(github=github)
         item = make_work_item(issue=3, state="ENTER")
@@ -702,7 +696,12 @@ class TestPlanReviewStageStep:
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
         github.comments[2766] = [
             render_current_plan("Plan v2", revision=2),
-            archive_review_body(1, "Earlier finding\n\nstate:plan-no-go"),
+            (
+                "<!-- hephaestus-plan-history:revision=1:kind=review -->\n"
+                "Earlier finding\n"
+                "\n"
+                "state:plan-no-go"
+            ),
         ]
         ctx = make_ctx(
             github=github,
@@ -767,7 +766,7 @@ class TestPlanReviewStageStep:
         binding = SimpleNamespace(cwd=Path("/tmp/planning"), revision="a" * 40, detached=True)
 
         class Manager:
-            def prepare(self, *args: Any, **kwargs: Any) -> object:
+            def prepare_bounded(self, *args: Any, **kwargs: Any) -> object:
                 calls.append((*args, kwargs))
                 return binding
 
@@ -783,14 +782,20 @@ class TestPlanReviewStageStep:
                 "_synced_default_branch_sha": "a" * 40,
             },
         )
-        ctx = make_ctx(paths=SimpleNamespace(source_workspaces=Manager()))
+        ctx = make_ctx(paths=SimpleNamespace(source_workspaces=Manager()), now_fn=lambda: 100.0)
 
         result = PlanReviewStage().step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.workspace is binding
-        assert calls == [(2998, SourceLane.REVIEW, "a" * 40, {"branch": None})]
+        assert len(calls) == 1
+        assert calls[0][:3] == (2998, SourceLane.REVIEW, "a" * 40)
+        options = calls[0][3]
+        assert set(options) == {"branch", "deadline"}
+        assert options["branch"] is None
+        assert options["deadline"].expires_at == 145.0
+        assert options["deadline"].shutdown is ctx.cancellation
 
     def test_review_wait_threads_prior_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """A later review round passes the prior review text to the prompt."""
@@ -848,7 +853,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-        item = make_work_item(issue=2, state="EVAL")
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -877,7 +882,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = DroppedLabelGitHub(labels=[STATE_NEEDS_PLAN])
         ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-        item = make_work_item(issue=202, state="EVAL")
+        item = _review_item(make_work_item, github, issue=202, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -899,7 +904,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = PartialLabelGitHub(labels=[STATE_PLAN_NO_GO])
         ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-        item = make_work_item(issue=203, state="EVAL")
+        item = _review_item(make_work_item, github, issue=203, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -915,7 +920,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED])
         ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-        item = make_work_item(issue=204, state="EVAL")
+        item = _review_item(make_work_item, github, issue=204, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -950,7 +955,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = PartialLabelGitHub(labels=[initial_label])
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=205, state="EVAL")
+        item = _review_item(make_work_item, github, issue=205, state="EVAL")
         item.payload["review_verdict"] = _verdict(verdict)
 
         result = stage.step(item, ctx)
@@ -963,15 +968,14 @@ class TestPlanReviewStageStep:
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """GO keeps the approved plan on the source issue."""
-        from hephaestus.automation.arming_state import LearningJournalStore
-
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         journal = LearningJournalStore(lambda: tmp_path)
         ctx = make_ctx(github=github, learning_journal=journal)
-        item = make_work_item(issue=3, state="EVAL")
+        item = _review_item(make_work_item, github, issue=3, state="EVAL")
         item.payload["plan_text"] = "# Approved plan\n\nImplement the queue."
         item.payload["plan_revision"] = 8
+        github.comments[item.issue] = [render_current_plan(item.payload["plan_text"], revision=8)]
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -987,7 +991,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=4, state="EVAL")
+        item = _review_item(make_work_item, github, issue=4, state="EVAL")
         item.payload["review_round"] = 0  # first review round of the cycle
         item.payload["review_verdict"] = _verdict("NOGO")
 
@@ -1011,7 +1015,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=44, state="EVAL")
+        item = _review_item(make_work_item, github, issue=44, state="EVAL")
         item.payload["review_verdict"] = ReviewVerdict(
             grade=None,
             verdict="BLOCKED",
@@ -1022,8 +1026,9 @@ class TestPlanReviewStageStep:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.BLOCKED
-        assert github.comments[44][0].startswith(PLAN_REVIEW_CANONICAL_MARKER)
-        assert "Waiting for the API decision in #41." in github.comments[44][0]
+        snapshot = journal_snapshot(github.issue_comments(44))
+        assert snapshot.current_review_revision == snapshot.revision
+        assert "Waiting for the API decision in #41." in snapshot.current_review
         assert github.mutation_log == [
             (
                 "edit_labels",
@@ -1042,7 +1047,7 @@ class TestPlanReviewStageStep:
             f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
             f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
         ]
-        item = make_work_item(issue=45, state="EVAL")
+        item = _review_item(make_work_item, github, issue=45, state="EVAL")
         item.payload["review_verdict"] = _verdict("BLOCKED")
 
         with pytest.raises(RuntimeError, match="plan and review"):
@@ -1060,9 +1065,8 @@ class TestPlanReviewStageStep:
             f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
             f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
         ]
-        item = make_work_item(issue=46, state="EVAL")
+        item = _review_item(make_work_item, github, issue=46, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
-        item.payload["review_comment_published"] = True
 
         with pytest.raises(RuntimeError, match="plan and review"):
             stage.step(item, make_ctx(github=github))
@@ -1075,7 +1079,7 @@ class TestPlanReviewStageStep:
         """A blocked review payload is checked before its label-first latch."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
-        item = make_work_item(issue=47, state="EVAL")
+        item = _review_item(make_work_item, github, issue=47, state="EVAL")
         item.payload["review_verdict"] = ReviewVerdict(
             grade=None,
             verdict="BLOCKED",
@@ -1095,7 +1099,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=5, state="EVAL")
+        item = _review_item(make_work_item, github, issue=5, state="EVAL")
         item.payload["review_round"] = 2  # this verdict is round 3/3
         item.payload["review_verdict"] = _verdict("NOGO")
 
@@ -1118,7 +1122,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=6, state="EVAL")
+        item = _review_item(make_work_item, github, issue=6, state="EVAL")
         item.payload["review_round"] = 2
         item.attempts["plan_cycles"] = 1  # this fail-back becomes 2/2
         item.payload["review_verdict"] = _verdict("NOGO")
@@ -1138,7 +1142,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=7, state="EVAL")
+        item = _review_item(make_work_item, github, issue=7, state="EVAL")
         item.payload["review_round"] = 2
         item.payload["review_verdict"] = _verdict("AMBIGUOUS")
 
@@ -1158,7 +1162,7 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=8, state="EVAL")
+        item = _review_item(make_work_item, github, issue=8, state="EVAL")
         item.payload["review_verdict"] = _verdict("ERROR")
 
         result = stage.step(item, ctx)
@@ -1174,7 +1178,7 @@ class TestPlanReviewStageStep:
         """EVAL without a stored verdict retries instead of guessing."""
         stage = PlanReviewStage()
         ctx = make_ctx()
-        item = make_work_item(issue=9, state="EVAL")
+        item = _review_item(make_work_item, ctx.github, issue=9, state="EVAL")
 
         result = stage.step(item, ctx)
 
@@ -1221,7 +1225,7 @@ class TestPlanReviewStageStep:
         binding = SimpleNamespace(cwd=Path("/tmp/planning"), revision="a" * 40, detached=True)
 
         class Manager:
-            def prepare(self, *args: Any, **kwargs: Any) -> object:
+            def prepare_bounded(self, *args: Any, **kwargs: Any) -> object:
                 calls.append((*args, kwargs))
                 return binding
 
@@ -1236,14 +1240,20 @@ class TestPlanReviewStageStep:
                 "_synced_default_branch_sha": "a" * 40,
             },
         )
-        ctx = make_ctx(paths=SimpleNamespace(source_workspaces=Manager()))
+        ctx = make_ctx(paths=SimpleNamespace(source_workspaces=Manager()), now_fn=lambda: 100.0)
 
         result = PlanReviewStage().step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.workspace is binding
-        assert calls == [(2998, SourceLane.REVIEW, "a" * 40, {"branch": None})]
+        assert len(calls) == 1
+        assert calls[0][:3] == (2998, SourceLane.REVIEW, "a" * 40)
+        options = calls[0][3]
+        assert set(options) == {"branch", "deadline"}
+        assert options["branch"] is None
+        assert options["deadline"].expires_at == 145.0
+        assert options["deadline"].shutdown is ctx.cancellation
 
     def test_plan_review_never_submits_learning_job(
         self, make_ctx: Any, make_work_item: Any
@@ -1251,8 +1261,9 @@ class TestPlanReviewStageStep:
         """The plan-review stage does not create a learning job."""
         stage = PlanReviewStage()
         ctx = make_ctx(github=FakeStageGitHub())
-        item = make_work_item(issue=11, state="EVAL")
+        item = _review_item(make_work_item, ctx.github, issue=11, state="EVAL")
         item.payload["plan_text"] = "# My Plan\n..."
+        ctx.github.comments[item.issue] = [render_current_plan(item.payload["plan_text"])]
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -1393,7 +1404,7 @@ class TestPlanReviewStageOnJobDone:
         github = FakeStageGitHub()
         github.comments[2] = [render_current_plan("Plan v1", revision=1)]
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=2, state="EVAL")
+        item = _review_item(make_work_item, github, issue=2, state="EVAL")
         item.payload.update(
             plan_text="Plan v1",
             plan_revision=1,
@@ -1533,8 +1544,15 @@ class TestPlanReviewStageOnJobDone:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         github.comments[8] = [
-            archive_plan_body(1, "Plan v1", "Plan v2"),
-            archive_review_body(1, "Review v1\n\nstate:plan-no-go"),
+            (
+                "<!-- hephaestus-plan-history:revision=1:kind=plan -->\n"
+                "<!-- hephaestus-plan-history:old-plan -->\n"
+                "Plan v1\n"
+                "<!-- hephaestus-plan-history:new-plan -->\n"
+                "Plan v2"
+            ),
+            "<!-- hephaestus-plan-history:revision=1:kind=review -->\n"
+            "Review v1\n\nstate:plan-no-go",
             render_current_plan("Plan v2", revision=2),
             render_current_review("Review v2\n\nstate:plan-no-go", revision=2),
         ]
@@ -1559,7 +1577,7 @@ class TestPlanReviewStageOnJobDone:
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
-        secret = f"{'token'}=known-test-value"
+        secret = "token=" + "known-test-value"
         result = JobResult(ok=False, error=f"RuntimeError: {secret}\n\x1b[31m")
 
         with caplog.at_level("WARNING", logger=plan_review.__name__):
@@ -1577,7 +1595,7 @@ class TestPlanReviewStageOnJobDone:
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
-        secret = f"{'token'}=known-test-value"
+        secret = "token=" + "known-test-value"
         result = JobResult(
             ok=False,
             error="rc=1",
@@ -1605,7 +1623,7 @@ class TestPlanReviewStageOnJobDone:
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
-        secret = f"{'password'}=known-test-value"
+        secret = "password=" + "known-test-value"
         result = JobResult(ok=False, error="rc=1", stderr_tail=f"{secret}\n\x1b[31munknown")
 
         with caplog.at_level("WARNING", logger=plan_review.__name__):
@@ -1684,7 +1702,7 @@ class TestDurableWriteOrdering:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-        item = make_work_item(issue=11, state="EVAL")
+        item = _review_item(make_work_item, github, issue=11, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -1714,7 +1732,7 @@ class TestDurableWriteOrdering:
         journal = OrderedJournal(lambda: tmp_path)
         github = OrderedGitHub()
         ctx = make_ctx(github=github, learning_journal=journal)
-        item = make_work_item(issue=11, state="EVAL")
+        item = _review_item(make_work_item, github, issue=11, state="EVAL")
         item.payload.update(
             {
                 "review_verdict": _verdict("GO"),
@@ -1722,6 +1740,7 @@ class TestDurableWriteOrdering:
                 "plan_revision": 4,
             }
         )
+        github.comments[item.issue] = [render_current_plan(item.payload["plan_text"], revision=4)]
 
         result = PlanReviewStage().step(item, ctx)
 
@@ -1736,7 +1755,7 @@ class TestDurableWriteOrdering:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=12, state="EVAL")
+        item = _review_item(make_work_item, github, issue=12, state="EVAL")
         item.payload["review_round"] = 2  # this verdict is round 3/3
         item.payload["review_verdict"] = _verdict("NOGO")
 
@@ -1760,11 +1779,12 @@ class TestDurableWriteOrdering:
         github = FailingCommentGitHub(labels=[STATE_NEEDS_PLAN])
         github.gh_issue_json(13)
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=13, state="EVAL")
+        item = _review_item(make_work_item, github, issue=13, state="EVAL")
         item.payload["review_verdict"] = _verdict("BLOCKED")
 
-        with pytest.raises(RuntimeError, match="comment write failed"):
-            stage.step(item, ctx)
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
 
         assert github.labels[13] == {STATE_PLAN_BLOCKED}
         assert github.mutation_log == [
@@ -1791,11 +1811,12 @@ class TestDurableWriteOrdering:
         stage = PlanReviewStage()
         github = FailOnceCommentGitHub(labels=[STATE_NEEDS_PLAN])
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=130, state="EVAL")
+        item = _review_item(make_work_item, github, issue=130, state="EVAL")
         item.payload["review_verdict"] = _verdict("BLOCKED")
 
-        with pytest.raises(RuntimeError, match="comment write failed"):
-            stage.step(item, ctx)
+        failed_publication = stage.step(item, ctx)
+        assert isinstance(failed_publication, StageOutcome)
+        assert failed_publication.disposition is Disposition.RETRY
         assert github.labels[130] == {STATE_PLAN_BLOCKED}
 
         restarted = make_work_item(issue=130, state="ENTER")
@@ -1806,8 +1827,9 @@ class TestDurableWriteOrdering:
             "plan requires external intervention",
         )
         assert github.labels[130] == {STATE_PLAN_BLOCKED}
-        assert github.comments[130][0].endswith(STATE_PLAN_BLOCKED)
-        assert "interrupted audit write" in github.comments[130][0]
+        snapshot = journal_snapshot(github.issue_comments(130))
+        assert snapshot.current_review.endswith(STATE_PLAN_BLOCKED)
+        assert "interrupted audit write" in snapshot.current_review
 
 
 class TestStaleVerdictAndErrorAccounting:
@@ -1826,7 +1848,7 @@ class TestStaleVerdictAndErrorAccounting:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=30, state="EVAL")
+        item = _review_item(make_work_item, github, issue=30, state="EVAL")
         item.payload["review_verdict"] = _verdict("NOGO")  # round 1
         item.payload["review_round"] = 0
 
@@ -1885,7 +1907,7 @@ class TestStaleVerdictAndErrorAccounting:
         github = FakeStageGitHub()
         _seed_canonical_plan(github, 31)
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=31, state="EVAL")
+        item = _review_item(make_work_item, github, issue=31, state="EVAL")
         assert stage.on_enter(item, ctx) is None
 
         # Round 1: NOGO -> amend (round 1/3 consumed).
@@ -1908,7 +1930,8 @@ class TestStaleVerdictAndErrorAccounting:
             ),
         ]  # prior NOGO is durable; ERROR adds no mutation
 
-        # Round 2 rerun: a real NOGO — the cycle still has amends left.
+        # A completed retry supplies a new review result.
+        item.state = "EVAL"
         item.payload["review_verdict"] = _verdict("NOGO")
         result = stage.step(item, ctx)
         assert isinstance(result, Continue)
@@ -1920,6 +1943,7 @@ class TestStaleVerdictAndErrorAccounting:
                 "edit_labels",
                 (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
             ),
+            ("gh_issue_upsert_comment", (31, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
                 (31, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
@@ -1931,15 +1955,17 @@ class TestStaleVerdictAndErrorAccounting:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=32, state="EVAL")
+        item = _review_item(make_work_item, github, issue=32, state="EVAL")
 
         for expected_retry in range(1, REVIEW_ERROR_RETRY_CAP + 1):
+            item.state = "EVAL"
             item.payload["review_verdict"] = _verdict("ERROR")
             outcome = stage.step(item, ctx)
             assert isinstance(outcome, StageOutcome)
             assert outcome.disposition == Disposition.RETRY
             assert item.payload["review_error_retries"] == expected_retry
 
+        item.state = "EVAL"
         item.payload["review_verdict"] = _verdict("ERROR")
         outcome = stage.step(item, ctx)
 
@@ -2044,7 +2070,7 @@ class TestCycleRelativeBudget:
 class TestAtomicLabelWrites:
     """Verdict labels use one fail-closed transition."""
 
-    def test_atomic_label_failure_propagates_before_advance(
+    def test_atomic_label_failure_retries_before_advance(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A failed durable transition cannot return an advancing outcome."""
@@ -2056,11 +2082,12 @@ class TestAtomicLabelWrites:
         stage = PlanReviewStage()
         github = EditFailsGitHub()
         ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-        item = make_work_item(issue=34, state="EVAL")
+        item = _review_item(make_work_item, github, issue=34, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
-        with pytest.raises(RuntimeError, match="atomic edit failed"):
-            stage.step(item, ctx)
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
 
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (34, PLAN_REVIEW_CANONICAL_MARKER)),
@@ -2070,7 +2097,7 @@ class TestAtomicLabelWrites:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
-        item = make_work_item(issue=35, state="EVAL")
+        item = _review_item(make_work_item, github, issue=35, state="EVAL")
         item.payload["review_round"] = 2
         item.payload["review_verdict"] = _verdict("NOGO")
 
@@ -2098,7 +2125,8 @@ class TestReviewFlowWithFakePool:
         github = FakeStageGitHub()
         ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=20, state="REVIEW_WAIT")
-        item.payload["plan_text"] = "# Plan"
+        _seed_canonical_plan(github, 20, "# Plan")
+        assert stage.on_enter(item, ctx) is None
 
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)

@@ -15,28 +15,37 @@ from typing import Any, cast
 import pytest
 
 import hephaestus.agents.runtime as agent_runtime
+from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
     AthenaSkillRequest,
     AthenaSkillResult,
 )
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import GitJob, JobHandle
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, LearningIntent, WorkItem
 from hephaestus.automation.review_journal import render_current_plan
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from hephaestus.utils import subprocess_registry
 from hephaestus.utils.helpers import run_subprocess
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    claim_test_item,
+    fake_worker_factories,
+)
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+from tests.unit.automation.test_source_worktree import _repository
 
 
 def test_coordinator_exposes_independent_learning_capacity(tmp_path: Path) -> None:
     """Learning capacity is configured separately from the main work window."""
-    assert "auxiliary_pool" in inspect.signature(Coordinator).parameters
+    assert "auxiliary_pool_factory" in inspect.signature(Coordinator).parameters
     config = PipelineConfig(
         org="org",
         repos=["repo"],
@@ -44,6 +53,7 @@ def test_coordinator_exposes_independent_learning_capacity(tmp_path: Path) -> No
         learning_workers=2,
         learning_queue_capacity=3,
         projects_dir=tmp_path,
+        rate_guard_enabled=False,
     )
     assert config.learning_workers == 2
     assert config.learning_queue_capacity == 3
@@ -59,9 +69,10 @@ def test_single_main_worker_progresses_while_learning_is_queued(tmp_path: Path) 
             learning_workers=1,
             learning_queue_capacity=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     learning = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLAN_REVIEW)
@@ -86,10 +97,10 @@ def test_learning_cleanup_does_not_wait_for_main_capacity(tmp_path: Path) -> Non
             learning_workers=1,
             learning_queue_capacity=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     learning = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING)
@@ -101,9 +112,10 @@ def test_learning_cleanup_does_not_wait_for_main_capacity(tmp_path: Path) -> Non
     assert coordinator._handoff_item(learning, StageName.FINISHED, enter=True)
 
     main_handle = JobHandle(
-        job=GitJob(repo="repo", op="push", timeout_s=1),
+        job=GitJob(repo="repo", op="rebase", timeout_s=1),
         on_done_state="DONE",
     )
+    claim_test_item(coordinator, unrelated)
     coordinator.in_flight[main_handle] = unrelated
     coordinator.inflight_per_repo["repo"] = 1
     assert coordinator.live_work_count == 1
@@ -122,10 +134,10 @@ def test_opposite_lane_handoffs_do_not_deadlock_at_capacity_one(tmp_path: Path) 
             learning_workers=1,
             learning_queue_capacity=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     returning = WorkItem(
@@ -170,10 +182,10 @@ def test_exact_stage_opposite_lane_handoffs_exchange_at_capacity_one(tmp_path: P
             learning_workers=1,
             learning_queue_capacity=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     returning = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING)
@@ -205,10 +217,10 @@ def test_repeated_opposite_lane_recovery_stays_bounded_by_active_leases(tmp_path
             learning_workers=1,
             learning_queue_capacity=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     main = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLANNING)
@@ -243,9 +255,10 @@ def test_scoped_plan_learning_resumes_at_scoped_sink(tmp_path: Path) -> None:
             repos=["repo"],
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLAN_REVIEW)
@@ -258,12 +271,16 @@ def test_scoped_plan_learning_resumes_at_scoped_sink(tmp_path: Path) -> None:
         )
     )
 
-    coordinator._route(item, StageOutcome(Disposition.ADVANCE, "plan approved"))
+    coordinator._route(
+        claim_test_item(coordinator, item), StageOutcome(Disposition.ADVANCE, "plan approved")
+    )
 
     assert item.stage is StageName.LEARNING
     assert item.learning_resume_stage is StageName.FINISHED
 
-    coordinator._route(item, StageOutcome(Disposition.ADVANCE, "learning terminal"))
+    coordinator._route(
+        claim_test_item(coordinator, item), StageOutcome(Disposition.ADVANCE, "learning terminal")
+    )
 
     assert item.stage is StageName.FINISHED
     assert item.result is not None
@@ -280,9 +297,10 @@ def test_restart_reconstructs_pending_intent_before_primary_stage(tmp_path: Path
             repos=["repo"],
             projects_dir=tmp_path,
             repo_roots={"repo": repo_root},
+            rate_guard_enabled=False,
         ),
         github=github,
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     approved_plan = "Use the approved plan."
@@ -308,9 +326,10 @@ def test_restart_restores_post_merge_cleanup_obligation(tmp_path: Path) -> None:
             repos=["repo"],
             projects_dir=tmp_path,
             repo_roots={"repo": repo_root},
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(pr_state={"state": "MERGED"}),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     original = WorkItem(
@@ -381,9 +400,10 @@ def test_malformed_recovery_record_does_not_poison_source_item(tmp_path: Path) -
             repos=["repo"],
             projects_dir=tmp_path,
             repo_roots={"repo": repo_root},
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     journal = coordinator._ctx_for_repo("repo").learning_journal
@@ -408,12 +428,12 @@ def test_malformed_recovery_record_does_not_poison_source_item(tmp_path: Path) -
     assert malformed.exists()
 
 
-def test_merged_legacy_item_reconstructs_missing_post_merge_intent(tmp_path: Path) -> None:
-    """A merged item without a new journal record enters learning once."""
+def test_merged_item_without_durable_intent_does_not_create_learning_work(tmp_path: Path) -> None:
+    """A merged item requires a durable intent before it can enter learning."""
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(pr_state={"state": "MERGED"}),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     item = WorkItem(
@@ -427,18 +447,17 @@ def test_merged_legacy_item_reconstructs_missing_post_merge_intent(tmp_path: Pat
     coordinator._restore_learning_intents(item, StageName.FINISHED, "already merged")
 
     intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
-    assert item.stage is StageName.LEARNING
-    assert item.learning_intents == [intent]
-    record = coordinator._ctx_for_repo("repo").learning_journal.load(intent.key)
-    assert record is not None and record["status"] == "pending"
+    assert item.stage is StageName.FINISHED
+    assert item.learning_intents == []
+    assert coordinator._ctx_for_repo("repo").learning_journal.load(intent.key) is None
 
 
 def test_merged_discovery_skips_terminal_learning_intent(tmp_path: Path) -> None:
     """Repeated discovery does not rebuild a completed auxiliary detour."""
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(pr_state={"state": "MERGED"}),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
@@ -470,9 +489,10 @@ def test_restart_restores_cleanup_after_learning_became_terminal(tmp_path: Path)
             repos=["repo"],
             projects_dir=tmp_path,
             repo_roots={"repo": repo_root},
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(pr_state={"state": "MERGED"}),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     original = WorkItem(
@@ -532,13 +552,15 @@ def test_no_learn_and_no_advise_keep_cleanup_on_separate_pool(
             projects_dir=tmp_path,
             enable_learn=False,
             no_advise=True,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
         install_signals=False,
     )
 
     assert coordinator.auxiliary_pool is not coordinator.pool
-    assert coordinator._auxiliary_pool_separate
+    assert coordinator.pool is not coordinator.auxiliary_pool
+    assert coordinator.completion_q is not coordinator.auxiliary_completion_q
     coordinator._shutdown_pool()
 
 
@@ -550,9 +572,10 @@ def test_no_learn_disables_recovered_intent_and_keeps_primary_route(tmp_path: Pa
             repos=["repo"],
             projects_dir=tmp_path,
             enable_learn=False,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
@@ -573,9 +596,15 @@ def test_no_learn_disables_recovered_intent_and_keeps_primary_route(tmp_path: Pa
 def test_no_learn_restores_terminal_cleanup_before_disabling(tmp_path: Path) -> None:
     """The no-learn switch preserves worktree cleanup from the journal."""
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, enable_learn=False),
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=tmp_path,
+            enable_learn=False,
+            rate_guard_enabled=False,
+        ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     original = WorkItem(
@@ -621,9 +650,9 @@ def test_no_learn_restores_terminal_cleanup_before_disabling(tmp_path: Path) -> 
 def test_pending_learning_ejection_keeps_cleanup_recoverable(tmp_path: Path) -> None:
     """Finished leaves the cleanup receipt pending until learning is terminal."""
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     item = WorkItem(
@@ -650,7 +679,7 @@ def test_pending_learning_ejection_keeps_cleanup_recoverable(tmp_path: Path) -> 
     outcome = finished.step(item, coordinator._ctx_for_repo("repo"))
 
     assert outcome == StageOutcome(Disposition.EJECT, "learning_cleanup_pending")
-    coordinator._route(item, outcome)
+    coordinator._route(claim_test_item(coordinator, item), outcome)
     record = journal.load(intent.key)
     assert record is not None
     assert record["status"] == "pending"
@@ -661,9 +690,9 @@ def test_pending_learning_ejection_keeps_cleanup_recoverable(tmp_path: Path) -> 
 def test_malformed_post_processing_quarantines_only_one_issue(tmp_path: Path) -> None:
     """One damaged cleanup receipt does not stop later repository discovery."""
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
@@ -702,10 +731,9 @@ def test_malformed_post_processing_quarantines_only_one_issue(tmp_path: Path) ->
 def test_post_merge_persistence_failure_keeps_confirmed_result(tmp_path: Path) -> None:
     """Late auxiliary persistence cannot poison a confirmed merge result."""
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     item = WorkItem(
@@ -723,7 +751,9 @@ def test_post_merge_persistence_failure_keeps_confirmed_result(tmp_path: Path) -
 
     cast(Any, journal).ensure_pending = fail_persistence
 
-    coordinator._route(item, StageOutcome(Disposition.FINISH_PASS, "merged"))
+    coordinator._route(
+        claim_test_item(coordinator, item), StageOutcome(Disposition.FINISH_PASS, "merged")
+    )
 
     assert item.stage is StageName.FINISHED
     assert item.result == ItemResult(
@@ -739,6 +769,10 @@ class _BlockingLearningHost:
     def __init__(self) -> None:
         self.started = threading.Event()
         self.release = threading.Event()
+
+    def cancel(self) -> None:
+        """Release the host test when shutdown cancels active work."""
+        self.release.set()
 
     def execute(self, request: object) -> AthenaSkillResult:
         self.started.set()
@@ -765,17 +799,9 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
 
     monkeypatch.setattr(agent_runtime, "run_agent_text", _harness_forbidden)
     monkeypatch.setattr(agent_runtime, "run_agent_session", _harness_forbidden)
-    monkeypatch.setattr(agent_runtime, "run_pi_text", _harness_forbidden)
-    monkeypatch.setattr(agent_runtime, "run_pi_session", _harness_forbidden)
     monkeypatch.setattr(agent_runtime, "preflight_pi_environment", _harness_forbidden)
+    repo_root, revision, _second = _repository(tmp_path)
     host = _BlockingLearningHost()
-    completions: queue.Queue = queue.Queue(maxsize=1)
-    auxiliary = AuxiliaryWorkerPool(
-        size=1,
-        shutdown=threading.Event(),
-        completion_q=completions,
-        athena_skill_executor=host,
-    )
     github = FakeStageGitHub(labels=[STATE_PLAN_GO])
     coordinator = Coordinator(
         PipelineConfig(
@@ -785,10 +811,14 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
             learning_workers=1,
             learning_queue_capacity=1,
             projects_dir=tmp_path,
+            repo_roots={"repo": repo_root},
+            rate_guard_enabled=False,
         ),
         github=github,
-        pool=FakeWorkerPool(),
-        auxiliary_pool=auxiliary,
+        pool_factory=FakeWorkerPool().factory,
+        auxiliary_pool_factory=lambda **kwargs: AuxiliaryWorkerPool(
+            **kwargs, athena_skill_executor=host
+        ),
         install_signals=False,
     )
     approved_plan = "Use the approved plan."
@@ -797,11 +827,15 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
         repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING, state="ENTER"
     )
     learning.learning_intents.append(LearningIntent.post_merge(repo="repo", issue=1, pr=2))
+    learning.payload["_synced_default_branch_sha"] = revision
+    coordinator._ctx_for(learning).paths.source_workspaces = SourceWorkspaceManager(
+        repo_root, repository="repo"
+    )
     learning.learning_resume_stage = StageName.IMPLEMENTATION
     assert coordinator._push_item(learning, StageName.LEARNING, enter=True)
     claimed = coordinator._claim_item(StageName.LEARNING)
     assert claimed is learning
-    coordinator._run_item(learning)
+    coordinator._run_item(claim_test_item(coordinator, learning))
     assert host.started.wait(timeout=2)
 
     unrelated = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2, stage=StageName.PLANNING)
@@ -811,7 +845,7 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
     assert coordinator._claim_item(StageName.PLANNING) is unrelated
     progressed = threading.Event()
 
-    class ProgressStage:
+    class ProgressStage(Stage):
         def on_enter(self, _item: WorkItem, _ctx: object) -> StageOutcome:
             progressed.set()
             return StageOutcome(Disposition.EJECT, "unrelated completed")
@@ -823,7 +857,7 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
             raise AssertionError("progress stage submits no job")
 
     coordinator.stages[StageName.PLANNING] = ProgressStage()
-    coordinator._run_item(unrelated)
+    coordinator._run_item(claim_test_item(coordinator, unrelated))
     assert progressed.is_set()
     assert unrelated.result is not None
     assert unrelated.result.passed
@@ -833,7 +867,7 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
     host.release.set()
     done, result = coordinator.auxiliary_completion_q.get(timeout=2)
     coordinator._handle_completion(done, result, auxiliary=True)
-    auxiliary.shutdown(mark_interrupted=False)
+    coordinator.auxiliary_pool.shutdown(mark_interrupted=False)
 
 
 @pytest.mark.skipif(not subprocess_registry.supported(), reason="requires POSIX process groups")
@@ -871,6 +905,7 @@ def test_forced_auxiliary_shutdown_stops_active_host_process() -> None:
             model="default",
             cwd=Path.cwd(),
             timeout_s=60,
+            workspace=WorkspaceBinding.external(Path.cwd()),
         )
     )
     pool.submit(request, "DONE")
@@ -889,9 +924,9 @@ def test_forced_auxiliary_shutdown_stops_active_host_process() -> None:
 def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: Path) -> None:
     """Post-merge learning drops review data and keeps the merge outcome."""
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, pr=7, stage=StageName.MERGE_WAIT)
@@ -900,7 +935,9 @@ def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: 
     item.payload.update({"pr_diff": "large raw diff", "review_audit": {"large": "value"}})
     item.learning_intents.append(LearningIntent.post_merge(repo="repo", issue=1, pr=7))
 
-    coordinator._route(item, StageOutcome(Disposition.FINISH_PASS, "merged"))
+    coordinator._route(
+        claim_test_item(coordinator, item), StageOutcome(Disposition.FINISH_PASS, "merged")
+    )
 
     assert item.stage is StageName.LEARNING
     assert item.payload["_learning_primary_reason"] == "merged"
@@ -913,7 +950,9 @@ def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: 
     assert item.branch == "1-fix"
 
     item.payload["learning_failures"] = [{"key": "intent", "error": "host failed"}]
-    coordinator._route(item, StageOutcome(Disposition.ADVANCE, "learning terminal"))
+    coordinator._route(
+        claim_test_item(coordinator, item), StageOutcome(Disposition.ADVANCE, "learning terminal")
+    )
 
     assert item.stage is StageName.FINISHED
     assert item.result is not None
@@ -932,10 +971,9 @@ def test_learning_completion_exception_parks_before_cleanup(tmp_path: Path) -> N
             raise OSError("journal unavailable")
 
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     item = WorkItem(
@@ -962,6 +1000,7 @@ def test_learning_completion_exception_parks_before_cleanup(tmp_path: Path) -> N
         )
     )
     handle = JobHandle(job=request, on_done_state="RESULT")
+    claim_test_item(coordinator, item)
     coordinator.auxiliary_in_flight[handle] = item
     coordinator.stages[StageName.LEARNING] = RaisingStage()  # type: ignore[assignment]
 
@@ -998,9 +1037,10 @@ def _queue_dual_lane_completions(
 
     main_item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLANNING)
     main_handle = JobHandle(
-        job=GitJob(repo="repo", op="push", timeout_s=1),
+        job=GitJob(repo="repo", op="rebase", timeout_s=1),
         on_done_state="DONE",
     )
+    claim_test_item(coordinator, main_item)
     coordinator.in_flight[main_handle] = main_item
     coordinator.inflight_per_repo[main_item.repo] = 1
 
@@ -1019,6 +1059,7 @@ def _queue_dual_lane_completions(
         ),
         on_done_state="DONE",
     )
+    claim_test_item(coordinator, auxiliary_item)
     coordinator.auxiliary_in_flight[auxiliary_handle] = auxiliary_item
 
     coordinator.completion_q.put((main_handle, JobResult(ok=True, duration_s=0.5)))
@@ -1031,14 +1072,9 @@ def _queue_dual_lane_completions(
 def test_dual_completion_channels_drain_all_published_results(tmp_path: Path) -> None:
     """One drain handles ready main and auxiliary results without loss."""
     coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["repo"],
-            projects_dir=tmp_path,
-        ),
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, rate_guard_enabled=False),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     main_stage, auxiliary_stage = _queue_dual_lane_completions(coordinator, tmp_path)
@@ -1065,10 +1101,10 @@ def test_dual_completion_saturation_drains_results_before_fault(tmp_path: Path) 
             learning_workers=3,
             learning_queue_capacity=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     main_stage, auxiliary_stage = _queue_dual_lane_completions(coordinator, tmp_path)
@@ -1093,8 +1129,7 @@ def test_deferred_learning_has_a_separate_summary_count(tmp_path: Path) -> None:
     coordinator = Coordinator(
         PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
-        auxiliary_pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), FakeWorkerPool()),
         install_signals=False,
     )
     _queue_dual_lane_completions(coordinator, tmp_path)
@@ -1105,4 +1140,4 @@ def test_deferred_learning_has_a_separate_summary_count(tmp_path: Path) -> None:
     coordinator.shutdown.set()
     coordinator._drain_completions()
     assert coordinator._auxiliary_job_failure_count == 0
-    assert getattr(coordinator, "_auxiliary_job_deferred_count", 0) == 1
+    assert coordinator._auxiliary_job_deferred_count == 1

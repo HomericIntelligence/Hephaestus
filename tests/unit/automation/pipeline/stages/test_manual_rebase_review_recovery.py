@@ -12,9 +12,10 @@ from hephaestus.automation.pipeline.seeding import IssueFacts, seed_entry_from_f
 from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import REBASE_WAIT, ImplementationStage
 from hephaestus.automation.state_labels import STATE_PLAN_GO
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 from tests.unit.automation.pipeline.stages.test_rebase_review_recovery import _proof, _record
+from tests.unit.automation.pipeline.stages.test_stage_implementation import _prepared_writer
 
 
 @pytest.mark.parametrize("failure", [None, "host_error", "wrong_head", "record_changed"])
@@ -44,7 +45,10 @@ def test_manual_restart_restores_review_before_rebase(make_ctx: Any, failure: st
     )
     ctx = make_ctx(github=github, config_overrides={"rebase": True})
     coordinator = Coordinator(
-        ctx.config, github=github, pool=FakeWorkerPool(), install_signals=False
+        ctx.config,
+        github=github,
+        **fake_worker_factories(FakeWorkerPool()),
+        install_signals=False,
     )
     item = coordinator._prepare_direct_item(entry, "test-repo", "f" * 40)
     assert item.stage is StageName.IMPLEMENTATION
@@ -54,6 +58,7 @@ def test_manual_restart_restores_review_before_rebase(make_ctx: Any, failure: st
     item.payload["rebase_reason"] = "manual"
     item.worktree = "/tmp/repo-writer"
     item.branch = "1-task"
+    _prepared_writer(item, revision=record.resulting_head_sha)
     stage = ImplementationStage()
     request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)

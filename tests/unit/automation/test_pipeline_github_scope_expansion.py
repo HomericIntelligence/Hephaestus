@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 import hephaestus.automation.github_api as github_api
-import hephaestus.automation.pipeline_github_scope_expansion as scope_expansion_adapter
+import hephaestus.automation.pipeline_github_transport as github_transport
 from hephaestus.automation.pipeline_github import PipelineGitHub
 
 
@@ -24,7 +24,7 @@ def _deny_github_calls(monkeypatch: pytest.MonkeyPatch) -> Generator[dict[str, M
         (PipelineGitHub, "_gh"),
         (PipelineGitHub, "_graphql"),
         (PipelineGitHub, "pull_request_reviews"),
-        (scope_expansion_adapter, "direct_gh_call"),
+        (github_transport, "gh_call"),
     ):
         boundary = Mock(name=name, side_effect=AssertionError(f"Unexpected GitHub call: {name}"))
         monkeypatch.setattr(target, name, boundary)
@@ -103,9 +103,9 @@ def test_all_repo_issues_uses_rest_pages_and_excludes_pull_requests(
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(pages.pop(0)), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
-
-    issues = PipelineGitHub("org", repo="repo", gh_timeout=30).all_repo_issues()
+    issues = PipelineGitHub(
+        "org", repo="repo", gh_timeout=30, command_runner=fake_gh_call
+    ).all_repo_issues()
 
     assert [issue["number"] for issue in issues] == [*range(1, 100), 101]
     assert calls == [
@@ -152,10 +152,11 @@ def test_merged_scope_expansion_pr_uses_all_child_timeline_pages(
         payload = _merged_pr_payload(73)
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    evidence = PipelineGitHub("org", repo="repo", gh_timeout=30).merged_scope_expansion_pr(41)
+    evidence = PipelineGitHub(
+        "org", repo="repo", gh_timeout=30, command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(41)
 
     assert evidence == {"merge_sha": "a" * 40, "base_branch": "main"}
     assert api_calls == [
@@ -206,9 +207,9 @@ def test_merged_scope_expansion_pr_returns_none_without_associated_pr(
         ]
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
-
-    evidence = PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+    evidence = PipelineGitHub(
+        "org", repo="repo", command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(41)
 
     assert evidence is None
 
@@ -243,10 +244,10 @@ def test_merged_scope_expansion_pr_rejects_malformed_associations(
     def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([event]), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
-
     with pytest.raises(RuntimeError, match="association is malformed"):
-        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
 
 
 def test_merged_scope_expansion_pr_rejects_multiple_associations(
@@ -266,11 +267,12 @@ def test_merged_scope_expansion_pr_rejects_multiple_associations(
             argv, 0, stdout=json.dumps(_merged_pr_payload(pr_number)), stderr=""
         )
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
     with pytest.raises(RuntimeError, match="multiple implementation"):
-        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
 
 
 @pytest.mark.parametrize(
@@ -327,11 +329,12 @@ def test_merged_scope_expansion_pr_rejects_invalid_merge_evidence(
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
     with pytest.raises(RuntimeError, match=expected_error):
-        PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41)
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
 
 
 def test_merged_scope_expansion_pr_returns_none_for_unmerged_association(
@@ -358,10 +361,14 @@ def test_merged_scope_expansion_pr_returns_none_for_unmerged_association(
         }
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    assert PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41) is None
+    assert (
+        PipelineGitHub("org", repo="repo", command_runner=fake_gh_call).merged_scope_expansion_pr(
+            41
+        )
+        is None
+    )
 
 
 def test_merged_scope_expansion_pr_accepts_canonical_branch_without_cross_reference(
@@ -380,10 +387,11 @@ def test_merged_scope_expansion_pr_accepts_canonical_branch_without_cross_refere
             argv, 0, stdout=json.dumps(_merged_pr_payload(73)), stderr=""
         )
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    assert PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(41) == {
+    assert PipelineGitHub(
+        "org", repo="repo", command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(41) == {
         "merge_sha": "a" * 40,
         "base_branch": "main",
     }
@@ -410,10 +418,11 @@ def test_merged_scope_expansion_pr_excludes_blocked_source_pr(
             argv, 0, stdout=json.dumps(_merged_pr_payload(73)), stderr=""
         )
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_gh_call)
     monkeypatch.setattr(PipelineGitHub, "_gh", fake_gh)
 
-    evidence = PipelineGitHub("org", repo="repo").merged_scope_expansion_pr(
+    evidence = PipelineGitHub(
+        "org", repo="repo", command_runner=fake_gh_call
+    ).merged_scope_expansion_pr(
         41,
         source_pr_number=2859,
     )
@@ -477,8 +486,8 @@ def test_repo_issues_rejects_malformed_pages(
 ) -> None:
     """Issue discovery rejects a non-list page and non-object page entries."""
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github_transport,
+        "gh_call",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps(payload), stderr=""
         ),
@@ -497,7 +506,7 @@ def test_repo_issues_stops_at_pagination_bound(monkeypatch: pytest.MonkeyPatch) 
         call_count += 1
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(full_page), stderr="")
 
-    monkeypatch.setattr(scope_expansion_adapter, "direct_gh_call", fake_call)
+    monkeypatch.setattr(github_transport, "gh_call", fake_call)
     with pytest.raises(RuntimeError, match="traversal exceeded"):
         PipelineGitHub("org", repo="repo")._repo_issues("all")
     assert call_count == 100
@@ -681,8 +690,8 @@ def test_timeline_association_rejects_additional_malformed_events(
 ) -> None:
     """Timeline association rejects malformed events, URLs, and pull-request links."""
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github_transport,
+        "gh_call",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps([event]), stderr=""
         ),
@@ -691,20 +700,14 @@ def test_timeline_association_rejects_additional_malformed_events(
         PipelineGitHub("org", repo="repo")._scope_expansion_timeline_prs(41)
 
 
-def test_timeline_association_requires_repository_scope() -> None:
-    """Organization-only adapters cannot inspect an issue timeline."""
-    with pytest.raises(RuntimeError, match="repo-scoped"):
-        PipelineGitHub("org")._scope_expansion_timeline_prs(41)
-
-
 def test_timeline_association_stops_at_pagination_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A full hundred-page timeline traversal stops at its safety bound."""
     page = [{"event": "commented"}] * 100
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github_transport,
+        "gh_call",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps(page), stderr=""
         ),
@@ -730,8 +733,8 @@ def test_canonical_branch_association_rejects_malformed_pages(
 ) -> None:
     """Canonical branch discovery rejects malformed or cross-repository pull requests."""
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github_transport,
+        "gh_call",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps(payload), stderr=""
         ),
@@ -740,20 +743,14 @@ def test_canonical_branch_association_rejects_malformed_pages(
         PipelineGitHub("org", repo="repo")._scope_expansion_canonical_branch_prs(41)
 
 
-def test_canonical_branch_association_requires_repository_scope() -> None:
-    """Organization-only adapters cannot search canonical child branches."""
-    with pytest.raises(RuntimeError, match="repo-scoped"):
-        PipelineGitHub("org")._scope_expansion_canonical_branch_prs(41)
-
-
 def test_canonical_branch_association_stops_at_pagination_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A full hundred-page canonical branch traversal stops at its bound."""
     page = [_canonical_pr(number, 41) for number in range(1, 101)]
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github_transport,
+        "gh_call",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps(page), stderr=""
         ),
@@ -831,12 +828,6 @@ def test_commit_is_ancestor_rejects_invalid_identifiers(
         PipelineGitHub("org", repo="repo").commit_is_ancestor(ancestor, descendant)
 
 
-def test_commit_is_ancestor_requires_repository_scope() -> None:
-    """Organization-only adapters cannot compare repository commits."""
-    with pytest.raises(RuntimeError, match="repo-scoped"):
-        PipelineGitHub("org").commit_is_ancestor("a" * 40, "main")
-
-
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
@@ -851,8 +842,8 @@ def test_commit_is_ancestor_maps_documented_compare_statuses(
 ) -> None:
     """Commit comparison maps each documented GitHub status to ancestry."""
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github_transport,
+        "gh_call",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps(payload), stderr=""
         ),
@@ -866,8 +857,8 @@ def test_commit_is_ancestor_rejects_malformed_response(
 ) -> None:
     """Commit comparison fails when GitHub omits a documented status."""
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github_transport,
+        "gh_call",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps(payload), stderr=""
         ),
@@ -884,7 +875,7 @@ def test_blocking_review_rejects_body_without_marker(_deny_github_calls: dict[st
         )
     _deny_github_calls["_gh"].assert_not_called()
     _deny_github_calls["pull_request_reviews"].assert_not_called()
-    _deny_github_calls["direct_gh_call"].assert_not_called()
+    _deny_github_calls["gh_call"].assert_not_called()
 
 
 def test_blocking_review_dry_run_returns_sentinel(_deny_github_calls: dict[str, Mock]) -> None:
@@ -898,7 +889,7 @@ def test_blocking_review_dry_run_returns_sentinel(_deny_github_calls: dict[str, 
     )
     _deny_github_calls["_gh"].assert_not_called()
     _deny_github_calls["pull_request_reviews"].assert_not_called()
-    _deny_github_calls["direct_gh_call"].assert_not_called()
+    _deny_github_calls["gh_call"].assert_not_called()
 
 
 @pytest.mark.parametrize("review_id", [None, ""])
@@ -921,7 +912,7 @@ def test_existing_blocking_review_requires_identity(
     with pytest.raises(RuntimeError, match="review id is unavailable"):
         github.post_scope_expansion_blocking_review(7, body=body, marker=marker)
     _deny_github_calls["_gh"].assert_not_called()
-    _deny_github_calls["direct_gh_call"].assert_not_called()
+    _deny_github_calls["gh_call"].assert_not_called()
 
 
 def test_existing_blocking_review_is_idempotent(
@@ -939,7 +930,7 @@ def test_existing_blocking_review_is_idempotent(
     )
     assert github.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R1"
     _deny_github_calls["_gh"].assert_not_called()
-    _deny_github_calls["direct_gh_call"].assert_not_called()
+    _deny_github_calls["gh_call"].assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -971,8 +962,8 @@ def test_blocking_review_publication_requires_matching_readback(
     reviews = iter([(), normalized])
     monkeypatch.setattr(github, "pull_request_reviews", lambda number: next(reviews))
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github,
+        "_command_runner",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps(response), stderr=""
         ),
@@ -996,10 +987,28 @@ def test_blocking_review_publication_accepts_node_id_and_readback(
     )
     monkeypatch.setattr(github, "pull_request_reviews", lambda number: next(reviews))
     monkeypatch.setattr(
-        scope_expansion_adapter,
-        "direct_gh_call",
+        github,
+        "_command_runner",
         lambda argv, **kwargs: subprocess.CompletedProcess(
             argv, 0, stdout=json.dumps({"node_id": "R2"}), stderr=""
         ),
     )
     assert github.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R2"
+
+
+def test_timeline_association_requires_repository_scope() -> None:
+    """Organization-only adapters cannot inspect an issue timeline."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        PipelineGitHub("org")._scope_expansion_timeline_prs(41)
+
+
+def test_canonical_branch_association_requires_repository_scope() -> None:
+    """Organization-only adapters cannot search canonical child branches."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        PipelineGitHub("org")._scope_expansion_canonical_branch_prs(41)
+
+
+def test_commit_is_ancestor_requires_repository_scope() -> None:
+    """Organization-only adapters cannot compare repository commits."""
+    with pytest.raises(RuntimeError, match="repo-scoped"):
+        PipelineGitHub("org").commit_is_ancestor("a" * 40, "main")

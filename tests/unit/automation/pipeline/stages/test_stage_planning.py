@@ -74,7 +74,10 @@ from hephaestus.automation.state_labels import (
     STATE_SKIP,
 )
 from hephaestus.prompts import PromptCatalog
-from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+from tests.unit.automation.pipeline.stages.conftest import (
+    FakeSourceWorkspaceManager,
+    FakeStageGitHub,
+)
 from tests.unit.automation.test_source_worktree import _repository
 
 _RECOVERY_REVISION = "d" * 40
@@ -1983,7 +1986,11 @@ class TestPlanningStageStep:
             item,
             make_ctx(
                 github=github,
-                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+                paths=SimpleNamespace(
+                    repo_root=tmp_path,
+                    worktree=tmp_path / "worktree",
+                    source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+                ),
             ),
         )
 
@@ -2040,7 +2047,11 @@ class TestPlanningStageStep:
             item,
             make_ctx(
                 github=github,
-                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+                paths=SimpleNamespace(
+                    repo_root=tmp_path,
+                    worktree=tmp_path / "worktree",
+                    source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+                ),
             ),
         )
 
@@ -2083,7 +2094,11 @@ class TestPlanningStageStep:
         github = FakeStageGitHub(labels=[STATE_SKIP, "epic"], issue_body=body)
         ctx = make_ctx(
             github=github,
-            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            paths=SimpleNamespace(
+                repo_root=tmp_path,
+                worktree=tmp_path / "worktree",
+                source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+            ),
         )
 
         stale = PlanningStage().on_enter(item, ctx)
@@ -2130,7 +2145,11 @@ class TestPlanningStageStep:
         )
         ctx = make_ctx(
             github=github,
-            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            paths=SimpleNamespace(
+                repo_root=tmp_path,
+                worktree=tmp_path / "worktree",
+                source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+            ),
         )
 
         drift = PlanningStage().on_enter(first_item, ctx)
@@ -2213,7 +2232,11 @@ class TestPlanningStageStep:
             item,
             make_ctx(
                 github=github,
-                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+                paths=SimpleNamespace(
+                    repo_root=tmp_path,
+                    worktree=tmp_path / "worktree",
+                    source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+                ),
             ),
         )
 
@@ -2249,7 +2272,11 @@ class TestPlanningStageStep:
         )
         ctx = make_ctx(
             github=github,
-            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            paths=SimpleNamespace(
+                repo_root=tmp_path,
+                worktree=tmp_path / "worktree",
+                source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+            ),
         )
         item = make_work_item(
             issue=126,
@@ -2322,7 +2349,11 @@ class TestPlanningStageStep:
         )
         ctx = make_ctx(
             github=github,
-            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            paths=SimpleNamespace(
+                repo_root=tmp_path,
+                worktree=tmp_path / "worktree",
+                source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+            ),
         )
 
         cleanup = PlanningStage().on_enter(item, ctx)
@@ -2372,7 +2403,11 @@ class TestPlanningStageStep:
             item,
             make_ctx(
                 github=github,
-                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+                paths=SimpleNamespace(
+                    repo_root=tmp_path,
+                    worktree=tmp_path / "worktree",
+                    source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+                ),
             ),
         )
 
@@ -2743,6 +2778,66 @@ class TestPlanningStageStep:
         assert item.payload["issue_body"] == "New requirements"
         assert "plan_text" not in item.payload
         assert "plan_revision" not in item.payload
+
+    @pytest.mark.parametrize(
+        "revision_key", ["_synced_default_branch_sha", "_direct_scope_base_sha"]
+    )
+    def test_restart_reuses_recovery_for_captured_default_source(
+        self,
+        revision_key: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A preserved writer revision cannot invalidate current planning evidence."""
+        issue = 79
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], issue_body=source)
+        github.comments[issue] = [_recovered_body(source, "Keep retries bounded.", issue=issue)]
+        item = make_work_item(
+            issue=issue,
+            state="ENTER",
+            payload={revision_key: _RECOVERY_REVISION, "_impl_source_revision": "e" * 40},
+        )
+
+        outcome = PlanningStage().on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert item.payload.get("requirements_recovered_comment") is True
+        assert item.payload["issue_body"] == "Keep retries bounded."
+        assert "requirements_recovery_required" not in item.payload
+
+    def test_restart_without_captured_source_rejects_zero_revision_recovery(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Missing source identity cannot authorize a recovery comment."""
+        issue = 80
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        revision = "0" * 40
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], issue_body=source)
+        github.comments[issue] = [
+            render_recovered_requirements(
+                source,
+                "Keep retries bounded.",
+                evidence_digest("test-repo", issue, revision, "A task", source),
+                issue_title="A task",
+                repository_revision=revision,
+            )
+        ]
+        item = make_work_item(
+            issue=issue,
+            state="ENTER",
+            payload={"_synced_default_branch_sha": None, "_direct_scope_base_sha": None},
+        )
+
+        outcome = PlanningStage().on_enter(item, make_ctx(github=github, budget_fn=lambda _: 2))
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert item.attempts["plan"] == 1
+        assert "requirements_recovered_comment" not in item.payload
+        assert github.mutation_log == []
 
     def test_restart_migrates_valid_v1_recovery_comment_to_v3_without_duplicate(
         self,

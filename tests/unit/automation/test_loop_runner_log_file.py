@@ -11,7 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.automation import loop_runner
+from hephaestus.automation import pipeline_cli as loop_runner
 from hephaestus.logging.utils import setup_logging
 
 
@@ -58,7 +58,7 @@ def run_main(monkeypatch: pytest.MonkeyPatch, path: Path, *options: str) -> None
     """Emit records after logging setup and stop dispatch."""
 
     def stop(*args: object, **kwargs: object) -> None:
-        logger = logging.getLogger("hephaestus.automation.loop_runner")
+        logger = logging.getLogger("hephaestus.automation.pipeline_cli")
         for level in (logging.DEBUG, logging.INFO, logging.WARNING):
             logger.log(level, "loop-record-%s", level)
         raise StopAfterLoggingError

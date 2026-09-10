@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -506,6 +507,47 @@ class TestInstallPackage:
 
 class TestRunSubprocessTimeoutLogging:
     """Tests that run_subprocess logs TimeoutExpired correctly (#382/A4-07)."""
+
+    def test_cancelled_tracked_child_stops_before_start(self) -> None:
+        """A cancellation request must prevent child creation."""
+        shutdown = threading.Event()
+        shutdown.set()
+        with patch("subprocess.Popen") as popen, pytest.raises(InterruptedError):
+            run_subprocess(
+                ["tool"],
+                env={"PATH": os.defpath},
+                timeout=60,
+                track_process_group=True,
+                shutdown=shutdown,
+            )
+        popen.assert_not_called()
+
+    def test_cancellation_stops_an_active_tracked_child(self) -> None:
+        """A cancelled child must stop before its full timeout expires."""
+        shutdown = threading.Event()
+        process = MagicMock(pid=123)
+
+        def wait_for_cancellation(*, timeout: float | None) -> tuple[str, str]:
+            assert timeout is not None and timeout <= 0.1
+            shutdown.set()
+            raise subprocess.TimeoutExpired(["tool"], timeout)
+
+        process.communicate.side_effect = wait_for_cancellation
+        with (
+            patch("hephaestus.utils.subprocess_registry.supported", return_value=True),
+            patch("subprocess.Popen", return_value=process),
+            patch("hephaestus.utils.subprocess_registry.track_process_group"),
+            patch("hephaestus.utils.helpers._stop_process_group", return_value=("", "")) as stop,
+            pytest.raises(InterruptedError),
+        ):
+            run_subprocess(
+                ["tool"],
+                env={"PATH": os.defpath},
+                timeout=60,
+                track_process_group=True,
+                shutdown=shutdown,
+            )
+        stop.assert_called_once_with(process)
 
     def test_timeout_expired_is_logged_and_reraised(self) -> None:
         """TimeoutExpired triggers an error log then re-raises the exception."""

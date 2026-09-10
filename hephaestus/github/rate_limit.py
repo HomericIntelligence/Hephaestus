@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo
@@ -408,7 +409,34 @@ def _load_persisted_throttle_state(raw: str, *, burst: float, now: float) -> tup
     return tokens, updated
 
 
-def gh_global_throttle_acquire() -> None:
+def _throttle_remaining(deadline_s: float | None, shutdown: threading.Event | None) -> float | None:
+    """Check cancellation and return the remaining throttle wait budget."""
+    if shutdown is not None and shutdown.is_set():
+        raise CancelledError("GitHub throttle was cancelled")
+    if deadline_s is None:
+        return None
+    budget = deadline_s - time.monotonic()
+    if budget <= 0:
+        raise subprocess.TimeoutExpired("GitHub throttle deadline", 0)
+    return budget
+
+
+def _throttle_pause(
+    seconds: float, deadline_s: float | None, shutdown: threading.Event | None
+) -> None:
+    """Wait only within the existing throttle operation budget."""
+    budget = _throttle_remaining(deadline_s, shutdown)
+    delay = seconds if budget is None else min(seconds, budget)
+    if shutdown is None:
+        time.sleep(delay)
+    else:
+        shutdown.wait(delay)
+    _throttle_remaining(deadline_s, shutdown)
+
+
+def gh_global_throttle_acquire(
+    *, deadline_s: float | None = None, shutdown: threading.Event | None = None
+) -> None:
     """Block until one token from the global ``gh`` rate budget is available.
 
     The bucket is shared across all processes on this machine via a small
@@ -422,6 +450,11 @@ def gh_global_throttle_acquire() -> None:
     the per-thread throttle in :mod:`hephaestus.automation.github_api`
     still applies.
     """
+    if deadline_s is not None and (
+        isinstance(deadline_s, bool) or not math.isfinite(deadline_s) or deadline_s <= 0
+    ):
+        raise ValueError("deadline_s must be a finite positive monotonic time")
+    _throttle_remaining(deadline_s, shutdown)
     rate = _global_throttle_rate
     if rate <= 0:
         return
@@ -437,9 +470,20 @@ def gh_global_throttle_acquire() -> None:
     # Loop because the bucket may be empty when we first acquire the lock;
     # we sleep for the time required to refill one token, then retry.
     while True:
+        _throttle_remaining(deadline_s, shutdown)
         with _open_secure_state_file(state_path) as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            if deadline_s is None and shutdown is None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            else:
+                while True:
+                    _throttle_remaining(deadline_s, shutdown)
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        _throttle_pause(0.05, deadline_s, shutdown)
             try:
+                _throttle_remaining(deadline_s, shutdown)
                 fh.seek(0)
                 raw = fh.read()
                 now = time.monotonic()
@@ -464,7 +508,7 @@ def gh_global_throttle_acquire() -> None:
 
         if wait <= 0.0:
             return
-        time.sleep(wait)
+        _throttle_pause(wait, deadline_s, shutdown)
 
 
 def _parse_reset_with_date(date_str: str, time_str: str, tz: str) -> int:

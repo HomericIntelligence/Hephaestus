@@ -1,8 +1,8 @@
 # Operations Runbooks
 
-Operator recovery procedures for the `hephaestus.automation` pipeline. Start
-here when the automation loop, a worktree, the drive-green stage, or a Claude stage
-needs hands-on recovery.
+Use these procedures to recover the `hephaestus.automation` pipeline.
+Start here when the automation loop, a worktree, `merge_wait`, or an agent job
+needs operator action.
 
 ## Runbooks
 
@@ -10,7 +10,7 @@ needs hands-on recovery.
 | ------- | -------- |
 | [Automation loop crashed mid-issue](automation-loop-crash.md) | The `hephaestus-automation-loop` process died or a phase timed out and you need to resume safely. |
 | [Recover a corrupted worktree state](corrupted-worktree.md) | An issue's `build/.worktrees/issue-<N>` worktree is dirty, abandoned, or blocking a clean re-run. |
-| [Drive-green stall](ci-driver-stall.md) | A PR with loop-owned `state:implementation-go` remains blocked. |
+| [Queue merge stall](ci-driver-stall.md) | A PR with loop-owned `state:implementation-go` remains blocked. |
 | [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage reports a 429 quota/session-limit infrastructure failure and the issue remains unlabeled. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [Pi issue #2519 evidence run](pi-e2e-2519.md) | You need to reproduce the live Pi/Codex conformance evidence run, regenerate the report, or re-attest the publication artifacts. |
@@ -24,8 +24,8 @@ needs hands-on recovery.
 - **Pipeline stages** — the stage → module → console-script mapping lives in
   [`../../AGENTS.md`](../../AGENTS.md). Use it to identify which module owns the
   behavior you are recovering.
-- **PR & state-label policy** — the PR policy (signed commits, `Closes #N`,
-  auto-merge gating) lives in [`../../AGENTS.md`](../../AGENTS.md).
+- **PR and state-label policy** — see [`../../AGENTS.md`](../../AGENTS.md) for
+  signed commits, `Closes #N`, and merge authorization for the exact reviewed head.
 
 ## State-label reference
 

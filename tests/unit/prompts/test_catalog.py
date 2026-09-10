@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import pytest
 
 from hephaestus.automation._review_utils import build_automation_parser
-from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.automation.prompts.planning import (
     get_plan_prompt,
 )
+from hephaestus.prompts import PromptCatalog
 
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
@@ -48,14 +49,6 @@ def test_default_templates_resolve_by_filesystem_path_not_package_metadata() -> 
     # The catalog loads its templates from that path (no PackageLoader involved).
     names = PromptCatalog()._environment.list_templates()
     assert "pr_review/analysis.j2" in names
-
-
-def test_legacy_prompt_constant_remains_a_jinja_backed_format_template() -> None:
-    """Existing ``PLAN_PROMPT.format`` callers retain their rendered prompt."""
-    from hephaestus.automation.prompts import PLAN_PROMPT
-
-    assert PLAN_PROMPT.format(issue_number=99) == get_plan_prompt(99)
-    assert PLAN_PROMPT.format("unused positional argument", issue_number=99) == get_plan_prompt(99)
 
 
 def test_harness_template_replaces_only_the_matching_default(tmp_path: Path) -> None:
@@ -148,3 +141,48 @@ def test_review_fix_prompt_inherits_model_selection() -> None:
     assert "Model tier by difficulty" not in rendered
     for name in ("haiku", "sonnet", "opus", "fable"):
         assert f"`{name}`" not in rendered
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ADDRESS_REVIEW_PROMPT",
+        "ADVISE_PROMPT",
+        "CODEX_ADVISE_PROMPT",
+        "DIRTY_REUSED_WORKTREE_DECISION_PROMPT",
+        "DIRTY_REUSED_WORKTREE_PROMPT",
+        "IMPLEMENTATION_PROMPT",
+        "IMPL_LOOP_REVIEW_PROMPT",
+        "IMPL_RESUME_FEEDBACK_PROMPT",
+        "PLAN_LOOP_REVIEW_PROMPT",
+        "PLAN_PROMPT",
+        "PLAN_REVIEW_PROMPT",
+        "PR_REVIEW_ANALYSIS_PROMPT",
+        "get_advise_prompt",
+        "get_codex_advise_prompt",
+        "get_advise_prompt_builder",
+    ],
+)
+def test_retired_prompt_exports_are_unavailable(name: str) -> None:
+    """Removed prompt interfaces cannot dispatch through a compatibility bridge."""
+    from hephaestus.automation import prompts
+
+    assert name not in prompts.__all__
+    with pytest.raises(AttributeError):
+        getattr(prompts, name)
+
+
+@pytest.mark.parametrize("module", ["catalog", "advise"])
+def test_retired_automation_prompt_modules_cannot_be_imported(module: str) -> None:
+    """The catalog has one library owner and retired builders stay removed."""
+    qualified_name = f"hephaestus.automation.prompts.{module}"
+    with pytest.raises(ModuleNotFoundError) as error:
+        importlib.import_module(qualified_name)
+    assert error.value.name == qualified_name
+
+
+def test_catalog_does_not_expose_the_removed_string_template_reader() -> None:
+    """Callers render a template through the current catalog API."""
+    removed_name = "source"
+    with pytest.raises(AttributeError):
+        getattr(PromptCatalog(), removed_name)

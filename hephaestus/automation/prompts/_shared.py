@@ -4,8 +4,7 @@ Provides the untrusted-input fencing helper used by every review prompt,
 path-relativization, iteration helpers used by the loop prompts, and the
 untrusted-content notice boilerplate.
 
-Only the standard library is imported here — submodules in this package
-build on these primitives.
+Prompt builders share these primitives and the library prompt catalog.
 """
 
 import logging
@@ -13,6 +12,7 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.prompts import PromptCatalog
 from hephaestus.prompts.fencing import fence_untrusted as fence_untrusted
 
 _prompts_logger = logging.getLogger("hephaestus.automation.prompts")
@@ -63,8 +63,6 @@ def _relativize_path(path: str, repo_root: str | None) -> str:
 
 def get_untrusted_notice() -> str:
     """Render the shared untrusted-content notice from the active catalog."""
-    from .catalog import PromptCatalog
-
     return PromptCatalog.current().render("shared/untrusted_notice.j2")
 
 
@@ -98,8 +96,6 @@ def _iteration_label(iteration: int) -> str:
 
 def _iteration_guidance(iteration: int) -> str:
     """Return guidance text emphasizing the iteration's role."""
-    from .catalog import PromptCatalog
-
     return PromptCatalog.current().render("shared/iteration_guidance.j2", iteration=iteration)
 
 
@@ -113,8 +109,6 @@ def _prior_review_block(
     if not prior_review:
         return ""
     body = fenced.fence(label, prior_review) if fenced is not None else prior_review
-    from .catalog import PromptCatalog
-
     return PromptCatalog.current().render("shared/prior_review_block.j2", body=body)
 
 
@@ -132,8 +126,6 @@ def get_terse_output_directive(*, terminal_output_contract: str | None = None) -
     textual verdict. Callers can supply a terminal-output contract without
     duplicating the rest of this directive.
     """
-    from .catalog import PromptCatalog
-
     return PromptCatalog.current().render(
         "shared/terse_output_directive.j2",
         terminal_output_contract=terminal_output_contract,

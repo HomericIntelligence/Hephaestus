@@ -1,8 +1,13 @@
-"""Platform-aware host-verification receipt normalization and matching."""
+"""Store and validate host verification receipts for the reviewed commit."""
 
 from __future__ import annotations
 
+from hephaestus.automation.issue_waves import is_full_commit_sha
+
+from ..diagnostics import redact_diagnostic_text
 from ..host_verification_pyxis import HOST_KEYS, pyxis_receipt_metadata_matches
+from .base import JobResult, WorkItem
+from .pr_review_repository import _payload_host_verification_specs
 from .pr_review_verification import _HostVerificationSpec
 
 UNSUPPORTED_HOST_VERIFICATION_ERROR = "unsupported_host_verification_boundary"
@@ -76,24 +81,44 @@ __all__ = [
     "_host_verification_failure_kind",
     "_host_verification_receipt_matches",
     "_host_verification_result_status",
+    "store_host_verification_result",
 ]
 
 
-def _authentic_linux_bootstrap_receipt(
-    receipt: object, spec: _HostVerificationSpec, reviewed_head: str
-) -> bool:
-    """Recognize only the first fixed Linux unsupported-boundary result."""
-    return bool(
-        isinstance(receipt, dict)
-        and spec.descr == "review_python_ruff_check"
-        and spec.argv == ("uv", "run", "ruff", "check", "hephaestus/", "tests/")
-        and receipt.get("argv") == list(spec.argv)
-        and receipt.get("head_sha") == reviewed_head
-        and receipt.get("ok") is False
-        and receipt.get("status") == "skipped"
-        and receipt.get("immutable_source") is False
-        and receipt.get("failure_kind") == "runner"
-        and receipt.get("platform") == "linux"
-        and receipt.get("error") == UNSUPPORTED_HOST_VERIFICATION_ERROR
-        and receipt.get("bootstrap_unsupported_result") is True
+def store_host_verification_result(item: WorkItem, result: JobResult) -> None:
+    """Append a bounded, head-bound receipt from the fixed host plan."""
+    specs = _payload_host_verification_specs(item.payload)
+    reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+    receipts = item.payload.get("host_verification_receipts")
+    if (
+        not specs
+        or not is_full_commit_sha(reviewed_head)
+        or not isinstance(receipts, list)
+        or len(receipts) >= len(specs)
+    ):
+        item.payload.pop("host_verification_receipts", None)
+        return
+    spec = specs[len(receipts)]
+    result_value = result.value if isinstance(result.value, dict) else {}
+    status, platform = _host_verification_result_status(
+        result.value, result.ok, result.error, reviewed_head
+    )
+    receipts.append(
+        {
+            "argv": list(spec.argv),
+            "head_sha": reviewed_head,
+            "immutable_source": bool(
+                isinstance(result.value, dict)
+                and result.value.get("head_sha") == reviewed_head
+                and result.value.get("immutable_source") is True
+            ),
+            "failure_kind": _host_verification_failure_kind(result_value),
+            "ok": result.ok,
+            "error": redact_diagnostic_text(result.error or "")[:500],
+            "platform": platform,
+            "status": status,
+            "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+            "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
+            **{key: value for key in HOST_KEYS if isinstance(value := result_value.get(key), str)},
+        }
     )

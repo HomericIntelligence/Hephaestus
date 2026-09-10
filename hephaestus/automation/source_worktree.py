@@ -8,22 +8,29 @@ import os
 import re
 import stat
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from hephaestus.agents.workspace import (
     DirtyDirectClaim,
     DirtyPlanIdentity,
+    DirtySourceOperation,
     SourceLane,
     WorkspaceBinding,
     WorkspaceBindingError,
     _dirty_workspace_permit,
     validate_workspace_binding,
+)
+from hephaestus.automation.git_runtime import (
+    current_operation_shutdown,
+    operation_deadline,
+    remaining_operation_timeout,
 )
 from hephaestus.automation.implementation_writer import (
     ImplementationWriterHandoff,
@@ -34,7 +41,10 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
     consume_implementation_writer_authority,
 )
-from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
+from hephaestus.automation.worktree_snapshot import (
+    _dirty_worktree_content_snapshot,
+    _dirty_worktree_snapshot_evidence,
+)
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
@@ -173,6 +183,9 @@ def _terminal_json_object(data: bytes) -> dict[str, Any]:
     return result
 
 
+_SOURCE_EVIDENCE_MAX_BYTES = 64 * 1024
+
+
 def _terminal_read_bytes(path: Path) -> bytes:
     """Read one bounded regular file without following links."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -189,16 +202,16 @@ def _terminal_read_bytes(path: Path) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | nofollow | nonblock)
     try:
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > 65536:
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _SOURCE_EVIDENCE_MAX_BYTES:
             raise SourceWorkspaceError("source workspace evidence file is invalid")
         chunks: list[bytes] = []
         size = 0
         while True:
-            chunk = os.read(descriptor, 65537 - size)
+            chunk = os.read(descriptor, _SOURCE_EVIDENCE_MAX_BYTES + 1 - size)
             if not chunk:
                 break
             size += len(chunk)
-            if size > 65536:
+            if size > _SOURCE_EVIDENCE_MAX_BYTES:
                 raise SourceWorkspaceError("source workspace evidence is too large")
             chunks.append(chunk)
         after = os.fstat(descriptor)
@@ -238,9 +251,12 @@ class _PreparationDeadline:
 
     expires_at: float
     monotonic: Callable[[], float]
+    shutdown: threading.Event | None = None
 
     def remaining(self) -> float:
         """Return the remaining subprocess time or raise a stable timeout."""
+        if self.shutdown is not None and self.shutdown.is_set():
+            raise InterruptedError("source workspace operation cancelled")
         remaining = self.expires_at - self.monotonic()
         if remaining <= 0:
             raise SourceWorkspacePreparationError(
@@ -275,6 +291,24 @@ class SourceWorkspaceReceipt:
     obligations: tuple[str, ...] = ()
     schema_version: int = 1
     dirty_claim: DirtyDirectClaim | None = None
+
+    def to_binding(self, repo_root: Path) -> WorkspaceBinding:
+        """Return the source binding described by these immutable facts."""
+        return replace(
+            WorkspaceBinding.source(
+                cwd=self.path,
+                reusable_root=repo_root,
+                repository=self.repository,
+                ownership_key=self.ownership_key,
+                item_number=self.item_number,
+                lane=self.lane,
+                revision=self.revision,
+                generation=self.generation,
+                detached=self.detached,
+            ),
+            schema_version=self.schema_version,
+            dirty_claim=self.dirty_claim,
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible receipt."""
@@ -352,9 +386,13 @@ def _git(
     deadline: _PreparationDeadline | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Git, applying the shared preparation deadline when supplied."""
-    timeout = deadline.remaining() if deadline is not None else None
     try:
+        timeout = remaining_operation_timeout(
+            deadline.remaining() if deadline is not None else None
+        )
         if timeout is not None:
+            shutdown = deadline.shutdown if deadline is not None else current_operation_shutdown()
+            cancellation: dict[str, Any] = {"shutdown": shutdown} if shutdown is not None else {}
             return run_subprocess(
                 ["git", *args],
                 cwd=cwd,
@@ -363,6 +401,7 @@ def _git(
                 env=build_git_signing_env(),
                 log_on_error=False,
                 track_process_group=True,
+                **cancellation,
             )
         return subprocess.run(
             ["git", *args],
@@ -626,28 +665,25 @@ class SourceWorkspaceManager:
         """Return the repository-qualified internal ownership key."""
         return f"{self.repository_identity}:{item_number}:{lane.value}"
 
-    def snapshot_implementation_receipt(self, item_number: int) -> SourceWorkspaceReceipt:
-        """Read the immutable implementation receipt under its lane lock."""
-        if type(item_number) is not int or item_number <= 0:
-            raise SourceWorkspaceError("implementation receipt item number is invalid")
-        lane = SourceLane.IMPLEMENTATION
-        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
-            receipt = self._require_receipt(item_number, lane)
-            self._reject_foreign_owner(receipt, item_number, lane)
-            return receipt
-
     @contextmanager
     def implementation_writer_handoff(
-        self, item_number: int
+        self, item_number: int, *, deadline: _PreparationDeadline | None = None
     ) -> Iterator[ImplementationWriterHandoff]:
         """Hold the implementation lane for one complete writer handoff."""
         if isinstance(item_number, bool) or not isinstance(item_number, int):
             raise SourceWorkspaceError("implementation writer handoff item number is invalid")
-        with implementation_writer_handoff(
-            self.repo_root,
-            item_number,
-            self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
-        ) as handoff:
+        if deadline is None:
+            deadline = _PreparationDeadline(time.monotonic() + 45.0, time.monotonic)
+        with (
+            operation_deadline(deadline.expires_at, shutdown=deadline.shutdown),
+            implementation_writer_handoff(
+                self.repo_root,
+                item_number,
+                self._lane_lock_path(item_number, SourceLane.IMPLEMENTATION),
+                remaining_timeout=deadline.remaining,
+                shutdown=deadline.shutdown,
+            ) as handoff,
+        ):
             try:
                 self._reconcile_writer_transition(item_number, finalize_exact_successor=True)
                 yield handoff
@@ -840,7 +876,11 @@ class SourceWorkspaceManager:
         )
         binding = self._binding(receipt)
         try:
-            validate_workspace_binding(binding)
+            validate_workspace_binding(
+                binding,
+                remaining_timeout=deadline.remaining if deadline is not None else None,
+                shutdown=deadline.shutdown if deadline is not None else None,
+            )
         except WorkspaceBindingError as exc:
             raise SourceWorkspaceError(str(exc)) from exc
         self._write_receipt(receipt)
@@ -998,22 +1038,58 @@ class SourceWorkspaceManager:
 
     @contextmanager
     def implementation_local_commit(
-        self, item_number: int, *, branch: str, path: Path
+        self,
+        item_number: int,
+        *,
+        branch: str,
+        path: Path,
+        expected_binding: WorkspaceBinding | None = None,
+        paused_head_sha: str | None = None,
+        deadline: _PreparationDeadline | None = None,
     ) -> Iterator[Callable[[str], WorkspaceBinding]]:
-        """Record one controlled local commit without claiming remote publication."""
+        """Hold one writer lease and optionally record its new clean head.
+
+        The expected binding fixes the source receipt for a queued host job.
+        A paused rebase also requires its exact head and active branch. The
+        returned callback records local state and does not prove publication.
+        """
         lane = SourceLane.IMPLEMENTATION
-        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+        if deadline is None:
+            deadline = _PreparationDeadline(time.monotonic() + 45.0, time.monotonic)
+        with (
+            self._acquire_lane(item_number, lane, deadline),
+            operation_deadline(deadline.expires_at, shutdown=deadline.shutdown),
+        ):
             original = self._require_receipt(item_number, lane)
             self._reject_foreign_owner(original, item_number, lane)
+            expected_head = original.revision
+            expected_branch: str | None = f"refs/heads/{branch}"
+            if paused_head_sha is not None:
+                if (
+                    re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", paused_head_sha) is None
+                    or WorktreeManager(
+                        repo_root=self.repo_root, base_dir=self.base_dir
+                    )._detached_rebase_head_ref(
+                        path,
+                        common_git_dir=self.common_dir,
+                        timeout=max(1, int(deadline.remaining())),
+                        shutdown=deadline.shutdown,
+                    )
+                    != expected_branch
+                ):
+                    raise SourceWorkspaceError("implementation paused rebase binding changed")
+                expected_head = paused_head_sha
+                expected_branch = None
             if (
                 original.detached
+                or (expected_binding is not None and self._binding(original) != expected_binding)
                 or original.branch != branch
                 or original.path != self._implementation_path(item_number)
                 or path != original.path
                 or path.is_symlink()
-                or not self._path_is_registered_to_repository(path)
-                or self._head_branch(path) != f"refs/heads/{branch}"
-                or self._head_revision(path) != original.revision
+                or not self._path_is_registered_to_repository(path, deadline=deadline)
+                or self._head_branch(path, deadline=deadline) != expected_branch
+                or self._head_revision(path, deadline=deadline) != expected_head
             ):
                 raise SourceWorkspaceError("implementation publication binding changed")
             active = True
@@ -1032,14 +1108,14 @@ class SourceWorkspaceManager:
                 if (
                     re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None
                     or self._read_receipt(item_number, lane) != original
-                    or not self._physical_matches_receipt(successor)
+                    or not self._physical_matches_receipt(successor, deadline=deadline)
                 ):
                     raise SourceWorkspaceError("implementation publication head changed")
                 if successor != original:
                     self._write_receipt(successor)
                 if self._read_receipt(
                     item_number, lane
-                ) != successor or not self._physical_matches_receipt(successor):
+                ) != successor or not self._physical_matches_receipt(successor, deadline=deadline):
                     raise SourceWorkspaceError("implementation publication receipt changed")
                 return self._binding(successor)
 
@@ -1445,7 +1521,7 @@ class SourceWorkspaceManager:
 
     @contextmanager
     def dirty_direct_publication(
-        self, binding: WorkspaceBinding
+        self, binding: WorkspaceBinding, *, deadline: _PreparationDeadline | None = None
     ) -> Iterator[Callable[[str], None]]:
         """Hold a consumed writer claim through controlled commit and publication."""
         claim = binding.dirty_claim
@@ -1453,7 +1529,12 @@ class SourceWorkspaceManager:
         if binding.schema_version != 2 or claim is None or item is None or claim.state != "armed":
             raise SourceWorkspaceError("dirty direct publication binding is invalid")
         lane = SourceLane.IMPLEMENTATION
-        with file_lock(self._lane_lock_path(item, lane), require_exclusive=True):
+        if deadline is None:
+            deadline = _PreparationDeadline(time.monotonic() + 45.0, time.monotonic)
+        with (
+            self._acquire_lane(item, lane, deadline),
+            operation_deadline(deadline.expires_at, shutdown=deadline.shutdown),
+        ):
             original = self._require_receipt(item, lane)
             self._reject_foreign_owner(original, item, lane)
             if (
@@ -1497,13 +1578,24 @@ class SourceWorkspaceManager:
                 active = False
 
     def finish_dirty_direct_publication(
-        self, item_number: int, *, expected_head: str, pr_number: int
-    ) -> None:
+        self,
+        item_number: int,
+        *,
+        expected_head: str,
+        pr_number: int,
+        expected_binding: WorkspaceBinding | None = None,
+        deadline: _PreparationDeadline | None = None,
+    ) -> SourceWorkspaceReceipt:
         """Restore a clean v1 receipt after the host verifies strict PR creation."""
         if type(pr_number) is not int or pr_number < 1:
             raise SourceWorkspaceError("dirty direct PR identity is invalid")
         lane = SourceLane.IMPLEMENTATION
-        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+        if deadline is None:
+            deadline = _PreparationDeadline(time.monotonic() + 45.0, time.monotonic)
+        with (
+            self._acquire_lane(item_number, lane, deadline),
+            operation_deadline(deadline.expires_at, shutdown=deadline.shutdown),
+        ):
             original = self._require_receipt(item_number, lane)
             self._reject_foreign_owner(original, item_number, lane)
             if (
@@ -1512,6 +1604,11 @@ class SourceWorkspaceManager:
                 or original.dirty_claim.state != "consumed"
                 or original.revision != expected_head
                 or original.revision == original.dirty_claim.reservation_base_sha
+                or (
+                    expected_binding is not None
+                    and self._binding(original)
+                    != self._published_dirty_binding(expected_binding, expected_head)
+                )
                 or not self._physical_matches_receipt(original)
             ):
                 raise SourceWorkspaceError("dirty direct completed publication changed")
@@ -1527,9 +1624,27 @@ class SourceWorkspaceManager:
             self._write_receipt(successor)
             if self._read_receipt(item_number, lane) != successor:
                 raise SourceWorkspaceError("dirty direct completion write is unconfirmed")
+            return successor
+
+    @staticmethod
+    def _published_dirty_binding(binding: WorkspaceBinding, head: str) -> WorkspaceBinding:
+        """Describe the one controlled child of an armed writer binding."""
+        claim = binding.dirty_claim
+        if binding.schema_version != 2 or claim is None or claim.state != "armed":
+            raise SourceWorkspaceError("dirty direct completed binding is invalid")
+        return replace(
+            binding,
+            revision=head,
+            generation=binding.generation + 1,
+            dirty_claim=replace(claim, state="consumed"),
+        )
 
     def _validate_dirty_claim_physical(
-        self, receipt: SourceWorkspaceReceipt, claim: DirtyDirectClaim
+        self,
+        receipt: SourceWorkspaceReceipt,
+        claim: DirtyDirectClaim,
+        *,
+        deadline: _PreparationDeadline | None = None,
     ) -> None:
         """Check exact owner, branch, revision, and pending content under the lease."""
         if (
@@ -1538,10 +1653,14 @@ class SourceWorkspaceManager:
             or receipt.revision != claim.reservation_base_sha
             or receipt.path != self._implementation_path(receipt.item_number)
             or receipt.path.resolve(strict=True) != receipt.path
-            or not self._path_is_registered_to_repository(receipt.path)
-            or self._head_revision(receipt.path) != receipt.revision
-            or self._head_branch(receipt.path) != f"refs/heads/{claim.branch}"
-            or _dirty_worktree_content_snapshot(receipt.path, timeout=30)
+            or not self._path_is_registered_to_repository(receipt.path, deadline=deadline)
+            or self._head_revision(receipt.path, deadline=deadline) != receipt.revision
+            or self._head_branch(receipt.path, deadline=deadline) != f"refs/heads/{claim.branch}"
+            or _dirty_worktree_content_snapshot(
+                receipt.path,
+                timeout=30,
+                shutdown=deadline.shutdown if deadline is not None else None,
+            )
             != claim.content_snapshot()
         ):
             raise SourceWorkspaceError("dirty direct claim physical identity changed")
@@ -1553,21 +1672,49 @@ class SourceWorkspaceManager:
         *,
         allowed_tools: str = "",
         dirty_plan_identity: DirtyPlanIdentity | None = None,
-        validate_dirty_job: Callable[[object], Path] | None = None,
+        deadline: _PreparationDeadline | None = None,
+        source_operation: DirtySourceOperation | None = None,
     ) -> Iterator[Path]:
         """Hold the lane lease and consume a dirty claim before provider execution."""
         if binding.item_number is None or binding.lane is None:
             raise SourceWorkspaceError("source workspace binding is incomplete")
-        with file_lock(
-            self._lane_lock_path(binding.item_number, binding.lane),
-            require_exclusive=True,
+        if deadline is None:
+            deadline = _PreparationDeadline(time.monotonic() + 45.0, time.monotonic)
+        with (
+            self._acquire_lane(binding.item_number, binding.lane, deadline),
+            operation_deadline(deadline.expires_at, shutdown=deadline.shutdown),
         ):
             receipt = self._read_receipt(binding.item_number, binding.lane)
             if receipt is None or self._binding(receipt) != binding:
                 raise SourceWorkspaceError("source workspace receipt no longer matches binding")
+            self._reject_foreign_owner(receipt, binding.item_number, binding.lane)
             try:
+                if binding.schema_version == 1 and not self._path_is_registered_to_repository(
+                    receipt.path, deadline=deadline
+                ):
+                    raise SourceWorkspaceError("source workspace registration changed")
+                if source_operation is not None:
+                    validated = self._validate_dirty_operation(
+                        receipt, binding, source_operation, deadline
+                    )
+                    with _dirty_workspace_permit(validated) as permit:
+                        yield validate_workspace_binding(
+                            validated,
+                            allowed_tools=allowed_tools,
+                            dirty_permit=permit,
+                            remaining_timeout=deadline.remaining,
+                            shutdown=deadline.shutdown,
+                            expected_branch=receipt.branch if not validated.detached else None,
+                        )
+                    return
                 if binding.schema_version == 1:
-                    yield validate_workspace_binding(binding, allowed_tools=allowed_tools)
+                    yield validate_workspace_binding(
+                        binding,
+                        allowed_tools=allowed_tools,
+                        remaining_timeout=deadline.remaining,
+                        shutdown=deadline.shutdown,
+                        expected_branch=receipt.branch,
+                    )
                     return
                 claim = receipt.dirty_claim
                 if (
@@ -1583,20 +1730,90 @@ class SourceWorkspaceManager:
                 ):
                     raise SourceWorkspaceError("dirty direct plan identity changed")
                 self._reject_foreign_owner(receipt, binding.item_number, binding.lane)
-                self._validate_dirty_claim_physical(receipt, claim)
+                self._validate_dirty_claim_physical(receipt, claim, deadline=deadline)
                 consumed = replace(receipt, dirty_claim=replace(claim, state="consumed"))
                 self._write_receipt(consumed)
                 if self._read_receipt(binding.item_number, binding.lane) != consumed:
                     raise SourceWorkspaceError("dirty direct consumption is unconfirmed")
                 with _dirty_workspace_permit(binding) as permit:
                     cwd = validate_workspace_binding(
-                        binding, allowed_tools=allowed_tools, dirty_permit=permit
+                        binding,
+                        allowed_tools=allowed_tools,
+                        dirty_permit=permit,
+                        remaining_timeout=deadline.remaining,
+                        shutdown=deadline.shutdown,
                     )
-                    if validate_dirty_job is not None and validate_dirty_job(permit) != cwd:
-                        raise SourceWorkspaceError("dirty direct job workspace changed")
                     yield cwd
             except WorkspaceBindingError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
+
+    def _validate_dirty_operation(
+        self,
+        receipt: SourceWorkspaceReceipt,
+        binding: WorkspaceBinding,
+        operation: DirtySourceOperation,
+        deadline: _PreparationDeadline,
+    ) -> WorkspaceBinding:
+        """Check one dirty operation under the current source-lane lease."""
+        if (
+            not isinstance(operation, DirtySourceOperation)
+            or binding.schema_version != 1
+            or binding.lane is not SourceLane.IMPLEMENTATION
+            or binding.detached
+            or not receipt.branch
+            or receipt.path != self._implementation_path(receipt.item_number)
+        ):
+            raise SourceWorkspaceError("dirty source operation does not match its receipt")
+        snapshot = _dirty_worktree_snapshot_evidence(
+            receipt.path, timeout=max(1, int(deadline.remaining())), shutdown=deadline.shutdown
+        )
+        if operation.content_snapshot and snapshot.snapshot != dict(operation.content_snapshot):
+            raise SourceWorkspaceError("dirty source content changed")
+        if operation.kind == "test-fix" and not set(snapshot.changed_paths).issubset(
+            operation.allowed_paths
+        ):
+            raise SourceWorkspaceError("dirty source contains unrelated files")
+        if operation.kind != "rebase-conflict":
+            return binding
+        manager = WorktreeManager(repo_root=self.repo_root, base_dir=self.base_dir)
+        if (
+            manager._detached_rebase_head_ref(
+                receipt.path,
+                common_git_dir=self.common_dir,
+                timeout=max(1, int(deadline.remaining())),
+                shutdown=deadline.shutdown,
+            )
+            != f"refs/heads/{receipt.branch}"
+        ):
+            raise SourceWorkspaceError("paused rebase identity changed")
+        return replace(binding, revision=operation.paused_head_sha, detached=True)
+
+    @contextmanager
+    def _acquire_lane(
+        self, item_number: int, lane: SourceLane, deadline: _PreparationDeadline
+    ) -> Iterator[None]:
+        """Wait for one lane within its deadline and cancellation request."""
+        while True:
+            deadline.remaining()
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(
+                        file_lock(
+                            self._lane_lock_path(item_number, lane),
+                            require_exclusive=True,
+                            blocking=False,
+                        )
+                    )
+                except LockUnavailableError:
+                    wait_s = min(0.1, deadline.remaining())
+                    if deadline.shutdown is None:
+                        time.sleep(wait_s)
+                    else:
+                        deadline.shutdown.wait(wait_s)
+                    continue
+                deadline.remaining()
+                yield
+                return
 
     def add_obligation(self, item_number: int, lane: SourceLane, name: str) -> None:
         """Record a durable source-reading obligation that blocks cleanup."""
@@ -1624,9 +1841,19 @@ class SourceWorkspaceManager:
         expected_revision: str | None = None,
         expected_detached: bool | None = None,
         physical_cleanup: Callable[[], None] | None = None,
+        deadline: _PreparationDeadline | None = None,
     ) -> None:
         """Remove one clean terminal lane and its receipt under the lane lock."""
-        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+        if deadline is None:
+            deadline = _PreparationDeadline(
+                time.monotonic() + cast(float, remaining_operation_timeout(45.0)),
+                time.monotonic,
+                current_operation_shutdown(),
+            )
+        with (
+            self._acquire_lane(item_number, lane, deadline),
+            operation_deadline(deadline.expires_at, shutdown=deadline.shutdown),
+        ):
             receipt = self._read_receipt(item_number, lane)
             if receipt is None:
                 if physical_cleanup is None:
@@ -1649,20 +1876,26 @@ class SourceWorkspaceManager:
                 raise SourceWorkspaceError("source workspace receipt checkout changed")
             if receipt.obligations:
                 raise SourceWorkspaceError("source workspace still has active obligations")
-            if receipt.path.exists() and self._is_dirty(receipt.path):
+            if receipt.path.exists() and self._is_dirty(receipt.path, deadline=deadline):
                 raise SourceWorkspaceError(
                     f"source workspace is dirty and preserved: {receipt.path}"
                 )
             if physical_cleanup is not None:
                 physical_cleanup()
             else:
-                with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+                with file_lock(
+                    WorktreeManager.git_metadata_lock_path(self.repo_root),
+                    blocking=False,
+                    require_exclusive=True,
+                ):
+                    deadline.remaining()
                     result = _git(
                         self.repo_root,
                         "worktree",
                         "remove",
                         str(receipt.path),
                         check=False,
+                        deadline=deadline,
                     )
                     if result.returncode and receipt.path.exists():
                         raise SourceWorkspaceError(
@@ -1805,21 +2038,7 @@ class SourceWorkspaceManager:
         return branch
 
     def _binding(self, receipt: SourceWorkspaceReceipt) -> WorkspaceBinding:
-        return replace(
-            WorkspaceBinding.source(
-                cwd=receipt.path,
-                reusable_root=self.repo_root,
-                repository=receipt.repository,
-                ownership_key=receipt.ownership_key,
-                item_number=receipt.item_number,
-                lane=receipt.lane,
-                revision=receipt.revision,
-                generation=receipt.generation,
-                detached=receipt.detached,
-            ),
-            schema_version=receipt.schema_version,
-            dirty_claim=receipt.dirty_claim,
-        )
+        return receipt.to_binding(self.repo_root)
 
     def _terminal_path(self, item_number: int) -> Path:
         return self.state_dir / f"{item_number}-impl-terminal.json"
@@ -2274,32 +2493,47 @@ class SourceWorkspaceManager:
             raise
         self._remove_writer_transition(item_number, journal.journal_digest)
 
-    def _physical_matches_receipt(self, receipt: SourceWorkspaceReceipt) -> bool:
+    def _physical_matches_receipt(
+        self, receipt: SourceWorkspaceReceipt, *, deadline: _PreparationDeadline | None = None
+    ) -> bool:
         """Return whether a checkout exactly matches a durable receipt."""
         if (
             receipt.path.is_symlink()
             or not receipt.path.exists()
-            or not self._path_is_registered_to_repository(receipt.path)
-            or self._is_dirty(receipt.path)
+            or not self._path_is_registered_to_repository(receipt.path, deadline=deadline)
+            or self._is_dirty(receipt.path, deadline=deadline)
         ):
             return False
-        branch = self._head_branch(receipt.path)
+        branch = self._head_branch(receipt.path, deadline=deadline)
         expected_branch = None if receipt.detached else f"refs/heads/{receipt.branch}"
-        return self._head_revision(receipt.path) == receipt.revision and branch == expected_branch
+        return (
+            self._head_revision(receipt.path, deadline=deadline) == receipt.revision
+            and branch == expected_branch
+        )
 
-    def _path_is_registered_to_repository(self, path: Path) -> bool:
+    def _path_is_registered_to_repository(
+        self, path: Path, *, deadline: _PreparationDeadline | None = None
+    ) -> bool:
         """Return whether Git binds the exact path to this repository metadata."""
         manager = WorktreeManager(repo_root=self.repo_root, base_dir=self.base_dir)
+        execution_options: dict[str, Any] = {}
+        if deadline is not None:
+            execution_options = {
+                "timeout": max(1, int(deadline.remaining())),
+                "shutdown": deadline.shutdown,
+            }
         try:
-            if manager._registered_worktree_at_path(path) is None:
+            if manager._registered_worktree_at_path(path, **execution_options) is None:
                 return False
-            common = _git(path, "rev-parse", "--git-common-dir", check=False)
+            common = _git(path, "rev-parse", "--git-common-dir", check=False, deadline=deadline)
             if common.returncode != 0 or not common.stdout.strip():
                 return False
             common_path = Path(common.stdout.strip())
             if not common_path.is_absolute():
                 common_path = path / common_path
             return common_path.resolve(strict=True) == self.common_dir
+        except (InterruptedError, SourceWorkspacePreparationError):
+            raise
         except (OSError, RuntimeError):
             return False
 
@@ -2459,7 +2693,7 @@ class SourceWorkspaceManager:
         if not path.exists():
             return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(_terminal_read_bytes(path).decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise SourceWorkspaceError(f"cannot read source workspace receipt: {path}") from exc
         if not isinstance(payload, dict):
@@ -2474,10 +2708,10 @@ class SourceWorkspaceManager:
 
     def _write_receipt(self, receipt: SourceWorkspaceReceipt) -> None:
         path = self._receipt_path(receipt.item_number, receipt.lane)
-        write_secure(
-            path,
-            json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
-        )
+        content = json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n"
+        if len(content.encode("utf-8")) > _SOURCE_EVIDENCE_MAX_BYTES:
+            raise SourceWorkspaceError("source workspace receipt exceeds the evidence limit")
+        write_secure(path, content)
         self._fsync_state_dir()
 
     def _reject_foreign_owner(

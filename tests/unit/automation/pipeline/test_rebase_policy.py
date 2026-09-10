@@ -1,41 +1,73 @@
 """Check the host rebase admission policy."""
 
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hephaestus.automation.pipeline.jobs import GitJob
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
 WP = "hephaestus.automation.pipeline.worker_pool"
 
 
+@pytest.fixture
+def worker_factory(tmp_path: Path) -> Iterator[Callable[[], WorkerPool]]:
+    """Create test workers and close them after the test."""
+    workers: list[WorkerPool] = []
+
+    def create() -> WorkerPool:
+        worker = WorkerPool(
+            size=1,
+            shutdown=Event(),
+            completion_q=CompletionQueue(),
+            lock_dir=tmp_path / "worker-locks",
+        )
+        workers.append(worker)
+        return worker
+
+    try:
+        yield create
+    finally:
+        for worker in workers:
+            worker.shutdown(mark_interrupted=False)
+
+
 @pytest.mark.parametrize("reason", [None, "", "behind", "dependency_sync"])
-def test_rebase_requires_allowed_reason(tmp_path: Path, reason: str | None) -> None:
+def test_rebase_requires_allowed_reason(
+    tmp_path: Path, reason: str | None, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """An unapproved reason must not start Git work."""
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     job = GitJob(
         repo="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={"cwd": tmp_path, "rebase_reason": reason},
     )
     with patch.object(pool, "_authenticated_remote_revalidator") as remote:
-        result = pool._git_rebase(job)
+        result = pool._git_rebase(job, record_source=MagicMock())
     assert not result.ok
     assert result.error == "rebase reason is not allowed"
     remote.assert_not_called()
 
 
-def test_publication_refresh_does_not_rebase(tmp_path: Path) -> None:
+def test_publication_refresh_does_not_rebase(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """A changed remote head must leave local history unchanged."""
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     job = GitJob(
         repo="test/repo",
         op="commit_push",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "writer_refresh": {
                 "phase": "rebase",
@@ -63,9 +95,10 @@ def test_admitted_rebase_uses_fetched_commit(
     tmp_path: Path,
     reason: str,
     publish: bool,
+    worker_factory: Callable[[], WorkerPool],
 ) -> None:
     """Use one fetched commit and publish only when requested."""
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     from hephaestus.automation.pipeline.jobs import JobResult
 
     head, base, rewritten = "a" * 40, "b" * 40, "c" * 40
@@ -73,6 +106,7 @@ def test_admitted_rebase_uses_fetched_commit(
         repo="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "rebase_reason": reason,
@@ -100,7 +134,7 @@ def test_admitted_rebase_uses_fetched_commit(
         patch(f"{WP}.git_utils.rebase_worktree_onto", return_value=True) as rebase,
         patch(f"{WP}.git_utils.push_head_to_branch") as push,
     ):
-        result = pool._git_rebase_once(job)
+        result = pool._git_rebase_once(job, record_source=MagicMock())
     assert result.ok
     assert result.value == {"rebased": True, "published": publish, "head_sha": rewritten}
     assert rebase.call_args.kwargs["base_sha"] == base
@@ -109,16 +143,19 @@ def test_admitted_rebase_uses_fetched_commit(
         assert push.call_args.args[1] == head
 
 
-def test_manual_conflict_aborts_before_agent_restart(tmp_path: Path) -> None:
+def test_manual_conflict_aborts_before_agent_restart(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """Return a pinned restart request after the host aborts a conflict."""
     from hephaestus.automation.pipeline.jobs import JobResult
 
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     head, base = "a" * 40, "b" * 40
     job = GitJob(
         repo="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "rebase_reason": "manual",
@@ -136,7 +173,7 @@ def test_manual_conflict_aborts_before_agent_restart(tmp_path: Path) -> None:
         patch(f"{WP}.git_utils.rebase_worktree_onto", return_value=False) as rebase,
         patch(f"{WP}.git_utils.push_head_to_branch") as push,
     ):
-        result = pool._git_rebase_once(job)
+        result = pool._git_rebase_once(job, record_source=MagicMock())
     assert result.error == "rebase conflict restart required"
     assert result.value == {"rebase_restart_required": True, "base_sha": base, "head_sha": head}
     assert rebase.call_args.kwargs["preserve_conflicts"] is False
@@ -144,16 +181,19 @@ def test_manual_conflict_aborts_before_agent_restart(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("moved", ["source", "base"])
-def test_conflict_restart_rejects_changed_input(tmp_path: Path, moved: str) -> None:
+def test_conflict_restart_rejects_changed_input(
+    tmp_path: Path, moved: str, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """A changed source or base must stop the replay."""
     from hephaestus.automation.pipeline.jobs import JobResult
 
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     head, base, changed = "a" * 40, "b" * 40, "c" * 40
     job = GitJob(
         repo="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "rebase_reason": "manual",
@@ -176,15 +216,23 @@ def test_conflict_restart_rejects_changed_input(tmp_path: Path, moved: str) -> N
         patch(f"{WP}.git_utils.is_clean_working_tree", return_value=True),
         patch(f"{WP}.git_utils.rebase_worktree_onto") as rebase,
     ):
-        result = pool._git_rebase_once(job)
+        result = pool._git_rebase_once(job, record_source=MagicMock())
     assert not result.ok
     rebase.assert_not_called()
 
 
-def test_fetch_main_does_not_change_checkout(tmp_path: Path) -> None:
+def test_fetch_main_does_not_change_checkout(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """Fetch only the main ref and read its fetched commit."""
-    pool = object.__new__(WorkerPool)
-    job = GitJob(repo="test/repo", op="fetch_main", timeout_s=60, kwargs={"cwd": tmp_path})
+    pool = worker_factory()
+    job = GitJob(
+        repo="test/repo",
+        op="fetch_main",
+        timeout_s=60,
+        deadline_s=monotonic() + 60,
+        kwargs={"cwd": tmp_path},
+    )
     with (
         patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
         patch(f"{WP}.git_utils.run", return_value=MagicMock(stdout="a" * 40)) as run,
@@ -198,14 +246,17 @@ def test_fetch_main_does_not_change_checkout(tmp_path: Path) -> None:
     ]
 
 
-def test_initial_conflict_continuation_does_not_publish(tmp_path: Path) -> None:
+def test_initial_conflict_continuation_does_not_publish(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """Finish an initial local rebase without a remote branch probe or push."""
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     head, base, changed = "a" * 40, "b" * 40, "c" * 40
     job = GitJob(
         repo="test/repo",
         op="continue_rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "branch": "issue-branch",
@@ -230,7 +281,7 @@ def test_initial_conflict_continuation_does_not_publish(tmp_path: Path) -> None:
         patch.object(pool, "_read_publish_head", return_value=changed),
         patch(f"{WP}.git_utils.push_head_to_branch") as push,
     ):
-        result = pool._git_continue_rebase(job)
+        result = pool._git_continue_rebase(job, record_source=MagicMock())
     assert result.ok
     assert result.value["published"] is False
     assert result.value["head_sha"] == changed
@@ -240,26 +291,30 @@ def test_initial_conflict_continuation_does_not_publish(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("failure", [None, "tree_changed", "remote_changed", "audit_missing"])
 def test_published_rebase_returns_separate_review_proof(
-    tmp_path: Path, failure: str | None
+    tmp_path: Path,
+    failure: str | None,
+    worker_factory: Callable[[], WorkerPool],
 ) -> None:
     """A checked rebase keeps the old review head apart from the new head."""
     from hephaestus.automation.pipeline.jobs import JobResult
     from hephaestus.automation.review_audit import ReviewAudit
 
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     from hephaestus.automation.pipeline.github_jobs import (
         PublishRebaseReviewRequest,
         RebaseReviewInspected,
         RebaseReviewPublished,
     )
 
-    pool._github_job_runner = MagicMock(
-        run=lambda job: (
+    def run(job: Any, *, shutdown: Event | None = None, deadline_s: float | None = None) -> object:
+        del shutdown, deadline_s
+        return (
             RebaseReviewPublished(job.request, True)
             if isinstance(job.request, PublishRebaseReviewRequest)
             else RebaseReviewInspected(job.request, True)
         )
-    )
+
+    pool._github_job_runner = MagicMock(gh_timeout=60, run=run)
     head, base, rewritten, tree = "a" * 40, "b" * 40, "c" * 40, "d" * 40
     audit = ReviewAudit("A", "Checks passed.", (), "", True, "GO")
     job = GitJob(
@@ -267,6 +322,7 @@ def test_published_rebase_returns_separate_review_proof(
         expected_repository="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -307,7 +363,7 @@ def test_published_rebase_returns_separate_review_proof(
         patch(f"{WP}.git_utils.rebase_worktree_onto", return_value=True),
         patch(f"{WP}.git_utils.push_head_to_branch"),
     ):
-        result = pool._git_rebase_once(job)
+        result = pool._git_rebase_once(job, record_source=MagicMock())
     if failure is not None:
         assert not result.ok
         assert result.error
@@ -323,16 +379,21 @@ def test_published_rebase_returns_separate_review_proof(
 
 @pytest.mark.parametrize("publication_ok", [True, False])
 def test_review_record_is_visible_before_the_rebase_push(
-    tmp_path: Path, publication_ok: bool
+    tmp_path: Path,
+    publication_ok: bool,
+    worker_factory: Callable[[], WorkerPool],
 ) -> None:
     """A crash after push must leave a durable record for recovery."""
     from hephaestus.automation.pipeline.jobs import JobResult
     from hephaestus.automation.review_audit import ReviewAudit
 
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     events: list[str] = []
 
-    def publish(job: Any) -> object:
+    def publish(
+        job: Any, *, shutdown: Event | None = None, deadline_s: float | None = None
+    ) -> object:
+        del shutdown, deadline_s
         from hephaestus.automation.pipeline.github_jobs import (
             InspectRebaseReviewRequest,
             RebaseReviewInspected,
@@ -344,13 +405,14 @@ def test_review_record_is_visible_before_the_rebase_push(
         events.append("record")
         return RebaseReviewPublished(job.request, publication_ok)
 
-    pool._github_job_runner = MagicMock(run=publish)
+    pool._github_job_runner = MagicMock(gh_timeout=60, run=publish)
     head, base, rewritten, tree = "a" * 40, "b" * 40, "c" * 40, "d" * 40
     job = GitJob(
         repo="repo",
         expected_repository="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -388,6 +450,6 @@ def test_review_record_is_visible_before_the_rebase_push(
             side_effect=lambda *a, **kw: events.append("push"),
         ),
     ):
-        result = pool._git_rebase_once(job)
+        result = pool._git_rebase_once(job, record_source=MagicMock())
     assert result.ok is publication_ok
     assert events == (["record", "push"] if publication_ok else ["record"])

@@ -37,7 +37,7 @@ ASCII_SYMBOLS = Symbols(banner="==", check="*", arrow="->", dash="--")
 class PRStatus(Enum):
     """Readiness classification for a pull request."""
 
-    READY = auto()  # CI green, no conflicts -> merge
+    READY = auto()  # Checks pass and there are no conflicts. The queue owns merges.
     OUTDATED = auto()  # CI pending/green, behind base -> rebase + re-sign
     CONFLICTED = auto()  # Has merge conflicts -> agent resolution
     FAILING = auto()  # CI failing -> skip

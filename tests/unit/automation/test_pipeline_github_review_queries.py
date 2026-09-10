@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Iterator
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 import hephaestus.automation.github_api as github_api
 import hephaestus.automation.pipeline_github as pg
-import hephaestus.automation.pipeline_github_scope_expansion as scope_expansion_mod
 
 
 def _review(review_id: str = "R1", *, body: str = "review") -> dict[str, object]:
@@ -125,16 +124,17 @@ def test_scope_expansion_publication_uses_generic_review_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The generic review snapshot prevents duplicate blocking reviews."""
-    adapter = pg.PipelineGitHub("org", repo="repo")
+    call_mock = MagicMock(
+        return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"id":2,"node_id":"R2"}', stderr=""
+        )
+    )
+    adapter = pg.PipelineGitHub("org", repo="repo", command_runner=call_mock)
     marker = "<!-- hephaestus-scope-expansion:test -->"
     body = f"{marker}\nBlocked by a child issue."
     review = {"id": "R2", "body": body, "state": "COMMENTED", "viewerDidAuthor": True}
     reviews = MagicMock(side_effect=[(), (review,)])
     monkeypatch.setattr(adapter, "pull_request_reviews", reviews)
-    call_mock = MagicMock(
-        return_value=SimpleNamespace(returncode=0, stdout='{"id":2,"node_id":"R2"}')
-    )
-    monkeypatch.setattr(scope_expansion_mod, "direct_gh_call", call_mock)
 
     assert adapter.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R2"
     assert reviews.call_count == 2

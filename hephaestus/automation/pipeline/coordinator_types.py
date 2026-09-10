@@ -47,11 +47,10 @@ at its stage — never FAILED.
 
 ### Rate budget gate
 
-The legacy ``_maybe_sleep_for_rate_budget`` SLEEPS its loop thread — fatal
-for a single coordinator thread. Its predicate is ported to a non-blocking
-check (:func:`~hephaestus.automation.pipeline_github.rate_budget_ok`); a
-low-budget AGENT job is timer-parked until the upstream reset instead of
-submitted. Git/build jobs are unaffected.
+The coordinator submits a quota read to the main worker queue before an
+agent job. A low-budget result parks the item on a timer until the reset.
+The coordinator does not wait for a quota read. Git and build jobs do not
+require a quota probe.
 
 ### Dry-run
 
@@ -78,7 +77,8 @@ from collections import deque as deque
 from collections.abc import Callable as Callable, Iterator as Iterator
 from dataclasses import dataclass as dataclass, field as field
 from pathlib import Path as Path
-from typing import Any as Any
+from threading import Event
+from typing import TYPE_CHECKING, Any as Any
 
 from jinja2 import TemplateNotFound as TemplateNotFound
 
@@ -110,6 +110,9 @@ from hephaestus.automation.pipeline.work_item import (
 )
 from hephaestus.prompts import PromptCatalog as PromptCatalog
 
+if TYPE_CHECKING:
+    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+
 #: Warn when any stage.step() call exceeds this duration (seconds) — the
 #: stage protocol promises short (<~60s) main-thread steps. 15s proved too
 #: tight in practice: routine repo-stage steps (clone + label reads over the
@@ -123,8 +126,8 @@ _DEFAULT_GRACE_S = 30.0
 #: Coordinator idle poll interval while waiting for completions (seconds).
 _IDLE_POLL_S = 1.0
 
-#: Number of fully stalled idle ticks before the coordinator force-runs work.
-_STALL_TICKS_BEFORE_FORCE = 3
+#: Number of fully stalled idle ticks before the coordinator retries queue admission.
+_STALL_TICKS_BEFORE_RETRY = 3
 
 # Host-owned work-item payload key for the file reservation that admitted a
 # queued implementation item. The frozen plan starts the reservation; paths
@@ -229,7 +232,7 @@ class PipelineConfig:
     # of materializing every repository in ``repos``.  The callable keeps
     # source state out of the durable configuration and makes reseeds restart
     # discovery from GitHub, which remains the sole routing authority.
-    repo_source_factory: Callable[[], Iterator[str]] | None = None
+    repo_source_factory: Callable[[Event], Iterator[str]] | None = None
     package_version: str = "unknown"
     source_revision: str | None = None
     issues: list[int] = field(default_factory=list)
@@ -279,9 +282,6 @@ class PipelineConfig:
     pre_pr_test_timeout: int | None = None
     no_advise: bool = False
     nitpick: bool = False
-    drive_green_all: bool = False
-    include_bot_prs: bool = True
-    include_all_authors: bool = False
     # Per-budget overrides applied on top of the ROUTES defaults.
     budget_overrides: dict[str, int] = field(default_factory=dict)
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
@@ -321,7 +321,6 @@ class PipelineConfig:
     # stale implementation labels do not route a retry into remediation first.
     explicit_pr_review: bool = False
     # This selector is not grant authority. Keep new fields at the end.
-    host_verification_bootstrap_comment_id: int | None = None
     host_verification_pyxis_image: Path = field(
         default_factory=lambda: DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
     )
@@ -345,7 +344,7 @@ class _Paths:
     repo_root: Path
     worktree: Path
     projects_dir: Path
-    source_workspaces: Any = None
+    source_workspaces: SourceWorkspaceManager | Callable[[], SourceWorkspaceManager]
 
 
 @dataclass(frozen=True)

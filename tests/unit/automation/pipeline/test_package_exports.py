@@ -7,7 +7,7 @@ _PACKAGE_INIT = Path(__file__).parents[4] / "hephaestus" / "automation" / "pipel
 
 
 def test_lazy_coordinator_exports_are_available_to_type_checkers() -> None:
-    """Mirror lazy coordinator exports in the package TYPE_CHECKING block."""
+    """Import each lazy coordinator export from its owner for type checks."""
     tree = ast.parse(_PACKAGE_INIT.read_text(encoding="utf-8"))
     type_checking_body = next(
         node.body
@@ -18,10 +18,11 @@ def test_lazy_coordinator_exports_are_available_to_type_checkers() -> None:
     )
 
     imports = {
-        alias.name
+        (node.module, alias.name)
         for node in type_checking_body
-        if isinstance(node, ast.ImportFrom) and node.module == "coordinator"
+        if isinstance(node, ast.ImportFrom)
         for alias in node.names
     }
 
-    assert imports >= {"PipelineConfig", "run_pipeline"}
+    assert imports >= {("coordinator_types", "PipelineConfig"), ("coordinator", "run_pipeline")}
+    assert ("coordinator", "PipelineConfig") not in imports

@@ -16,8 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import hephaestus.automation.loop_runner as loop_runner
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
+import hephaestus.automation.pipeline_cli as loop_runner
 from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_COUNT,
@@ -26,6 +26,7 @@ from hephaestus.automation.event_log_retention import (
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.stages.base import StageContext, stage_model
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR
 
 
@@ -35,14 +36,14 @@ def dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     mocks = {
         "run_pipeline": MagicMock(return_value=0),
         "preflight": MagicMock(),
-        "clone": MagicMock(),
+        "submit": MagicMock(),
         "event_log_lifecycle": MagicMock(),
     }
     mocks["event_log_lifecycle"].return_value.__enter__.return_value = None
     mocks["event_log_lifecycle"].return_value.__exit__.return_value = False
     monkeypatch.setattr(coordinator_mod, "run_pipeline", mocks["run_pipeline"])
     monkeypatch.setattr(loop_runner, "_preflight_token_scopes", mocks["preflight"])
-    monkeypatch.setattr(loop_runner, "_clone_missing_repos", mocks["clone"])
+    monkeypatch.setattr(WorkerPool, "submit", mocks["submit"])
     monkeypatch.setattr(loop_runner, "event_log_lifecycle", mocks["event_log_lifecycle"])
     monkeypatch.setattr(
         loop_runner, "_resolve_org_and_repos", lambda args: ("org", ["repo-a"], None)
@@ -65,7 +66,7 @@ def test_pipeline_path_preflights_but_skips_clone(dispatch: dict[str, MagicMock]
 
     dispatch["run_pipeline"].assert_called_once()
     dispatch["preflight"].assert_called_once_with("org", "repo-a", timeout=120)
-    dispatch["clone"].assert_not_called()
+    dispatch["submit"].assert_not_called()
 
 
 def test_pipeline_exit_code_propagates(dispatch: dict[str, MagicMock]) -> None:
@@ -196,16 +197,6 @@ def test_build_pipeline_config_maps_explicit_gh_root(
     assert config.gh_extra_path_root == gh_root
 
 
-def test_drive_green_all_maps_all_authors_and_bots(dispatch: dict[str, MagicMock]) -> None:
-    """The legacy drive-green-all flag preserves its configuration mapping."""
-    loop_runner.main(["--drive-green-all", "--dry-run"])
-
-    (config,) = dispatch["run_pipeline"].call_args.args
-    assert config.drive_green_all is True
-    assert config.include_all_authors is True
-    assert config.include_bot_prs is True
-
-
 def test_default_pipeline_event_log_path_does_not_create_repo_checkout() -> None:
     """The default event log path must not live under a repo clone directory."""
     path = loop_runner._pipeline_event_log_path(DEFAULT_PROJECTS_DIR, ["repo-a"])
@@ -215,22 +206,22 @@ def test_default_pipeline_event_log_path_does_not_create_repo_checkout() -> None
     assert DEFAULT_PROJECTS_DIR / "repo-a" not in path.parents
 
 
-def test_build_pipeline_config_maps_plan_phase_to_planning_scope(
+def test_build_pipeline_config_maps_planning_stages_to_scope(
     dispatch: dict[str, MagicMock],
 ) -> None:
     """A planning-only top-level run must stop after plan_review."""
-    loop_runner.main(["--issues", "11", "--phases", "plan"])
+    loop_runner.main(["--issues", "11", "--stages", "planning,plan_review"])
 
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.scope is not None
     assert config.scope.stages == frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})
 
 
-def test_build_pipeline_config_maps_implement_phase_to_review_scope(
+def test_build_pipeline_config_maps_implementation_stages_to_scope(
     dispatch: dict[str, MagicMock],
 ) -> None:
-    """The implement phase owns implementation plus PR review."""
-    loop_runner.main(["--issues", "11", "--phases", "implement"])
+    """The implementation scope includes PR review and merge wait."""
+    loop_runner.main(["--issues", "11", "--stages", "implementation,pr_review,merge_wait"])
 
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.scope is not None
@@ -239,22 +230,22 @@ def test_build_pipeline_config_maps_implement_phase_to_review_scope(
     )
 
 
-def test_build_pipeline_config_maps_drive_green_phase_to_review_scope(
+def test_build_pipeline_config_maps_review_and_merge_stages_to_scope(
     dispatch: dict[str, MagicMock],
 ) -> None:
-    """The drive-green phase owns loop review plus merge wait."""
-    loop_runner.main(["--issues", "11", "--phases", "drive-green"])
+    """The selected stages include PR review and merge wait."""
+    loop_runner.main(["--issues", "11", "--stages", "pr_review,merge_wait"])
 
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.scope is not None
     assert config.scope.stages == frozenset({StageName.PR_REVIEW, StageName.MERGE_WAIT})
 
 
-def test_build_pipeline_config_maps_drive_green_loops_to_budget(
+def test_build_pipeline_config_maps_merge_attempts_to_budget(
     dispatch: dict[str, MagicMock],
 ) -> None:
-    """The loop CLI's drive-green loop cap must tune the merge_wait budget."""
-    loop_runner.main(["--drive-green-loops", "3"])
+    """The merge attempt limit sets the merge_wait budget."""
+    loop_runner.main(["--merge-attempts", "3"])
 
     (config,) = dispatch["run_pipeline"].call_args.args
     assert config.budget_overrides["merge"] == 3
@@ -460,7 +451,7 @@ def test_stage_model_preserves_existing_codex_reasoning_selector(model: str) -> 
 
 def test_phase_timeout_help_documents_agent_job_scope() -> None:
     """The --phase-timeout help names the per-agent-job semantic."""
-    parser = loop_runner._build_parser()
+    parser = loop_runner.build_parser()
     action = next(a for a in parser._actions if "--phase-timeout" in a.option_strings)
 
-    assert "AGENT JOB" in (action.help or "")
+    assert "agent job" in (action.help or "").lower()

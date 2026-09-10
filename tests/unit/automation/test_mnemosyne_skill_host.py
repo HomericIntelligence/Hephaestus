@@ -18,9 +18,9 @@ from hephaestus.automation.mnemosyne_corpus import (
     MnemosyneSkillBlock,
     SkillSelection,
 )
+from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDeliveryReceipt
 from hephaestus.automation.mnemosyne_skill_host import (
-    DefaultCorpusReader,
     GitHubLearnDeliveryAdapter,
     MnemosyneSkillHost,
     fence_untrusted_context,

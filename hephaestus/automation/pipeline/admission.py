@@ -1,56 +1,31 @@
-"""Admission control for the implementation queue.
+"""Order implementation candidates and read their repository-specific plan files.
 
-Part of epic #1809. Provides:
-
-- File-overlap serialization via greedy first-fit partitioning
-  (:func:`_select_non_overlapping`, re-housed from ``loop_runner.py``, #1623)
-- Dependency-based execution ordering via
-  ``DependencyResolver.topological_sort`` (:func:`order_for_implementation`)
-- Closed-issue filtering for explicit ``--issues`` lists
-  (:func:`_filter_open_issues`, #1576)
-
-The file-overlap guard (#1623) prevents concurrent plan execution on the same
-source files, which would lead to merge conflicts when the first PR lands.
-
-Dropped deliverable (documented): the per-repo in-flight cap helper
-(``within_repo_cap``) is intentionally NOT implemented. The issue #1813
-"# Implementation Plan" comment sanctions the drop: "justify or drop
-``within_repo_cap`` (YAGNI — no named consumer)" — the cap is owned by
-:meth:`~hephaestus.automation.pipeline.coordinator.Coordinator._admit`, where
-the coordinator slice tracks per-repo worker slots and applies the cap at
-dispatch time.
+The coordinator owns overlap reservations and per-repository worker limits.
+This module orders dependencies and filters closed explicit issues.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import CancelledError
+from subprocess import SubprocessError
 from typing import TYPE_CHECKING
 
-from hephaestus.automation.comment_identity import has_marker_alias
+from hephaestus.automation.comment_identity import CommentAliasConflictError
 from hephaestus.automation.dependency_resolver import CyclicDependencyError, DependencyResolver
-from hephaestus.automation.github_api import (
-    fetch_issue_comments_metadata,
-    gh_current_login,
-    is_issue_closed,
-    prefetch_issue_states,
-)
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
-from hephaestus.automation.protocol import (
-    PLAN_CANONICAL_MARKER,
-    PLAN_REVIEW_CANONICAL_MARKER,
-    comment_marker_aliases,
-)
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     PlanDiscoveryStatus,
-    discover_plan_from_comments,
-    normalize_issue_comments,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
+    from threading import Event
+
+    from .stages import StageGitHub
 
 LOG = logging.getLogger(__name__)
 
@@ -145,112 +120,34 @@ def parse_publication_scope_files(plan_body: str) -> set[str]:
     return files
 
 
-def _fetch_planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str] | None:
-    """Return the file set an issue's plan claims, or None if unknown.
-
-    No planning marker or an empty fetch returns ``None``. The caller then
-    dispatches the issue this round. If a shared plan or review marker exists,
-    the full journal must prove its ownership and one unambiguous plan role.
-    A conflict raises instead of making a foreign marker look like no plan.
-
-    Args:
-        issue: GitHub issue number.
-        repo: ``(owner, name)`` of the repo owning *issue*. Required in the
-            multi-repo loop; omitting it resolves the repo from the ambient
-            working directory (#1795).
-
-    Returns:
-        The parsed plan file set, or None when no plan comment is present.
-
-    """
-    metadata = fetch_issue_comments_metadata(issue, repo=repo)
-    planning_aliases = (
-        *comment_marker_aliases(PLAN_CANONICAL_MARKER),
-        *comment_marker_aliases(PLAN_REVIEW_CANONICAL_MARKER),
-    )
-    if not any(
-        has_marker_alias(str(comment.get("body", "")), planning_aliases) for comment in metadata
-    ):
-        return None
-
-    try:
-        comments = normalize_issue_comments(metadata, viewer_login=gh_current_login() or "")
-    except CommentJournalReadError as exc:
-        raise RuntimeError(f"plan marker identity conflict: {exc}") from exc
-
-    discovered = discover_plan_from_comments(comments)
-    if discovered.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
-        raise RuntimeError(f"plan marker identity conflict: {discovered.error}")
-    if discovered.status is not PlanDiscoveryStatus.FOUND or discovered.plan_text is None:
-        return None
-    return _parse_planned_files(discovered.plan_text)
-
-
-def _select_non_overlapping(
-    issues: list[int],
-    repo_of: Mapping[int, tuple[str, str]] | None = None,
+def _fetch_planned_files(
+    issue: int,
     *,
-    initial_claims: set[PlanFileClaim] | None = None,
-    selected_claims: dict[int, set[PlanFileClaim]] | None = None,
-) -> tuple[list[int], list[int]]:
-    """Partition *issues* into (dispatch_now, defer_next_round).
+    github: StageGitHub,
+    deadline_s: float,
+    shutdown: Event,
+) -> set[str] | None:
+    """Read one authenticated plan within its deadline and cancellation scope.
 
-    Greedy first-fit in the given order: an issue whose parsed plan file set
-    intersects the union of already-claimed files in the same repository is
-    deferred. ``initial_claims`` carries plans belonging to implementation
-    items that were dispatched by an earlier drain and are still in flight.
-    Unknown file set (no plan / parse failure) claims NO files and is always dispatched
-    (fail-open). When active work already owns a conflicting known path, every
-    queued item may defer until that work completes. Performs one serial
-    GraphQL comment fetch per issue; only invoked in multi-worker rounds
-    (guarded at the call site), so the cost is bounded by the issue count
-    already being processed that round.
-
-    Args:
-        issues: The issue numbers to partition, in dispatch-priority order.
-        repo_of: Maps each issue number to the ``(owner, name)`` that owns it.
-            Resolved PER ISSUE, not per batch: the implementation queue is keyed
-            by stage rather than by repo, so one round can legitimately hold
-            issues from several repositories. An issue missing from the mapping
-            falls back to ambient-CWD resolution (#1795).
-        initial_claims: Repository-scoped plan-file claims owned by in-flight
-            implementation jobs.  They reserve paths before queued jobs are
-            considered, closing the gap between drain rounds.
-        selected_claims: Optional host-owned sink populated with the exact
-            plan snapshot that admitted each dispatched issue.  The
-            coordinator reuses those claims when submitting the job, so an
-            editable plan comment cannot change the reservation after the
-            overlap decision.
-
-    Returns:
-        A ``(dispatch, defer)`` tuple of issue-number lists (order preserved).
-
+    Return None only after a complete journal proves that no plan exists.
+    Keep identity conflicts separate from temporary read failures.
     """
-    repo_of = repo_of or {}
-    claimed: set[PlanFileClaim] = set(initial_claims or ())
-    dispatch: list[int] = []
-    defer: list[int] = []
-    for issue in issues:
-        repo = repo_of.get(issue)
-        planned = _fetch_planned_files(issue, repo=repo)
-        claims = {(repo, path) for path in planned} if planned else set()
-        if claims and (claims & claimed):
-            LOG.info(
-                "issue #%s deferred: plan files %s overlap in-flight peers",
-                issue,
-                sorted(path for _repo, path in claims & claimed),
-            )
-            defer.append(issue)
-            continue
-        if claims:
-            claimed |= claims
-        if selected_claims is not None:
-            # Preserve even an empty snapshot.  It proves this drain selected
-            # the issue fail-open and prevents submission from re-reading a
-            # mutable plan comment after the overlap decision.
-            selected_claims[issue] = set(claims)
-        dispatch.append(issue)
-    return dispatch, defer
+    try:
+        with github.operation_deadline(deadline_s, shutdown=shutdown):
+            discovered = github.discover_plan(issue)
+    except CommentAliasConflictError:
+        raise
+    except (CancelledError, SubprocessError, OSError, RuntimeError) as error:
+        raise CommentJournalReadError(str(error)) from error
+    if discovered.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
+        raise CommentAliasConflictError(f"plan marker identity conflict: {discovered.error}")
+    if discovered.status is PlanDiscoveryStatus.READ_ERROR:
+        raise CommentJournalReadError(discovered.error or "plan admission read failed")
+    if discovered.status is PlanDiscoveryStatus.ABSENT:
+        return None
+    if discovered.plan_text is None:
+        raise CommentJournalReadError("plan admission returned no plan text")
+    return _parse_planned_files(discovered.plan_text)
 
 
 def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
@@ -301,34 +198,31 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
         return [info.number for info in issue_infos]
 
 
-def _filter_open_issues(repo: tuple[str, str], issue_numbers: list[int]) -> list[int]:
-    """Drop CLOSED issues from an explicit ``--issues`` list (#1576).
+def _filter_open_issues(
+    repo: tuple[str, str],
+    issue_numbers: list[int],
+    *,
+    github: StageGitHub,
+    deadline_s: float,
+    shutdown: Event,
+) -> list[int]:
+    """Exclude only confirmed closed issues through the bounded repository accessor.
 
-    An operator-pinned ``cfg.issues`` list bypasses the ``--state open`` filter
-    that auto-discovery applies, so a closed issue would otherwise be driven
-    every loop and wrongly tagged ``state:skip`` by drive-green. States are
-    fetched once via :func:`prefetch_issue_states` and checked with
-    :func:`is_issue_closed`. On any lookup failure an issue is KEPT (fail-open:
-    never silently drop work over a transient API blip).
-
-    Args:
-        repo: Repository owner and name for all issue-state reads.
-        issue_numbers: The explicit issue list.
-
-    Returns:
-        The subset that is not closed (order preserved).
-
+    Keep a row when its state read fails or returns an unknown identity.
+    Later classification must obtain complete issue facts before dispatch.
     """
     slug = f"{repo[0]}/{repo[1]}"
-    try:
-        cached_states = prefetch_issue_states(issue_numbers, repo=repo)
-    except Exception as exc:  # transient API failure → keep all, don't drop work
-        LOG.warning("[%s] could not prefetch issue states for closed-filter: %s", slug, exc)
-        return issue_numbers
     kept: list[int] = []
     for num in issue_numbers:
-        if is_issue_closed(num, cached_states, repo=repo):
-            LOG.info("[%s] issue #%s is closed — excluding from phase loop", slug, num)
+        try:
+            with github.operation_deadline(deadline_s, shutdown=shutdown):
+                snapshot = github.gh_issue_json(num)
+        except Exception as error:
+            LOG.warning("[%s] issue #%s state is unknown: %s", slug, num, error)
+            kept.append(num)
+            continue
+        if snapshot.get("number") == num and snapshot.get("state") == "CLOSED":
+            LOG.info("[%s] issue #%s is closed; exclude it from this run", slug, num)
             continue
         kept.append(num)
     return kept
@@ -339,6 +233,5 @@ __all__ = [
     "_fetch_planned_files",
     "_filter_open_issues",
     "_parse_planned_files",
-    "_select_non_overlapping",
     "order_for_implementation",
 ]

@@ -1,22 +1,28 @@
-"""Test the exact coverage omit list and issue #2371 migration contract."""
+"""Test the exact coverage omit list and current queue coverage floors."""
 
 import tomllib
 from pathlib import Path
 
 _ALLOWED_OMITS = ["*/tests/*", "*/__init__.py"]
 
-_ISSUE_2371_FLOORS = {
+_QUEUE_CUTOVER_FLOORS = {
     "automation/implementer.py",
     "automation/planner.py",
+    "automation/loop_runner.py",
+    "automation/loop_repo_manager.py",
+    "automation/address_review_core.py",
+    "automation/pipeline_cli.py",
+}
+
+_RETIRED_FLOORS = {
+    "automation/arming_state.py",
     "automation/ci_driver.py",
     "automation/pr_discovery.py",
     "automation/ci_check_inspector.py",
     "automation/post_merge_processor.py",
-    "automation/loop_runner.py",
-    "automation/loop_repo_manager.py",
     "automation/curses_ui.py",
     "automation/audit_reviewer.py",
-    "automation/address_review_core.py",
+    "automation/address_review.py",
 }
 
 
@@ -39,17 +45,16 @@ def test_omit_allowlist_is_exact() -> None:
     assert omit == _ALLOWED_OMITS
 
 
-def test_issue_2371_cohort_has_executable_line_floors() -> None:
-    """Every issue cohort source has an explicit measured line floor."""
+def test_queue_cutover_preserves_surviving_line_floors() -> None:
+    """The surviving cohort and current CLI retain explicit line floors."""
     root = get_pyproject_toml_path().parent
     with open(root / "coverage.toml", "rb") as stream:
         modules = tomllib.load(stream)["coverage"]["modules"]
 
-    assert set(modules) >= _ISSUE_2371_FLOORS
-    for module in _ISSUE_2371_FLOORS:
+    assert set(modules) >= _QUEUE_CUTOVER_FLOORS
+    for module in _QUEUE_CUTOVER_FLOORS:
         assert modules[module] == {"minimum": 70, "metric": "line"}
 
-    promoted = _ISSUE_2371_FLOORS - {"automation/address_review_core.py"}
-    assert all((root / "hephaestus" / module).is_file() for module in promoted)
-    assert not (root / "hephaestus/automation/address_review.py").exists()
-    assert (root / "hephaestus/automation/address_review_core.py").is_file()
+    assert all((root / "hephaestus" / module).is_file() for module in _QUEUE_CUTOVER_FLOORS)
+    assert _RETIRED_FLOORS.isdisjoint(modules)
+    assert all(not (root / "hephaestus" / module).exists() for module in _RETIRED_FLOORS)

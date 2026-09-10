@@ -3,12 +3,13 @@
 import logging
 import math
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.cache import ThreadSafeCache
@@ -21,10 +22,15 @@ _operation_deadline_s: ContextVar[float | None] = ContextVar(
     "git_operation_deadline_s",
     default=None,
 )
+_operation_shutdown: ContextVar[threading.Event | None] = ContextVar(
+    "git_operation_shutdown", default=None
+)
 
 
 @contextmanager
-def operation_deadline(deadline_s: float | None) -> Iterator[None]:
+def operation_deadline(
+    deadline_s: float | None, *, shutdown: threading.Event | None = None
+) -> Iterator[None]:
     """Apply one absolute monotonic deadline to all Git children in this context."""
     if deadline_s is not None and (
         isinstance(deadline_s, bool)
@@ -34,14 +40,24 @@ def operation_deadline(deadline_s: float | None) -> Iterator[None]:
     ):
         raise ValueError("deadline_s must be a finite positive monotonic time")
     token = _operation_deadline_s.set(float(deadline_s) if deadline_s is not None else None)
+    shutdown_token = _operation_shutdown.set(shutdown or _operation_shutdown.get())
     try:
         yield
     finally:
+        _operation_shutdown.reset(shutdown_token)
         _operation_deadline_s.reset(token)
+
+
+def current_operation_shutdown() -> threading.Event | None:
+    """Return the active operation's cancellation event."""
+    return _operation_shutdown.get()
 
 
 def remaining_operation_timeout(timeout: int | float | None) -> int | float | None:
     """Return the smaller per-child timeout or operation time that remains."""
+    shutdown = current_operation_shutdown()
+    if shutdown is not None and shutdown.is_set():
+        raise InterruptedError("Git operation cancelled")
     deadline_s = _operation_deadline_s.get()
     if deadline_s is None:
         return timeout
@@ -59,10 +75,13 @@ def run(
     timeout: int | float | None = None,
     log_errors: bool = True,
     env: dict[str, str] | None = None,
+    shutdown: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command with consistent, redacted error handling."""
     logger.debug("Running subprocess")
     timeout = remaining_operation_timeout(timeout)
+    shutdown = shutdown or current_operation_shutdown()
+    cancellation: dict[str, Any] = {"shutdown": shutdown} if shutdown is not None else {}
     try:
         if cmd and cmd[0] == "git":
             return _shared_run_git(
@@ -73,6 +92,7 @@ def run(
                 log_on_error=False,
                 env=env,
                 retries=0,
+                **cancellation,
             )
         return run_subprocess(
             cmd,
@@ -81,6 +101,7 @@ def run(
             timeout=timeout,
             check=check,
             log_on_error=False,
+            **cancellation,
         )
     except subprocess.TimeoutExpired:
         if log_errors:

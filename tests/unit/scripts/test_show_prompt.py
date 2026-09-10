@@ -210,23 +210,10 @@ class TestBuildPrompt:
             mock_threads.assert_not_called()
         assert isinstance(prompt, str)
 
-    @patch("scripts.show_prompt.fetch_issue")
-    def test_follow_up_stage(self, mock_issue: MagicMock) -> None:
-        mock_issue.return_value = {"title": "T", "body": "B", "comments": []}
-        prompt = build_prompt("follow-up", 1, "owner/repo")
-        assert isinstance(prompt, str)
-        assert len(prompt) > 0
-
-    @patch("scripts.show_prompt.fetch_issue")
-    def test_advise_stage(self, mock_issue: MagicMock) -> None:
-        mock_issue.return_value = {"title": "T", "body": "B", "comments": []}
-        prompt = build_prompt("advise", 1, "owner/repo")
-        assert isinstance(prompt, str)
-        assert len(prompt) > 0
-
-    def test_unknown_stage_raises(self) -> None:
+    @pytest.mark.parametrize("stage", ["bogus", "advise", "follow-up"])
+    def test_unknown_or_retired_stage_raises(self, stage: str) -> None:
         with pytest.raises(ValueError, match="Unknown stage"):
-            build_prompt("bogus", 1, "owner/repo")
+            build_prompt(stage, 1, "owner/repo")
 
     @patch("scripts.show_prompt.fetch_issue")
     @patch("scripts.show_prompt._extract_plan_from_issue_data")
@@ -354,8 +341,6 @@ def test_all_stages_covered() -> None:
         "impl-resume",
         "pr-review",
         "address-review",
-        "follow-up",
-        "advise",
     }
     assert set(STAGES) == expected
 

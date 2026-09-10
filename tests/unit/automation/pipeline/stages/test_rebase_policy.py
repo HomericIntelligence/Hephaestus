@@ -9,6 +9,10 @@ from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+from tests.unit.automation.pipeline.stages.test_stage_implementation import (
+    _prepared_writer,
+    _worktree_receipt,
+)
 
 
 @pytest.mark.parametrize(
@@ -40,6 +44,7 @@ def test_initial_rebase_has_no_pr_publication(make_ctx: Any, make_work_item: Any
     """The first implementation rebases before it changes source files."""
     item = make_work_item(issue=1, state="REBASE_WAIT")
     item.payload.update(rebase_reason="implementation_start", _impl_source_revision="a" * 40)
+    _prepared_writer(item)
     request = ImplementationStage().step(item, make_ctx())
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, GitJob)
@@ -79,6 +84,7 @@ def test_manual_conflict_restarts_from_captured_base(make_ctx: Any, make_work_it
     stage = ImplementationStage()
     item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
     item.payload["rebase_reason"] = "manual"
+    _prepared_writer(item)
     stage.on_job_done(
         item,
         JobResult(
@@ -123,6 +129,7 @@ def test_reviewed_conflict_starts_an_agent_before_rebase(
     )
     item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
     item.payload.update(rebase_reason="review_conflict", reviewed_pr_head_sha="a" * 40)
+    _prepared_writer(item)
     request = ImplementationStage().step(item, make_ctx(github=github))
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, AgentJob)
@@ -256,6 +263,7 @@ def test_initial_reservation_moves_before_implementation(
     """Use the new reserved head only after a complete host receipt."""
     stage = ImplementationStage()
     item = make_work_item(issue=1, state="REBASE_WAIT")
+    _prepared_writer(item)
     reservation = {"branch": item.branch, "base_sha": "a" * 40}
     item.payload.update(
         rebase_reason="implementation_start",
@@ -270,12 +278,14 @@ def test_initial_reservation_moves_before_implementation(
         item,
         JobResult(
             ok=True,
-            value={
-                "head_sha": "b" * 40,
-                "published": True,
-                "implementation_started": True,
-                "direct_scope_reservation": returned,
-            },
+            value=_worktree_receipt(
+                item,
+                revision="b" * 40,
+                head_sha="b" * 40,
+                published=True,
+                implementation_started=True,
+                direct_scope_reservation=returned,
+            ),
         ),
         make_ctx(),
     )
@@ -338,6 +348,7 @@ def test_host_rebase_receipt_retains_the_original_review(
         original_audit_id=f"<!-- hephaestus-implementation-go-audit:pr=1001:head={'a' * 40} -->",
     )
     item = make_work_item(repo="test-repo", issue=1, pr=1001, state="REBASE_WAIT")
+    _prepared_writer(item)
     item.payload.update(
         rebase_reason="review_conflict",
         reviewed_pr_head_sha="a" * 40,
@@ -351,11 +362,13 @@ def test_host_rebase_receipt_retains_the_original_review(
         item,
         JobResult(
             ok=True,
-            value={
-                "published": True,
-                "head_sha": "d" * 40,
-                "retained_rebase_review_proof": proof,
-            },
+            value=_worktree_receipt(
+                item,
+                revision="d" * 40,
+                published=True,
+                head_sha="d" * 40,
+                retained_rebase_review_proof=proof,
+            ),
         ),
         ctx,
     )
@@ -372,6 +385,7 @@ def test_host_noop_rebase_keeps_the_review(make_ctx: Any, make_work_item: Any) -
     from hephaestus.automation.review_audit import ReviewAudit
 
     item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+    _prepared_writer(item)
     item.payload.update(
         rebase_reason="review_conflict",
         reviewed_pr_head_sha="a" * 40,
@@ -382,11 +396,12 @@ def test_host_noop_rebase_keeps_the_review(make_ctx: Any, make_work_item: Any) -
         item,
         JobResult(
             ok=True,
-            value={
-                "rebased": False,
-                "published": False,
-                "head_sha": "a" * 40,
-            },
+            value=_worktree_receipt(
+                item,
+                rebased=False,
+                published=False,
+                head_sha="a" * 40,
+            ),
         ),
         make_ctx(),
     )

@@ -22,6 +22,30 @@ from hephaestus.github.tidy import (
 
 tidy_module = importlib.import_module("hephaestus.github.tidy")
 
+
+@pytest.mark.parametrize(
+    ("remote_url", "expected"),
+    [
+        ("git@github.com:HomericIntelligence/Hephaestus.git", "HomericIntelligence/Hephaestus"),
+        ("https://github.com/HomericIntelligence/Scylla.git", "HomericIntelligence/Scylla"),
+        ("https://github.com/owner/repo", "owner/repo"),
+        ("https://gitlab.com/owner/repo.git", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_detect_repo_from_remote(remote_url: str | None, expected: str | None) -> None:
+    """Read the GitHub repository name from supported origin URLs."""
+    with patch.object(tidy_module, "git_remote_url", return_value=remote_url):
+        assert tidy_module._detect_repo_from_remote() == expected
+
+
+def test_detect_repo_from_remote_returns_none_on_lookup_error() -> None:
+    """An origin lookup error leaves the repository name unknown."""
+    with patch.object(tidy_module, "git_remote_url", side_effect=RuntimeError("git not found")):
+        assert tidy_module._detect_repo_from_remote() is None
+
+
 WORKTREE_PORCELAIN = "\0".join(
     (
         "worktree /repo",
@@ -526,7 +550,7 @@ class TestMain:
         git("-C", str(repo), "worktree", "add", "-b", "123-finished", str(stale_root))
 
         monkeypatch.chdir(linked_root)
-        monkeypatch.setattr(tidy_module, "detect_repo_from_remote", lambda: "owner/repo")
+        monkeypatch.setattr(tidy_module, "_detect_repo_from_remote", lambda: "owner/repo")
         monkeypatch.setattr(tidy_module, "_working_tree_clean", lambda: True)
         monkeypatch.setattr(tidy_module, "_in_git_repo", lambda: True)
         monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda _path: False)

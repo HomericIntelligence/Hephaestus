@@ -16,14 +16,14 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from contextlib import ExitStack, nullcontext
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import ANY, MagicMock, call, patch
+from unittest.mock import ANY, DEFAULT, MagicMock, Mock, call, patch
 
 import pytest
 
@@ -43,9 +43,13 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import DirtySourceOperation, SourceLane, WorkspaceBinding
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
+from hephaestus.automation.agent_config import (
+    AGENT_IMPLEMENTER,
+    AGENT_PR_REVIEWER,
+)
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -87,16 +91,15 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
+    _ignore_local_agent_failure,
     _linux_resource_limited_command,
     _owned_codex_adapter,
     _path_content_identity,
     _prepare_host_output_aliases,
     _quota_backed_volume,
-    _read_bounded_git_output_with_threads,
     _repo_lock_path,
     _run_bounded_git_output,
     _run_bounded_host_command,
-    _terminate_bounded_process_tree,
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
@@ -110,10 +113,6 @@ from hephaestus.automation.remediation_recovery import (
     RemediationReviewInput,
 )
 from hephaestus.automation.review_journal import CommentJournalReadError
-from hephaestus.automation.session_naming import (
-    AGENT_IMPLEMENTER,
-    AGENT_PR_REVIEWER,
-)
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -128,6 +127,10 @@ from hephaestus.automation.worktree_manager import (
     WorktreeCreationReceiptError,
     WorktreeManager,
     consume_implementation_writer_authority,
+)
+from hephaestus.automation.worktree_snapshot import (
+    _read_bounded_git_output_with_threads,
+    _terminate_bounded_process_tree,
 )
 from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
@@ -220,6 +223,78 @@ def _worker_repository(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, predecessor, base
 
 
+def _rebase_gate_command_result(
+    command: list[str],
+    *,
+    ancestor: bool,
+    abort_returncode: int = 0,
+    remote_head: str | None = None,
+    **_kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Return fixture state for the requested ancestry, abort, or remote read."""
+    if command == ["git", "merge-base", "--is-ancestor", "b" * 40, "HEAD"]:
+        return subprocess.CompletedProcess(command, 0 if ancestor else 1, "", "")
+    if command == ["git", "rebase", "--abort"]:
+        return subprocess.CompletedProcess(command, abort_returncode, "", "")
+    if command[-4:-1] == ["ls-remote", "--refs", "origin"] and remote_head is not None:
+        return subprocess.CompletedProcess(command, 0, f"{remote_head}\t{command[-1]}\n", "")
+    raise AssertionError(f"Unexpected rebase fixture command: {command!r}")
+
+
+def _continue_rebase_command_result(
+    command: list[str], *, ancestor: bool, raw_commit: str = "", **_kwargs: Any
+) -> subprocess.CompletedProcess[str]:
+    """Return command-specific state for a completed rebase and its metadata gates."""
+    results = {
+        ("git", "diff", "--name-only", "-z"): (0, "x.py\0"),
+        ("git", "ls-files", "--others", "--exclude-standard", "-z"): (0, ""),
+        ("git", "add", "--", "x.py"): (0, ""),
+        ("git", "diff", "--cached", "--check"): (0, ""),
+        ("git", "rebase", "--continue"): (0, ""),
+        ("git", "rev-parse", "HEAD"): (0, "d" * 40),
+        ("git", "merge-base", "--is-ancestor", "b" * 40, "HEAD"): (0 if ancestor else 1, ""),
+        ("git", "rev-list", "--reverse", f"{'b' * 40}..HEAD"): (0, "d" * 40),
+        ("git", "cat-file", "-p", "d" * 40): (0, raw_commit),
+    }
+    if tuple(command) not in results:
+        raise AssertionError(f"Unexpected continuation fixture command: {command!r}")
+    returncode, stdout = results[tuple(command)]
+    return subprocess.CompletedProcess(command, returncode, stdout, "")
+
+
+def _writer_creation_managers(
+    tmp_path: Path, *, repository: str
+) -> tuple[Path, str, MagicMock, MagicMock]:
+    """Record calls while real managers create and claim a local source writer."""
+    repo, _predecessor, head = _worker_repository(tmp_path)
+    worktree_manager = WorktreeManager(
+        base_dir=repo / "build" / ".worktrees",
+        base_branch=head,
+        repo_root=repo,
+        remote_git_env={},
+        remote_git_config=("-c", "credential.helper="),
+    )
+    source_manager = SourceWorkspaceManager(repo, repository=repository)
+    return repo, head, MagicMock(wraps=worktree_manager), MagicMock(wraps=source_manager)
+
+
+def _prepared_publication_writer(
+    tmp_path: Path, *, issue_number: int, branch: str, repository: str = "test/repo"
+) -> tuple[SourceWorkspaceManager, WorkspaceBinding]:
+    """Prepare a real source receipt for a publication test."""
+    root, _predecessor, head = _worker_repository(tmp_path)
+    manager = SourceWorkspaceManager(root, repository=repository)
+    binding = manager.prepare(issue_number, SourceLane.IMPLEMENTATION, head, branch=branch)
+    return manager, binding
+
+
+def _commit_publication_change(writer: Path, *_args: object, **_kwargs: object) -> bool:
+    """Create one real child commit through a controlled commit test seam."""
+    (writer / "tracked.txt").write_text("publication change\n")
+    _git(writer, "commit", "-am", "fix: publication change")
+    return True
+
+
 def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) -> None:
     """Opt-in evidence records the queue result without exposing provider output."""
     receipt_dir = tmp_path / "receipts"
@@ -237,6 +312,7 @@ def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) 
         cwd=tmp_path,
         timeout_s=60,
         execution_request=request,
+        workspace=WorkspaceBinding.external(tmp_path),
         descr="plan",
     )
     pool = WorkerPool(
@@ -249,7 +325,7 @@ def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) 
     try:
         with patch.object(
             pool,
-            "_run_agent",
+            "_invoke_agent",
             return_value=JobResult(ok=True, session_id="pi-session-2519"),
         ):
             result = pool._run(job, claim_key="Hephaestus#2519", claim_stage="planning")
@@ -292,7 +368,7 @@ def test_evidence_receipts_cover_host_lifecycle_jobs(tmp_path: Path) -> None:
             verified_runner_source_revision=revision,
             descr="tests",
         ),
-        GitJob("Hephaestus", "push", 60, descr="push"),
+        GitJob("Hephaestus", "commit_push", 60, descr="commit_push"),
     ]
     try:
         for job in jobs:
@@ -494,10 +570,11 @@ def pool(
 
 
 def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
-    """Build an AgentJob with test defaults.
+    """Build a job with an external binding for a non-repository test directory.
 
     Failing-path tests pass a unique ``model`` to keep their invocation
     details distinct while the runtime circuit breaker remains shared.
+    Repository tests must supply the actual source binding.
     """
     _TEST_AGENT_CWD.mkdir(parents=True, exist_ok=True)
     defaults: dict[str, object] = {
@@ -511,6 +588,11 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
         "descr": "test job",
     }
     defaults.update(overrides)
+    if "workspace" not in overrides:
+        cwd = cast(Path, defaults["cwd"])
+        if (cwd / ".git").exists() or (cwd / ".git").is_symlink():
+            raise ValueError("Repository tests must supply their source workspace binding")
+        defaults["workspace"] = WorkspaceBinding.external(cwd)
     return AgentJob(**defaults)  # type: ignore[arg-type]
 
 
@@ -632,12 +714,19 @@ def test_codex_boundary_failure_blocks_commit_and_push(pool: WorkerPool, tmp_pat
 
 def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_path: Path) -> None:
     """The publication sink rejects an unplanned path in committed history."""
-    base_sha = "a" * 40
+    _manager, binding = _prepared_publication_writer(
+        tmp_path, issue_number=2472, branch="2472-auto-impl"
+    )
+    tmp_path = binding.cwd
+    base_sha = binding.revision
     job = GitJob(
         repo="test/repo",
         op="commit_push",
+        workspace=binding,
         timeout_s=60,
         kwargs={
+            "source_lane": "impl",
+            "repo_root": str(binding.reusable_root),
             "issue_number": 2472,
             "worktree_path": tmp_path,
             "branch": "2472-auto-impl",
@@ -824,6 +913,11 @@ def test_codex_implementation_builds_one_frozen_admitted_request(
         cwd=tmp_path,
         model=model,
         session_key="implementation:123",
+        workspace=(
+            manager._binding(manager._require_receipt(12, SourceLane.IMPLEMENTATION))
+            if manager is not None
+            else WorkspaceBinding.external(tmp_path)
+        ),
         resume_session_id=resume_session_id,
         sandbox=sandbox,
         allowed_tools=allowed_tools,
@@ -1195,10 +1289,18 @@ def test_github_job_dispatches_once_through_injected_typed_runner(
     calls: list[GitHubJob] = []
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
-            assert isinstance(submitted, GitHubJob)
-            calls.append(submitted)
-            return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
+        gh_timeout = 120
+
+        def run(
+            self,
+            job: GitHubJob,
+            *,
+            shutdown: threading.Event | None = None,
+            deadline_s: float | None = None,
+        ) -> ReplyJournalAppended:
+            assert isinstance(job, GitHubJob)
+            calls.append(job)
+            return ReplyJournalAppended(request=job.request)  # type: ignore[arg-type]
 
     pool = WorkerPool(
         size=1,
@@ -1235,9 +1337,17 @@ def test_same_repo_github_jobs_are_serialized(
     guard = threading.Lock()
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+        gh_timeout = 120
+
+        def run(
+            self,
+            job: GitHubJob,
+            *,
+            shutdown: threading.Event | None = None,
+            deadline_s: float | None = None,
+        ) -> ReplyJournalAppended:
             nonlocal active, max_active
-            assert isinstance(submitted, GitHubJob)
+            assert isinstance(job, GitHubJob)
             with guard:
                 active += 1
                 max_active = max(max_active, active)
@@ -1247,7 +1357,7 @@ def test_same_repo_github_jobs_are_serialized(
                 assert release_first.wait(timeout=2)
             with guard:
                 active -= 1
-            return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
+            return ReplyJournalAppended(request=job.request)  # type: ignore[arg-type]
 
     pool = WorkerPool(
         size=2,
@@ -1292,9 +1402,17 @@ def test_different_repo_github_jobs_may_run_concurrently(
     guard = threading.Lock()
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+        gh_timeout = 120
+
+        def run(
+            self,
+            job: GitHubJob,
+            *,
+            shutdown: threading.Event | None = None,
+            deadline_s: float | None = None,
+        ) -> ReplyJournalAppended:
             nonlocal active, max_active
-            assert isinstance(submitted, GitHubJob)
+            assert isinstance(job, GitHubJob)
             with guard:
                 active += 1
                 max_active = max(max_active, active)
@@ -1303,7 +1421,7 @@ def test_different_repo_github_jobs_may_run_concurrently(
             assert release.wait(timeout=2)
             with guard:
                 active -= 1
-            return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
+            return ReplyJournalAppended(request=job.request)  # type: ignore[arg-type]
 
     pool = WorkerPool(
         size=2,
@@ -1339,10 +1457,18 @@ def test_failing_github_job_is_not_replayed_by_worker_pool(
     calls = 0
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+        gh_timeout = 120
+
+        def run(
+            self,
+            job: GitHubJob,
+            *,
+            shutdown: threading.Event | None = None,
+            deadline_s: float | None = None,
+        ) -> ReplyJournalAppended:
             nonlocal calls
-            assert isinstance(submitted, GitHubJob)
-            del submitted
+            assert isinstance(job, GitHubJob)
+            del job
             calls += 1
             raise OSError("ambiguous transport")
 
@@ -1391,8 +1517,16 @@ def test_github_job_returns_safe_structured_failure(
     request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
-            del submitted
+        gh_timeout = 120
+
+        def run(
+            self,
+            job: GitHubJob,
+            *,
+            shutdown: threading.Event | None = None,
+            deadline_s: float | None = None,
+        ) -> ReplyJournalAppended:
+            del job
             raise error
 
     pool = WorkerPool(
@@ -1429,8 +1563,16 @@ def test_github_job_classifies_wrapped_rate_limit(
     request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
-            del submitted
+        gh_timeout = 120
+
+        def run(
+            self,
+            job: GitHubJob,
+            *,
+            shutdown: threading.Event | None = None,
+            deadline_s: float | None = None,
+        ) -> ReplyJournalAppended:
+            del job
             try:
                 raise GitHubRateLimitError("private rate detail", reset_epoch=145)
             except GitHubRateLimitError as exc:
@@ -1500,7 +1642,10 @@ class TestWorkerPoolSubmitComplete:
     ) -> None:
         """An impossible completion overflow faults the run rather than deadlocking a worker."""
         completion_q: CompletionQueue = queue.Queue(maxsize=1)
-        occupied = (object(), JobResult(ok=True, value="already queued"))
+        occupied = (
+            JobHandle(job=_agent_job(), on_done_state=StageName.PLANNING),
+            JobResult(ok=True, value="already queued"),
+        )
         completion_q.put_nowait(occupied)
         pool = WorkerPool(
             size=1,
@@ -1691,11 +1836,12 @@ class TestWorkerPoolSubmitComplete:
             pi_dir=None,
             model_references=(job.model,),
         )
+        assert 0 < mock_session.call_args.kwargs["timeout"] <= job.timeout_s
         mock_session.assert_called_once_with(
             agent="codex",
             prompt="test prompt",
             cwd=job.cwd,
-            timeout=job.timeout_s,
+            timeout=ANY,
             model=job.model,
             sandbox="workspace-write",
             approval="never",
@@ -1776,12 +1922,13 @@ class TestWorkerPoolSubmitComplete:
             pool.submit(job, StageName.IMPLEMENTATION)
             _handle, result = completion_q.get(timeout=10)
 
+        assert 0 < resume.call_args.kwargs["timeout"] <= job.timeout_s
         resume.assert_called_once_with(
             agent="codex",
             session_id="saved-codex-session",
             prompt="test prompt",
             cwd=job.cwd,
-            timeout=job.timeout_s,
+            timeout=ANY,
             model=job.model,
             sandbox="workspace-write",
             approval="never",
@@ -1990,29 +2137,44 @@ class TestWorkerPoolSubmitComplete:
         assert result.error == "timeout"
         resolve.assert_not_called()
 
-    def test_agent_deadline_stops_a_whole_invocation_retry(
+    def test_agent_timeout_includes_workspace_validation(self, pool: WorkerPool) -> None:
+        """A job timeout includes the time needed to validate its workspace."""
+        clock = [100.0]
+        job = _agent_job(timeout_s=60)
+
+        def delayed_validation(*args: object, **kwargs: object) -> Path:
+            clock[0] = 161.0
+            return job.cwd
+
+        with (
+            patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
+            patch(f"{_WP}.validate_job_workspace", side_effect=delayed_validation),
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session", return_value=("ok", "id")
+            ) as invoke,
+        ):
+            result = pool._run_agent(job)
+
+        assert not result.ok
+        assert result.error == "timeout"
+        invoke.assert_not_called()
+
+    def test_agent_failure_does_not_restart_before_deadline(
         self,
         pool: WorkerPool,
     ) -> None:
-        """A transient provider failure cannot renew the operation budget."""
+        """Unused time cannot authorize a second provider invocation."""
         job = _agent_job(agent="codex", deadline_s=5.0)
-
-        def retry_once(function: Any, **_kwargs: object) -> Any:
-            try:
-                return function()
-            except OSError:
-                return function()
-
         with (
-            patch(f"{_WP}.time.monotonic", side_effect=[1.0, 1.0, 1.0, 6.0]),
+            patch(f"{_WP}.time.monotonic", return_value=1.0),
             patch(f"{_WP}.resolve_agent", return_value="codex"),
             patch(f"{_WP}.run_agent_session", side_effect=OSError("transient")) as run,
-            patch(f"{_WP}.resilient_call", side_effect=retry_once),
         ):
             result = pool._run_agent(job)
 
         assert result.ok is False
-        assert result.error == "timeout"
+        assert result.error == "OSError: transient"
         run.assert_called_once()
 
     def test_submit_and_complete_build_test_job(
@@ -2042,7 +2204,7 @@ class TestWorkerPoolSubmitComplete:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A worker records its identity when it starts executing a submitted job."""
+        """A worker records its identity when it starts a job."""
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -2053,7 +2215,7 @@ class TestWorkerPoolSubmitComplete:
         completed = subprocess.CompletedProcess(job.argv, 0, stdout="", stderr="")
         caplog.set_level(logging.INFO, logger=_WP)
 
-        with patch(f"{_WP}.subprocess.run", return_value=completed):
+        with patch(f"{_WP}.run_subprocess", return_value=completed) as run:
             pool.submit(
                 job,
                 StageName.PR_REVIEW,
@@ -2062,6 +2224,10 @@ class TestWorkerPoolSubmitComplete:
             )
             _handle, result = completion_q.get(timeout=10)
 
+        run.assert_called_once()
+        assert run.call_args.kwargs["track_process_group"] is True
+        assert run.call_args.kwargs["shutdown"] is pool._shutdown
+        assert 0 < run.call_args.kwargs["timeout"] <= job.timeout_s
         worker_id = getattr(result, "worker_id", "")
         assert worker_id
         assert any(
@@ -2099,16 +2265,19 @@ class TestWorkerPoolSubmitComplete:
         barrier = threading.Barrier(2, timeout=5)
 
         def complete_after_both_workers_enter(
-            argv: tuple[str, ...],
-            **_kwargs: object,
+            argv: list[str],
+            **kwargs: Any,
         ) -> subprocess.CompletedProcess[str]:
+            assert kwargs["track_process_group"] is True
+            assert kwargs["shutdown"] is shutdown_event
+            assert 0 < kwargs["timeout"] <= 60
             barrier.wait()
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         caplog.set_level(logging.INFO, logger=_WP)
 
         try:
-            with patch(f"{_WP}.subprocess.run", side_effect=complete_after_both_workers_enter):
+            with patch(f"{_WP}.run_subprocess", side_effect=complete_after_both_workers_enter):
                 pool.submit(
                     jobs[0],
                     StageName.PR_REVIEW,
@@ -2160,6 +2329,7 @@ class TestWorkerPoolSubmitComplete:
         _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
+        assert result.error is not None
         assert "rc=1" in result.error
 
     def test_verified_runner_is_resolved_only_at_worker_execution(
@@ -2181,13 +2351,16 @@ class TestWorkerPoolSubmitComplete:
 
         with (
             patch(f"{_WP}.build_verified_runner_argv", return_value=launcher) as build_launcher,
-            patch(f"{_WP}.subprocess.run", return_value=completed) as run,
+            patch(f"{_WP}.run_subprocess", return_value=completed) as run,
         ):
             result = pool._run_build_test(job)
 
         build_launcher.assert_called_once_with(command, revision)
-        assert run.call_args.args == (launcher,)
+        assert run.call_args.args == (list(launcher),)
         assert run.call_args.kwargs["cwd"] == "/tmp"
+        assert run.call_args.kwargs["track_process_group"] is True
+        assert run.call_args.kwargs["shutdown"] is pool._shutdown
+        assert 0 < run.call_args.kwargs["timeout"] <= job.timeout_s
         assert result.ok is True
         assert result.stdout_tail == "passed"
 
@@ -2205,14 +2378,17 @@ class TestWorkerPoolSubmitComplete:
         )
 
         with patch(
-            f"{_WP}.subprocess.run",
+            f"{_WP}.run_subprocess",
             side_effect=subprocess.TimeoutExpired(cmd=["sleep", "60"], timeout=1),
-        ):
+        ) as run:
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
         assert result.error == "timeout"
+        assert run.call_args.kwargs["track_process_group"] is True
+        assert run.call_args.kwargs["shutdown"] is pool._shutdown
+        assert 0 < run.call_args.kwargs["timeout"] <= job.timeout_s
 
     def test_pytest_failure_classification_requires_terminal_summary(self) -> None:
         """A bootstrap error mentioning failures is never implementation work."""
@@ -3155,27 +3331,104 @@ class TestWorkerPoolSubmitComplete:
 class TestAgentErrorHandling:
     """Tests for agent-job error handling paths."""
 
+    def test_shutdown_cancels_host_skill_executor(self, pool: WorkerPool) -> None:
+        """Pool shutdown must cancel the host skill that it owns."""
+        executor = MagicMock()
+        pool._athena_skill_executor = executor
+        pool.shutdown()
+        executor.cancel.assert_called_once()
+        pool._athena_skill_executor = None
+
+    @pytest.mark.parametrize("mismatch", ["role", "scope", "item"])
+    def test_dirty_operation_rejects_mismatched_job_authority(
+        self, pool: WorkerPool, tmp_path: Path, mismatch: str
+    ) -> None:
+        """Dirty source permission must match the exact job and operation."""
+        from hephaestus.agents.workspace import DirtySourceOperation
+
+        root, _, revision = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(root, repository="project")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, revision, branch="writer")
+        (binding.cwd / "tracked.txt").write_text("candidate\n")
+        request = ExecutionRequest(
+            AgentRole.PR_REVIEWER if mismatch == "role" else AgentRole.IMPLEMENTER,
+            AgentOperation.PR_REVIEW if mismatch == "role" else AgentOperation.TEST_FIX,
+            SessionLifecycle.RESUME_REQUIRED,
+        )
+        job = _agent_job(
+            repo="project",
+            issue=8 if mismatch == "item" else 7,
+            cwd=binding.cwd,
+            workspace=binding,
+            execution_request=request,
+            source_operation=DirtySourceOperation("test-fix", ("tracked.txt",)),
+            allowed_tools="Bash" if mismatch == "scope" else "Read,Write,Edit,Glob,Grep,Bash",
+        )
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(f"{_WP}.claude_invoke.invoke_claude_with_session") as invoke,
+        ):
+            result = pool._run_agent(job)
+        assert not result.ok
+        invoke.assert_not_called()
+
+    def test_local_session_failures_do_not_open_provider_breaker(self, pool: WorkerPool) -> None:
+        """A missing item session must not block other provider jobs."""
+        from hephaestus.agents.session_errors import AgentSessionLostError
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                side_effect=[
+                    *(AgentSessionLostError("missing session") for _ in range(5)),
+                    ("ok", "session"),
+                ],
+            ) as invoke,
+        ):
+            failures = [pool._run_agent(_agent_job()) for _ in range(5)]
+            healthy = pool._run_agent(_agent_job(issue=456))
+
+        assert all(result.session_lost for result in failures)
+        assert healthy.ok
+        assert invoke.call_count == 6
+
+    def test_agent_failure_after_possible_effects_is_not_replayed(self, pool: WorkerPool) -> None:
+        """The queue receives one failure after one provider invocation."""
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                side_effect=ConnectionResetError("connection reset after tool execution"),
+            ) as invoke,
+            patch("hephaestus.utils.retry.time.sleep"),
+        ):
+            result = pool._run_agent(_agent_job())
+
+        assert not result.ok
+        invoke.assert_called_once()
+
     def test_agent_breaker_is_shared_across_models(
         self,
         pool: WorkerPool,
     ) -> None:
         """Failures for one model open the runtime breaker for every model."""
-        get_circuit_breaker("agent:claude", failure_threshold=2)
+        get_circuit_breaker("agent:claude", failure_threshold=2, ignore=_ignore_local_agent_failure)
         jobs = [_agent_job(model=model) for model in ("opus", "sonnet")]
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
             patch(
                 f"{_WP}.claude_invoke.invoke_claude_with_session",
-                side_effect=RuntimeError("runtime unavailable"),
+                side_effect=ConnectionError("runtime unavailable"),
             ) as invoke,
         ):
             first = pool._run_agent(jobs[0])
             second = pool._run_agent(jobs[0])
             blocked = pool._run_agent(jobs[1])
 
-        assert first.error == "RuntimeError: runtime unavailable"
-        assert second.error == "RuntimeError: runtime unavailable"
+        assert first.error == "ConnectionError: runtime unavailable"
+        assert second.error == "ConnectionError: runtime unavailable"
         assert blocked.error == "circuit_open"
         assert invoke.call_count == 2
 
@@ -3331,7 +3584,7 @@ class TestAgentErrorHandling:
     ) -> None:
         """An informational Codex notice remains successful across the worker boundary."""
         job = _agent_job(agent="codex")
-        breaker = get_circuit_breaker("agent:codex")
+        breaker = get_circuit_breaker("agent:codex", ignore=_ignore_local_agent_failure)
         notice = (
             "Skill descriptions were shortened to fit the skills context budget. "
             "Codex can still see every skill, but some descriptions are shorter. "
@@ -3463,23 +3716,23 @@ class TestAgentErrorHandling:
         assert result.error.startswith("RuntimeError: ")
         assert len(result.error) == small_err_max
 
-    def test_run_agent_classifies_resilient_call_exception(self, pool: WorkerPool) -> None:
-        """Unexpected resilience-wrapper failures are classified inside _run_agent."""
+    def test_run_agent_classifies_breaker_configuration_exception(self, pool: WorkerPool) -> None:
+        """A failed circuit setup returns a job error."""
         job = _agent_job(model="model-resilient-generic", prompt_builder=lambda: "prompt")
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
-            patch(f"{_WP}.resilient_call", side_effect=OSError("retry wrapper failed")),
+            patch(f"{_WP}.get_circuit_breaker", side_effect=ValueError("circuit setup failed")),
         ):
             result = pool._run_agent(job)
 
         assert result.ok is False
-        assert result.error == "OSError: retry wrapper failed"
+        assert result.error == "ValueError: circuit setup failed"
 
     def test_run_agent_does_not_retry_transient_error_after_shutdown(
         self, pool: WorkerPool, shutdown_event: threading.Event
     ) -> None:
-        """Shutdown suppresses retrying an interrupted agent session."""
+        """Shutdown prevents a provider call and a retry."""
         job = _agent_job(model="model-shutdown-no-retry", prompt_builder=lambda: "prompt")
         shutdown_event.set()
 
@@ -3494,16 +3747,13 @@ class TestAgentErrorHandling:
             result = pool._run_agent(job)
 
         assert result.ok is False
-        assert result.error == "OSError: connection reset"
-        assert invoke.call_count == 1
+        assert result.error == "interrupted"
+        invoke.assert_not_called()
         sleep.assert_not_called()
 
-    def test_nonretryable_agent_runs_once_after_transient_failure(self, pool: WorkerPool) -> None:
+    def test_agent_runs_once_after_transient_failure(self, pool: WorkerPool) -> None:
         """A one-use writer turn must not repeat after a provider failure."""
-        job = replace(
-            _agent_job(model="model-one-use-writer", prompt_builder=lambda: "prompt"),
-            retryable=False,
-        )
+        job = _agent_job(model="model-one-use-writer", prompt_builder=lambda: "prompt")
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
             patch(
@@ -3702,6 +3952,7 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """create_worktree forwards kwargs to WorktreeManager.create_worktree."""
+        repo, writer, _head = self._inspection_writer(tmp_path, "7-auto")
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
@@ -3709,18 +3960,18 @@ class TestGitOps:
             kwargs={
                 "issue_number": 7,
                 "branch_name": "7-auto",
-                "repo_root": str(tmp_path),
+                "repo_root": str(repo),
             },
         )
         instance = MagicMock()
-        instance.create_worktree.return_value = tmp_path / "wt"
+        instance.create_worktree.return_value = writer
         with patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         mock_manager.assert_called_once_with(
-            base_dir=tmp_path / "build" / ".worktrees",
-            repo_root=tmp_path,
+            base_dir=repo / "build" / ".worktrees",
+            repo_root=repo,
         )
         instance.create_worktree.assert_called_once_with(
             issue_number=7,
@@ -3728,7 +3979,7 @@ class TestGitOps:
             timeout=60,
         )
         assert result.ok is True
-        assert result.value == str(tmp_path / "wt")
+        assert result.value == {"path": str(writer)}
 
     def test_create_worktree_normal_reuse_returns_complete_dirty_snapshot(
         self,
@@ -4022,8 +4273,10 @@ class TestGitOps:
         (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
         git("add", "tracked.txt")
         git("commit", "--quiet", "--no-gpg-sign", "-m", "test: base")
-        git("worktree", "add", "--quiet", "-b", branch, str(writer))
-        parent = git("rev-parse", "HEAD", cwd=writer)
+        parent = git("rev-parse", "HEAD")
+        source_manager = SourceWorkspaceManager(repo, repository="test/repo")
+        binding = source_manager.prepare(2973, SourceLane.IMPLEMENTATION, parent, branch=branch)
+        assert binding.cwd == writer
         (writer / "tracked.txt").write_text("prepared\n", encoding="utf-8")
         snapshot = _dirty_worktree_content_snapshot(writer, timeout=60)
         tree, diff = _candidate_commit_tree_evidence(writer, parent, timeout=60)
@@ -4077,11 +4330,11 @@ class TestGitOps:
             },
         )
         with patch.object(pool, "_git_create_worktree_with_handoff") as fallback:
-            same_manager = pool._git_create_worktree(recovery)
+            same_manager = pool._run_git(recovery)
         fallback.assert_not_called()
         restarted = WorkerPool(1, threading.Event(), CompletionQueue())
         try:
-            new_manager = restarted._recover_prepared_remediation_worktree(recovery, repo)
+            new_manager = restarted._run_git(recovery)
         finally:
             restarted.shutdown()
 
@@ -6452,7 +6705,7 @@ class TestGitOps:
                 return_value=revalidate_remote,
             ),
         ):
-            rebase = pool._git_rebase(rebase_job)
+            rebase = pool._git_rebase(rebase_job, record_source=Mock())
         return recovery, rebase, checkout, branch
 
     @pytest.mark.usefixtures("require_git_path_format")
@@ -7154,8 +7407,8 @@ class TestGitOps:
         ):
             result = pool._git_create_worktree(job)
 
-        assert result.ok is True
-        assert result.value is None
+        assert result.ok is False
+        assert result.error == "worktree manager returned no worktree"
         assert prepare.call_args.kwargs["expected_repo"] == "HomericIntelligence/Hephaestus"
 
     def test_create_worktree_authenticates_requested_remote_refresh(
@@ -7164,6 +7417,7 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """The worker gives a remote refresh an isolated GitHub credential helper."""
+        repo, writer, _head = self._inspection_writer(tmp_path, "2924-auto")
         job = GitJob(
             repo="Hephaestus",
             expected_repository="HomericIntelligence/Hephaestus",
@@ -7172,12 +7426,12 @@ class TestGitOps:
             kwargs={
                 "issue_number": 2924,
                 "branch_name": "2924-auto",
-                "repo_root": str(tmp_path),
+                "repo_root": str(repo),
                 "refresh_base": True,
             },
         )
         manager = MagicMock()
-        manager.create_worktree.return_value = tmp_path / "build" / ".worktrees" / "issue-2924"
+        manager.create_worktree.return_value = writer
         remote_env = {"GIT_TERMINAL_PROMPT": "0"}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
 
@@ -7193,13 +7447,13 @@ class TestGitOps:
 
         assert result.ok is True
         authenticate.assert_called_once_with(
-            cwd=tmp_path,
+            cwd=repo,
             expected_repo="HomericIntelligence/Hephaestus",
             timeout=60,
         )
         manager_type.assert_called_once_with(
-            base_dir=tmp_path / "build" / ".worktrees",
-            repo_root=tmp_path,
+            base_dir=repo / "build" / ".worktrees",
+            repo_root=repo,
             remote_git_env=remote_env,
             remote_git_config=remote_config,
         )
@@ -7370,11 +7624,10 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A direct writer claims its source lane after its remote reservation."""
-        pinned_sha = "a" * 40
-        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
-        writer_path.mkdir(parents=True)
-        authority = MagicMock(spec=ImplementationWriterAuthority)
-        binding = MagicMock(revision=pinned_sha)
+        repo, pinned_sha, manager, source_manager = _writer_creation_managers(
+            tmp_path, repository="test/repo"
+        )
+        writer_path = repo / "build" / ".worktrees" / "auto-7-impl"
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
@@ -7382,26 +7635,23 @@ class TestGitOps:
             kwargs={
                 "issue_number": 7,
                 "branch_name": "7-auto",
-                "repo_root": str(tmp_path),
+                "repo_root": str(repo),
                 "refresh_base": False,
                 "base_sha": pinned_sha,
                 "source_lane": "impl",
             },
         )
-        manager = MagicMock()
-        manager.create_worktree.return_value = writer_path
-        manager.implementation_writer_authority.return_value = authority
-        source_manager = MagicMock()
-        source_manager.claim_implementation_writer.return_value = binding
-
         with (
             patch(f"{_WP}.WorktreeManager", return_value=manager),
-            patch(
-                f"{_WP}.git_utils.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
             ),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent") as reserve,
+            patch(
+                f"{_WP}.git_utils.reserve_remote_branch_if_absent",
+                wraps=git_utils.reserve_remote_branch_if_absent,
+            ) as reserve,
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
         ):
             pool.submit(job, StageName.REPO)
@@ -7410,7 +7660,7 @@ class TestGitOps:
         reserve.assert_called_once_with(
             "7-auto",
             pinned_sha,
-            tmp_path,
+            repo,
             timeout=60,
             env=ANY,
             remote_config=ANY,
@@ -7430,13 +7680,18 @@ class TestGitOps:
             7,
             branch="7-auto",
             path=writer_path,
-            authority=authority,
+            authority=ANY,
             handoff=ANY,
         )
         assert result.ok is True
+        receipt = source_manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+        assert receipt.path == writer_path
+        assert receipt.revision == pinned_sha
         assert result.value == {
             "path": str(writer_path),
             "impl_source_revision": pinned_sha,
+            "source_workspace": source_manager._binding(receipt).to_dict(),
+            "source_receipt": receipt.to_dict(),
             "direct_scope_reservation": {"branch": "7-auto", "base_sha": pinned_sha},
         }
 
@@ -7478,13 +7733,15 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
+        promoted = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+        assert promoted is not None
         assert result.value == {
             "path": str(predecessor.cwd),
             "impl_source_revision": base_revision,
+            "source_workspace": source_manager._binding(promoted).to_dict(),
+            "source_receipt": promoted.to_dict(),
             "direct_scope_reservation": {"branch": branch, "base_sha": base_revision},
         }
-        promoted = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
-        assert promoted is not None
         assert promoted.generation == predecessor.generation + 1
         assert promoted.revision == base_revision
         assert promoted.detached is False
@@ -7615,7 +7872,7 @@ class TestGitOps:
                             side_effect=OSError("simulated successor receipt failure"),
                         )
                     )
-                failed = pool._git_create_worktree(job)
+                failed = pool._run_git(job)
 
             assert failed.ok is False
             assert failed.error == "source_workspace_terminal"
@@ -7628,7 +7885,7 @@ class TestGitOps:
             assert old_receipt is not None
             assert old_receipt.revision == predecessor_revision
 
-            retried = pool._git_create_worktree(job)
+            retried = pool._run_git(job)
 
         assert retried.ok is True
         final_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
@@ -7694,17 +7951,19 @@ class TestGitOps:
 
         assert first_result.ok is True
         assert second_result.ok is True
+        source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
+        receipt = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
+        assert receipt is not None
         assert second_result.value == {
             "path": first_result.value["path"],
             "impl_source_revision": base_revision,
+            "source_workspace": source_manager._binding(receipt).to_dict(),
+            "source_receipt": receipt.to_dict(),
             "direct_scope_reservation": {
                 "branch": second_branch,
                 "base_sha": base_revision,
             },
         }
-        source_manager = SourceWorkspaceManager(repo, repository="Hephaestus")
-        receipt = source_manager._read_receipt(7, SourceLane.IMPLEMENTATION)
-        assert receipt is not None
         assert receipt.detached is False
         assert receipt.branch == second_branch
         assert receipt.revision == base_revision
@@ -8299,8 +8558,10 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A controlled implementation writer is registered before source use."""
-        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
-        writer_path.mkdir(parents=True)
+        repo, head, worktree_manager, source_manager = _writer_creation_managers(
+            tmp_path, repository="test/repo"
+        )
+        writer_path = repo / "build" / ".worktrees" / "auto-7-impl"
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
@@ -8308,26 +8569,24 @@ class TestGitOps:
             kwargs={
                 "issue_number": 7,
                 "branch_name": "7-auto",
-                "repo_root": str(tmp_path),
+                "repo_root": str(repo),
                 "source_lane": "impl",
             },
         )
-        worktree_manager = MagicMock()
-        worktree_manager.create_worktree.return_value = writer_path
-        authority = ImplementationWriterAuthority("authority-token")
-        worktree_manager.implementation_writer_authority.return_value = authority
-        source_manager = MagicMock()
-        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
+            ),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         source_class.assert_called_once_with(
-            tmp_path,
+            repo,
             repository="test/repo",
             base_dir=writer_path.parent,
         )
@@ -8335,14 +8594,19 @@ class TestGitOps:
             7,
             branch="7-auto",
             path=writer_path,
-            authority=authority,
+            authority=ANY,
             handoff=ANY,
         )
         worktree_manager.implementation_writer_authority.assert_called_once_with(writer_path)
         assert result.ok is True
+        receipt = source_manager._require_receipt(7, SourceLane.IMPLEMENTATION)
+        assert receipt.path == writer_path
+        assert receipt.revision == head
         assert result.value == {
             "path": str(writer_path),
-            "impl_source_revision": "b" * 40,
+            "impl_source_revision": head,
+            "source_workspace": source_manager._binding(receipt).to_dict(),
+            "source_receipt": receipt.to_dict(),
         }
 
     def test_create_implementation_source_lane_handoff_uses_job_repository_identity(
@@ -8352,8 +8616,10 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """Source ownership uses the stage repository, not its transport target."""
-        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
-        writer_path.mkdir(parents=True)
+        repo, head, worktree_manager, source_manager = _writer_creation_managers(
+            tmp_path, repository="org/repo"
+        )
+        writer_path = repo / "build" / ".worktrees" / "auto-7-impl"
         job = GitJob(
             repo="org/repo",
             op="create_worktree",
@@ -8362,27 +8628,32 @@ class TestGitOps:
             kwargs={
                 "issue_number": 7,
                 "branch_name": "7-auto",
-                "repo_root": str(tmp_path),
+                "repo_root": str(repo),
                 "source_lane": "impl",
             },
         )
-        worktree_manager = MagicMock()
-        worktree_manager.create_worktree.return_value = writer_path
-        source_manager = MagicMock()
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ("-c", "credential.helper=")),
+            ) as authentication,
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         source_class.assert_called_once_with(
-            tmp_path,
+            repo,
             repository="org/repo",
             base_dir=writer_path.parent,
         )
         assert result.ok is True
+        assert authentication.call_args.kwargs["expected_repo"] == "transport/repo"
+        binding = WorkspaceBinding.from_dict(result.value["source_workspace"])
+        assert binding.repository == "org/repo"
+        assert binding.revision == head
 
     @pytest.mark.parametrize("base_sha", [None, "a" * 40], ids=["fresh", "direct"])
     def test_create_implementation_writer_passes_authenticated_transport_to_manager(
@@ -8393,8 +8664,10 @@ class TestGitOps:
         base_sha: str | None,
     ) -> None:
         """Fresh and direct writer requests use controlled remote Git transport."""
-        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
-        writer_path.mkdir(parents=True)
+        repo, head, worktree_manager, source_manager = _writer_creation_managers(
+            tmp_path, repository="test/repo"
+        )
+        selected_base = head if base_sha is not None else None
         job = GitJob(
             repo="test/repo",
             op="create_worktree",
@@ -8402,20 +8675,16 @@ class TestGitOps:
             kwargs={
                 "issue_number": 7,
                 "branch_name": "7-auto",
-                "repo_root": str(tmp_path),
+                "repo_root": str(repo),
                 "source_lane": "impl",
             },
         )
         remote_env = {"GIT_TERMINAL_PROMPT": "0"}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
-        worktree_manager = MagicMock()
-        worktree_manager.create_worktree.return_value = writer_path
-        authority = ImplementationWriterAuthority("authority-token")
-        worktree_manager.implementation_writer_authority.return_value = authority
-        source_manager = MagicMock()
-        source_manager.claim_implementation_writer.return_value.revision = "b" * 40
         with (
-            patch.object(pool, "_prepare_direct_scope_worktree", return_value=(base_sha, "7-auto")),
+            patch.object(
+                pool, "_prepare_direct_scope_worktree", return_value=(selected_base, "7-auto")
+            ),
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -8423,13 +8692,12 @@ class TestGitOps:
             ) as authentication,
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager) as manager_class,
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         authentication.assert_called_once_with(
-            cwd=tmp_path,
+            cwd=repo,
             expected_repo="test/repo",
             timeout=60,
         )
@@ -8439,8 +8707,11 @@ class TestGitOps:
         if base_sha is None:
             assert "base_branch" not in manager_kwargs
         else:
-            assert manager_kwargs["base_branch"] == base_sha
+            assert manager_kwargs["base_branch"] == selected_base
         assert result.ok is True
+        binding = WorkspaceBinding.from_dict(result.value["source_workspace"])
+        assert binding.revision == head
+        assert binding.repository == "test/repo"
 
     def test_direct_implementation_receipt_check_runs_before_create(
         self,
@@ -8449,8 +8720,10 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A direct writer checks source ownership before creating its checkout."""
-        pin = "a" * 40
-        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        repo, pin, worktree_manager, source_manager = _writer_creation_managers(
+            tmp_path, repository="test/repo"
+        )
+        writer_path = repo / "build" / ".worktrees" / "auto-7-impl"
         events: list[str] = []
         job = GitJob(
             repo="test/repo",
@@ -8459,26 +8732,24 @@ class TestGitOps:
             kwargs={
                 "issue_number": 7,
                 "branch_name": "7-auto",
-                "repo_root": str(tmp_path),
+                "repo_root": str(repo),
                 "source_lane": "impl",
                 "base_sha": pin,
             },
         )
-        worktree_manager = MagicMock()
 
-        def create_worktree(**_kwargs: object) -> Path:
+        def record_create(**_kwargs: object) -> object:
             events.append("create")
-            return writer_path
+            return DEFAULT
 
-        worktree_manager.create_worktree.side_effect = create_worktree
-        worktree_manager.implementation_writer_authority.return_value = (
-            ImplementationWriterAuthority("authority-token")
-        )
-        source_manager = MagicMock()
+        def record_authorize(*_args: object, **_kwargs: object) -> object:
+            events.append("authorize")
+            return DEFAULT
+
+        worktree_manager.create_worktree.side_effect = record_create
         source_manager.authorize_direct_implementation_writer_transition.side_effect = (
-            lambda *_args, **_kwargs: events.append("authorize")
+            record_authorize
         )
-        source_manager.claim_implementation_writer.return_value.revision = pin
         with (
             patch.object(pool, "_prepare_direct_scope_worktree", return_value=(pin, "7-auto")),
             patch.object(
@@ -8488,13 +8759,15 @@ class TestGitOps:
             ),
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         assert events == ["authorize", "create"]
         assert result.ok is True
+        binding = WorkspaceBinding.from_dict(result.value["source_workspace"])
+        assert binding.cwd == writer_path
+        assert binding.revision == pin
 
     def test_direct_implementation_receipt_failure_prevents_create(
         self,
@@ -9123,7 +9396,6 @@ class TestGitOps:
                     MagicMock(stdout="d" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for stale base"),
                     MagicMock(stdout="stale.py\0"),
-                    MagicMock(stdout="M\0stale.py\0"),
                 ],
             ) as mock_run,
         ):
@@ -9137,7 +9409,6 @@ class TestGitOps:
             "base": "d" * 40,
             "diff": "checkout diff for stale base",
             "changed_paths": ["stale.py"],
-            "status_manifest": (("M", "stale.py"),),
         }
         assert mock_run.call_args_list[1].args[0] == [
             "git",
@@ -9192,7 +9463,6 @@ class TestGitOps:
                     MagicMock(stdout="b" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for A"),
                     MagicMock(stdout="old.py\0new.py\0"),
-                    MagicMock(stdout="D\0old.py\0A\0new.py\0"),
                 ],
             ) as mock_run,
         ):
@@ -9206,7 +9476,6 @@ class TestGitOps:
             "base": "b" * 40,
             "diff": "checkout diff for A",
             "changed_paths": ["old.py", "new.py"],
-            "status_manifest": (("A", "new.py"), ("D", "old.py")),
         }
         mock_sync.assert_called_once()
         assert mock_sync.call_args.args == (tmp_path, "70-existing")
@@ -9271,6 +9540,7 @@ class TestGitOps:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        tmp_path: Path,
     ) -> None:
         """No repo_root kwarg falls back to get_repo_root() (single-repo callers)."""
         job = GitJob(
@@ -9280,8 +9550,8 @@ class TestGitOps:
             kwargs={"issue_number": 7, "branch_name": "7-auto"},
         )
         instance = MagicMock()
-        ambient_root = get_repo_root()
-        instance.create_worktree.return_value = ambient_root / "build" / ".worktrees" / "issue-7"
+        ambient_root, writer, _head = self._inspection_writer(tmp_path, "7-auto")
+        instance.create_worktree.return_value = writer
         with (
             patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager,
             patch(f"{_WP}.get_repo_root", return_value=ambient_root),
@@ -9324,47 +9594,24 @@ class TestGitOps:
         assert "escaped resolved repo root" in result.error
         assert str(repo_root) in result.error
 
-    def test_remove_worktree_dispatch(
+    def test_remove_worktree_requires_an_exact_path(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """remove_worktree forwards kwargs to WorktreeManager.remove_worktree."""
+        """Cleanup cannot use a new manager's empty in-memory state."""
         job = GitJob(
             repo="test/repo",
             op="remove_worktree",
             timeout_s=60,
             kwargs={"issue_number": 7, "force": True},
         )
-        instance = MagicMock()
-        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+        with patch(f"{_WP}.WorktreeManager") as manager:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
-
-        instance.remove_worktree.assert_called_once_with(issue_number=7, force=True, timeout=60)
-        assert result.ok is True
-
-    def test_remove_worktree_fallback_honors_repo_root_kwarg(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-        tmp_path: Path,
-    ) -> None:
-        """The manager-state fallback (no worktree_path) still scopes repo_root."""
-        other_repo = tmp_path / "Argus"
-        job = GitJob(
-            repo="Argus",
-            op="remove_worktree",
-            timeout_s=60,
-            kwargs={"issue_number": 107, "force": True, "repo_root": str(other_repo)},
-        )
-        instance = MagicMock()
-        with patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager:
-            pool.submit(job, StageName.REPO)
-            _, result = completion_q.get(timeout=10)
-
-        mock_manager.assert_called_once_with(repo_root=other_repo)
-        assert result.ok is True
+        manager.assert_not_called()
+        assert result.ok is False
+        assert result.error == "cleanup requires an exact worktree path"
 
     def test_remove_worktree_path_dispatch(
         self,
@@ -9750,26 +9997,32 @@ class TestGitOps:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        tmp_path: Path,
         rebase_clean: bool,
         expected_error: str | None,
-        tmp_path: Path,
     ) -> None:
         """Rebase propagates its status and explains an aborted conflict."""
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(repo, repository="test/repo")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl")
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
+                "branch": "7-auto-impl",
                 "base_branch": "main",
                 "rebase_reason": "manual",
                 "publish_rebased_head": True,
-                "branch": "writer",
-                "expected_remote_sha": "a" * 40,
+                "expected_remote_sha": head,
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=head),
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch.object(
                 pool,
@@ -9799,23 +10052,29 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         mock_rebase.assert_called_once_with(
-            cwd=tmp_path,
-            remote="origin",
+            cwd=binding.cwd,
             base_sha="b" * 40,
             base_branch="main",
+            remote="origin",
             preserve_conflicts=False,
             timeout=60,
             env={"GIT_CONFIG_KEY_0": "user.signingkey"},
         )
         assert result.ok is rebase_clean
         if rebase_clean:
-            assert result.value == {"rebased": True, "published": True, "head_sha": "a" * 40}
+            assert result.value == {
+                "rebased": True,
+                "published": True,
+                "head_sha": head,
+                "source_workspace": binding.to_dict(),
+                "source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION).to_dict(),
+            }
             push.assert_called_once()
         else:
             assert result.value == {
                 "rebase_restart_required": True,
                 "base_sha": "b" * 40,
-                "head_sha": "a" * 40,
+                "head_sha": head,
             }
             push.assert_not_called()
         assert result.error == expected_error
@@ -9906,19 +10165,27 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A remote rebase stops before Git runs when the GitHub helper is absent."""
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
+            7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl"
+        )
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
+                "branch": "7-auto-impl",
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
-                "expected_head_sha": "a" * 40,
+                "expected_head_sha": head,
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=head),
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch(f"{_WP}._trusted_gh_executable", return_value=None),
             patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
@@ -9938,21 +10205,28 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """The active writer publish path preserves the conflict explanation."""
+        repo, predecessor, head = _worker_repository(tmp_path)
+        binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
+            7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl"
+        )
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "publish_rebased_head": True,
                 "branch": "7-auto-impl",
-                "expected_remote_sha": "a" * 40,
+                "expected_remote_sha": head,
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=head),
             patch.object(
                 pool,
                 "_git_fetch_main",
@@ -9965,6 +10239,7 @@ class TestGitOps:
                 return_value=False,
             ),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_conflict_receipt") as receipt,
         ):
@@ -9976,9 +10251,9 @@ class TestGitOps:
                 "conflict_paths": ("x.py",),
                 "conflict_snapshot": {"x.py": "before"},
                 "conflict_index_snapshot": "1" * 64,
-                "paused_head_sha": "c" * 40,
-                "base_sha": "b" * 40,
-                "expected_remote_sha": "a" * 40,
+                "paused_head_sha": head,
+                "base_sha": predecessor,
+                "expected_remote_sha": head,
             }
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
@@ -9994,13 +10269,18 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """Mnemosyne can continue from its unchanged verified writer head."""
-        expected_head = "a" * 40
+        repo, _predecessor, expected_head = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(repo, repository="Mnemosyne")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, expected_head, branch="7-auto-impl")
         job = GitJob(
             repo="Mnemosyne",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "publish_rebased_head": True,
@@ -10009,7 +10289,7 @@ class TestGitOps:
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=expected_head),
             patch.object(
                 pool,
                 "_git_fetch_main",
@@ -10022,6 +10302,7 @@ class TestGitOps:
                 return_value=False,
             ),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(
                 pool,
@@ -10036,10 +10317,13 @@ class TestGitOps:
                 ),
             ) as verify,
         ):
-            run.side_effect = [
-                MagicMock(returncode=1),
-                MagicMock(returncode=0),
-            ]
+            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
+                command,
+                ancestor=False,
+                abort_returncode=0,
+                remote_head=None,
+                **kwargs,
+            )
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
@@ -10050,16 +10334,18 @@ class TestGitOps:
             "head_sha": expected_head,
             "rebase_fallback": "verified-current-head",
             "rebase_policy": "mnemosyne-current-head-v1",
+            "source_workspace": binding.to_dict(),
+            "source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION).to_dict(),
         }
         assert run.call_args_list[-1] == call(
             ["git", "rebase", "--abort"],
-            cwd=tmp_path,
+            cwd=binding.cwd,
             check=False,
             timeout=60,
             env={},
         )
         verify.assert_called_once_with(
-            tmp_path,
+            binding.cwd,
             remote="origin",
             branch="7-auto-impl",
             expected_repo=job.transport_repository,
@@ -10074,21 +10360,28 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A failed abort cannot advance Mnemosyne to head verification."""
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        binding = SourceWorkspaceManager(repo, repository="Mnemosyne").prepare(
+            7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl"
+        )
         job = GitJob(
             repo="Mnemosyne",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "publish_rebased_head": True,
                 "branch": "7-auto-impl",
-                "expected_remote_sha": "a" * 40,
+                "expected_remote_sha": head,
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=head),
             patch.object(
                 pool,
                 "_git_fetch_main",
@@ -10098,13 +10391,17 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_verify_noop_writer_rebase") as verify,
         ):
-            run.side_effect = [
-                MagicMock(returncode=1),
-                MagicMock(returncode=1),
-            ]
+            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
+                command,
+                ancestor=False,
+                abort_returncode=1,
+                remote_head=None,
+                **kwargs,
+            )
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
@@ -10127,13 +10424,19 @@ class TestGitOps:
         verification_error: str,
     ) -> None:
         """A failed fallback head proof cannot advance Mnemosyne."""
-        expected_head = "a" * 40
+        repo, _predecessor, expected_head = _worker_repository(tmp_path)
+        binding = SourceWorkspaceManager(repo, repository="Mnemosyne").prepare(
+            7, SourceLane.IMPLEMENTATION, expected_head, branch="7-auto-impl"
+        )
         job = GitJob(
             repo="Mnemosyne",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "publish_rebased_head": True,
@@ -10142,7 +10445,7 @@ class TestGitOps:
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=expected_head),
             patch.object(
                 pool,
                 "_git_fetch_main",
@@ -10152,6 +10455,7 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(
                 pool,
@@ -10159,10 +10463,13 @@ class TestGitOps:
                 return_value=JobResult(ok=False, error=verification_error),
             ) as verify,
         ):
-            run.side_effect = [
-                MagicMock(returncode=1),
-                MagicMock(returncode=0),
-            ]
+            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
+                command,
+                ancestor=False,
+                abort_returncode=0,
+                remote_head=None,
+                **kwargs,
+            )
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
@@ -10170,13 +10477,13 @@ class TestGitOps:
         assert result.error == verification_error
         assert run.call_args_list[-1] == call(
             ["git", "rebase", "--abort"],
-            cwd=tmp_path,
+            cwd=binding.cwd,
             check=False,
             timeout=60,
             env={},
         )
         verify.assert_called_once_with(
-            tmp_path,
+            binding.cwd,
             remote="origin",
             branch="7-auto-impl",
             expected_repo=job.transport_repository,
@@ -10229,7 +10536,7 @@ class TestGitOps:
             ),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
-            result = pool._git_rebase(job)
+            result = pool._git_rebase(job, record_source=Mock())
 
         assert result.ok is True
         assert authentication.call_args_list == [
@@ -10288,19 +10595,26 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """The retired dependency rebase options cannot change the worktree."""
+        repo, predecessor, head = _worker_repository(tmp_path)
+        binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
+            7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl"
+        )
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "publish_rebased_head": True,
                 "abort_on_conflict": True,
-                "required_ancestor_shas": ("b" * 40,),
+                "required_ancestor_shas": (predecessor,),
                 "branch": "7-auto-impl",
-                "expected_remote_sha": "a" * 40,
+                "expected_remote_sha": head,
             },
         )
         with (
@@ -10309,6 +10623,7 @@ class TestGitOps:
                 return_value=False,
             ) as rebase,
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_conflict_receipt") as receipt,
         ):
@@ -10326,42 +10641,58 @@ class TestGitOps:
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
         """The host captures the complete index before agent file editing."""
-        (tmp_path / "x.py").write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> topic\n")
-        index_state = (
-            "100644 host-blob 0\thost-staged.py\0"
-            "100644 ours-blob 1\tx.py\0"
-            "100644 theirs-blob 2\tx.py\0"
-        )
-        with patch(f"{_WP}.git_utils.run") as run:
-            run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout=index_state),
-                MagicMock(returncode=0, stdout="c" * 40),
-                MagicMock(returncode=0, stdout="b" * 40),
-            ]
+        root, predecessor, base = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(root, repository="test/repo")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, predecessor, branch="7-auto-impl")
+        with manager.implementation_local_commit(
+            7, branch="7-auto-impl", path=binding.cwd, expected_binding=binding
+        ) as record:
+            (binding.cwd / "tracked.txt").write_text("writer change\n")
+            _git(binding.cwd, "commit", "-am", "writer change")
+            writer_head = _git(binding.cwd, "rev-parse", "HEAD")
+            binding = record(writer_head)
+        _git(binding.cwd, "push", "origin", "7-auto-impl")
 
-            receipt = pool._conflict_receipt(
-                tmp_path,
-                remote="origin",
-                base_branch="main",
-                expected_remote_sha="a" * 40,
-                timeout=60,
+        with manager.implementation_local_commit(
+            7, branch="7-auto-impl", path=binding.cwd, expected_binding=binding
+        ):
+            rebase = subprocess.run(
+                ["git", "rebase", "origin/main"],
+                cwd=binding.cwd,
+                env=build_git_child_env(),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
             )
+            assert rebase.returncode == 1, rebase.stderr
+            try:
+                (binding.cwd / "host-staged.py").write_text("host change\n")
+                _git(binding.cwd, "add", "host-staged.py")
+                index_state = _git(binding.cwd, "ls-files", "--stage", "-z")
+                receipt = pool._conflict_receipt(
+                    binding.cwd,
+                    remote="origin",
+                    base_branch="main",
+                    expected_remote_sha=writer_head,
+                    timeout=60,
+                )
+            finally:
+                _git(binding.cwd, "rebase", "--abort")
 
         assert isinstance(receipt, dict)
-        assert receipt["conflict_paths"] == ("x.py",)
+        assert receipt["conflict_paths"] == ("tracked.txt",)
+        assert " 0\thost-staged.py\0" in index_state
+        assert all(f" {stage}\ttracked.txt\0" in index_state for stage in (1, 2, 3))
         assert (
             receipt["conflict_index_snapshot"] == hashlib.sha256(index_state.encode()).hexdigest()
         )
-        assert receipt["paused_head_sha"] == "c" * 40
-        assert receipt["base_sha"] == "b" * 40
-        assert receipt["expected_remote_sha"] == "a" * 40
-        assert run.call_args_list[1].args[0] == [
-            "git",
-            "ls-files",
-            "--stage",
-            "-z",
-        ]
+        content_snapshot = receipt["content_snapshot"]
+        assert isinstance(content_snapshot, dict)
+        assert content_snapshot["index_sha256"] == receipt["conflict_index_snapshot"]
+        assert receipt["paused_head_sha"] == base
+        assert receipt["base_sha"] == base
+        assert receipt["expected_remote_sha"] == writer_head
 
     @staticmethod
     def _continue_rebase_job(tmp_path: Path, *, repo: str = "Hephaestus") -> GitJob:
@@ -10396,7 +10727,7 @@ class TestGitOps:
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch(f"{_WP}.git_utils.run") as run,
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.error == "rebase conflict resolution required: agent made no file changes"
@@ -10436,7 +10767,7 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.value == {
@@ -10500,7 +10831,7 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result == JobResult(
             ok=False,
@@ -10562,7 +10893,7 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result == JobResult(
             ok=True,
@@ -10627,7 +10958,7 @@ class TestGitOps:
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.error == "rebase conflict resolution required: conflict markers remain"
@@ -10669,7 +11000,7 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.push_head_to_branch"),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.error == "rebase conflict resolution changed paths outside host scope"
@@ -10735,7 +11066,7 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.push_head_to_branch"),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.error == "conflict index was mutated outside host ownership"
@@ -10758,7 +11089,7 @@ class TestGitOps:
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch(f"{_WP}.git_utils.run") as run,
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.error == "conflict index was mutated outside host ownership"
@@ -10799,7 +11130,7 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.push_head_to_branch"),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.error == "paused rebase head changed outside host ownership"
@@ -10810,7 +11141,7 @@ class TestGitOps:
         """The captured PR head is an exact publication lease, not a hint."""
         job = self._continue_rebase_job(tmp_path)
         with patch.object(pool, "_read_remote_branch_head", return_value="c" * 40):
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result.ok is False
         assert result.error == "remote writer head changed during conflict resolution"
@@ -10872,23 +11203,22 @@ class TestGitOps:
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
         }
+        record_source = Mock()
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
-            run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=1, stdout=""),
-            ]
-            result = pool._git_continue_rebase(job)
+            run.side_effect = lambda command, **kwargs: _continue_rebase_command_result(
+                command, ancestor=False, raw_commit="", **kwargs
+            )
+            result = pool._git_continue_rebase(job, record_source=record_source)
 
+        record_source.assert_called_once_with("d" * 40)
+        push.assert_not_called()
         assert result.ok is False
         assert result.error == "completed rebase lacks captured base ancestry"
 
@@ -10911,25 +11241,22 @@ class TestGitOps:
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
         }
+        record_source = Mock()
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
-            run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout="c" * 40),
-                MagicMock(returncode=0, stdout=raw_commit),
-            ]
-            result = pool._git_continue_rebase(job)
+            run.side_effect = lambda command, **kwargs: _continue_rebase_command_result(
+                command, ancestor=True, raw_commit=raw_commit, **kwargs
+            )
+            result = pool._git_continue_rebase(job, record_source=record_source)
 
+        record_source.assert_called_once_with("d" * 40)
+        push.assert_not_called()
         assert result.ok is False
         assert result.error == "completed rebase commit metadata invalid"
 
@@ -10977,7 +11304,7 @@ class TestGitOps:
                 MagicMock(returncode=0, stdout="c" * 40),
                 MagicMock(returncode=0, stdout=signed),
             ]
-            result = pool._git_continue_rebase(job)
+            result = pool._git_continue_rebase(job, record_source=Mock())
 
         assert result == JobResult(
             ok=True,
@@ -11187,7 +11514,7 @@ class TestGitOps:
                 return_value=(os.environ.copy(), ()),
             ),
         ):
-            first = pool._git_rebase(rebase_job)
+            first = pool._git_rebase(rebase_job, record_source=Mock())
             assert first.ok is False
             assert first.error == "mechanical rebase hit conflicts; resolution required"
             assert isinstance(first.value, dict)
@@ -11206,7 +11533,7 @@ class TestGitOps:
                     **{key: value for key, value in first.value.items() if key != "rebased"},
                 },
             )
-            second = pool._git_continue_rebase(first_continuation)
+            second = pool._git_continue_rebase(first_continuation, record_source=Mock())
             assert second.ok is False
             assert second.error == (
                 "rebase conflict resolution required: additional conflicts found"
@@ -11227,7 +11554,7 @@ class TestGitOps:
                     **{key: value for key, value in second.value.items() if key != "rebased"},
                 },
             )
-            completed = pool._git_continue_rebase(second_continuation)
+            completed = pool._git_continue_rebase(second_continuation, record_source=Mock())
 
         assert completed.ok is True
         assert isinstance(completed.value, dict)
@@ -11273,13 +11600,18 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """Review preparation must not rewrite or publish an already-current PR."""
-        head = "a" * 40
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(repo, repository="test/repo")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl")
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "remote": "origin",
@@ -11289,7 +11621,7 @@ class TestGitOps:
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=head),
             patch.object(
                 pool,
                 "_git_fetch_main",
@@ -11309,13 +11641,13 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
-            run.side_effect = [
-                MagicMock(returncode=0),
-                MagicMock(
-                    returncode=0,
-                    stdout=f"{head}\trefs/heads/7-auto-impl\n",
-                ),
-            ]
+            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
+                command,
+                ancestor=True,
+                abort_returncode=0,
+                remote_head=head,
+                **kwargs,
+            )
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
@@ -11324,6 +11656,8 @@ class TestGitOps:
             "rebased": False,
             "published": False,
             "head_sha": head,
+            "source_workspace": binding.to_dict(),
+            "source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION).to_dict(),
         }
         assert run.call_args_list[0].args[0] == [
             "git",
@@ -11343,15 +11677,20 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """Review preparation must reject a stale head after a concurrent push."""
-        expected_head = "a" * 40
-        moved_head = "b" * 40
+        repo, moved_head, expected_head = _worker_repository(tmp_path)
         branch = "7-auto-impl"
+        binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
+            7, SourceLane.IMPLEMENTATION, expected_head, branch=branch
+        )
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "remote": "origin",
@@ -11361,7 +11700,7 @@ class TestGitOps:
             },
         )
         with (
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch.object(pool, "_read_publish_head", return_value=expected_head),
             patch.object(
                 pool,
                 "_git_fetch_main",
@@ -11381,13 +11720,13 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
-            run.side_effect = [
-                MagicMock(returncode=0),
-                MagicMock(
-                    returncode=0,
-                    stdout=f"{moved_head}\trefs/heads/{branch}\n",
-                ),
-            ]
+            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
+                command,
+                ancestor=True,
+                abort_returncode=0,
+                remote_head=moved_head,
+                **kwargs,
+            )
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
@@ -11403,7 +11742,7 @@ class TestGitOps:
                 "origin",
                 f"refs/heads/{branch}",
             ],
-            cwd=tmp_path,
+            cwd=binding.cwd,
             timeout=60,
             env={"GIT_TERMINAL_PROMPT": "0"},
         )
@@ -11417,14 +11756,18 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A restored writer must not rebase stale local H against newer remote E."""
-        expected_head = "a" * 40
-        synced_head = "b" * 40
+        repo, expected_head, synced_head = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(repo, repository="test/repo")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, expected_head, branch="7-auto-impl")
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "remote": "origin",
@@ -11435,11 +11778,17 @@ class TestGitOps:
                 "pr_number": 70,
             },
         )
+
+        def sync_head(path: Path, _branch: str, **_kwargs: object) -> None:
+            _git(path, "reset", "--hard", synced_head)
+
         with (
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True) as clean,
-            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as sync,
-            patch.object(pool, "_read_publish_head", return_value=synced_head),
-            patch(f"{_WP}.git_utils.run") as run,
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+            patch(
+                f"{_WP}.git_utils.is_clean_working_tree",
+                wraps=git_utils.is_clean_working_tree,
+            ) as clean,
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch", side_effect=sync_head) as sync,
             patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
@@ -11452,14 +11801,18 @@ class TestGitOps:
             "published": False,
             "head_drift": True,
             "head_sha": synced_head,
+            "source_workspace": replace(
+                binding, revision=synced_head, generation=binding.generation + 1
+            ).to_dict(),
+            "source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION).to_dict(),
         }
-        clean.assert_called_once_with(tmp_path, timeout=60)
+        assert _git(binding.cwd, "rev-parse", "HEAD") == synced_head
+        clean.assert_called_once_with(binding.cwd, timeout=60)
         sync.assert_called_once()
-        assert sync.call_args.args == (tmp_path, "7-auto-impl")
+        assert sync.call_args.args == (binding.cwd, "7-auto-impl")
         assert sync.call_args.kwargs["remote"] == "origin"
         assert sync.call_args.kwargs["pr_number"] == 70
         assert sync.call_args.kwargs["timeout"] == 60
-        run.assert_not_called()
         rebase.assert_not_called()
         push.assert_not_called()
 
@@ -11470,16 +11823,23 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """The reviewer-only detached publish mode has no compatibility path."""
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
+            70, SourceLane.IMPLEMENTATION, head, branch="70-existing"
+        )
         job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "cwd": tmp_path,
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 70,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "branch": "70-existing",
-                "expected_remote_sha": "a" * 40,
+                "expected_remote_sha": head,
                 "publish_detached_head": True,
             },
         )
@@ -11490,80 +11850,6 @@ class TestGitOps:
         mock_rebase.assert_not_called()
         assert result.ok is False
         assert result.error == "detached reviewer rebase publication is unsupported"
-
-    def test_push_dispatch(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-    ) -> None:
-        """Push forwards to push_current_branch_with_lease_on_divergence."""
-        job = GitJob(
-            repo="test/repo",
-            op="push",
-            timeout_s=60,
-            kwargs={"cwd": Path("/tmp/wt"), "branch": "7-auto"},
-        )
-        with patch(
-            "hephaestus.automation.git_utils.push_current_branch_with_lease_on_divergence"
-        ) as mock_push:
-            pool.submit(job, StageName.MERGE_WAIT)
-            _, result = completion_q.get(timeout=10)
-
-        mock_push.assert_called_once_with(
-            cwd=Path("/tmp/wt"),
-            branch="7-auto",
-            timeout=60,
-            env=ANY,
-            remote_config=ANY,
-            revalidate_remote=ANY,
-        )
-        assert result.ok is True
-
-    @pytest.mark.parametrize(
-        ("push_error", "failure_kind", "error"),
-        [
-            (
-                git_utils.DetachedHeadPushRemoteHeadChangedError(),
-                "publish_remote_head_changed",
-                "publish failed: remote head changed",
-            ),
-            (
-                git_utils.DetachedHeadPushRemoteHeadUnchangedError(),
-                "publish_remote_head_unchanged",
-                "publish failed: remote head unchanged",
-            ),
-            (
-                git_utils.DetachedHeadPushRemoteProbeError(),
-                "publish_remote_probe_failed",
-                "publish failed: remote head probe failed",
-            ),
-        ],
-    )
-    def test_push_dispatch_classifies_detached_publish_failures(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-        push_error: Exception,
-        failure_kind: str,
-        error: str,
-    ) -> None:
-        """Lease publication failures become durable results instead of worker crashes."""
-        job = GitJob(
-            repo="test/repo",
-            op="push",
-            timeout_s=60,
-            kwargs={"cwd": Path("/tmp/wt"), "branch": "7-auto"},
-        )
-        with patch(
-            "hephaestus.automation.git_utils.push_current_branch_with_lease_on_divergence",
-            side_effect=push_error,
-        ):
-            pool.submit(job, StageName.MERGE_WAIT)
-            _, result = completion_q.get(timeout=10)
-
-        assert result.ok is False
-        assert result.error == error
-        assert result.value == {"failure_kind": failure_kind}
 
     def test_release_branch_reservation_dispatches_conditional_delete(
         self,
@@ -11641,11 +11927,16 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """commit_push passes only accepted keys ('branch' must not crash it)."""
+        manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 5,
                 "worktree_path": tmp_path,
                 "branch": "5-auto",
@@ -11659,12 +11950,12 @@ class TestGitOps:
         remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         with (
-            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
+            patch.object(pool, "_writer_tracking_head", return_value=binding.revision),
             patch(
-                "hephaestus.automation.git_utils.commit_if_changes", return_value=True
+                "hephaestus.automation.git_utils.commit_if_changes",
+                side_effect=partial(_commit_publication_change, tmp_path),
             ) as mock_commit,
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
-            patch.object(pool, "_read_publish_head", return_value="b" * 40),
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -11679,10 +11970,10 @@ class TestGitOps:
             tmp_path,
             "claude",
             allowed_paths=None,
-            timeout=60,
+            timeout=ANY,
             agent_model="sol:medium",
             pi_dir=Path("/private/pi-agent"),
-            git_message_timeout=1200,
+            git_message_timeout=ANY,
             signing_env_factory=mock_commit.call_args.kwargs["signing_env_factory"],
             git_env=mock_commit.call_args.kwargs["git_env"],
             issue_title="Keep commit metadata closed",
@@ -11690,6 +11981,8 @@ class TestGitOps:
             claude_message_agent=ANY,
         )
         assert mock_commit.call_args.kwargs["git_env"]["GIT_CONFIG"] == os.devnull
+        assert 0 < mock_commit.call_args.kwargs["timeout"] <= job.timeout_s
+        assert 0 < mock_commit.call_args.kwargs["git_message_timeout"] <= job.timeout_s
         authentication.assert_called_once_with(
             cwd=tmp_path,
             expected_repo="test/repo",
@@ -11698,19 +11991,22 @@ class TestGitOps:
         mock_push.assert_called_once_with(
             "5-auto",
             tmp_path,
-            source_sha="b" * 40,
+            source_sha=_git(tmp_path, "rev-parse", "HEAD"),
             timeout=60,
             env=remote_env,
             remote_config=remote_config,
         )
         assert result.ok is True
+        current = manager._require_receipt(5, SourceLane.IMPLEMENTATION)
         assert result.value == {
             "publication_state": "published",
             "pushed": True,
-            "head_sha": "b" * 40,
-            "baseline_remote_sha": "a" * 40,
-            "observed_remote_sha": "b" * 40,
+            "head_sha": current.revision,
+            "baseline_remote_sha": binding.revision,
+            "observed_remote_sha": current.revision,
             "refresh_phase": None,
+            "source_workspace": manager._binding(current).to_dict(),
+            "source_receipt": current.to_dict(),
         }
 
     @pytest.mark.parametrize(
@@ -12548,7 +12844,7 @@ class TestGitOps:
             nonlocal push_attempts
             push_attempts += 1
             if push_attempts == 1:
-                raise git_utils.DetachedHeadPushRemoteProbeError(
+                raise git_utils.BranchPublicationRemoteProbeError(
                     "injected first-push failure",
                     failure_kind="transport",
                 )
@@ -12814,7 +13110,7 @@ class TestGitOps:
             ),
             patch(
                 f"{_WP}.git_utils.push_head_to_branch",
-                side_effect=git_utils.DetachedHeadPushRemoteProbeError(
+                side_effect=git_utils.BranchPublicationRemoteProbeError(
                     "probe failed",
                     failure_kind="transport",
                 ),
@@ -13071,11 +13367,19 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A dirty worker passes the exact host signing environment to the commit."""
+        manager, binding = _prepared_publication_writer(
+            tmp_path, issue_number=2874, branch="2874-sign-commits"
+        )
+        tmp_path = binding.cwd
+        (tmp_path / "tracked.txt").write_text("pending change\n")
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=73,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 2874,
                 "worktree_path": tmp_path,
                 "branch": "2874-sign-commits",
@@ -13096,17 +13400,15 @@ class TestGitOps:
         remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         with (
-            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
-            patch(
-                "hephaestus.automation.git_utils.run",
-                return_value=MagicMock(stdout=" M pending.py\n"),
-            ),
+            patch.object(pool, "_writer_tracking_head", return_value=binding.revision),
             patch(
                 f"{_WP}._controlled_git_signing_env", return_value=signing_env
             ) as controlled_signing,
-            patch("hephaestus.automation.git_utils._commit_changes") as commit,
+            patch(
+                "hephaestus.automation.git_utils._commit_changes",
+                side_effect=partial(_commit_publication_change, tmp_path),
+            ) as commit,
             patch("hephaestus.automation.git_utils.push_branch") as push,
-            patch.object(pool, "_read_publish_head", return_value="b" * 40),
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -13118,7 +13420,7 @@ class TestGitOps:
 
         controlled_signing.assert_called_once_with(
             tmp_path,
-            timeout=73,
+            timeout=ANY,
             private_metadata=False,
         )
         commit.assert_called_once_with(
@@ -13127,29 +13429,35 @@ class TestGitOps:
             "claude",
             allowed_paths=None,
             agent_model="sol:medium",
-            git_timeout=73,
-            git_message_timeout=321,
+            git_timeout=ANY,
+            git_message_timeout=ANY,
             git_env=commit.call_args.kwargs["git_env"],
             signing_env=signing_env,
             claude_message_agent=ANY,
         )
         assert commit.call_args.kwargs["git_env"]["GIT_CONFIG"] == os.devnull
+        assert 0 < controlled_signing.call_args.kwargs["timeout"] <= job.timeout_s
+        assert 0 < commit.call_args.kwargs["git_timeout"] <= job.timeout_s
+        assert 0 < commit.call_args.kwargs["git_message_timeout"] <= job.timeout_s
         push.assert_called_once_with(
             "2874-sign-commits",
             tmp_path,
-            source_sha="b" * 40,
+            source_sha=_git(tmp_path, "rev-parse", "HEAD"),
             timeout=73,
             env=remote_env,
             remote_config=remote_config,
         )
         assert result.ok is True
+        current = manager._require_receipt(2874, SourceLane.IMPLEMENTATION)
         assert result.value == {
             "publication_state": "published",
             "pushed": True,
-            "head_sha": "b" * 40,
-            "baseline_remote_sha": "a" * 40,
-            "observed_remote_sha": "b" * 40,
+            "head_sha": current.revision,
+            "baseline_remote_sha": binding.revision,
+            "observed_remote_sha": current.revision,
             "refresh_phase": None,
+            "source_workspace": manager._binding(current).to_dict(),
+            "source_receipt": current.to_dict(),
         }
 
     @pytest.mark.requires_posix
@@ -13244,11 +13552,16 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A dirty worktree cannot stage or commit without a validated signing identity."""
+        _manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 5,
                 "issue_title": "Test signing failure",
                 "issue_body": "",
@@ -13287,12 +13600,19 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """An address agent cannot publish an unrelated feature it merely repaired."""
-        base_sha = "a" * 40
+        _manager, binding = _prepared_publication_writer(
+            tmp_path, issue_number=2137, branch="2137-auto-impl"
+        )
+        tmp_path = binding.cwd
+        base_sha = binding.revision
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 2137,
                 "worktree_path": tmp_path,
                 "branch": "2137-auto-impl",
@@ -13343,16 +13663,23 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """Git pathspec magic cannot turn a required retraction into an empty diff."""
+        _manager, binding = _prepared_publication_writer(
+            tmp_path, issue_number=2137, branch="2137-auto-impl"
+        )
+        tmp_path = binding.cwd
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 2137,
                 "worktree_path": tmp_path,
                 "branch": "2137-auto-impl",
                 "agent": "claude",
-                "scope_retraction_base_sha": "a" * 40,
+                "scope_retraction_base_sha": binding.revision,
                 "scope_retraction_paths": (":(exclude,glob)**",),
             },
         )
@@ -13377,12 +13704,17 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """Direct scopes publish only through the server-side reservation lease."""
-        pin = "a" * 40
+        manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
+        pin = binding.revision
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 5,
                 "worktree_path": tmp_path,
                 "branch": "5-auto",
@@ -13391,21 +13723,35 @@ class TestGitOps:
             },
         )
         with (
-            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.commit_if_changes",
+                side_effect=partial(_commit_publication_change, tmp_path),
+            ),
             patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as strict_push,
             patch("hephaestus.automation.git_utils.push_branch") as normal_push,
-            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+            patch.object(
+                pool,
+                "_read_remote_branch_head",
+                side_effect=lambda *args, **kwargs: _git(tmp_path, "rev-parse", "HEAD"),
+            ),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert result.value == {"pushed": True, "head_sha": "b" * 40}
+        current = manager._require_receipt(5, SourceLane.IMPLEMENTATION)
+        assert result.value == {
+            "pushed": True,
+            "head_sha": current.revision,
+            "source_workspace": manager._binding(current).to_dict(),
+            "source_receipt": current.to_dict(),
+        }
         strict_push.assert_called_once_with(
             "5-auto",
             pin,
             tmp_path,
-            source_sha="b" * 40,
+            source_sha=current.revision,
             timeout=60,
             env=ANY,
             remote_config=ANY,
@@ -13419,12 +13765,17 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """An unused reservation is conditionally deleted instead of blocking reruns."""
-        pin = "a" * 40
+        manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
+        pin = binding.revision
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 5,
                 "worktree_path": tmp_path,
                 "branch": "5-auto",
@@ -13434,19 +13785,21 @@ class TestGitOps:
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
-            patch(
-                "hephaestus.automation.git_utils.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0\n"),
-            ),
+            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=False),
             patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
             patch("hephaestus.automation.git_utils.push_branch") as normal_push,
-            patch.object(pool, "_read_publish_head", return_value=pin) as read_head,
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert result.value == {"pushed": False, "head_sha": pin}
+        assert result.value == {
+            "pushed": False,
+            "head_sha": pin,
+            "source_workspace": binding.to_dict(),
+            "source_receipt": manager._require_receipt(5, SourceLane.IMPLEMENTATION).to_dict(),
+        }
         release.assert_called_once_with(
             "5-auto",
             pin,
@@ -13456,7 +13809,7 @@ class TestGitOps:
             remote_config=ANY,
             revalidate_remote=ANY,
         )
-        read_head.assert_called_once_with(tmp_path, timeout=60)
+        assert _git(tmp_path, "rev-parse", "HEAD") == pin
         normal_push.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -13478,18 +13831,19 @@ class TestGitOps:
         """An empty writer releases its remote reservation and retains local identity."""
         repo, predecessor, pin = _worker_repository(tmp_path)
         manager = SourceWorkspaceManager(repo, repository="Hephaestus")
-        binding = manager.prepare(
-            7, SourceLane.IMPLEMENTATION, predecessor if mutation == "changed_to_base" else pin
-        )
         branch = "7-empty-writer"
-        _git(binding.cwd, "switch", "-c", branch)
+        binding = manager.prepare(
+            7,
+            SourceLane.IMPLEMENTATION,
+            predecessor if mutation == "changed_to_base" else pin,
+            branch=branch,
+        )
         receipt = manager._read_receipt(7, SourceLane.IMPLEMENTATION)
         assert receipt is not None
-        receipt = replace(receipt, branch=branch, detached=False)
-        manager._write_receipt(receipt)
         job = GitJob(
             repo="Hephaestus",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             expected_repository="HomericIntelligence/Hephaestus",
             kwargs={
@@ -13554,12 +13908,22 @@ class TestGitOps:
                 revision=_git(binding.cwd, "rev-parse", "HEAD"),
                 generation=receipt.generation + 1,
             )
-            assert result.value == {"pushed": True, "head_sha": current.revision}
+            assert result.value == {
+                "pushed": True,
+                "head_sha": current.revision,
+                "source_workspace": manager._binding(current).to_dict(),
+                "source_receipt": current.to_dict(),
+            }
             return
         assert current == receipt
         if mutation is None:
             assert result.ok is True, result.error
-            assert result.value == {"pushed": False, "head_sha": pin}
+            assert result.value == {
+                "pushed": False,
+                "head_sha": pin,
+                "source_workspace": binding.to_dict(),
+                "source_receipt": receipt.to_dict(),
+            }
             remote_read.assert_not_called()
         else:
             assert result.ok is False
@@ -13572,23 +13936,37 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """commit_push reports the verified clean head without pushing it."""
+        manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
-            kwargs={"issue_number": 5, "worktree_path": tmp_path},
+            kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
+                "branch": "5-auto",
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+            },
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
-            patch.object(pool, "_read_publish_head", return_value="a" * 40),
+            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=False),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_push.assert_not_called()
         assert result.ok is True
-        assert result.value == {"pushed": False, "head_sha": "a" * 40}
+        assert result.value == {
+            "pushed": False,
+            "head_sha": binding.revision,
+            "source_workspace": binding.to_dict(),
+            "source_receipt": manager._require_receipt(5, SourceLane.IMPLEMENTATION).to_dict(),
+        }
 
     def test_commit_push_publishes_agent_precommitted_change(
         self,
@@ -13597,21 +13975,35 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A clean tree ahead of its remote branch still needs coordinator-owned push."""
+        manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
+        base = binding.revision
+        with manager.implementation_local_commit(
+            5, branch="5-auto", path=tmp_path, expected_binding=binding
+        ) as record:
+            _commit_publication_change(tmp_path)
+            binding = record(_git(tmp_path, "rev-parse", "HEAD"))
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
-            kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
+            kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+            },
         )
         with (
-            patch.object(pool, "_writer_tracking_head", return_value="a" * 40),
+            patch.object(pool, "_writer_tracking_head", return_value=base),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch(
                 "hephaestus.automation.git_utils.has_unpushed_commits", return_value=True
             ) as mock_ahead,
-            patch("hephaestus.automation.git_utils.run", return_value=MagicMock(stdout="")),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
-            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -13620,7 +14012,7 @@ class TestGitOps:
         mock_push.assert_called_once_with(
             "5-auto",
             tmp_path,
-            source_sha="b" * 40,
+            source_sha=binding.revision,
             timeout=60,
             env=ANY,
             remote_config=ANY,
@@ -13629,10 +14021,12 @@ class TestGitOps:
         assert result.value == {
             "publication_state": "published",
             "pushed": True,
-            "head_sha": "b" * 40,
-            "baseline_remote_sha": "a" * 40,
-            "observed_remote_sha": "b" * 40,
+            "head_sha": binding.revision,
+            "baseline_remote_sha": base,
+            "observed_remote_sha": binding.revision,
             "refresh_phase": None,
+            "source_workspace": binding.to_dict(),
+            "source_receipt": manager._require_receipt(5, SourceLane.IMPLEMENTATION).to_dict(),
         }
 
     def test_commit_push_does_not_publish_dirty_worktree_after_failed_commit(
@@ -13642,19 +14036,25 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A failed commit cannot publish an older unpushed branch tip."""
+        _manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
+        (tmp_path / "tracked.txt").write_text("uncommitted change\n")
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
-            kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
+            kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+            },
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=True),
-            patch(
-                "hephaestus.automation.git_utils.run",
-                return_value=MagicMock(stdout=" M uncommitted-change.py\\n"),
-            ),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
         ):
             pool.submit(job, StageName.PR_REVIEW)
@@ -13671,16 +14071,21 @@ class TestGitOps:
         tmp_path: Path,
     ) -> None:
         """A reviewer checkout can never be repurposed as a branch writer."""
+        _manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
+        tmp_path = binding.cwd
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
             kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
                 "issue_number": 5,
                 "worktree_path": tmp_path,
                 "branch": "5-auto",
                 "publish_detached_head": True,
-                "expected_remote_sha": "a" * 40,
+                "expected_remote_sha": binding.revision,
             },
         )
         with patch("hephaestus.automation.git_utils.commit_if_changes") as commit:
@@ -13695,13 +14100,21 @@ class TestGitOps:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        tmp_path: Path,
     ) -> None:
         """Missing worktree_path is an explicit error, not a silent skip."""
+        _manager, binding = _prepared_publication_writer(tmp_path, issue_number=5, branch="5-auto")
         job = GitJob(
             repo="test/repo",
             op="commit_push",
+            workspace=binding,
             timeout_s=60,
-            kwargs={"issue_number": 5},
+            kwargs={
+                "source_lane": "impl",
+                "repo_root": str(binding.reusable_root),
+                "issue_number": 5,
+                "branch": "5-auto",
+            },
         )
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes") as mock_commit,
@@ -13713,7 +14126,7 @@ class TestGitOps:
         mock_commit.assert_not_called()
         mock_push.assert_not_called()
         assert result.ok is False
-        assert "worktree_path" in result.error
+        assert result.error == "source_workspace_ownership_unavailable: publication binding invalid"
 
     def test_clone_dispatch_threads_timeout(
         self,
@@ -14766,7 +15179,7 @@ class TestGitOps:
         job = GitJob(
             repo="test/repo",
             op="sync_checkout",
-            timeout_s=0,
+            timeout_s=1,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
         with (
@@ -14799,16 +15212,17 @@ class TestGitOps:
                     "--list",
                 ],
                 cwd=Path("/"),
-                timeout=0,
+                timeout=ANY,
                 env=ANY,
             ),
             call(
                 ["git", "rev-parse", "--git-path", "info/grafts"],
                 cwd=checkout,
-                timeout=0,
+                timeout=ANY,
                 env=ANY,
             ),
         ]
+        assert all(0 < call.kwargs["timeout"] <= job.timeout_s for call in mock_run.call_args_list)
 
     def test_sync_checkout_rejects_local_commits_ahead_of_remote(
         self,
@@ -14969,6 +15383,7 @@ class TestGitOps:
 
         mock_run.assert_not_called()
         assert result.ok is False
+        assert result.error is not None
         assert "clone requires" in result.error
 
     def test_git_timeout_returns_error(
@@ -15078,11 +15493,11 @@ class TestGitLocking:
         job1 = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
         job2 = GitJob(repo="test/repo", op="remove_worktree", timeout_s=60, kwargs={})
 
-        instance = MagicMock()
-        instance.create_worktree.side_effect = lambda **kwargs: git_job_entrypoint("job1")
-        instance.remove_worktree.side_effect = lambda **kwargs: git_job_entrypoint("job2")
+        def dispatch(job: GitJob) -> JobResult:
+            git_job_entrypoint("job1" if job.op == "create_worktree" else "job2")
+            return JobResult(ok=True)
 
-        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+        with patch.object(pool, "_dispatch_git_op", side_effect=dispatch):
             pool.submit(job1, StageName.REPO)
             pool.submit(job2, StageName.REPO)
             # Block on the completion channel instead of sleeping: robust
@@ -15113,19 +15528,17 @@ class TestGitLocking:
         )
         barrier = threading.Barrier(2)
 
-        def wait_at_barrier(**kwargs: object) -> None:
+        def wait_at_barrier(job: GitJob) -> JobResult:
             # Both jobs must be inside their critical sections at once to
             # satisfy the barrier; a 10 s timeout fails the test if the pool
             # wrongly serialized different repos.
             barrier.wait(timeout=10)
+            return JobResult(ok=True)
 
         job1 = GitJob(repo="test/repo1", op="create_worktree", timeout_s=60, kwargs={})
         job2 = GitJob(repo="test/repo2", op="create_worktree", timeout_s=60, kwargs={})
 
-        instance = MagicMock()
-        instance.create_worktree.side_effect = wait_at_barrier
-
-        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+        with patch.object(pool, "_dispatch_git_op", side_effect=wait_at_barrier):
             pool.submit(job1, StageName.REPO)
             pool.submit(job2, StageName.REPO)
             completions = [completion_q.get(timeout=10.0) for _ in range(2)]
@@ -15156,9 +15569,7 @@ class TestGitLocking:
         """A completed GitJob does not leave an idle repo lock cached forever."""
         job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
 
-        instance = MagicMock()
-        instance.create_worktree.return_value = None
-        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+        with patch.object(pool, "_dispatch_git_op", return_value=JobResult(ok=True)):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -15223,9 +15634,7 @@ class TestGitLocking:
     ) -> None:
         """Running a GitJob creates the per-repo sentinel file in lock_dir."""
         job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
-        instance = MagicMock()
-        instance.create_worktree.return_value = None
-        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+        with patch.object(pool, "_dispatch_git_op", return_value=JobResult(ok=True)):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -15289,7 +15698,7 @@ class TestGitLocking:
         pool: WorkerPool,
     ) -> None:
         """Only outer lock acquisition failures are mapped to lock_timeout."""
-        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=0, kwargs={})
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
         instance = MagicMock()
         instance.create_worktree.side_effect = LockUnavailableError("inner lock")
 
@@ -15301,17 +15710,12 @@ class TestGitLocking:
 class TestShutdownAndCancel:
     """Tests for shutdown behavior and future cancellation."""
 
-    def test_shutdown_cancels_queued_job_and_emits_no_completion_for_it(
+    def test_shutdown_cancels_queued_job_and_emits_its_completion(
         self,
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """Cancelled queued jobs emit NO completion; the running one completes.
-
-        A slow job occupies the single worker while a second job sits queued;
-        shutdown(cancel_futures=True) cancels the queued one. Exactly one
-        completion (the running job's, marked interrupted) must arrive.
-        """
+        """The running job and the cancelled queued job each produce a result."""
         shutdown_event = threading.Event()
         pool = WorkerPool(
             size=1,
@@ -15347,12 +15751,15 @@ class TestShutdownAndCancel:
             assert shutdown_event.is_set()
             release.set()
 
-            handle, result = completion_q.get(timeout=10)
+            completions = [completion_q.get(timeout=10) for _ in range(2)]
 
-        # Exactly the running job's completion arrives ...
-        assert handle.job is slow_job
-        assert result.interrupted is True  # shutdown was set mid-flight
-        # ... and NONE for the cancelled queued job.
+        assert {id(handle.job) for handle, _result in completions} == {
+            id(slow_job),
+            id(queued_job),
+        }
+        assert all(result.interrupted and not result.ok for _handle, result in completions)
+        cancelled = next(result for handle, result in completions if handle.job is queued_job)
+        assert cancelled.error == "interrupted_before_start"
         with pytest.raises(queue.Empty):
             completion_q.get(timeout=0.5)
 
@@ -15360,12 +15767,12 @@ class TestShutdownAndCancel:
 class TestOnFutureDone:
     """Tests for the completion-loss guarantees of _on_future_done."""
 
-    def test_cancelled_future_emits_no_completion(
+    def test_cancelled_future_emits_one_interrupted_completion(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """A cancelled future synthesizes no completion tuple."""
+        """A cancelled future produces one interrupted completion tuple."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
             on_done_state=StageName.PR_REVIEW,
@@ -15373,6 +15780,11 @@ class TestOnFutureDone:
         future: Future[JobResult] = Future()
         future.cancel()
         pool._on_future_done(handle, future)
+        completed_handle, result = completion_q.get_nowait()
+        assert completed_handle is handle
+        assert not result.ok
+        assert result.interrupted
+        assert result.error == "interrupted_before_start"
         assert completion_q.empty()
 
     @pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit(3), GeneratorExit()])
@@ -15410,6 +15822,7 @@ class TestOnFutureDone:
         got_handle, result = completion_q.get_nowait()
         assert got_handle is handle
         assert result.ok is False
+        assert result.error is not None
         assert result.error.startswith("worker_crash: RuntimeError")
         assert any(
             record.levelno == logging.ERROR and record.exc_info is not None
@@ -15446,6 +15859,7 @@ class TestOnFutureDone:
         got_handle, result = completion_q.get_nowait()
         assert got_handle is handle
         assert result.ok is False
+        assert result.error is not None
         assert result.error.startswith(f"worker_crash: {type(exc).__name__}")
         assert any(record.levelno == expected_level for record in caplog.records)
         assert not any(record.exc_info is not None for record in caplog.records)
@@ -15970,7 +16384,7 @@ def test_commit_push_rejects_stale_writer_replay_without_mutation(
         "_authenticated_remote_git_configuration",
         return_value=(build_git_child_env(), ("-c", "protocol.file.allow=always")),
     ):
-        created = pool._git_create_worktree(create)
+        created = pool._run_git(create)
     assert created.ok, created.error
     repo = manager.path_for(9, SourceLane.IMPLEMENTATION)
     manager.add_obligation(9, SourceLane.IMPLEMENTATION, "review")
@@ -15996,6 +16410,7 @@ def test_commit_push_rejects_stale_writer_replay_without_mutation(
     job = GitJob(
         repo="example/project",
         op="commit_push",
+        workspace=manager._binding(original),
         timeout_s=60,
         kwargs={
             "issue_number": 9,
@@ -16057,9 +16472,12 @@ def test_commit_push_rejects_stale_writer_replay_without_mutation(
             "observed_remote_sha": remote,
             "pushed": False,
             "refresh_phase": None,
+            "source_workspace": manager._binding(first_receipt).to_dict(),
+            "source_receipt": first_receipt.to_dict(),
         }
         refresh = replace(
             job,
+            workspace=WorkspaceBinding.from_dict(first.value["source_workspace"]),
             kwargs={
                 **job.kwargs,
                 "writer_refresh": {
@@ -16159,7 +16577,7 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
         patch.object(WorktreeManager, "_add_worktree_for_branch", side_effect=RuntimeError("stop")),
         patch.object(pool, "_rollback_direct_scope_reservation") as rollback,
     ):
-        failure = pool._git_create_worktree(job)
+        failure = pool._run_git(job)
     rollback.assert_not_called()
     assert not failure.ok
     assert isinstance(failure.value, dict)
@@ -16232,15 +16650,8 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     assert ("Hephaestus", 7, str(predecessor.cwd)) in preserved
 
 
-def test_ordinary_review_keeps_noncanonical_bootstrap_filenames(
-    pool: WorkerPool, tmp_path: Path
-) -> None:
-    """Ordinary review retains valid Git names that cannot enter the bootstrap map."""
-    from hephaestus.automation.host_verification_bootstrap import (
-        BootstrapGrantError,
-        authenticate_bootstrap_grant,
-    )
-
+def test_ordinary_review_keeps_valid_git_filenames(pool: WorkerPool, tmp_path: Path) -> None:
+    """Ordinary review retains file names with control characters and backslashes."""
     repo, _, base = _worker_repository(tmp_path)
     name = "ordinary\nname\twith\\slash.py"
     (repo / name).write_text("value = 1\n")
@@ -16268,18 +16679,6 @@ def test_ordinary_review_keeps_noncanonical_bootstrap_filenames(
         )
     assert result.ok is True
     assert result.value["changed_paths"] == [name]
-    assert result.value["status_manifest"] == (("A", name),)
-    with pytest.raises(BootstrapGrantError):
-        authenticate_bootstrap_grant(
-            [],
-            comment_id=123,
-            repository="HomericIntelligence/Hephaestus",
-            issue=2701,
-            pr=3006,
-            head_sha=head,
-            base_sha=base,
-            manifest=result.value["status_manifest"],
-        )
 
 
 def test_dirty_codex_adapter_retains_consumed_lease_through_close(
@@ -16347,7 +16746,7 @@ def _dirty_test_job(job: AgentJob, worktree: Path, manager: Any, initial_head: s
         untracked_sha256=snapshot["untracked_sha256"],
     )
     binding = manager.claim_dirty_direct_continuation(12, claim=claim, expected_generation=1)
-    job = replace(job, repo="repo", issue=12, workspace=binding, retryable=False, dirty_plan=inputs)
+    job = replace(job, repo="repo", issue=12, workspace=binding, dirty_plan=inputs)
     with pytest.raises(WorkspaceBindingError):
         validate_workspace_binding(binding)
 
@@ -16514,7 +16913,7 @@ def test_adopted_remediation_creation_consumes_worker_metadata(
             WorktreeManager, "create_worktree", autospec=True, side_effect=real_create
         ) as create,
     ):
-        result = pool._git_create_worktree(job)
+        result = pool._run_git(job)
     if mutation != "none":
         assert not result.ok
         create.assert_not_called()
@@ -16581,13 +16980,14 @@ def test_fresh_direct_reservation_allows_exactly_one_initial_rebase(
         },
     )
     with patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())):
-        created = pool._git_create_worktree(create)
+        created = pool._run_git(create)
     assert created.ok, created.error
     rebase = GitJob(
         repo=create.repo,
         expected_repository=create.expected_repository,
         op="rebase",
         timeout_s=60,
+        workspace=WorkspaceBinding.from_dict(created.value["source_workspace"]),
         kwargs={
             "cwd": created.value["path"],
             "repo_root": str(repo),
@@ -16598,10 +16998,12 @@ def test_fresh_direct_reservation_allows_exactly_one_initial_rebase(
         },
     )
     with patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())):
-        first = pool._git_rebase(rebase)
+        first = pool._run_git(rebase)
     assert first.ok, first.error
     with patch.object(pool, "_git_fetch_main") as fetch:
-        second = pool._git_rebase(rebase)
+        second = pool._run_git(
+            replace(rebase, workspace=WorkspaceBinding.from_dict(first.value["source_workspace"]))
+        )
     assert second.ok, second.error
     fetch.assert_not_called()
 
@@ -16769,14 +17171,18 @@ def test_pretest_publication_advances_real_receipt_before_store_and_remote(
             workspace=binding,
             remediation_pretest_nonce="7" * 32,
             remediation_pretest_input=replace(inputs, candidate_sequence=2),
+            source_operation=DirtySourceOperation("test-fix", inputs.allowed_paths),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER, AgentOperation.TEST_FIX, SessionLifecycle.START_NEW
             ),
         )
-        with patch.object(pool, "_run_agent") as provider:
+        with patch.object(pool, "_invoke_agent") as provider:
             rejected = pool._run(fix, "project#7", "implementation", remediation_owner_id=1)
         assert not rejected.ok
-        assert rejected.error == "ValueError: remediation pretest fix predecessor is unavailable"
+        assert (
+            rejected.error == "SourceWorkspaceError: remediation pretest predecessor is unavailable"
+        )
         provider.assert_not_called()
         assert not pool._pretest_successes
         assert manager._require_receipt(7, SourceLane.IMPLEMENTATION) == source
@@ -16786,6 +17192,7 @@ def test_pretest_publication_advances_real_receipt_before_store_and_remote(
         repo="project",
         expected_repository="example/project",
         op="commit_push",
+        workspace=binding,
         timeout_s=60,
         kwargs={
             "source_lane": "impl",
@@ -16996,7 +17403,7 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
 
     with patch.object(
         pool,
-        "_run_agent",
+        "_invoke_agent",
         side_effect=partial(_pretest_completion_provider, pool, restart_change, value),
     ) as invoke:
         completed = pool._run(agent, "project#7", "implementation", remediation_owner_id=1)
@@ -17054,7 +17461,7 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
     assert stored.ok, stored.error
     assert not replay.ok
     candidate = load_pretest_candidate(repo_root=root, pr_number=8)
-    if restart_change == "clean":
+    if restart_change in {"clean", "capacity", "same_job"}:
         assert candidate is None
         assert stored.value == {
             "outcome": "clean",
@@ -17067,7 +17474,7 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
         assert not pool._pretest_successes
         assert manager._require_receipt(7, SourceLane.IMPLEMENTATION) == source
         _assert_pretest_clean_stage(stored, inputs, nonce, remediation_pretest_result_digest(value))
-        _assert_pretest_clean_no_change(pool, root, binding.cwd, inputs.branch, head)
+        _assert_pretest_clean_no_change(pool, root, binding, inputs.branch, head)
         return
     assert candidate is not None and candidate.successful_job_id == nonce
     assert candidate.addressed_replies == (("thread-1", "Fixed."),)
@@ -17094,16 +17501,25 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
             agent,
             remediation_pretest_nonce="8" * 32,
             remediation_pretest_input=fix_inputs,
+            source_operation=DirtySourceOperation("test-fix", fix_inputs.allowed_paths),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER, AgentOperation.TEST_FIX, SessionLifecycle.START_NEW
             ),
         )
 
-        def fix_provider(job: AgentJob) -> JobResult:
-            (job.cwd / "tracked.txt").write_text("successful test fix\n")
+        def fix_provider(
+            job: AgentJob,
+            cwd: Path,
+            *,
+            deadline_s: float,
+            remaining_timeout: Callable[[], int],
+        ) -> JobResult:
+            del job, deadline_s, remaining_timeout
+            (cwd / "tracked.txt").write_text("successful test fix\n")
             return JobResult(ok=True, value=None)
 
-        with patch.object(pool, "_run_agent", side_effect=fix_provider) as fix_invoke:
+        with patch.object(pool, "_invoke_agent", side_effect=fix_provider) as fix_invoke:
             fixed = pool._run(fix, "project#7", "implementation", remediation_owner_id=1)
         assert fixed.ok, fixed.error
         fix_invoke.assert_called_once()
@@ -17156,7 +17572,7 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
     try:
         with (
             patch.object(fresh, "_read_remote_branch_head", return_value=head),
-            patch.object(fresh, "_run_agent") as reinvoke,
+            patch.object(fresh, "_invoke_agent") as reinvoke,
             patch.object(fresh, "_git_create_worktree_with_handoff") as recreate,
         ):
             recovered = fresh._run(recover)
@@ -17168,8 +17584,6 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
                 "wrong_request",
                 "write_failure",
                 "uncertain_write",
-                "capacity",
-                "same_job",
             }
         ), recovered.error
         reinvoke.assert_not_called()
@@ -17197,11 +17611,19 @@ def _fail_pretest_record_write(write_first: bool, **kwargs: Any) -> str:
 
 
 def _pretest_completion_provider(
-    pool: WorkerPool, case: str, value: dict[str, Any], job: AgentJob
+    pool: WorkerPool,
+    case: str,
+    value: dict[str, Any],
+    job: AgentJob,
+    cwd: Path,
+    *,
+    deadline_s: float,
+    remaining_timeout: Callable[[], int],
 ) -> JobResult:
-    """Return one actual result after a bounded simulated provider edit."""
-    if case != "clean":
-        (job.cwd / "tracked.txt").write_text("successful candidate\n")
+    """Return a provider result after the real source lease is acquired."""
+    del deadline_s, remaining_timeout
+    if case not in {"clean", "capacity", "same_job"}:
+        (cwd / "tracked.txt").write_text("successful candidate\n")
     job.prompt_kwargs["branch"] = "foreign-branch"
     if case == "shutdown":
         pool.shutdown(mark_interrupted=False)
@@ -17216,7 +17638,7 @@ def _check_pretest_second_reservation(pool: WorkerPool, job: AgentJob, case: str
     """Keep an earlier completion when a later reservation fails."""
     if case not in {"capacity", "same_job"}:
         return
-    with patch.object(pool, "_run_agent") as provider:
+    with patch.object(pool, "_invoke_agent") as provider:
         result = pool._run(
             job if case == "same_job" else replace(job, remediation_pretest_nonce="9" * 32),
             "project#7",
@@ -17224,17 +17646,21 @@ def _check_pretest_second_reservation(pool: WorkerPool, job: AgentJob, case: str
             remediation_owner_id=2,
         )
     assert not result.ok
+    assert result.error == "ValueError: remediation pretest success capacity is unavailable"
     provider.assert_not_called()
     assert set(pool._pretest_successes) == {job.remediation_pretest_nonce}
 
 
 def _assert_pretest_clean_no_change(
-    pool: WorkerPool, root: Path, writer: Path, branch: str, head: str
+    pool: WorkerPool, root: Path, binding: WorkspaceBinding, branch: str, head: str
 ) -> None:
     """Clean success retains the ordinary no-change commit path."""
+    writer = binding.cwd
+    manager = SourceWorkspaceManager(root, repository="project", base_dir=writer.parent)
     job = GitJob(
         repo="project",
         op="commit_push",
+        workspace=binding,
         timeout_s=30,
         expected_repository="example/project",
         kwargs={
@@ -17253,7 +17679,12 @@ def _assert_pretest_clean_no_change(
     ):
         result = pool._run(job)
     assert result.ok, result.error
-    assert result.value == {"pushed": False, "head_sha": head}
+    assert result.value == {
+        "pushed": False,
+        "head_sha": head,
+        "source_workspace": binding.to_dict(),
+        "source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION).to_dict(),
+    }
     publish.assert_not_called()
     dirty_commit.assert_not_called()
     assert _git(writer, "status", "--porcelain") == ""
@@ -17265,7 +17696,7 @@ def _assert_pretest_clean_stage(
     """Use the actual clean result to request tests without dirty authority."""
     from types import SimpleNamespace
 
-    from hephaestus.automation.pipeline.coordinator import PipelineConfig
+    from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
     from hephaestus.automation.pipeline.stages import JobRequest
     from hephaestus.automation.pipeline.stages.base import StageContext
     from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
@@ -17313,7 +17744,7 @@ def _assert_pretest_stage_restarts(recovered: JobResult, root: Path) -> None:
     """Pass the actual fresh worker result through the stage into a test request."""
     from types import SimpleNamespace
 
-    from hephaestus.automation.pipeline.coordinator import PipelineConfig
+    from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
     from hephaestus.automation.pipeline.stages import Continue, JobRequest
     from hephaestus.automation.pipeline.stages.base import StageContext
     from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
@@ -17395,7 +17826,7 @@ def test_pretest_job_issue_requires_an_integer(
     )
     with patch.object(
         pool,
-        "_run_agent",
+        "_invoke_agent",
         return_value=JobResult(
             ok=True, value={"addressed": ["thread-1"], "replies": {"thread-1": "Fixed."}}
         ),

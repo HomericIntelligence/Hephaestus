@@ -5,7 +5,6 @@ import logging
 import signal
 from contextlib import suppress
 from pathlib import Path
-from typing import cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 import hephaestus.automation.pipeline.coordinator_types as ct
@@ -75,9 +74,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._ctx_cache.move_to_end(repo)
             return ctx
         root = ct._effective_repo_root(self.config, repo)
-        from hephaestus.automation.arming_state import LearningJournalStore
+        from hephaestus.automation.learning_journal import LearningJournalStore
         from hephaestus.automation.plan_review_session import PlanReviewSessionStore
         from hephaestus.automation.source_worktree import SourceWorkspaceManager
+
+        def source_workspaces() -> SourceWorkspaceManager:
+            if not (root / ".git").exists():
+                raise RuntimeError(f"source repository is missing: {root}")
+            return SourceWorkspaceManager(root, repository=repo)
 
         def learning_state_dir() -> Path:
             return root / "build" / ".automation-state"
@@ -92,11 +96,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 repo_root=root,
                 worktree=root,
                 projects_dir=Path(self.config.projects_dir),
-                source_workspaces=lambda: (
-                    SourceWorkspaceManager(root, repository=repo)
-                    if (root / ".git").exists()
-                    else None
-                ),
+                source_workspaces=source_workspaces,
             ),
             now_fn=self._monotonic,
             budget_fn=self._budget_for,
@@ -144,7 +144,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         return _observability.health_snapshot(
             self,
             logger=logger,
-            stalled_ticks_threshold=self._stall_ticks_before_force,
+            stalled_ticks_threshold=self._stall_ticks_before_retry,
         )
 
     def _emit_observability_tick(self) -> None:
@@ -479,7 +479,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         lease = self.queues[stage_name].claim_at(index)
         if lease is None:
             return None
-        item = cast(ct.WorkItem, lease.item)
+        item = lease.item
         item_id = id(item)
         if item_id in self._leases:  # pragma: no cover - internal invariant
             lease.restore()
@@ -547,28 +547,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         enter: bool,
         result: ct.ItemResult | None = None,
     ) -> bool:
-        """Route an item destination-first, retaining a full-target intent.
-
-        Direct unit-test calls do not own a source lease and retain the
-        historical push behavior.  Normal drains always carry a lease, so a
-        full destination only records a bounded intent and the completed
-        stage action is never replayed.
-        """
-        lease = self._leases.get(id(item))
-        if lease is None:
-            if result is not None:
-                item.result = result
-            source = item.stage
-            self._push_item(item, target, enter=enter)
-            source_auxiliary = self._is_auxiliary_stage(source)
-            target_auxiliary = self._is_auxiliary_stage(target)
-            if not source_auxiliary and target_auxiliary:
-                self._live_work_permit_ids.discard(id(item))
-                self._learning_work_permit_ids.add(id(item))
-            elif source_auxiliary and not target_auxiliary:
-                self._learning_work_permit_ids.discard(id(item))
-                self._live_work_permit_ids.add(id(item))
-            return True
+        """Retain the source lease until the destination accepts the item."""
+        lease = self._leases[id(item)]
 
         if target is item.stage:
             # RETRY to the source is a restore, not a self-handoff: a held
@@ -604,19 +584,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         """Retry every retained route whose destination may have opened."""
         self._drain_complementary_handoff_pairs()
         for item_id, pending in list(self._pending_handoffs.items()):
-            lease = self._leases.get(item_id)
+            lease = self._leases[item_id]
             item = pending.item
             if not self._lane_handoff_capacity(item, pending.target):
                 continue
-            accepted = (
-                lease.handoff(self.queues[pending.target])
-                if lease is not None
-                else self.queues[pending.target].offer(item)
-            )
-            if not accepted:
+            if not lease.handoff(self.queues[pending.target]):
                 continue
-            if lease is not None:
-                self._leases.pop(item_id, None)
+            self._leases.pop(item_id)
             self._pending_handoffs.pop(item_id, None)
             self._activate_handoff(
                 item,
@@ -640,47 +614,33 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
 
     def _idle_wait(self) -> None:
-        """Block on the completion queue (the loop's only sleep).
-
-        Also breaks a theoretical no-progress stall: if a full tick made no
-        progress with nothing in flight and no timers pending, force-run the
-        most-downstream queued item ignoring admission (liveness guarantee —
-        admission can only defer while something else is running or parked).
-        """
+        """Wait for completion and retry stalled work through normal queue admission."""
         if self._progress:
             self._progress = False
             self._stalled_ticks = 0
         elif not self.in_flight and not self.auxiliary_in_flight and not self.timers:
             self._stalled_ticks += 1
-            if self._stalled_ticks >= self._stall_ticks_before_force:
-                self._force_run_one()
-                return
+            if self._stalled_ticks >= self._stall_ticks_before_retry:
+                self._retry_stalled_queues()
+                if self._progress:
+                    return
         timeout = self._idle_poll_s
         if self.timers:
             timeout = min(timeout, max(0.01, self.timers[0][0] - self._monotonic()))
         self._wait_for_completion(timeout=timeout)
 
-    def _force_run_one(self) -> None:
-        """Run the first item of the most-downstream non-empty queue."""
+    def _retry_stalled_queues(self) -> None:
+        """Use normal queue admission after a bounded number of idle ticks."""
         assert not self.in_flight and not self.auxiliary_in_flight, (  # noqa: S101
-            "force-run requires no in-flight work"
+            "stalled retry requires no in-flight work"
         )
         self._stalled_ticks = 0
-        for stage_name in ct._DRAIN_ORDER:
-            q = self.queues[stage_name]
-            if len(q):
-                item = self._claim_item(stage_name)
-                if item is None:  # pragma: no cover - len/claim are coordinator-thread atomic
-                    continue
-                logger.error(
-                    "pipeline stalled with no in-flight work; "
-                    "force-running %s item %s; inflight_per_repo=%s",
-                    stage_name.value,
-                    self._item_key(item),
-                    dict(self.inflight_per_repo),
-                )
-                self._run_item(item)
-                return
+        logger.error(
+            "pipeline stalled with no in-flight work; retrying queue admission; "
+            "inflight_per_repo=%s",
+            dict(self.inflight_per_repo),
+        )
+        self._drain_queues()
 
     def _timer_park(self, item: ct.WorkItem, delay_s: float) -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
@@ -724,6 +684,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             final_stage=item.stage,
         )
         self._record_terminal_result(item)
+        self._release_work_permit(item)
         item.add_history_event(item.stage, item.state, note="interrupted; resumable")
         self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(
@@ -951,7 +912,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             # A stage absent from this run's (possibly scope-trimmed) route
             # table has no next/fail mapping — routing it would KeyError. This
             # happens when a seeder-created REPO item is poisoned under a
-            # partial ``--phases`` scope whose ``trimmed_routes`` omits REPO
+            # partial ``--stages`` scope whose ``trimmed_routes`` omits REPO
             # (#2294). Fail closed to the sink instead of crashing the whole
             # run, which the poison handler that called us already intends.
             logger.error(
@@ -974,7 +935,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
 
         if disposition is Disposition.ADVANCE:
-            self._seed_products(item)
             if item.stage is ct.StageName.PLAN_REVIEW and item.learning_intents:
                 # Preserve the scope-trimmed primary destination before the
                 # auxiliary detour. A planner-only run must return to its sink
@@ -1024,7 +984,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._finish(item, passed=False, reason=f"blocked: {outcome.note}")
             return
         if disposition is Disposition.FINISH_PASS:
-            self._seed_products(item)
             if item.stage is ct.StageName.MERGE_WAIT and item.learning_intents:
                 primary_reason = outcome.note or "merged"
                 item.payload["_learning_primary_reason"] = primary_reason
@@ -1103,18 +1062,16 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             base_sha = ""
         try:
             repo_root = Path(str(self._ctx_for_repo(item.repo).paths.repo_root))
-            if not repo_root.is_dir():
-                # Test-only/fake worker paths do not represent a reusable
-                # checkout. Preserve legacy explicit recovery semantics there;
-                # production sync always materializes the repository first.
-                self._direct_wave_lease = None
-                self._ctx_for_repo(item.repo).github.ensure_state_labels()
-                self._begin_direct_pr_source(item.repo, base_sha)
-                self._begin_direct_issue_source(item.repo, base_sha)
-                raise StopIteration
-            store = IssueWaveStore(repo_root, self.config.org, item.repo)
-            checkpoint = store.load()
+            store = None
+            if repo_root.is_dir():
+                store = IssueWaveStore(repo_root, self.config.org, item.repo)
+                checkpoint = store.load()
+            elif self.config.dry_run:
+                checkpoint = None
+            else:
+                raise IssueWaveError("direct scope checkout is missing")
             if checkpoint is not None and checkpoint.status == "active":
+                assert store is not None  # noqa: S101
                 linked_issues = set(self.config.issues)
                 for pr_number in self.config.prs:
                     issue_number = self._ctx_for_repo(item.repo).github.find_issue_for_pr(pr_number)
@@ -1134,8 +1091,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._ctx_for_repo(item.repo).github.ensure_state_labels()
             self._begin_direct_pr_source(item.repo, base_sha)
             self._begin_direct_issue_source(item.repo, base_sha)
-        except StopIteration:
-            pass
         except Exception as exc:
             self._direct_scope_bootstrap_pending = False
             logger.warning(
@@ -1154,8 +1109,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         with suppress(ValueError):
             self.items.remove(item)
         self._record_event("direct_scope_ready", item.repo)
-        self._drain_direct_pr_source()
-        self._drain_direct_issue_source()
 
     def _route_retry(self, item: ct.WorkItem, outcome: ct.StageOutcome) -> None:
         """Apply the RETRY row: heap-park on a recorded delay, else next tick.
@@ -1169,7 +1122,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         delay = item.payload.pop("retry_delay_s", None)
         if delay is None:
             if not self._restore_source_lease(item):
-                self._push_item(item, item.stage, enter=False)
+                raise RuntimeError("retry requires an owned source lease")
         elif self.config.dry_run:
             self._finish(
                 item, passed=False, reason=f"[dry-run] would wait {delay}s: {outcome.note}"
@@ -1319,6 +1272,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     shutdown_signal_message(signum, self.config.grace_s, immediate=False)
                 )
                 self.shutdown.set()
+                self._worker_shutdown.set()
                 self._grace_deadline = self._monotonic() + self.config.grace_s
                 self._wake_completion_wait()
 
@@ -1334,6 +1288,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     def _teardown_immediate(self) -> None:
         """Cancel the pool and synthesize interrupted results for in-flight items."""
         self.shutdown.set()
+        self._worker_shutdown.set()
         self._force_shutdown.set()
         self._shutdown_pool()
 
@@ -1351,18 +1306,18 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         self._pool_shut_down = True
         try:
-            # ``self.shutdown`` belongs to the coordinator's signal path. A
-            # normal ``finally`` must reap worker resources without changing
-            # its exit outcome to an interruption (#2431), while a genuine
-            # signal preserves the pool's direct cancellation semantics.
-            self.pool.shutdown(mark_interrupted=self.shutdown.is_set())
+            # The worker event is separate from the operator-signal event.
+            # Thus, a fatal exit cancels active work without changing exit 1
+            # to an operator-interrupt exit (#2431).
+            self.pool.shutdown(mark_interrupted=self._worker_shutdown.is_set() or self._fatal)
         except Exception:  # pragma: no cover - defensive
             logger.exception("pool shutdown raised")
-        if self._auxiliary_pool_separate:
-            try:
-                self.auxiliary_pool.shutdown(mark_interrupted=self.shutdown.is_set())
-            except Exception:  # pragma: no cover - defensive
-                logger.exception("auxiliary pool shutdown raised")
+        try:
+            self.auxiliary_pool.shutdown(
+                mark_interrupted=self._force_shutdown.is_set() or self._fatal
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("auxiliary pool shutdown raised")
         try:
             self._drain_completions()
         except RuntimeError as exc:
@@ -1374,8 +1329,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._park_resumable(item)
         self.in_flight.clear()
         self.auxiliary_in_flight.clear()
-        self._inflight_implementation_claims.clear()
-        self._implementation_file_claims.clear()
         self.inflight_per_repo.clear()
 
     def _finalize_resumable(self) -> None:

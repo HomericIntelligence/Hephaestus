@@ -21,7 +21,7 @@ from hephaestus.automation.mnemosyne_binding import (
     MnemosyneBindingService,
 )
 from hephaestus.automation.mnemosyne_corpus import MnemosyneCorpusResult
-from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader as DefaultCorpusReader
+from hephaestus.automation.mnemosyne_corpus_reader import DefaultCorpusReader
 from hephaestus.automation.mnemosyne_delivery import (
     ExistingPullRequest,
     LearnDeliveryError,

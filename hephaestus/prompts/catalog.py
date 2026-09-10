@@ -30,21 +30,12 @@ _AGENT_DIRECTION_TEMPLATES = frozenset(
     {
         "address_review/address_review.j2",
         "address_review/reply_recovery.j2",
-        "advise/advise.j2",
-        "advise/direct.j2",
-        "advise/json_retry.j2",
-        "agent_stage/skill_prefix.j2",
-        "audit/coordinator.j2",
-        "ci/fix.j2",
-        "ci/force_engagement.j2",
         "fleet_sync/conflict_resolution.j2",
-        "follow_up/follow_up.j2",
         "implementation/dirty_worktree.j2",
         "implementation/dirty_direct_continuation.j2",
         "implementation/implementation.j2",
         "implementation/loop_review.j2",
         "implementation/resume_feedback.j2",
-        "learn/learn.j2",
         "planning/context.j2",
         "planning/plan.j2",
         "planning/plan_loop_review.j2",
@@ -54,13 +45,11 @@ _AGENT_DIRECTION_TEMPLATES = frozenset(
         "pr_management/commit_message.j2",
         "pr_management/pr_message.j2",
         "pr_review/analysis.j2",
-        "pr_review/comment_difficulty.j2",
         "pr_review/validation.j2",
         "tidy/rebase_fix.j2",
     }
 )
 _COMPOSED_AGENT_DIRECTION_KEYS = {
-    "advise/json_retry.j2": "advise_prompt",
     "planning/context.j2": "plan_prompt",
 }
 
@@ -96,8 +85,7 @@ class PromptCatalog:
         loaders.append(FileSystemLoader(str(_DEFAULT_TEMPLATES_DIR)))
         self._environment = Environment(
             loader=ChoiceLoader(loaders),
-            # Prompt templates are plain text; escaping would alter rendered
-            # GitHub content and break the byte-parity compatibility contract.
+            # Prompt templates are plain text. Keep the supplied content unchanged.
             autoescape=False,  # nosec B701
             undefined=StrictUndefined,
             trim_blocks=False,
@@ -161,21 +149,12 @@ class PromptCatalog:
             context["_writing_standard_directive"] = directive.rstrip()
         rendered = self._environment.get_template(template_name).render(**context)
 
-        if template_name == "learn/learn.j2" or rendered.startswith("/"):
+        if rendered.startswith("/"):
             # Provider command parsing requires the slash command to remain first.
             return self._compose_writing_standard(
                 rendered, directive, preserve_leading_command=True
             )
         return self._compose_writing_standard(rendered, directive, preserve_leading_command=False)
-
-    def source(self, template_name: str) -> str:
-        """Return a template's source for legacy string-template compatibility."""
-        self._validate_template_name(template_name)
-        loader = self._environment.loader
-        if loader is None:  # pragma: no cover - every catalog configures a loader
-            raise RuntimeError("Prompt catalog has no template loader")
-        source, _, _ = loader.get_source(self._environment, template_name)
-        return source
 
     @staticmethod
     def _validate_template_name(template_name: str) -> None:

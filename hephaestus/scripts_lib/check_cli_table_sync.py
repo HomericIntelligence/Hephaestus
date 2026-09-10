@@ -6,7 +6,8 @@ whenever a guarded documentation surface or pyproject.toml changes. It verifies
 that every declared command has a README reference, that the three documented
 source-derived script counts agree with pyproject.toml, and that every
 backticked ``hephaestus-*`` reference in the guarded docs names a registered
-console script.
+console script. Accepted ADR bodies retain their historical command names.
+Draft decisions and current documentation remain in the reference check.
 
 Usage:
     python3 -m hephaestus.scripts_lib.check_cli_table_sync
@@ -42,6 +43,29 @@ _PROSE_COUNT_CHECKS: tuple[tuple[str, re.Pattern[str], str], ...] = (
 )
 
 _DOC_SCAN_GLOBS = ("README.md", "COMPATIBILITY.md", "AGENTS.md", "docs/**/*.md")
+_ADR_PATH_RE = re.compile(r"docs/adr/[0-9]{4}-[a-z0-9-]+\.md")
+_ADR_STATUS_RE = re.compile(
+    r"^\s*(?:[-*+]\s+)?(?:\*\*Status\*\*\s*:|\*\*Status:\*\*|Status\s*:)"
+    r"\s*(?P<status>.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ACCEPTED_ADR_STATUS_RE = re.compile(
+    r"Accepted(?:\s*\([^\r\n)]+\))?",
+    re.IGNORECASE,
+)
+_MARKDOWN_SECTION_RE = re.compile(r"^##\s+", re.MULTILINE)
+
+
+def has_accepted_adr_status(content: str) -> bool:
+    """Return whether all status fields in the document header declare acceptance."""
+    first_section = _MARKDOWN_SECTION_RE.search(content)
+    metadata = content[: first_section.start()] if first_section else content
+    statuses = [
+        match.group("status").strip().strip("*_` ") for match in _ADR_STATUS_RE.finditer(metadata)
+    ]
+    return bool(statuses) and all(
+        _ACCEPTED_ADR_STATUS_RE.fullmatch(status) is not None for status in statuses
+    )
 
 
 def _load_scripts(repo_root: Path | None = None) -> set[str]:
@@ -93,10 +117,14 @@ def check_docs_command_references(repo_root: Path, declared: set[str]) -> list[s
 
     for pattern in _DOC_SCAN_GLOBS:
         for path in sorted(repo_root.glob(pattern)):
-            commands = set(_BACKTICK_CMD_RE.findall(path.read_text(encoding="utf-8")))
+            relative_path = path.relative_to(repo_root).as_posix()
+            content = path.read_text(encoding="utf-8")
+            if _ADR_PATH_RE.fullmatch(relative_path) and has_accepted_adr_status(content):
+                continue
+            commands = set(_BACKTICK_CMD_RE.findall(content))
             for command in sorted(commands - declared):
                 problems.append(
-                    f"{path.relative_to(repo_root)}: references `{command}` "
+                    f"{relative_path}: references `{command}` "
                     "which is not in pyproject.toml [project.scripts]"
                 )
 

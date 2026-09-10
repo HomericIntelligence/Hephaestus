@@ -4,13 +4,16 @@ import subprocess
 import time
 from threading import Event
 
+import hephaestus.automation.git_runtime as git_runtime
 from hephaestus.automation.github_api import (
     GraphQLDeterministicError,
     GraphQLMutationOutcomeUnknownError,
     GraphQLResponseError,
     GraphQLRetryableError,
     MergeQueueAlreadyEnqueuedError,
+    prs as github_prs,
 )
+from hephaestus.automation.operation_deadlines import operation_deadline_after
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_comments import PipelineGitHubIssueComments
@@ -155,7 +158,7 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
                 cancellation,
             )
         try:
-            result = gh_call(
+            result = self._deadline_gh_call(
                 [
                     "api",
                     "--method",
@@ -179,29 +182,6 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         if status is None:
             return ConditionalMergeResult(status=None, body=None, transport_error=True)
         return ConditionalMergeResult(status=status, body=body, malformed=malformed)
-
-    def drive_green_learn_terminal(self, issue_number: int) -> bool:
-        """Return True when the post-merge ``/learn`` is already terminal.
-
-        Mirrors ``ci_driver.CIDriver._learn_record_terminal`` over the issue's
-        arming record: captured/succeeded timestamps or a terminal
-        ``learn_status`` mean ``/learn`` must never fire again (#848).
-        """
-        record = self._arming.load(issue_number) or {}
-        if record.get("learn_captured_at") or record.get("learn_succeeded_at"):
-            return True
-        return str(record.get("learn_status") or "").lower() in {"succeeded", "failed"}
-
-    def drive_green_learn_inflight(self, issue_number: int) -> bool:
-        """Return whether a persisted /learn dispatch may already have run.
-
-        A process can fail after the agent receives its prompt but before it
-        writes its outcome. This durable claim is intentionally not treated as
-        a successful result: recovery retains the record for inspection, but
-        must never repeat the external learning side effect.
-        """
-        record = self._arming.load(issue_number) or {}
-        return str(record.get("learn_status") or "").lower() == "in_progress"
 
     def add_labels(self, issue_number: int, labels: list[str]) -> None:
         """Durably add labels (``gh_issue_add_labels``)."""
@@ -278,9 +258,7 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
     ) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
-        PR creation requires a repo-scoped accessor.  The legacy helper can
-        alter auto-merge state, so an unscoped caller must fail closed rather
-        than delegate to it.
+        PR creation requires an explicit repository identity.
 
         First select and reuse an open PR on the supplied branch, then use
         ``find_pr_for_issue`` as the issue-level fallback before creating a
@@ -332,9 +310,18 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         strict_absence: bool,
     ) -> int:
         """Submit one create request without a PR adoption path."""
-        if self._repo_slug is not None:
+        deadline = self._operation_deadline_s or operation_deadline_after(self._gh_timeout)
+        with self.operation_deadline(deadline), git_runtime.operation_deadline(deadline):
+            repository = self._owner_name()
             github_api._assert_body_has_closes(body)
-            github_api._assert_branch_commits_signed(branch, base="main")
+            github_prs._assert_branch_commits_signed(
+                branch,
+                base="main",
+                run_git=self._run_signature_git,
+                verify_commit=lambda oid: github_prs._gh_commit_is_verified(
+                    oid, repository=repository, run_gh=self._gh
+                ),
+            )
             with github_api._body_file(body) as body_path:
                 result = self._gh(
                     [
@@ -350,22 +337,29 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
                         body_path,
                     ]
                 )
-            raw_output = result.stdout
-            if strict_absence and (
-                not isinstance(raw_output, str) or getattr(result, "returncode", 0) != 0
-            ):
-                raise RuntimeError("strict PR creation outcome is ambiguous")
-            output = raw_output.strip()
-            match = re.search(r"/pull/(\d+)", output)
-            if match:
-                return int(match.group(1))
-            if strict_absence:
-                raise RuntimeError("strict PR creation outcome is ambiguous")
-            logger.error("Failed to parse PR number from gh pr create output: %r", raw_output)
-            raise RuntimeError(
-                f"Failed to parse PR number from gh pr create output: {raw_output!r}"
-            )
-        return github_api.gh_pr_create(branch, title, body)
+        raw_output = result.stdout
+        if strict_absence and (
+            not isinstance(raw_output, str) or getattr(result, "returncode", 0) != 0
+        ):
+            raise RuntimeError("strict PR creation outcome is ambiguous")
+        output = raw_output.strip()
+        match = re.search(r"/pull/(\d+)", output)
+        if match:
+            return int(match.group(1))
+        if strict_absence:
+            raise RuntimeError("strict PR creation outcome is ambiguous")
+        logger.error("Failed to parse PR number from gh pr create output: %r", raw_output)
+        raise RuntimeError(f"Failed to parse PR number from gh pr create output: {raw_output!r}")
+
+    def _run_signature_git(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run one signature check in the repository under the operation bounds."""
+        return git_runtime.run(
+            argv,
+            cwd=self._repo_root,
+            check=False,
+            timeout=self._operation_timeout(self._gh_timeout),
+            shutdown=self._operation_shutdown,
+        )
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Apply and read back exclusive ``state:implementation-no-go``."""
@@ -376,78 +370,6 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         has_go, has_no_go = self.pr_has_implementation_state_label(pr_number)
         if has_go or not has_no_go:
             raise RuntimeError(f"PR #{pr_number} implementation-no-go label read-back failed")
-
-    def claim_drive_green_learn(self, issue_number: int, pr_number: int) -> bool:
-        """Persist and read back the pre-dispatch /learn claim.
-
-        The claim is the exactly-once boundary for the agent's external
-        learning work. A nonterminal arm record becomes ``in_progress``
-        before the job is handed to the worker; a restart encountering that
-        state must surface an unknown outcome instead of invoking /learn a
-        second time.
-        """
-        if self._skip(f"claim drive-green learn for #{issue_number} (PR #{pr_number})"):
-            return True
-        # Hold a stable sibling lock across read/check/write/readback. The
-        # JSON record is atomically replaced by save(), so it cannot itself be
-        # the lock inode. Every coordinator process takes this same lock before
-        # claiming, making only one external /learn dispatch possible.
-        with file_lock(
-            self._arming.learn_claim_lock_path(issue_number),
-            require_exclusive=True,
-        ):
-            record = self._arming.load(issue_number) or {"pr_number": pr_number}
-            status = str(record.get("learn_status") or "").lower()
-            if status in {"succeeded", "failed", "in_progress"}:
-                return False
-            record["pr_number"] = pr_number
-            record["learn_status"] = "in_progress"
-            record["learn_attempted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            if not self._arming.save(issue_number, record):
-                raise RuntimeError(
-                    f"could not persist drive-green learn claim for issue #{issue_number}"
-                )
-            persisted = self._arming.load(issue_number)
-            if (
-                persisted is None
-                or persisted.get("pr_number") != pr_number
-                or persisted.get("learn_status") != "in_progress"
-            ):
-                raise RuntimeError(
-                    f"could not verify drive-green learn claim for issue #{issue_number}"
-                )
-            return True
-
-    def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
-        """Record the post-merge ``/learn`` outcome on the arming record.
-
-        Mirrors ``post_merge_processor.mark_drive_green_learn_result`` (minus
-        the session-evidence enrichment, which stays with the legacy driver
-        until the cutover issue): written before FINISH_PASS so a restart can
-        never replay ``/learn`` for the same merged PR.
-        """
-        if self._skip(f"record drive-green learn result for #{issue_number}"):
-            return
-        record = self._arming.load(issue_number) or {}
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        record["learn_attempted_at"] = timestamp
-        if succeeded:
-            record["learn_status"] = "succeeded"
-            record["learn_succeeded_at"] = timestamp
-            record["learn_captured_at"] = timestamp
-        else:
-            record["learn_status"] = "failed"
-            record["learn_succeeded_at"] = None
-            record["learn_captured_at"] = None
-        if not self._arming.save(issue_number, record):
-            raise RuntimeError(
-                f"could not persist drive-green learn result for issue #{issue_number}"
-            )
-        persisted = self._arming.load(issue_number)
-        if persisted is None or persisted.get("learn_status") != record["learn_status"]:
-            raise RuntimeError(
-                f"could not verify drive-green learn result for issue #{issue_number}"
-            )
 
     def ensure_state_labels(self) -> None:
         """Ensure the ``state:*`` label vocabulary exists on the repo.

@@ -361,7 +361,7 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
         "hephaestus-plan-issues",
         "--issues",
         "2519",
-        "--parallel",
+        "--max-workers",
         "1",
         "--agent",
         "pi",
@@ -1568,6 +1568,8 @@ def test_render_verify_and_publication_attestation(
     assert "/usr/bin/pi" not in report_text
     assert "Pi Issue 2519 Runbook" in runbook_text
     assert "capture --run-id <run-id>" in runbook_text
+    assert "--issues 2519 --max-workers 1 --agent pi --json" in runbook_text
+    assert "--parallel" not in runbook_text
     assert "HEPH_PI_ISOLATION_ADAPTER" in runbook_text
     assert "direct Pi CLI execution is not workflow evidence" in runbook_text
     assert "Session identifiers are published in the report" in runbook_text

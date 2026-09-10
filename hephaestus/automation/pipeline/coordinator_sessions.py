@@ -6,7 +6,6 @@ from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.agents.pi_session import validate_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, resolve_pi_model_reference
 
-from ..agent_config import AGENT_ADDRESS_REVIEW, AGENT_IMPLEMENTER
 from .jobs import AgentJob, CompactJob, JobResult
 from .work_item import WorkItem
 
@@ -69,14 +68,6 @@ def agent_session_lifecycle(item: WorkItem, key: str) -> SessionLifecycle:
     if key in item.session_bindings or key in item.session_ids:
         return SessionLifecycle.RESUME_REQUIRED
     return SessionLifecycle.START_NEW
-
-
-def writer_session_key(item: WorkItem) -> str:
-    """Select the stored writer session, including the legacy review writer."""
-    sessions = item.session_ids.keys() | item.session_bindings.keys()
-    if AGENT_IMPLEMENTER not in sessions and AGENT_ADDRESS_REVIEW in sessions:
-        return AGENT_ADDRESS_REVIEW
-    return AGENT_IMPLEMENTER
 
 
 __all__ = ["store_agent_session_result"]

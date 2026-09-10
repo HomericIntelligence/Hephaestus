@@ -49,23 +49,6 @@ class LearningSource(Protocol):
 
 
 @dataclass(frozen=True)
-class ApprovedPlanLearningSource:
-    """Retain the legacy source shape; plan publication is rejected."""
-
-    repository: str
-    issue: int
-    revision: int
-    fingerprint: str
-    comment_database_id: int
-    source_date: str
-    objective: str
-    approach: str
-    implementation_order: str
-    verification: str
-    changes_from_review: str = ""
-
-
-@dataclass(frozen=True)
 class PostMergeLearningSource:
     """Validated immutable merged-PR source fields."""
 

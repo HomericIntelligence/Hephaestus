@@ -46,7 +46,6 @@ def recover_rebase_review(
         or record.repository != f"{ctx.org}/{item.repo}"
         or record.issue_number != item.issue
         or record.pr_number != item.pr
-        or item.payload.get("host_verification_bootstrap_proof") is not None
     ):
         return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_recovery_invalid")
     if _PENDING in item.payload:

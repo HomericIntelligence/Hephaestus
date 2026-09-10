@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import queue
 import threading
 from pathlib import Path
 from typing import Any
@@ -11,14 +10,15 @@ from typing import Any
 import pytest
 
 from hephaestus.automation.pipeline import admission as admission_mod, seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
-from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.stages.base import JobRequest
+from hephaestus.automation.pipeline.stages.base import JobRequest, Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -32,9 +32,10 @@ def _coordinator(tmp_path: Path) -> tuple[Coordinator, FakeWorkerPool]:
             max_workers=1,
             parallel_repos=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     return coordinator, pool
@@ -43,7 +44,10 @@ def _coordinator(tmp_path: Path) -> tuple[Coordinator, FakeWorkerPool]:
 def test_signal_wake_never_blocks_on_a_full_completion_queue(tmp_path: Path) -> None:
     """Signal wake-up is a latch, not a queue write that can deadlock a handler."""
     coordinator, _pool = _coordinator(tmp_path)
-    occupied = (object(), JobResult(ok=True, value="already queued"))
+    occupied = (
+        JobHandle(job=GitJob(repo="repo-a", op="rebase", timeout_s=1), on_done_state="DONE"),
+        JobResult(ok=True, value="already queued"),
+    )
     coordinator.completion_q.put_nowait(occupied)
     callback = threading.Thread(target=coordinator._wake_completion_wait)
 
@@ -67,7 +71,6 @@ def test_completion_saturation_exits_failed_without_claiming_signal_interrupt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An internal completion fault is exit 1, never an exit-130 cancellation."""
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda _repos, _issues, _prs: [])
     coordinator, pool = _coordinator(tmp_path)
     coordinator._completion_saturation.set()
 
@@ -80,8 +83,8 @@ def test_completion_saturation_exits_failed_without_claiming_signal_interrupt(
 class _BlockingWorkerPool(WorkerPool):
     """Real callback path with test-controlled worker completion."""
 
-    def __init__(self, release: threading.Event, finished: threading.Event) -> None:
-        super().__init__(size=1, shutdown=threading.Event(), completion_q=queue.Queue())
+    def __init__(self, release: threading.Event, finished: threading.Event, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self._release = release
         self._finished = finished
 
@@ -98,7 +101,7 @@ class _BlockingWorkerPool(WorkerPool):
         return JobResult(ok=True)
 
 
-class _OneBlockingJobStage:
+class _OneBlockingJobStage(Stage):
     """Submit exactly one inert job so WorkerPool owns its real callback."""
 
     def __init__(self, cwd: Path) -> None:
@@ -126,7 +129,7 @@ class _OneBlockingJobStage:
         )
 
 
-class _PassStage:
+class _PassStage(Stage):
     """Complete a freshly reseeded item without submitting an external job."""
 
     def on_enter(self, item: WorkItem, ctx: Any) -> None:
@@ -146,7 +149,6 @@ def test_real_worker_saturation_is_durable_resumable_and_recoverable(
     """A C=1 callback overflow fails safely and a fresh source can resume work."""
     release = threading.Event()
     finished = threading.Event()
-    pool = _BlockingWorkerPool(release, finished)
     event_log = tmp_path / "events.jsonl"
     coordinator = Coordinator(
         PipelineConfig(
@@ -156,13 +158,14 @@ def test_real_worker_saturation_is_durable_resumable_and_recoverable(
             max_workers=1,
             event_log_path=event_log,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=pool,
+        pool_factory=lambda **kwargs: _BlockingWorkerPool(release, finished, **kwargs),
+        auxiliary_pool_factory=FakeWorkerPool().factory,
         stages={StageName.PLANNING: _OneBlockingJobStage(tmp_path)},
         install_signals=False,
     )
-    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=71, stage=StageName.PLANNING)
     coordinator._push_item(item, StageName.PLANNING, enter=True)
     coordinator._drain_queues()
@@ -198,7 +201,9 @@ def test_real_worker_saturation_is_durable_resumable_and_recoverable(
             pr_is_merged=False,
         ),
     )
-    monkeypatch.setattr(admission_mod, "_filter_open_issues", lambda _repo, issues: list(issues))
+    monkeypatch.setattr(
+        admission_mod, "_filter_open_issues", lambda _repo, issues, **_kwargs: list(issues)
+    )
     recovered = Coordinator(
         PipelineConfig(
             org="org",
@@ -208,9 +213,10 @@ def test_real_worker_saturation_is_durable_resumable_and_recoverable(
             max_workers=1,
             dry_run=True,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     recovered.stages[StageName.PLANNING] = _PassStage()

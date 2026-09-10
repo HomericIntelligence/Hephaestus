@@ -8,16 +8,18 @@ from typing import Any
 import pytest
 
 from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.queues import StageQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
+from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-class _ImmediatePassStage:
+class _ImmediatePassStage(Stage):
     """A no-I/O planning stage that makes admission progress observable."""
 
     def __init__(self, events: list[tuple[str, int]]) -> None:
@@ -76,11 +78,10 @@ def test_direct_issue_seeds_are_source_pulled_and_lossless_at_capacity_one(
         )
 
     monkeypatch.setattr(StageQueue, "offer", record_offer)
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify_direct_issue)
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: issues,
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: issues,
     )
 
     coordinator = Coordinator(
@@ -92,9 +93,10 @@ def test_direct_issue_seeds_are_source_pulled_and_lossless_at_capacity_one(
             parallel_repos=1,
             max_workers=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
@@ -136,11 +138,10 @@ def test_direct_issue_source_does_not_reseed_after_explicit_scope_drains(
             pr_is_merged=False,
         )
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify_direct_issue)
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: issues,
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: issues,
     )
 
     coordinator = Coordinator(
@@ -150,9 +151,10 @@ def test_direct_issue_source_does_not_reseed_after_explicit_scope_drains(
             issues=[101],
             loops=2,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
@@ -182,9 +184,10 @@ def test_reseed_is_disabled_for_any_explicit_selection(
             prs=prs,
             loops=2,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator._loops_run = 1
@@ -210,7 +213,6 @@ def test_direct_pr_seeds_are_source_pulled_and_lossless_at_capacity_one(
             events.append(("classify", pr_number))
             return pr_number + 1000
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -220,9 +222,10 @@ def test_direct_pr_seeds_are_source_pulled_and_lossless_at_capacity_one(
             parallel_repos=1,
             max_workers=1,
             projects_dir=tmp_path,
+            rate_guard_enabled=False,
         ),
         github=_DirectPrGitHub(pr_impl_state=(True, False)),
-        pool=FakeWorkerPool(),
+        **fake_worker_factories(FakeWorkerPool(), None),
         install_signals=False,
     )
     coordinator.stages[StageName.MERGE_WAIT] = _ImmediatePassStage(events)

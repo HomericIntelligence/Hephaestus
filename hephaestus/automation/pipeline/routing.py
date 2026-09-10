@@ -15,11 +15,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-#: Default for the ``merge`` budget. Mirrors ``LoopConfig.drive_green_loops``
-#: and the ``--drive-green-loops`` CLI default in ``loop_runner.py``; the
-#: coordinator overrides it from config when the pipeline is wired up
-#: (epic #1809 coordinator slice).
-DEFAULT_DRIVE_GREEN_LOOPS = 5
+#: Default for the ``merge`` budget and the ``--merge-attempts`` CLI option.
+#: The coordinator applies explicit configuration overrides to this budget.
+DEFAULT_MERGE_ATTEMPTS = 5
 
 
 class StageName(StrEnum):
@@ -79,8 +77,7 @@ class Route:
 #   clone=2, plan=2, source_workspace=2, plan_cycles=2,
 #   implement=2, rebase_conflict=2, test_fix=1, remediation_reply=1
 #                                             <- architecture doc stage sections
-#   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops
-#                                             and --drive-green-loops defaults
+#   merge=DEFAULT_MERGE_ATTEMPTS            <- pipeline_cli.py --merge-attempts
 ROUTES: dict[StageName, Route] = {
     # The repo item itself is terminal: it seeds discovered issues/PRs into
     # their classified entry queues and then advances to finished(pass).
@@ -147,7 +144,7 @@ ROUTES: dict[StageName, Route] = {
             "merge_conflicting": StageName.IMPLEMENTATION,
             "*": StageName.FINISHED,
         },
-        budgets={"merge": DEFAULT_DRIVE_GREEN_LOOPS},
+        budgets={"merge": DEFAULT_MERGE_ATTEMPTS},
     ),
     StageName.LEARNING: Route(
         next=StageName.FINISHED,

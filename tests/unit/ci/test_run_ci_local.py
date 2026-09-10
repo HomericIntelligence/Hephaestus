@@ -851,6 +851,7 @@ def test_schema_validator_is_part_of_the_locked_dev_environment() -> None:
 
 def test_linked_worktree_git_metadata_is_mounted_read_only(tmp_path: Path) -> None:
     """Container checks must resolve linked-worktree Git metadata."""
+    repo = _candidate_repo(tmp_path)
     common_dir = tmp_path / "outside" / "repo.git"
     common_dir.mkdir(parents=True)
 
@@ -858,6 +859,7 @@ def test_linked_worktree_git_metadata_is_mounted_read_only(tmp_path: Path) -> No
         tmp_path,
         "unit",
         external_git_common_dir=common_dir,
+        repo_root=repo,
     )
 
     assert result.returncode == 0, result.stderr

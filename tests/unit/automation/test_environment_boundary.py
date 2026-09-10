@@ -8,8 +8,7 @@ from pathlib import Path
 import pytest
 
 import hephaestus.automation as automation_package
-import hephaestus.automation.loop_runner as loop_runner
-import hephaestus.automation.pipeline_github as pipeline_github
+import hephaestus.automation.pipeline_cli as loop_runner
 import hephaestus.config.child_environments as child_environments
 
 AUTOMATION_ROOT = Path(automation_package.__file__).parent
@@ -93,7 +92,7 @@ def test_automation_contains_no_removed_configuration_variable_literals() -> Non
 
 def test_loop_parser_exposes_typed_environment_replacements_with_exact_defaults() -> None:
     """Every removed tuning variable has a typed loop option with the same default."""
-    args = loop_runner._build_parser().parse_args([])
+    args = loop_runner.build_parser().parse_args([])
     assert (args.planner_timeout, args.reviewer_timeout, args.implementer_timeout) == (
         1200,
         1200,
@@ -114,28 +113,33 @@ def test_loop_parser_exposes_typed_environment_replacements_with_exact_defaults(
 def test_loop_parser_rejects_superseded_timeout_spellings(removed_flag: str) -> None:
     """Only the approved timeout flag names remain part of the loop interface."""
     with pytest.raises(SystemExit):
-        loop_runner._build_parser().parse_args([removed_flag, "11"])
+        loop_runner.build_parser().parse_args([removed_flag, "11"])
 
 
-def test_role_model_precedence_is_role_then_global_then_constant() -> None:
-    """Role-specific model selection wins over the global option and default."""
-    assert loop_runner._resolve_model_option("role", "global", "default") == "role"
-    assert loop_runner._resolve_model_option("", "global", "default") == "global"
-    assert loop_runner._resolve_model_option("", "", "default") == "default"
+def test_role_model_precedence_is_role_then_global_then_empty(tmp_path: Path) -> None:
+    """Role choices override the global model and provider-owned default."""
+    args = loop_runner.parse_args(
+        ["--projects-dir", str(tmp_path), "--model", "global", "--planner-model", "role"]
+    )
+    config = loop_runner.build_config(args, "acme", ["widget"])
+    assert config.planner_model == "role"
+    assert config.reviewer_model == "global"
+    args = loop_runner.parse_args(["--projects-dir", str(tmp_path)])
+    assert loop_runner.build_config(args, "acme", ["widget"]).planner_model == ""
 
 
 def test_rate_guard_ignores_removed_environment_configuration(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Poisoned legacy variables cannot alter default or explicit guard behavior."""
     monkeypatch.setenv("HEPHAESTUS_RATE_GUARD", "0")
     monkeypatch.setenv("HEPHAESTUS_RATE_GUARD_THRESHOLD", "999999")
-    monkeypatch.setattr(pipeline_github, "rate_limit_remaining", lambda **_: (150, 1000))
-    assert pipeline_github.rate_budget_ok(now_epoch=900) == (False, 105.0)
-    assert pipeline_github.rate_budget_ok(now_epoch=900, enabled=False, threshold=999999) == (
-        True,
-        0.0,
-    )
+    defaults = loop_runner.parse_args([])
+    assert defaults.rate_guard_enabled is True
+    assert defaults.rate_guard_threshold == 200
+    explicit = loop_runner.parse_args(["--no-rate-guard", "--rate-guard-threshold", "999999"])
+    assert explicit.rate_guard_enabled is False
+    assert explicit.rate_guard_threshold == 999999
 
 
 @pytest.mark.parametrize(
@@ -145,4 +149,4 @@ def test_rate_guard_ignores_removed_environment_configuration(
 def test_modern_loop_rejects_host_owned_no_op_flags(removed_flag: str) -> None:
     """Host-owned Athena work cannot advertise ignored provider configuration."""
     with pytest.raises(SystemExit):
-        loop_runner._build_parser().parse_args([removed_flag, "ignored"])
+        loop_runner.build_parser().parse_args([removed_flag, "ignored"])

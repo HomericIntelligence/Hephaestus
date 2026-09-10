@@ -5,9 +5,6 @@ from ..work_item import WorkItem
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
 _ROUND_PAYLOAD_KEYS = (
-    "host_verification_bootstrap_proof",
-    "host_verification_bootstrap_json",
-    "review_status_manifest",
     "review_audit",
     "review_feedback",
     "review_text",
@@ -18,15 +15,8 @@ _ROUND_PAYLOAD_KEYS = (
     "posted_thread_ids",
     "remediation_threads",
     "remediation_thread_snapshots",
-    "address_error",
-    "address_output",
-    "direct_push_retries",
-    "detached_push_retry_head_sha",
-    "push_no_commit",
-    "no_commit_retry_done",
     "unaddressed_findings",
     "review_audit_failure",
-    "review_refresh_required",
     "prior_comments_json",
     "validation_threads",
     "validation_receipt_fingerprints",

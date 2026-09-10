@@ -1,54 +1,26 @@
-# The stage façade re-exports stage-local helper constants for compatibility.
-# ruff: noqa: F403
-import typing as _typing
+"""Queue-owned PR review and implementation-state admission."""
 
-from hephaestus.automation.review_audit import is_clean_go_review
+from collections.abc import Callable
+from typing import cast
 
-from .base import _reviewed_terminal_pr_outcome
+from ..work_item import ItemKind
+from .base import (
+    Continue,
+    Disposition,
+    Stage,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    WorkItem,
+    _reviewed_terminal_pr_outcome,
+)
 from .pr_review_audit import PrReviewAudit
 from .pr_review_gate import PrReviewGate
 from .pr_review_jobs import PrReviewJobs
-
-if _typing.TYPE_CHECKING:
-    from .pr_review_threads import (
-        _STEP_HANDLER_NAMES,
-        ADOPT_WORKTREE_WAIT as ADOPT_WORKTREE_WAIT,
-        CLEANUP_REVIEW_WORKTREE_WAIT as CLEANUP_REVIEW_WORKTREE_WAIT,
-        DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP as DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
-        DIRECT_PUSH_RETRY_CAP as DIRECT_PUSH_RETRY_CAP,
-        ENTER as ENTER,
-        GO_AUDIT_RECEIPT as GO_AUDIT_RECEIPT,
-        HOST_VERIFICATION_WAIT as HOST_VERIFICATION_WAIT,
-        REVIEW_CHECKOUT_WAIT as REVIEW_CHECKOUT_WAIT,
-        REVIEW_ERROR_RETRY_CAP as REVIEW_ERROR_RETRY_CAP,
-        Callable,
-        Continue,
-        Disposition,
-        ItemKind,
-        StageContext,
-        StageOutcome,
-        StepResult,
-        WorkItem,
-        _address_replies as _address_replies,
-        _host_verification_receipt_matches as _host_verification_receipt_matches,
-        _host_verification_specs as _host_verification_specs,
-        _implementation_reply_handoff as _implementation_reply_handoff,
-        _is_postable_finding as _is_postable_finding,
-        _normalize_remediation_threads as _normalize_remediation_threads,
-        _parse_validation_result as _parse_validation_result,
-        _pr_is_current_open_head as _pr_is_current_open_head,
-        _reviewer_thread_decisions as _reviewer_thread_decisions,
-        _validation_receipt_fingerprints as _validation_receipt_fingerprints,
-        _validation_thread_snapshots as _validation_thread_snapshots,
-        _without_duplicate_live_findings as _without_duplicate_live_findings,
-        cast,
-        logger,
-    )
-else:
-    from .pr_review_threads import *
+from .pr_review_threads import _STEP_HANDLER_NAMES, ENTER, GO_AUDIT_RECEIPT, logger
 
 
-class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
+class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate, Stage):
     """Public stage façade over review jobs and the approval gate."""
 
     @staticmethod
@@ -76,13 +48,7 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
         if item.state == ENTER and item.payload.get("pending_implementation_go_audit"):
-            audit = item.payload["pending_implementation_go_audit"]
-            if is_clean_go_review(audit):
-                return Continue(next_state=GO_AUDIT_RECEIPT)
-            item.payload.pop("pending_implementation_go_audit", None)
-            item.payload.pop("pending_implementation_go_audit_head", None)
-            item.payload.pop("pending_implementation_go_label_confirmed", None)
-            return Continue(next_state="REVIEW_WAIT")
+            return self._require_current_audit(item) or Continue(next_state=GO_AUDIT_RECEIPT)
         if (
             item.state == "ENTER"
             and item.payload.pop("scope_dependency_entry_reconciled", False)

@@ -8,8 +8,6 @@ import time
 from datetime import UTC, datetime, timedelta
 from threading import Event
 
-import hephaestus.automation.github_api as github_api
-
 from .pipeline_github_contract import _PipelineGitHubHost
 
 logger = logging.getLogger(__name__)
@@ -78,10 +76,12 @@ def _statuses_for_head(
         if remaining <= 0:
             return None
         page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
-        result = github_api.gh_call(
+        result = host._deadline_gh_call(
             ["api", page_endpoint],
             check=False,
             timeout=min(float(host._gh_timeout), remaining),
+            deadline_s=deadline_s,
+            shutdown=cancellation,
         )
         if result.returncode != 0:
             raise RuntimeError("GitHub returned an error for commit statuses")

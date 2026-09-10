@@ -1,16 +1,46 @@
 """Check durable first-start and fresh conflict admission."""
 
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
 WP = "hephaestus.automation.pipeline.worker_pool"
 
 
-def test_first_start_survives_a_new_worker_process(tmp_path: Path) -> None:
+@pytest.fixture
+def worker_factory(tmp_path: Path) -> Iterator[Callable[[], WorkerPool]]:
+    """Create test workers and close them after the test."""
+    workers: list[WorkerPool] = []
+
+    def create() -> WorkerPool:
+        worker = WorkerPool(
+            size=1,
+            shutdown=Event(),
+            completion_q=CompletionQueue(),
+            lock_dir=tmp_path / "worker-locks",
+        )
+        workers.append(worker)
+        return worker
+
+    try:
+        yield create
+    finally:
+        for worker in workers:
+            worker.shutdown(mark_interrupted=False)
+
+
+def test_first_start_survives_a_new_worker_process(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """A stored start must prevent another main fetch after restart."""
     state_dir = tmp_path / "host-state"
     state_dir.mkdir()
@@ -23,6 +53,7 @@ def test_first_start_survives_a_new_worker_process(tmp_path: Path) -> None:
         expected_repository="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -55,19 +86,22 @@ def test_first_start_survives_a_new_worker_process(tmp_path: Path) -> None:
             expected_repository="test/repo",
             op="create_worktree",
             timeout_s=60,
+            deadline_s=monotonic() + 60,
             kwargs={**job.kwargs, "branch_name": "issue-branch"},
         )
-        object.__new__(WorkerPool)._record_fresh_initial_creation(creation_job, created)
-        first = object.__new__(WorkerPool)._git_rebase(job)
-        second = object.__new__(WorkerPool)._git_rebase(job)
+        worker_factory()._record_fresh_initial_creation(creation_job, created)
+        first = worker_factory()._git_rebase(job, record_source=MagicMock())
+        second = worker_factory()._git_rebase(job, record_source=MagicMock())
     assert first.ok and second.ok
     assert second.value["implementation_started"] is True
     assert fetch.call_count == 1
 
 
-def test_review_conflict_needs_fresh_admission_after_fetch(tmp_path: Path) -> None:
+def test_review_conflict_needs_fresh_admission_after_fetch(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """A missing live GitHub reader must prevent replay."""
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     pool._github_job_runner = None
     head = "a" * 40
     job = GitJob(
@@ -75,6 +109,7 @@ def test_review_conflict_needs_fresh_admission_after_fetch(tmp_path: Path) -> No
         expected_repository="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -98,12 +133,14 @@ def test_review_conflict_needs_fresh_admission_after_fetch(tmp_path: Path) -> No
         patch.object(pool, "_authenticated_remote_revalidator", return_value=lambda: ({}, ())),
         patch(f"{WP}.git_utils.push_head_to_branch"),
     ):
-        result = pool._git_rebase(job)
+        result = pool._git_rebase(job, record_source=MagicMock())
     assert not result.ok
     rebase.assert_not_called()
 
 
-def test_initial_continuation_records_start_before_return(tmp_path: Path) -> None:
+def test_initial_continuation_records_start_before_return(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """Successful local conflict resolution must save the first-start record."""
     import json
 
@@ -117,6 +154,7 @@ def test_initial_continuation_records_start_before_return(tmp_path: Path) -> Non
         expected_repository="test/repo",
         op="continue_rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -134,7 +172,7 @@ def test_initial_continuation_records_start_before_return(tmp_path: Path) -> Non
             return_value=JobResult(ok=True, value={"head_sha": "a" * 40, "published": False}),
         ),
     ):
-        result = object.__new__(WorkerPool)._git_continue_rebase(job)
+        result = worker_factory()._git_continue_rebase(job, record_source=MagicMock())
     assert result.ok
     assert result.value["implementation_started"] is True
     assert (
@@ -142,7 +180,9 @@ def test_initial_continuation_records_start_before_return(tmp_path: Path) -> Non
     )
 
 
-def test_initial_record_rejects_other_branch(tmp_path: Path) -> None:
+def test_initial_record_rejects_other_branch(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """A different branch cannot reuse another branch's start record."""
     import json
 
@@ -168,6 +208,7 @@ def test_initial_record_rejects_other_branch(tmp_path: Path) -> None:
         expected_repository="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -183,7 +224,7 @@ def test_initial_record_rejects_other_branch(tmp_path: Path) -> None:
         patch(f"{WP}.git_utils.run", return_value=MagicMock(stdout="issue-branch\n")),
         patch.object(WorkerPool, "_git_fetch_main") as fetch,
     ):
-        result = object.__new__(WorkerPool)._git_rebase(job)
+        result = worker_factory()._git_rebase(job, record_source=MagicMock())
     assert not result.ok
     fetch.assert_not_called()
 
@@ -225,7 +266,9 @@ def test_live_conflict_requires_same_base_and_exclusive_go() -> None:
         github.merge_pr.assert_not_called()
 
 
-def test_legacy_branch_without_start_provenance_does_not_rebase(tmp_path: Path) -> None:
+def test_legacy_branch_without_start_provenance_does_not_rebase(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """Unknown implementation history must stop before a base fetch."""
     state = tmp_path / "host-state"
     state.mkdir()
@@ -237,6 +280,7 @@ def test_legacy_branch_without_start_provenance_does_not_rebase(tmp_path: Path) 
         expected_repository="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -256,21 +300,24 @@ def test_legacy_branch_without_start_provenance_does_not_rebase(tmp_path: Path) 
             return_value=JobResult(ok=True, value={"head_sha": "a" * 40}),
         ) as replay,
     ):
-        result = object.__new__(WorkerPool)._git_rebase(job)
+        result = worker_factory()._git_rebase(job, record_source=MagicMock())
     assert not result.ok
     assert result.value == {"initial_implementation_ambiguous": True}
     replay.assert_not_called()
 
 
-def test_fresh_creation_requires_local_remote_and_owner_absence(tmp_path: Path) -> None:
+def test_fresh_creation_requires_local_remote_and_owner_absence(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """A transport failure or existing owner cannot prove a first start."""
-    pool = object.__new__(WorkerPool)
+    pool = worker_factory()
     manager = MagicMock(repo_root=tmp_path)
     job = GitJob(
         repo="repo",
         expected_repository="test/repo",
         op="create_worktree",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={"record_initial_creation": True, "issue_number": 7, "branch_name": "issue"},
     )
     for case in ("fresh", "local", "remote", "transport", "owner"):
@@ -291,7 +338,9 @@ def test_fresh_creation_requires_local_remote_and_owner_absence(tmp_path: Path) 
             assert pool._fresh_initial_creation(job, manager) is (case == "fresh")
 
 
-def test_manual_local_rebase_records_explicit_recovery(tmp_path: Path) -> None:
+def test_manual_local_rebase_records_explicit_recovery(
+    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
+) -> None:
     """Manual replay permits a later first-start check without another rebase."""
     state = tmp_path / "host-state"
     state.mkdir()
@@ -303,6 +352,7 @@ def test_manual_local_rebase_records_explicit_recovery(tmp_path: Path) -> None:
         expected_repository="test/repo",
         op="rebase",
         timeout_s=60,
+        deadline_s=monotonic() + 60,
         kwargs={
             "cwd": tmp_path,
             "repo_root": str(tmp_path),
@@ -322,8 +372,8 @@ def test_manual_local_rebase_records_explicit_recovery(tmp_path: Path) -> None:
             return_value=JobResult(ok=True, value={"head_sha": "a" * 40}),
         ),
     ):
-        pool = object.__new__(WorkerPool)
-        result = pool._git_rebase(job)
+        pool = worker_factory()
+        result = pool._git_rebase(job, record_source=MagicMock())
         assert pool._completed_initial_start(job)
     assert result.ok
     assert result.value["implementation_started"] is True

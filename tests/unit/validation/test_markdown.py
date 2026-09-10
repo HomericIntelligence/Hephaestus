@@ -129,6 +129,111 @@ class TestValidateLinksMain:
         assert rc in (0, 1)
 
 
+@pytest.mark.parametrize(
+    ("source_path", "metadata", "expected_broken"),
+    [
+        ("docs/adr/0001-history.md", "- Status: Accepted", 0),
+        ("docs/adr/0001-history.md", "- Status: Accepted (historical)", 0),
+        ("docs/adr/0002-draft.md", "- Status: Draft", 1),
+        ("docs/adr/0002-proposed.md", "- Status: Proposed", 1),
+        ("docs/adr/0002-ambiguous.md", "- Status: Accepted\n- Status: Draft", 1),
+        ("docs/adr/README.md", "- Status: Accepted", 1),
+        ("docs/adr/index.md", "- Status: Accepted", 1),
+        ("docs/runbooks/current.md", "- Status: Accepted", 1),
+        ("README.md", "- Status: Accepted", 1),
+    ],
+)
+def test_link_scan_limits_historical_exclusion_to_accepted_adr_bodies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    source_path: str,
+    metadata: str,
+    expected_broken: int,
+) -> None:
+    """Only an accepted decision body may retain a link to deleted source."""
+    document = tmp_path / source_path
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text(
+        f"# Decision\n\n{metadata}\n\n## Decision\n\n"
+        "See [former source](/hephaestus/automation/retired_owner.py).\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hephaestus-validate-links", str(tmp_path), "--repo-root", str(tmp_path), "--json"],
+    )
+
+    result = main()
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == expected_broken
+    assert report["broken_links"] == expected_broken
+    assert len(report["failed"]) == expected_broken
+
+
+def test_link_scan_excludes_history_from_relative_docs_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CI command may use a relative scan directory and repository root."""
+    document = tmp_path / "docs/adr/0001-history.md"
+    document.parent.mkdir(parents=True)
+    document.write_text(
+        "# Decision\n\n- Status: Accepted\n\n## Decision\n\n"
+        "See [former source](/hephaestus/automation/retired_owner.py).\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["hephaestus-validate-links", "docs", "--repo-root", ".", "--json"]
+    )
+
+    result = main()
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert report == {"passed": [], "failed": [], "total_links": 0, "broken_links": 0}
+
+
+@pytest.mark.parametrize("target_exists", [True, False])
+def test_link_scan_checks_incoming_links_to_historical_decisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    target_exists: bool,
+) -> None:
+    """A current document must point to a decision file that still exists."""
+    target = tmp_path / "docs/adr/0001-history.md"
+    if target_exists:
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "# Decision\n\n- Status: Accepted\n\n## Decision\n\n"
+            "See [former source](/hephaestus/automation/retired_owner.py).\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "README.md").write_text(
+        "# Current guide\n\nSee [decision](docs/adr/0001-history.md).\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hephaestus-validate-links", str(tmp_path), "--repo-root", str(tmp_path), "--json"],
+    )
+
+    result = main()
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == int(not target_exists)
+    assert report["total_links"] == 1
+    assert report["broken_links"] == int(not target_exists)
+    if not target_exists:
+        assert report["failed"][0]["path"] == "README.md"
+        assert report["failed"][0]["broken_links"][0]["target"] == "docs/adr/0001-history.md"
+
+
 class TestCheckReadmesMain:
     """Smoke tests for `hephaestus.validation.markdown:check_readmes_main`."""
 

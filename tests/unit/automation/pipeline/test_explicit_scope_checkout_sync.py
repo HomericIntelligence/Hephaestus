@@ -8,7 +8,8 @@ from typing import Any
 import pytest
 
 from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import (
     Disposition,
@@ -17,12 +18,13 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.seeding import IssueFacts
+from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.work_item import WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-class _ImmediatePassStage:
+class _ImmediatePassStage(Stage):
     """Finish a seeded issue without an agent job."""
 
     def on_enter(self, item: WorkItem, ctx: Any) -> None:
@@ -96,11 +98,10 @@ def test_explicit_scope_syncs_before_labels_and_classification(
         events.append("classify")
         return _facts(issue)
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     coordinator = Coordinator(
         PipelineConfig(
@@ -109,9 +110,10 @@ def test_explicit_scope_syncs_before_labels_and_classification(
             issues=[101],
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            rate_guard_enabled=False,
         ),
         github=github,
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
@@ -133,11 +135,10 @@ def test_missing_direct_scope_checkout_clones_then_syncs_before_classification(
         events.append("classify")
         return _facts(issue)
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     coordinator = Coordinator(
         PipelineConfig(
@@ -146,9 +147,10 @@ def test_missing_direct_scope_checkout_clones_then_syncs_before_classification(
             issues=[101],
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            rate_guard_enabled=False,
         ),
         github=github,
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
@@ -170,10 +172,9 @@ def test_direct_issue_carries_the_bootstrap_checkout_pin(
     pool.script(JobResult(ok=True, value=pin))
     github = FakeStageGitHub(labels=["state:needs-plan"])
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     coordinator = Coordinator(
         PipelineConfig(
@@ -182,9 +183,10 @@ def test_direct_issue_carries_the_bootstrap_checkout_pin(
             issues=[101],
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.PLANNING})),
+            rate_guard_enabled=False,
         ),
         github=github,
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
@@ -203,7 +205,6 @@ def test_explicit_pr_scope_syncs_before_labels_and_pr_classification(
     pool = _RecordingPool(events)
     github = _RecordingGitHub(events, pr_issue=101, pr_impl_state=(True, False))
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -211,9 +212,10 @@ def test_explicit_pr_scope_syncs_before_labels_and_pr_classification(
             prs=[77],
             projects_dir=tmp_path,
             scope=PipelineScope(frozenset({StageName.MERGE_WAIT})),
+            rate_guard_enabled=False,
         ),
         github=github,
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     coordinator.stages[StageName.MERGE_WAIT] = _ImmediatePassStage()
@@ -245,16 +247,21 @@ def test_explicit_scope_sync_failure_blocks_labels_sources_and_agents(
         classifications.append(issue)
         return _facts(issue)
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
     )
     coordinator = Coordinator(
-        PipelineConfig(org="org", repos=["repo-a"], issues=[101], projects_dir=tmp_path),
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[101],
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
         github=github,
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()

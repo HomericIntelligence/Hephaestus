@@ -4,20 +4,21 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from queue import Queue
 from threading import Event
 from typing import Any, cast
 
 import pytest
 
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-class _RecordingWorkerPool:
+class _RecordingWorkerPool(FakeWorkerPool):
     """Worker-pool stand-in that records the coordinator's production wiring."""
 
     def __init__(
@@ -36,6 +37,7 @@ class _RecordingWorkerPool:
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
     ) -> None:
+        super().__init__(size=size, shutdown=shutdown, completion_q=completion_q)
         del lock_dir
         self.size = size
         self.shutdown_event = shutdown
@@ -67,6 +69,7 @@ def _config(
         max_workers=max_workers,
         projects_dir=tmp_path,
         gh_extra_path_root=gh_extra_path_root,
+        rate_guard_enabled=False,
     )
 
 
@@ -89,6 +92,7 @@ def test_coordinator_uses_independent_main_and_learning_capacities(
     assert coordinator.queues[StageName.LEARNING].capacity == config.learning_queue_capacity
     assert coordinator.completion_q.maxsize == capacity
     assert coordinator.auxiliary_completion_q.maxsize == config.learning_queue_capacity
+    assert isinstance(coordinator.pool, _RecordingWorkerPool)
     assert coordinator.pool.size == capacity
     assert coordinator.pool.completion_q is coordinator.completion_q
     assert coordinator.pool.gh_extra_path_root is None
@@ -112,6 +116,7 @@ def test_coordinator_passes_extra_gh_root_to_worker_pool(
 
     coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
+    assert isinstance(coordinator.pool, _RecordingWorkerPool)
     assert coordinator.pool.gh_extra_path_root == tmp_path
 
 
@@ -131,6 +136,7 @@ def test_coordinator_passes_bound_rebase_policy_selector_to_recording_pool(
         install_signals=False,
     )
 
+    assert isinstance(coordinator.pool, _RecordingWorkerPool)
     assert coordinator.pool.size == capacity
     assert coordinator.completion_q.maxsize == capacity
     selector = coordinator.pool.rebase_policy_selector
@@ -155,41 +161,44 @@ def test_admission_rejects_when_global_worker_capacity_is_live(tmp_path: Path) -
     assert coordinator._admit(WorkItem(repo="repo-e", kind=ItemKind.ISSUE, issue=5)) is False
 
 
-def test_coordinator_rejects_injected_completion_queue_with_wrong_capacity(
-    tmp_path: Path,
-) -> None:
-    """An injected completion queue cannot weaken the coordinator's C bound."""
-    config = _config(tmp_path, parallel_repos=2, max_workers=2)
-    incompatible_pool = _RecordingWorkerPool(
-        size=4,
-        shutdown=Event(),
-        completion_q=Queue(maxsize=5),
-    )
-
-    with pytest.raises(ValueError):
+def test_coordinator_requires_both_worker_factories(tmp_path: Path) -> None:
+    """A custom main lane requires an explicit auxiliary lane factory."""
+    with pytest.raises(ValueError, match="supplied together"):
         Coordinator(
-            config,
+            _config(tmp_path),
             github=FakeStageGitHub(),
-            pool=incompatible_pool,
+            pool_factory=FakeWorkerPool().factory,
             install_signals=False,
         )
 
 
-def test_coordinator_replaces_an_injected_unbounded_completion_queue(tmp_path: Path) -> None:
-    """A zero-maxsize test double cannot silently bypass the global C bound."""
-    config = _config(tmp_path, parallel_repos=2, max_workers=2)
-    unbounded_pool = _RecordingWorkerPool(
-        size=4,
-        shutdown=Event(),
-        completion_q=Queue(),
-    )
-
+def test_coordinator_supplies_distinct_bounded_factory_channels(tmp_path: Path) -> None:
+    """Each worker factory receives one independently bounded channel."""
+    main = FakeWorkerPool()
+    auxiliary = FakeWorkerPool()
     coordinator = Coordinator(
-        config,
+        _config(tmp_path),
         github=FakeStageGitHub(),
-        pool=unbounded_pool,
+        **fake_worker_factories(main, auxiliary),
         install_signals=False,
     )
+    assert main.completion_q is coordinator.completion_q
+    assert main.completion_q.maxsize == 6
+    assert auxiliary.completion_q is coordinator.auxiliary_completion_q
+    assert auxiliary.completion_q.maxsize == 1
+    assert main.completion_q is not auxiliary.completion_q
+    assert main.shutdown_event is coordinator.worker_shutdown_event
+    assert auxiliary.shutdown_event is coordinator.force_shutdown_event
 
-    assert coordinator.completion_q.maxsize == 4
-    assert unbounded_pool.completion_q is coordinator.completion_q
+
+def test_coordinator_rejects_one_pool_for_both_lanes(tmp_path: Path) -> None:
+    """One worker object cannot own both lane channels."""
+    pool = FakeWorkerPool()
+    with pytest.raises(ValueError, match="must be distinct"):
+        Coordinator(
+            _config(tmp_path),
+            github=FakeStageGitHub(),
+            pool_factory=pool.factory,
+            auxiliary_pool_factory=pool.factory,
+            install_signals=False,
+        )

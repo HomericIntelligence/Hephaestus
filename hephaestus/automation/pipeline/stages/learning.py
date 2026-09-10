@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBindingError
 from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
-from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
+from hephaestus.automation.source_worktree import SourceWorkspaceError
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..job_results import JobResult
@@ -86,6 +86,16 @@ class LearningStage:
             record_summary_action(item, error)
             return Continue(next_state=CLAIM)
 
+        return self._prepare_host_job(item, ctx, intent, delivery_payload)
+
+    def _prepare_host_job(
+        self,
+        item: WorkItem,
+        ctx: Any,
+        intent: LearningIntent,
+        delivery_payload: dict[str, object],
+    ) -> StepResult:
+        """Prepare one claimed host job or release its known failed claim."""
         payload: dict[str, object] = {
             "issue_number": intent.issue,
             "learning_intent": delivery_payload,
@@ -97,13 +107,24 @@ class LearningStage:
             or item.payload.get("_direct_scope_base_sha")
             or ""
         )
-        workspace = source_workspace_binding(
-            item,
-            ctx,
-            SourceLane.IMPLEMENTATION,
-            revision=revision or None,
-            branch=item.branch or None,
-        )
+        try:
+            workspace = source_workspace_binding(
+                item,
+                ctx,
+                SourceLane.IMPLEMENTATION,
+                revision=revision or None,
+                branch=item.branch or None,
+            )
+        except InterruptedError:
+            self.on_cancelled_before_start(item, ctx)
+            return StageOutcome(Disposition.RETRY, "learning preparation interrupted")
+        except (WorkspaceBindingError, SourceWorkspaceError) as exc:
+            self.on_job_done(
+                item,
+                JobResult(ok=False, error=f"learning source preparation failed: {exc}"),
+                ctx,
+            )
+            return Continue(next_state=CLAIM)
         return JobRequest(
             AthenaSkillJob(
                 request=AthenaSkillRequest(
@@ -116,11 +137,7 @@ class LearningStage:
                         or getattr(ctx.config, "model", "")
                         or learn_model()
                     ),
-                    cwd=(
-                        workspace.cwd
-                        if workspace
-                        else Path(item.worktree or str(ctx.paths.worktree))
-                    ),
+                    cwd=workspace.cwd,
                     timeout_s=stage_timeout(ctx, "learn", learn_claude_timeout),
                     workspace=workspace,
                     payload=payload,

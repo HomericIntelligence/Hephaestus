@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import argparse
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.automation import loop_runner
-from hephaestus.automation.loop_runner import (
-    LoopConfig,
-    _build_pipeline_config,
-    _parse_args,
+from hephaestus.automation import pipeline_cli as loop_runner
+from hephaestus.automation.pipeline_cli import (
     _source_revision,
+    build_config,
+    parse_args as _parse_args,
 )
 
 
@@ -45,13 +43,12 @@ def test_positive_wave_limits_parse(limit: int) -> None:
     assert args.issue_limit == limit
 
 
-def test_pipeline_config_carries_issue_limit_without_shifting_legacy_fields(
+def test_pipeline_config_carries_issue_limit(
     tmp_path: Path,
 ) -> None:
     """The public config carries the selector and preserves keyword behavior."""
-    args = argparse.Namespace(json=False)
-    cfg = LoopConfig(issue_limit=4, projects_dir=tmp_path)
-    pipeline = _build_pipeline_config(args, cfg, "acme", ["hephaestus"])
+    args = _parse_args(["--issue-limit", "4", "--projects-dir", str(tmp_path)])
+    pipeline = build_config(args, "acme", ["hephaestus"])
     assert pipeline.issue_limit == 4
     assert pipeline.repo_source_factory is None
 

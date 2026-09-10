@@ -87,78 +87,6 @@ def test_dirty_publication_completion_stops_before_pr_create(
     assert item.payload["dirty_direct_preserve"] is True
 
 
-def test_dirty_publication_completion_creates_strict_pr(
-    make_ctx: Any, make_work_item: Any, tmp_path: Any
-) -> None:
-    """A confirmed push uses strict creation before it clears preservation."""
-    from dataclasses import replace
-    from unittest.mock import patch
-
-    from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-    from hephaestus.automation.pipeline.job_results import JobResult
-    from tests.unit.agents.test_dirty_workspace import _claim
-
-    stage = ImplementationStage()
-    ctx = make_ctx()
-    item = make_work_item(state="COMMIT_PUSH_WAIT", issue=12)
-    claim = _claim()
-    binding = replace(
-        WorkspaceBinding.source(
-            cwd=tmp_path / "writer",
-            reusable_root=tmp_path,
-            repository=item.repo,
-            ownership_key="test",
-            item_number=12,
-            lane=SourceLane.IMPLEMENTATION,
-            revision=claim.reservation_base_sha,
-            generation=2,
-            detached=False,
-        ),
-        schema_version=2,
-        dirty_claim=claim,
-    )
-    item.branch = claim.branch
-    item.payload.update(
-        {
-            "dirty_direct_active": True,
-            "dirty_direct_preserve": True,
-            "dirty_direct_binding": binding.to_dict(),
-            "_direct_scope_reservation": {"branch": claim.branch},
-        }
-    )
-    head = "b" * 40
-    stage.on_job_done(item, JobResult(ok=True, value={"pushed": True, "head_sha": head}), ctx)
-    item.state = "PR_CREATE"
-    with (
-        patch.object(ctx.github, "create_pr", return_value=17) as create,
-        patch.object(
-            ctx.github,
-            "gh_pr_state",
-            return_value={
-                "state": "OPEN",
-                "headRefOid": head,
-                "baseRefName": "main",
-            },
-        ),
-        patch.object(ctx.github, "get_pr_head_branch", return_value=claim.branch),
-        patch.object(ctx.github, "pr_head_is_writable", return_value=True),
-        patch(
-            "hephaestus.automation.pipeline.stages.implementation.SourceWorkspaceManager"
-        ) as manager,
-    ):
-        result = stage.step(item, ctx)
-    assert isinstance(result, StageOutcome)
-    assert result.disposition is Disposition.ADVANCE
-    assert create.call_args.kwargs["strict_absence"] is True
-    manager.return_value.finish_dirty_direct_publication.assert_called_once_with(
-        12,
-        expected_head=head,
-        pr_number=17,
-    )
-    assert "dirty_direct_preserve" not in item.payload
-    assert "_direct_scope_reservation" not in item.payload
-
-
 @pytest.mark.parametrize("foreign", [False, True])
 @pytest.mark.parametrize("lazy", [False, True])
 def test_failed_dirty_probe_records_only_its_deterministic_path(
@@ -264,5 +192,4 @@ def test_dirty_turn_uses_the_implementer_tool(
     assert result.job.agent == implementer_agent
     assert result.job.model == "gpt-6-astra:low"
     assert result.job.workspace == binding
-    assert result.job.retryable is False
     assert result.job.dirty_plan.allowed_paths == ("tracked.txt",)

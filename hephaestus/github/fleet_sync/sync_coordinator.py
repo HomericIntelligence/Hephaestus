@@ -15,7 +15,7 @@ from hephaestus.github.fleet_sync.models import (
     PRStatus,
     Symbols,
 )
-from hephaestus.github.fleet_sync.pr_api import list_prs, merge_pr
+from hephaestus.github.fleet_sync.pr_api import list_prs
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
@@ -158,16 +158,8 @@ def _process_pr(
     _log_pr(pr)
 
     if pr.status == PRStatus.READY:
-        _record_result(
-            counts,
-            "merged",
-            merge_pr(
-                pr,
-                org,
-                dry_run=args.dry_run,
-                **({"timeouts": timeouts} if timeouts is not None else {}),
-            ),
-        )
+        logger.info("  %s Skipping (the queue owns PR merges)", symbols.arrow)
+        counts["skipped"] += 1
     elif pr.status == PRStatus.OUTDATED:
         resign_values = _resign_args(args)
         resign_email = resign_values.get("resign_email")

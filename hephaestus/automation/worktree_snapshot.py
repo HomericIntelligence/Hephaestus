@@ -50,6 +50,7 @@ class _DirtySnapshotEvidence:
 
     snapshot: dict[str, str]
     changed_file_count: int
+    changed_paths: tuple[str, ...] = ()
 
 
 def _subprocess_pipe_selector_supported() -> bool:
@@ -105,6 +106,7 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
     max_bytes: int,
     retain_text: bool,
     process_group: bool = False,
+    shutdown: threading.Event | None = None,
 ) -> _BoundedGitOutput:
     """Read both child pipes with bounded reader threads."""
     if process.stdout is None or process.stderr is None:  # pragma: no cover
@@ -167,7 +169,11 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
             reader.start()
             started_readers.append(reader)
         while len(ended) != len(readers):
-            remaining = deadline - time.monotonic()
+            if shutdown is not None and shutdown.is_set():
+                raise InterruptedError("Git capture cancelled")
+            remaining = cast(
+                float, git_utils.remaining_operation_timeout(deadline - time.monotonic())
+            )
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(argv, timeout)
             try:
@@ -190,10 +196,10 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
             digest.update(chunk)
             if retain_text:
                 output.extend(chunk)
-        remaining = deadline - time.monotonic()
+        remaining = cast(float, git_utils.remaining_operation_timeout(deadline - time.monotonic()))
         if remaining <= 0:
             raise subprocess.TimeoutExpired(argv, timeout)
-        returncode = process.wait(timeout=remaining)
+        returncode = _wait_for_capture_child(process, argv, deadline, timeout, shutdown)
         process_completed = True
     finally:
         stop.set()
@@ -220,6 +226,27 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
     return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
 
 
+def _wait_for_capture_child(
+    process: subprocess.Popen[bytes],
+    argv: tuple[str, ...],
+    deadline: float,
+    timeout: int | float,
+    shutdown: threading.Event | None,
+) -> int:
+    """Wait for a capture child within the same cancellation and time limits."""
+    while True:
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("Git capture cancelled")
+        remaining = cast(float, git_utils.remaining_operation_timeout(deadline - time.monotonic()))
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        try:
+            return process.wait(timeout=min(0.1, remaining) if shutdown is not None else remaining)
+        except subprocess.TimeoutExpired:
+            if shutdown is None:
+                raise
+
+
 def _run_bounded_git_output(  # noqa: C901
     argv: tuple[str, ...],
     *,
@@ -228,9 +255,12 @@ def _run_bounded_git_output(  # noqa: C901
     max_bytes: int,
     retain_text: bool,
     env: dict[str, str] | None = None,
+    shutdown: threading.Event | None = None,
 ) -> _BoundedGitOutput:
     """Run Git with bounded memory and return an exact output digest."""
     timeout = cast(float, git_utils.remaining_operation_timeout(timeout))
+    if shutdown is not None and shutdown.is_set():
+        raise InterruptedError("Git capture cancelled before start")
     thread_backend = not _subprocess_pipe_selector_supported()
     process_options: dict[str, object] = {}
     if os.name == "posix":
@@ -257,6 +287,7 @@ def _run_bounded_git_output(  # noqa: C901
             max_bytes=max_bytes,
             retain_text=retain_text,
             process_group=True,
+            shutdown=shutdown,
         )
     selector: selectors.BaseSelector | None = None
     digest = hashlib.sha256()
@@ -272,7 +303,11 @@ def _run_bounded_git_output(  # noqa: C901
         selector.register(process.stdout, selectors.EVENT_READ, "stdout")
         selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         while selector.get_map():
-            remaining = deadline - time.monotonic()
+            if shutdown is not None and shutdown.is_set():
+                raise InterruptedError("Git capture cancelled")
+            remaining = cast(
+                float, git_utils.remaining_operation_timeout(deadline - time.monotonic())
+            )
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(argv, timeout)
             for key, _events in selector.select(timeout=min(remaining, 0.1)):
@@ -294,10 +329,10 @@ def _run_bounded_git_output(  # noqa: C901
                 digest.update(chunk)
                 if retain_text:
                     output.extend(chunk)
-        remaining = deadline - time.monotonic()
+        remaining = cast(float, git_utils.remaining_operation_timeout(deadline - time.monotonic()))
         if remaining <= 0:
             raise subprocess.TimeoutExpired(argv, timeout)
-        returncode = process.wait(timeout=remaining)
+        returncode = _wait_for_capture_child(process, argv, deadline, timeout, shutdown)
         process_completed = True
     finally:
         if not process_completed:
@@ -325,8 +360,9 @@ def _path_content_identity(  # noqa: C901
     *,
     seed_digest: str = "",
     remaining_content_bytes: list[int] | None = None,
-    timeout: int | None = None,
+    timeout: int | float | None = None,
     copy_root: Path | None = None,
+    shutdown: threading.Event | None = None,
 ) -> str:
     """Hash NUL-delimited paths and their current file-system content."""
     if paths_output and (not paths_output.endswith("\0") or "\0\0" in paths_output):
@@ -357,9 +393,13 @@ def _path_content_identity(  # noqa: C901
             stat.S_IMODE(metadata.st_mode),
         )
 
+    timeout = git_utils.remaining_operation_timeout(timeout)
     deadline = time.monotonic() + timeout if timeout is not None else None
 
     def check_deadline() -> None:
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("dirty snapshot cancelled")
+        git_utils.remaining_operation_timeout(timeout)
         if deadline is not None and time.monotonic() >= deadline:
             raise subprocess.TimeoutExpired("dirty snapshot content", cast(int, timeout))
 
@@ -528,6 +568,7 @@ def _dirty_worktree_snapshot_evidence(
     *,
     timeout: int,
     git_env: dict[str, str] | None = None,
+    shutdown: threading.Event | None = None,
 ) -> _DirtySnapshotEvidence:
     """Return bounded identities for index, tracked, and untracked content."""
     command_prefix = ("git", "-c", "core.fsmonitor=false")
@@ -539,6 +580,7 @@ def _dirty_worktree_snapshot_evidence(
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=False,
         env=env,
+        shutdown=shutdown,
     )
     tracked_paths = _run_bounded_git_output(
         (
@@ -556,6 +598,7 @@ def _dirty_worktree_snapshot_evidence(
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=True,
         env=env,
+        shutdown=shutdown,
     )
     tracked_diff = _run_bounded_git_output(
         (
@@ -573,6 +616,7 @@ def _dirty_worktree_snapshot_evidence(
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=False,
         env=env,
+        shutdown=shutdown,
     )
     untracked_paths = _run_bounded_git_output(
         (*command_prefix, "ls-files", "--others", "--exclude-standard", "-z"),
@@ -581,6 +625,7 @@ def _dirty_worktree_snapshot_evidence(
         max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
         retain_text=True,
         env=env,
+        shutdown=shutdown,
     )
     tracked = tuple(path for path in tracked_paths.text.split("\0") if path)
     untracked = tuple(path for path in untracked_paths.text.split("\0") if path)
@@ -596,15 +641,21 @@ def _dirty_worktree_snapshot_evidence(
             seed_digest=tracked_diff.sha256,
             remaining_content_bytes=remaining_content_bytes,
             timeout=timeout,
+            shutdown=shutdown,
         ),
         "untracked_sha256": _path_content_identity(
             worktree,
             untracked_paths.text,
             remaining_content_bytes=remaining_content_bytes,
             timeout=timeout,
+            shutdown=shutdown,
         ),
     }
-    return _DirtySnapshotEvidence(snapshot=snapshot, changed_file_count=changed_file_count)
+    return _DirtySnapshotEvidence(
+        snapshot=snapshot,
+        changed_file_count=changed_file_count,
+        changed_paths=tuple(sorted(set(tracked).union(untracked))),
+    )
 
 
 def _dirty_worktree_content_snapshot(
@@ -612,12 +663,14 @@ def _dirty_worktree_content_snapshot(
     *,
     timeout: int,
     git_env: dict[str, str] | None = None,
+    shutdown: threading.Event | None = None,
 ) -> dict[str, str]:
     """Return the bounded content identity for one dirty worktree."""
     return _dirty_worktree_snapshot_evidence(
         worktree,
         timeout=timeout,
         git_env=git_env,
+        shutdown=shutdown,
     ).snapshot
 
 

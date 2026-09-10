@@ -35,7 +35,6 @@ from hephaestus.github.fleet_sync.pr_api import (
     _fetch_pr_ci_state,
     _gh,
     list_prs,
-    merge_pr,
 )
 from hephaestus.github.fleet_sync.sync_coordinator import logger, process_repo
 
@@ -63,7 +62,6 @@ __all__ = [
     "list_prs",
     "logger",
     "main",
-    "merge_pr",
     "process_repo",
     "rebase_and_resign",
     "remove_worktree",

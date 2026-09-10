@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from threading import Event
+from typing import TYPE_CHECKING, Protocol, cast
 
-from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 if TYPE_CHECKING:
+
+    class _HandoffIssuer(Protocol):
+        """Describe the private issuer's bounded lock contract."""
+
+        def __call__(
+            self,
+            repo_root: Path,
+            item_number: int,
+            lock_path: Path,
+            *,
+            remaining_timeout: Callable[[], float] | None = None,
+            shutdown: Event | None = None,
+        ) -> AbstractContextManager[ImplementationWriterHandoff]: ...
 
     class ImplementationWriterHandoff:
         """Static type for the opaque implementation-writer capability."""
@@ -137,7 +152,7 @@ if TYPE_CHECKING:
 
 def _build_implementation_writer_api() -> tuple[  # noqa: C901
     type[ImplementationWriterHandoff],
-    Callable[[Path, int, Path], AbstractContextManager[ImplementationWriterHandoff]],
+    _HandoffIssuer,
 ]:
     """Build the handoff API around a sentinel inaccessible to callers."""
     sentinel = object()
@@ -511,7 +526,12 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
 
     @contextmanager
     def implementation_writer_handoff(
-        repo_root: Path, item_number: int, lock_path: Path
+        repo_root: Path,
+        item_number: int,
+        lock_path: Path,
+        *,
+        remaining_timeout: Callable[[], float] | None = None,
+        shutdown: Event | None = None,
     ) -> Iterator[_ImplementationWriterHandoff]:
         """Acquire *lock_path* and issue one active implementation-writer handoff."""
         normalized_root = repo_root.resolve()
@@ -527,7 +547,30 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
         object.__setattr__(handoff, "_journal_validator", None)
         object.__setattr__(handoff, "_phase_writer", None)
         object.__setattr__(handoff, "_commit_writer", None)
-        with file_lock(normalized_lock_path, require_exclusive=True):
+        with ExitStack() as stack:
+            while True:
+                if remaining_timeout is not None:
+                    remaining_timeout()
+                try:
+                    stack.enter_context(
+                        file_lock(
+                            normalized_lock_path,
+                            require_exclusive=True,
+                            blocking=remaining_timeout is None,
+                        )
+                    )
+                except LockUnavailableError:
+                    if remaining_timeout is None:
+                        raise
+                    wait_s = min(0.1, remaining_timeout())
+                    if shutdown is None:
+                        time.sleep(wait_s)
+                    else:
+                        shutdown.wait(wait_s)
+                    continue
+                break
+            if remaining_timeout is not None:
+                remaining_timeout()
             object.__setattr__(handoff, "_active", True)
             try:
                 yield handoff
@@ -542,7 +585,7 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
     return (
         cast("type[ImplementationWriterHandoff]", _ImplementationWriterHandoff),
         cast(
-            "Callable[[Path, int, Path], AbstractContextManager[ImplementationWriterHandoff]]",
+            "_HandoffIssuer",
             implementation_writer_handoff,
         ),
     )

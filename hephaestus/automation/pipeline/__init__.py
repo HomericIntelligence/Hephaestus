@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
     from .auxiliary_worker_pool import AuxiliaryWorkerPool
-    from .coordinator import PipelineConfig, run_pipeline
+    from .coordinator import run_pipeline
+    from .coordinator_types import PipelineConfig
     from .jobs import GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue
     from .routing import (
@@ -78,7 +79,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "LearningIntent": "hephaestus.automation.pipeline.work_item",
     "JobHandle": "hephaestus.automation.pipeline.jobs",
     "JobResult": "hephaestus.automation.pipeline.jobs",
-    "PipelineConfig": "hephaestus.automation.pipeline.coordinator",
+    "PipelineConfig": "hephaestus.automation.pipeline.coordinator_types",
     "PipelineScope": "hephaestus.automation.pipeline.routing",
     "ROUTES": "hephaestus.automation.pipeline.routing",
     "Route": "hephaestus.automation.pipeline.routing",

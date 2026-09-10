@@ -4,6 +4,8 @@ Contains the canonical implementation prompt, the iteration-aware impl-loop
 structural-audit prompt, and the resume-after-feedback prompt.
 """
 
+from hephaestus.prompts import PromptCatalog
+
 from ._review_rubric import (
     get_full_sweep_suffix,
     get_implementation_loop_review_rubric,
@@ -17,7 +19,6 @@ from ._shared import (
     fence_content,
     get_terse_output_directive,
 )
-from .catalog import PromptCatalog
 
 # Prompt the implementer receives when resuming its session to address a
 # NoGo review verdict. Used on iterations 1 and 2 of the impl loop.
