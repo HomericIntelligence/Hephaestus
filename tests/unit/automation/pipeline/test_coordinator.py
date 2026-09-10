@@ -2989,7 +2989,11 @@ class TestImplementationAdmission:
             id(third): {claim_bc, claim_ca},
         }
         for item in (first, second, third):
+            item.kind = ItemKind.PR
+            item.pr = (item.issue or 0) + 100
+            item.worktree = str(tmp_path / f"writer-{item.issue}")
             item.payload["_implementation_file_claims"] = claims_by_item[id(item)]
+            assert coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
 
         dispatch = coordinator._select_file_overlap_implementation_items(
             [(first, "#21"), (second, "#22"), (third, "#23")]
