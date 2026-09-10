@@ -2496,6 +2496,7 @@ def test_codex_implementation_profile_admits_only_validated_athena(
     source_home = tmp_path / "source-codex-home"
     athena = source_home / "plugins" / "cache" / "athena" / "athena" / "0.5.1"
     athena.mkdir(parents=True)
+    athena.chmod(0o700)
     (athena / ".codex-marketplace-install.json").write_text(
         json.dumps(
             {
@@ -2510,6 +2511,8 @@ def test_codex_implementation_profile_admits_only_validated_athena(
         encoding="utf-8",
     )
     (athena / "skill.md").write_text("validated Athena\n", encoding="utf-8")
+    for artifact in athena.iterdir():
+        artifact.chmod(0o600)
     (source_home / "sessions").mkdir()
     (source_home / "sessions" / "old.jsonl").write_text("private history", encoding="utf-8")
     (source_home / "logs").mkdir()
@@ -2547,6 +2550,12 @@ def test_codex_implementation_profile_admits_only_validated_athena(
     session_id = "provider-session-3019"
     generated_session = profile / "sessions" / "2026" / "09" / "07"
     generated_session.mkdir(parents=True)
+    for directory in (
+        profile / "sessions" / "2026",
+        profile / "sessions" / "2026" / "09",
+        generated_session,
+    ):
+        directory.chmod(0o700)
     generated_rollout = generated_session / f"rollout-test-{session_id}.jsonl"
     generated_rollout.write_text(
         json.dumps(
