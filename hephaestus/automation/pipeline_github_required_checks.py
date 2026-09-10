@@ -105,7 +105,6 @@ def _check_run_snapshot(
 ) -> tuple[object, ...] | None:
     """Return stable identity and status data for a Check Runs traversal."""
     snapshot: list[tuple[int, str, int, str, str, object, str, frozenset[_RequiredCheck]]] = []
-    identities: set[tuple[str, int]] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
@@ -128,11 +127,6 @@ def _check_run_snapshot(
         if not isinstance(name, str):
             logger.warning("Check Run for %s has no valid name", head_sha)
             return None
-        identity = (name, app_id)
-        if identity in identities:
-            logger.warning("Check Runs contain duplicate context and app identity for %s", head_sha)
-            return None
-        identities.add(identity)
         completed_at = _current_evidence_timestamp(check_run.get("completed_at"), now_utc)
         if completed_at is None:
             logger.warning("Check Run for %s has no current completion time", head_sha)
