@@ -30,6 +30,10 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.13"
+      - name: Select the approved Command Line Tools root
+        run: |
+          sudo xcode-select --switch /Library/Developer/CommandLineTools
+          test "$(xcode-select --print-path)" = /Library/Developer/CommandLineTools
       - name: Install the locked project environment
         run: uv sync --all-groups --all-extras --locked
       - name: Run the focused macOS acceptance tests
