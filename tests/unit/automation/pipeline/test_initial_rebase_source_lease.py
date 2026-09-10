@@ -159,7 +159,11 @@ def test_runtime_cache_lock_keeps_the_build_job_budget(
     monkeypatch.setattr(
         worker_pool,
         "_validated_git_exec_path",
-        lambda: ("/usr/bin/git", Path("/usr/libexec/git-core")),
+        lambda: (
+            "/usr/bin/git",
+            Path("/usr/libexec/git-core"),
+            Path("/usr/share/git-core/gitconfig"),
+        ),
     )
     monkeypatch.setattr(worker_pool, "_trusted_git_executable", lambda: "/usr/bin/git")
     monkeypatch.setattr(shutil, "copytree", copy)

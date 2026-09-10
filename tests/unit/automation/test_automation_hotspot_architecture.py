@@ -53,6 +53,7 @@ _FILE_BUDGETS = {
     # Receipt storage moved here when the bootstrap stage helper was removed.
     "hephaestus/automation/pipeline/stages/pr_review_receipts.py": 150,
     "hephaestus/automation/pipeline/stages/pr_review_verification.py": 250,
+    "hephaestus/automation/pipeline/stages/pr_review_verification_specs.py": 150,
     # The GraphQL contract helpers added by #2393 bring this collaborator to
     # 1,403 lines; keep the explicit cap just above the measured source size.
     "hephaestus/automation/pipeline/stages/pr_review_jobs.py": 1_403,
@@ -83,6 +84,7 @@ _COLLABORATOR_MODULES = frozenset(
         "pr_review_repository",
         "pr_review_receipts",
         "pr_review_verification",
+        "pr_review_verification_specs",
         "pr_review_jobs",
         "pr_review_gate",
     }
