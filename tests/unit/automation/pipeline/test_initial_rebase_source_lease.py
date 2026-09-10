@@ -156,6 +156,11 @@ def test_runtime_cache_lock_keeps_the_build_job_budget(
     )
     monkeypatch.setattr(worker_pool, "_checkout_matches_immutable_head", lambda *_args: None)
     monkeypatch.setattr(worker_pool, "_trusted_uv_executable", lambda: "/usr/bin/uv")
+    monkeypatch.setattr(
+        worker_pool,
+        "_validated_git_exec_path",
+        lambda: ("/usr/bin/git", Path("/usr/libexec/git-core")),
+    )
     monkeypatch.setattr(worker_pool, "_trusted_git_executable", lambda: "/usr/bin/git")
     monkeypatch.setattr(shutil, "copytree", copy)
     results: list[JobResult] = []

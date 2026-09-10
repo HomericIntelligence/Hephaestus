@@ -1626,6 +1626,17 @@ def _git_exec_path_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return system_git, toolchain, git_exec_path, developer_git
 
 
+@pytest.fixture
+def safe_git_exec_tmp_path(tmp_path: Path) -> Iterator[Path]:
+    """Put Git path fixtures below repository-owned safe path components."""
+    root = Path.cwd() / "build" / "pytest-host-git-exec-path" / f"{os.getpid()}-{tmp_path.name}"
+    root.mkdir(parents=True)
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 _NATIVE_FALLBACK_RUNNER = (
     "#!/bin/bash\n"
     "printf '%s\\n' 'HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-absent' >&2\n"
@@ -1680,10 +1691,12 @@ class TestHostVerificationGitExecPath:
         probe.assert_not_called()
 
     def test_resolves_system_git_before_candidate_launch(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, safe_git_exec_tmp_path: Path
     ) -> None:
         """The probe uses the same fixed Git selection as the verified runner."""
-        system_git, toolchain, git_exec_path, developer_git = _git_exec_path_fixture(tmp_path)
+        system_git, toolchain, git_exec_path, developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
         monkeypatch.setenv("PATH", "/unsafe/homebrew/bin")
         monkeypatch.setenv("GIT_EXEC_PATH", "/unsafe/git-core")
         monkeypatch.setenv("DEVELOPER_DIR", "/unsafe/developer")
@@ -1801,8 +1814,11 @@ class TestHostVerificationGitExecPath:
         ):
             _validated_git_exec_path()
 
-    def test_rejects_invalid_git_exec_path_before_launch(self, tmp_path: Path) -> None:
+    def test_rejects_invalid_git_exec_path_before_launch(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
         """Unapproved, indirect, or writable support paths fail closed."""
+        tmp_path = safe_git_exec_tmp_path
         system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
         external = tmp_path / "external" / "usr" / "libexec" / "git-core"
         external.mkdir(parents=True)
@@ -1845,9 +1861,13 @@ class TestHostVerificationGitExecPath:
             ):
                 _validated_git_exec_path()
 
-    def test_missing_git_exec_path_is_stably_unavailable(self, tmp_path: Path) -> None:
+    def test_missing_git_exec_path_is_stably_unavailable(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
         """A missing exact Git support directory has the unavailable category."""
-        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
         shutil.rmtree(git_exec_path)
         bounded = _BoundedGitOutput(
             text=f"{git_exec_path}\n",
@@ -1865,8 +1885,12 @@ class TestHostVerificationGitExecPath:
         ):
             _validated_git_exec_path()
 
-    def test_symlinked_exact_git_exec_path_is_rejected(self, tmp_path: Path) -> None:
+    def test_symlinked_exact_git_exec_path_is_rejected(
+        self,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
         """The exact support directory cannot be a symbolic link."""
+        tmp_path = safe_git_exec_tmp_path
         system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
         target = tmp_path / "support-target"
         target.mkdir()
@@ -1888,8 +1912,11 @@ class TestHostVerificationGitExecPath:
         ):
             _validated_git_exec_path()
 
-    def test_symlinked_git_exec_path_ancestor_is_rejected(self, tmp_path: Path) -> None:
+    def test_symlinked_git_exec_path_ancestor_is_rejected(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
         """An approved-root ancestor cannot redirect the support directory."""
+        tmp_path = safe_git_exec_tmp_path
         system_git = tmp_path / "system" / "git"
         system_git.parent.mkdir()
         system_git.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -1921,9 +1948,13 @@ class TestHostVerificationGitExecPath:
         ):
             _validated_git_exec_path()
 
-    def test_missing_developer_git_parent_is_stably_unavailable(self, tmp_path: Path) -> None:
+    def test_missing_developer_git_parent_is_stably_unavailable(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
         """A missing developer Git parent has the unavailable category."""
-        system_git, toolchain, git_exec_path, developer_git = _git_exec_path_fixture(tmp_path)
+        system_git, toolchain, git_exec_path, developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
         shutil.rmtree(developer_git.parent)
         bounded = _BoundedGitOutput(
             text=f"{git_exec_path}\n",
