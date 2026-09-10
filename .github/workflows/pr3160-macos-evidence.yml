@@ -1,0 +1,48 @@
+name: PR 3160 macOS Evidence
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: pr3160-macos-evidence-${{ github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  focused-host-verification:
+    name: Focused host verification at d9dafc1b
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: d9dafc1b607d247e6c6227804093f53a482e4eef
+      - name: Verify the evidence commit
+        env:
+          EXPECTED_HEAD: d9dafc1b607d247e6c6227804093f53a482e4eef
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install the locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Run the focused macOS acceptance tests
+        run: >-
+          uv run pytest -o addopts=
+          tests/unit/automation/pipeline/test_worker_pool.py::TestHostVerificationGitExecPath
+          tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_trusted_runner_preserves_native_fallback
+          tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_runner_rejects_native_fallback
+          tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_helper_rejects_native_fallback
+          -q --tb=short
+      - name: Verify that the evidence commit did not change
+        env:
+          EXPECTED_HEAD: d9dafc1b607d247e6c6227804093f53a482e4eef
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --short)"

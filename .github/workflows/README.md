@@ -11,5 +11,6 @@
 | contract.yml | Opt-in authenticated GitHub and agent contract tests. | workflow_dispatch |
 | nightly-tests.yml | Runs the high-cost functional tests excluded from pull-request checks. | schedule, workflow_dispatch |
 | performance.yml | Runs bounded worker-pool capacity, latency, and sustained-concurrency tests and retains the JSON report. | schedule, workflow_dispatch |
+| pr3160-macos-evidence.yml | Runs the issue 3159 acceptance tests on commit `d9dafc1b` for review evidence. | pull_request |
 | release.yml | Builds, tests, publishes, and creates releases for tags. | push tags `v*`, workflow_dispatch |
 | security.yml | Runs scheduled/manual security scans and PR-time security checks for dependency-sensitive changes. | pull_request paths, schedule, workflow_dispatch |
