@@ -130,6 +130,7 @@ def test_manual_conflict_retains_failed_preparation_across_callback_order(
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, AgentJob)
     stage.on_job_done(item, JobResult(ok=False, error="agent failed"), make_ctx())
+    assert item.payload["rebase_agent_started"] is False
     item.state = request.on_done_state
 
     assert stage.step(item, make_ctx()) == StageOutcome(
