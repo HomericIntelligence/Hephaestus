@@ -16,7 +16,9 @@ Examples of allowed patterns::
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,19 +173,69 @@ def check_files(file_paths: list[Path]) -> tuple[int, list[str]]:
     return result.exit_code, result.violations + result.read_errors
 
 
+def _record_read_error(result: _BatchResult, path: Path, error: OSError) -> None:
+    """Record one filesystem access failure."""
+    result.read_errors.append(f"Could not read {path}: {error}")
+
+
+def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
+    """Find regular Python files without following directory links."""
+    files: list[Path] = []
+    pending = [directory]
+
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    entry_path = Path(entry.path)
+                    try:
+                        mode = entry.stat(follow_symlinks=False).st_mode
+                        if stat.S_ISDIR(mode):
+                            pending.append(entry_path)
+                        elif stat.S_ISREG(mode) and entry.name.endswith(".py"):
+                            files.append(entry_path)
+                    except OSError as error:
+                        _record_read_error(result, entry_path, error)
+        except OSError as error:
+            _record_read_error(result, current, error)
+
+    return files
+
+
+def _select_path(path: Path, result: _BatchResult) -> list[Path]:
+    """Select Python files from one explicit input path."""
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return [path] if path.suffix == ".py" else []
+    except OSError as error:
+        _record_read_error(result, path, error)
+        return []
+
+    if stat.S_ISDIR(mode):
+        return _collect_python_files(path, result)
+    if stat.S_ISREG(mode) and path.suffix == ".py":
+        return [path]
+    if not stat.S_ISLNK(mode) or path.suffix != ".py":
+        return []
+
+    try:
+        target_mode = path.stat().st_mode
+    except OSError:
+        return [path]
+    if stat.S_ISREG(target_mode):
+        return [path]
+    return []
+
+
 def _check_files(file_paths: list[Path]) -> _BatchResult:
     """Scan each selected file once and collect all diagnostics."""
     result = _BatchResult([], [])
 
     files_to_check: list[Path] = []
     for path in file_paths:
-        try:
-            if path.is_dir():
-                files_to_check.extend(path.rglob("*.py"))
-            elif path.suffix == ".py":
-                files_to_check.append(path)
-        except OSError as error:
-            result.read_errors.append(f"Could not read {path}: {error}")
+        files_to_check.extend(_select_path(path, result))
 
     for file_path in files_to_check:
         scan = _scan_file(file_path)

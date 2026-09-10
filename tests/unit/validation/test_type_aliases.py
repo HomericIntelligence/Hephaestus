@@ -1,6 +1,7 @@
 """Tests for hephaestus.validation.type_aliases."""
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -156,6 +157,122 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
 
+    def test_reports_nested_search_error_and_continues_inputs(self, tmp_path: Path) -> None:
+        """Report an inaccessible subtree and scan a later input."""
+        source = tmp_path / "source"
+        locked = source / "locked"
+        locked.mkdir(parents=True)
+        (locked / "hidden.py").write_text("x = 1\n", encoding="utf-8")
+        later = tmp_path / "later.py"
+        later.write_text("Result = DomainResult\n", encoding="utf-8")
+        real_scandir = os.scandir
+
+        def controlled_scandir(path: Path) -> Iterator[os.DirEntry[str]]:
+            if Path(path) == locked:
+                raise PermissionError("search denied")
+            return real_scandir(path)
+
+        with patch("os.scandir", side_effect=controlled_scandir):
+            exit_code, errors = check_files([source, later])
+
+        assert exit_code == 1
+        assert any(str(locked) in error and "search denied" in error for error in errors)
+        assert any(str(later) in error and "DomainResult" in error for error in errors)
+
+    def test_python_suffix_directory_is_not_scanned_as_file(self, tmp_path: Path) -> None:
+        """Scan children but do not read a directory whose name ends in .py."""
+        package = tmp_path / "package.py"
+        package.mkdir()
+        child = package / "child.py"
+        child.write_text("Result = DomainResult\n", encoding="utf-8")
+
+        exit_code, errors = check_files([tmp_path])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(child) in errors[0]
+
+    def test_reports_entry_classification_error(self, tmp_path: Path) -> None:
+        """Report an entry that cannot be classified."""
+        source = tmp_path / "source"
+        source.mkdir()
+        broken = source / "broken.py"
+        entry = MagicMock()
+        entry.path = str(broken)
+        entry.stat.side_effect = OSError("classification failed")
+        entries = MagicMock()
+        entries.__enter__.return_value = iter([entry])
+
+        with patch("os.scandir", return_value=entries):
+            exit_code, errors = check_files([source])
+
+        assert exit_code == 1
+        assert errors == [f"Could not read {broken}: classification failed"]
+
+    def test_directory_symlink_is_not_followed(self, tmp_path: Path) -> None:
+        """Do not follow a directory link during a recursive scan."""
+        source = tmp_path / "source"
+        target = tmp_path / "target"
+        source.mkdir()
+        target.mkdir()
+        (target / "hidden.py").write_text("Result = DomainResult\n", encoding="utf-8")
+        (source / "linked").symlink_to(target, target_is_directory=True)
+
+        exit_code, errors = check_files([source])
+
+        assert exit_code == 0
+        assert errors == []
+
+    def test_explicit_directory_symlink_is_not_followed(self, tmp_path: Path) -> None:
+        """Do not follow a directory link that an explicit input selects."""
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "hidden.py").write_text("Result = DomainResult\n", encoding="utf-8")
+        linked = tmp_path / "linked.py"
+        linked.symlink_to(target, target_is_directory=True)
+
+        exit_code, errors = check_files([linked])
+
+        assert exit_code == 0
+        assert errors == []
+
+    def test_explicit_file_symlink_is_scanned(self, tmp_path: Path) -> None:
+        """Scan a regular Python file that an explicit link selects."""
+        target = tmp_path / "target.py"
+        target.write_text("Result = DomainResult\n", encoding="utf-8")
+        linked = tmp_path / "linked.py"
+        linked.symlink_to(target)
+
+        exit_code, errors = check_files([linked])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(linked) in errors[0]
+
+    def test_broken_explicit_python_symlink_is_read_error(self, tmp_path: Path) -> None:
+        """Report a broken Python file link as an incomplete scan."""
+        linked = tmp_path / "linked.py"
+        linked.symlink_to(tmp_path / "missing.py")
+
+        exit_code, errors = check_files([linked])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert f"Could not read {linked}:" in errors[0]
+
+    def test_recursive_file_symlink_is_not_scanned(self, tmp_path: Path) -> None:
+        """Do not scan a file link that recursive discovery finds."""
+        source = tmp_path / "source"
+        source.mkdir()
+        target = tmp_path / "target.py"
+        target.write_text("Result = DomainResult\n", encoding="utf-8")
+        (source / "linked.py").symlink_to(target)
+
+        exit_code, errors = check_files([source])
+
+        assert exit_code == 0
+        assert errors == []
+
 
 class TestUpdateStringState:
     """Tests for _update_string_state()."""
@@ -303,14 +420,14 @@ def test_selection_error_diagnostics_consistency(
     later = tmp_path / "later.py"
     later.write_text("Result = DomainResult\n" if with_violation else "x = 1\n", encoding="utf-8")
     paths = [locked, later]
-    real_is_dir = Path.is_dir
+    real_stat = Path.stat
 
-    def controlled_is_dir(path: Path) -> bool:
+    def controlled_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
         if path == locked:
             raise error
-        return real_is_dir(path)
+        return real_stat(path, follow_symlinks=follow_symlinks)
 
-    with patch.object(Path, "is_dir", controlled_is_dir):
+    with patch.object(Path, "stat", controlled_stat):
         code, errors = check_files(paths)
         monkeypatch.setattr("sys.argv", ["check-type-aliases", *map(str, paths)])
         text_code = main()
