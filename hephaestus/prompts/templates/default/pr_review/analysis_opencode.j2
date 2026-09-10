@@ -17,9 +17,12 @@ PR diff:
 Host validation receipts:
 {{ host_verifications_block }}
 
-A receipt is local evidence only when it has `ok: true`, `status: passed`, and
-the reviewed `head_sha`. A skipped, missing, or failed receipt is an evidence
-gap. Do not run local checks in this read-only review.
+The supplied receipts are the complete coordinator-bound host plan. A receipt
+is local evidence only when it has `ok: true`, `status: passed`, and the
+reviewed `head_sha`. Do not require an additional coordinator-bound receipt
+outside this supplied plan. Missing, skipped, or failed receipts in this
+supplied plan are evidence gaps. Do not run local checks in this read-only
+review.
 
 Find correctness, security, architecture, scope, and false-green test defects.
 Inspect every changed path and its full source from the current checkout.
