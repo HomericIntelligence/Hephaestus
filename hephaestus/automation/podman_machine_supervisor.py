@@ -15,6 +15,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from hephaestus.config.child_environments import read_approved_parent_env
 
@@ -87,6 +88,75 @@ def _provider(document: dict[str, Any]) -> str:
         if isinstance(path, str) and path:
             return Path(path).name.lower()
     return ""
+
+
+def _named_connection_matches_machine(document: dict[str, Any], connection: dict[str, Any]) -> bool:
+    """Return whether one named connection identifies the inspected machine."""
+    if connection.get("IsMachine") is not True:
+        return False
+    uri = connection.get("URI")
+    if not isinstance(uri, str):
+        return False
+    try:
+        endpoint = urlsplit(uri)
+        port = endpoint.port
+    except ValueError:
+        return False
+    machine_connection = document.get("ConnectionInfo")
+    socket = (
+        machine_connection.get("PodmanSocket") if isinstance(machine_connection, dict) else None
+    )
+    socket_path = socket.get("Path") if isinstance(socket, dict) else None
+    if endpoint.scheme == "unix":
+        return isinstance(socket_path, str) and unquote(endpoint.path) == socket_path
+    if endpoint.scheme != "ssh":
+        return False
+    ssh = document.get("SSHConfig")
+    if not isinstance(ssh, dict):
+        return False
+    identity = connection.get("Identity")
+    return (
+        endpoint.hostname in {"127.0.0.1", "localhost"}
+        and endpoint.username == ssh.get("RemoteUsername")
+        and port == ssh.get("Port")
+        and isinstance(identity, str)
+        and identity == ssh.get("IdentityPath")
+    )
+
+
+def _verify_named_connection(
+    name: str,
+    document: dict[str, Any],
+    *,
+    timeout_s: float,
+    command_runner: CommandRunner,
+) -> None:
+    """Verify that the selected name maps to the inspected machine endpoint."""
+    command = ["podman", "system", "connection", "list", "--format", "json"]
+    try:
+        result = command_runner(command, timeout_s)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PodmanMachineError(
+            f"Podman could not inspect named connection {name!r}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "Podman could not inspect named connections."
+        raise PodmanMachineError(detail)
+    try:
+        connections = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise PodmanMachineError("Podman returned invalid named-connection data.") from exc
+    selected: list[dict[str, Any]] = []
+    if isinstance(connections, list):
+        selected = [
+            connection
+            for connection in connections
+            if isinstance(connection, dict) and connection.get("Name") == name
+        ]
+    if len(selected) != 1 or not _named_connection_matches_machine(document, selected[0]):
+        raise PodmanMachineError(
+            f"Podman named connection {name!r} does not match the selected machine endpoint."
+        )
 
 
 def _serial_log_path(document: dict[str, Any], name: str) -> Path | None:
@@ -252,6 +322,22 @@ def prepare_podman_machine(
             f"Podman machine {name!r} is not ready: State={state or 'unknown'}, "
             f"LastUp={last_up or 'empty'}.\n{evidence}".rstrip()
         )
+
+    try:
+        _verify_named_connection(
+            name,
+            document,
+            timeout_s=min(health_timeout_s, 30),
+            command_runner=command_runner,
+        )
+    except PodmanMachineError as exc:
+        evidence = _failure_evidence(
+            document,
+            name,
+            command_runner=command_runner,
+            data_home=data_home,
+        )
+        raise PodmanMachineError(f"{exc}\n{evidence}".rstrip()) from exc
 
     health_command = ["podman", "--connection", name, "info"]
     try:

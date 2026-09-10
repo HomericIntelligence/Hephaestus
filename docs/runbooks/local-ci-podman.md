@@ -19,7 +19,8 @@ The foreground automation-loop process owns the AppleHV helper lifetime. Before
 pipeline dispatch, the supervisor inspects only the selected machine. It starts
 the machine if it is stopped and runs a bounded health check against its named
 connection. It requires the AppleHV provider, a running state, and a nonempty
-`LastUp` value.
+`LastUp` value. It also compares the selected named connection with the machine's
+inspected SSH port, remote user, and identity before it runs the health check.
 If a check fails, it records the `machine-start.lock` owner from the approved
 Podman data directory and at most 200 serial-log lines. The serial-log read and
 encoded detail are each limited to 16 KiB. It then stops pipeline dispatch. It does not stop, remove, or

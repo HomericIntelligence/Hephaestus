@@ -26,6 +26,11 @@ def _inspect(
                 "ConnectionInfo": {"PodmanSocket": {"Path": "/tmp/podman/hephaestus-ci.sock"}},
                 "LastUp": last_up,
                 "Name": "hephaestus-ci",
+                "SSHConfig": {
+                    "IdentityPath": "/tmp/podman-machine-key",
+                    "Port": 60645,
+                    "RemoteUsername": "core",
+                },
                 "State": state,
             }
         ]
@@ -55,10 +60,25 @@ def _result(
     return subprocess.CompletedProcess(command, returncode, stdout, "")
 
 
+def _connections(*, port: int = 60645) -> str:
+    """Return a named connection for the representative machine."""
+    return json.dumps(
+        [
+            {
+                "Name": "hephaestus-ci",
+                "URI": f"ssh://core@127.0.0.1:{port}/run/user/501/podman/podman.sock",
+                "Identity": "/tmp/podman-machine-key",
+                "IsMachine": True,
+            }
+        ]
+    )
+
+
 def test_starts_stopped_applehv_machine_and_probes_its_named_connection() -> None:
     """The host starts only the selected machine before it reports ready."""
     inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
     start_command = ("podman", "machine", "start", "hephaestus-ci")
+    connection_command = ("podman", "system", "connection", "list", "--format", "json")
     health_command = ("podman", "--connection", "hephaestus-ci", "info")
     runner = CommandHarness(
         {
@@ -67,6 +87,7 @@ def test_starts_stopped_applehv_machine_and_probes_its_named_connection() -> Non
                 _result(inspect_command, stdout=_inspect(state="running")),
             ],
             start_command: [_result(start_command)],
+            connection_command: [_result(connection_command, stdout=_connections())],
             health_command: [_result(health_command, stdout="{}")],
         }
     )
@@ -79,7 +100,13 @@ def test_starts_stopped_applehv_machine_and_probes_its_named_connection() -> Non
     )
 
     commands = [command for command, _timeout in runner.calls]
-    assert commands == [inspect_command, start_command, inspect_command, health_command]
+    assert commands == [
+        inspect_command,
+        start_command,
+        inspect_command,
+        connection_command,
+        health_command,
+    ]
     assert all("rm" not in command and "stop" not in command for command in commands)
 
 
@@ -206,6 +233,7 @@ def test_failure_collects_lock_owner_and_serial_log_without_recovery_mutation(
     (serial_dir / "hephaestus-ci.log").write_text("boot line\nfatal line\n", encoding="utf-8")
 
     inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
+    connection_command = ("podman", "system", "connection", "list", "--format", "json")
     health_command = ("podman", "--connection", "hephaestus-ci", "info")
     lsof_command = ("lsof", str(lock_path))
     inspect = json.loads(_inspect(state="running"))
@@ -213,6 +241,7 @@ def test_failure_collects_lock_owner_and_serial_log_without_recovery_mutation(
     runner = CommandHarness(
         {
             inspect_command: [_result(inspect_command, stdout=json.dumps(inspect))],
+            connection_command: [_result(connection_command, stdout=_connections())],
             health_command: [_result(health_command, returncode=125)],
             lsof_command: [_result(lsof_command, stdout="COMMAND PID USER\npodman 42 user")],
         }
@@ -230,7 +259,7 @@ def test_failure_collects_lock_owner_and_serial_log_without_recovery_mutation(
     assert "podman 42 user" in detail
     assert "fatal line" in detail
     commands = [command for command, _timeout in runner.calls]
-    assert commands == [inspect_command, health_command, lsof_command]
+    assert commands == [inspect_command, connection_command, health_command, lsof_command]
     assert all(not ({"rm", "stop", "reset"} & set(command)) for command in commands)
 
 
@@ -293,10 +322,12 @@ def test_failure_bounds_serial_log_bytes_and_keeps_recent_output(
     inspect = json.loads(_inspect(state="running"))
     inspect[0]["ConnectionInfo"]["PodmanSocket"]["Path"] = str(tmp_path / "hephaestus-ci.sock")
     inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
+    connection_command = ("podman", "system", "connection", "list", "--format", "json")
     health_command = ("podman", "--connection", "hephaestus-ci", "info")
     runner = CommandHarness(
         {
             inspect_command: [_result(inspect_command, stdout=json.dumps(inspect))],
+            connection_command: [_result(connection_command, stdout=_connections())],
             health_command: [_result(health_command, returncode=125)],
         }
     )
@@ -324,11 +355,13 @@ def test_lock_diagnostics_use_approved_data_home(
         lambda: {"HOME": str(tmp_path / "home"), "XDG_DATA_HOME": str(xdg_home)},
     )
     inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
+    connection_command = ("podman", "system", "connection", "list", "--format", "json")
     health_command = ("podman", "--connection", "hephaestus-ci", "info")
     lock_command = ("lsof", str(lock))
     runner = CommandHarness(
         {
             inspect_command: [_result(inspect_command, stdout=_inspect(state="running"))],
+            connection_command: [_result(connection_command, stdout=_connections())],
             health_command: [_result(health_command, returncode=125)],
             lock_command: [_result(lock_command, stdout="EXPECTED LOCK OWNER")],
         }
@@ -338,3 +371,25 @@ def test_lock_diagnostics_use_approved_data_home(
             "hephaestus-ci", command_runner=runner, data_home=explicit_home if override else None
         )
     assert runner.calls[-1][0] == lock_command
+
+
+def test_rejects_named_connection_for_a_different_machine(tmp_path: Path) -> None:
+    """A responsive stale connection cannot select a different machine."""
+    inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
+    connection_command = ("podman", "system", "connection", "list", "--format", "json")
+    health_command = ("podman", "--connection", "hephaestus-ci", "info")
+    runner = CommandHarness(
+        {
+            inspect_command: [_result(inspect_command, stdout=_inspect(state="running"))],
+            connection_command: [_result(connection_command, stdout=_connections(port=61616))],
+            health_command: [_result(health_command, stdout="{}")],
+        }
+    )
+
+    with pytest.raises(PodmanMachineError, match="named connection"):
+        prepare_podman_machine("hephaestus-ci", command_runner=runner, data_home=tmp_path / "data")
+
+    assert [command for command, _timeout in runner.calls] == [
+        inspect_command,
+        connection_command,
+    ]
