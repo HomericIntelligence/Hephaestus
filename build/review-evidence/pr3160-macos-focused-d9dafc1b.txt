@@ -1,0 +1,15 @@
+timestamp_started: 2026-09-09T21:03:20.026074-07:00
+timestamp_finished: 2026-09-09T21:03:36.377308-07:00
+platform: darwin
+platform_detail: macOS-26.6.2-arm64-arm-64bit-Mach-O
+checkout: /Users/mvillmow/Projects/Hephaestus/build/recovery/projects/Hephaestus/build/.worktrees/auto-3159-impl
+exact_command: uv run pytest -o addopts= tests/unit/automation/pipeline/test_worker_pool.py::TestHostVerificationGitExecPath tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_trusted_runner_preserves_native_fallback tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_runner_rejects_native_fallback tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_helper_rejects_native_fallback -q --tb=short
+head_before: d9dafc1b607d247e6c6227804093f53a482e4eef
+status_before:
+head_after: d9dafc1b607d247e6c6227804093f53a482e4eef
+status_after:
+exit_status: 0
+pytest_output_begin:
+........................                                                 [100%]
+24 passed in 15.56s
+pytest_output_end:
