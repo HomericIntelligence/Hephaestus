@@ -462,6 +462,18 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         readers=(_NESTED_READER,),
     ),
     _child(
+        "CONTAINER_CONNECTION",
+        "Explicit named connection for the verified local CI runner",
+        "hephaestus.automation.pipeline.worker_pool.WorkerPool._execute_build_test",
+        "token",
+    ),
+    _child(
+        "CONTAINER_ENGINE",
+        "Explicit engine for the verified local CI runner",
+        "hephaestus.automation.pipeline.worker_pool.WorkerPool._execute_build_test",
+        "token",
+    ),
+    _child(
         "PYTHONPATH",
         "Source checkout for internal Python phases",
         "hephaestus.config.child_environments.build_python_phase_env",

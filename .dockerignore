@@ -1,0 +1,12 @@
+# Send only the files that ci/Containerfile reads. This keeps credentials,
+# Git data, virtual environments, and volatile build trees out of the context.
+**
+!.pre-commit-config.yaml
+!README.md
+!pyproject.toml
+!uv.lock
+!ci/
+ci/*
+!ci/Containerfile
+!hephaestus/
+!hephaestus/**

@@ -4056,6 +4056,27 @@ class TestTestsAndFix:
         assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
 
+    @patch(_IMPLEMENTATION_PLATFORM, "darwin")
+    def test_failed_podman_preflight_starts_with_native_fallback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed selected-machine preflight retains the macOS native gate."""
+        stage = ImplementationStage()
+        ctx = make_ctx(
+            org="HomericIntelligence",
+            config_overrides={"podman_machine_preflight_failed": True},
+        )
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == PRE_PR_TEST_ARGV
+        assert result.job.verified_runner_source_revision is None
+        assert item.payload["pre_pr_runner_mode"] == "native"
+        assert item.payload["pre_pr_fallback_reason"] == "container-engine-unavailable"
+
     def test_hephaestus_required_checks_cannot_be_replaced_by_generic_override(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -7726,3 +7747,29 @@ def test_failed_implementation_reconciles_source_before_another_turn(
     assert result.disposition is Disposition.RETRY
     assert item.state == "WORKTREE_WAIT"
     assert item.attempts["implement"] == 1
+
+
+def test_verified_runner_snapshot_retains_selected_podman_connection(tmp_path: Path) -> None:
+    """The verified shell snapshot receives the host-selected connection."""
+    source = '#!/bin/bash\nprintf "%s:%s" "$CONTAINER_ENGINE" "$CONTAINER_CONNECTION"\n'
+    repo, revision = _committed_runner_fixture(tmp_path, source)
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        podman_machine="hephaestus-ci",
+    )
+    job = BuildTestJob(
+        repo="Hephaestus",
+        cwd=repo,
+        argv=("bash", "scripts/run_ci_local.sh", "all", "--rebuild"),
+        timeout_s=30,
+        verified_runner_source_revision=revision,
+    )
+    try:
+        result = pool._run_build_test(job)
+    finally:
+        pool.shutdown(mark_interrupted=False)
+    assert result.ok, result.stderr_tail
+    assert result.stdout_tail == "podman:hephaestus-ci"

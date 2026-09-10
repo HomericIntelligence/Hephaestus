@@ -6,9 +6,11 @@ import re
 from pathlib import Path
 
 import yaml
+from pathspec import GitIgnoreSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 PRE_COMMIT_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
 
 
@@ -77,6 +79,67 @@ def test_baked_console_scripts_do_not_depend_on_builder_source_tree() -> None:
     assert source.index("WORKDIR /home/ci") < source.index(
         "RUN hephaestus-install-pi-plugins --global --yes --no-approve"
     )
+
+
+def test_pre_commit_cache_keeps_one_absolute_path_between_stages() -> None:
+    """The runtime must use the absolute cache paths from the builder database."""
+    source = CONTAINERFILE.read_text(encoding="utf-8")
+    builder = source.split("FROM python-snapshot AS builder", maxsplit=1)[1].split(
+        "FROM python-snapshot", maxsplit=1
+    )[0]
+    runtime = source.rsplit("FROM python-snapshot", maxsplit=1)[1]
+
+    assert "PRE_COMMIT_HOME=/opt/pre-commit-cache" in builder
+    assert "PRE_COMMIT_HOME=/opt/pre-commit-cache" in runtime
+    assert "COPY --from=builder /opt/pre-commit-cache /opt/pre-commit-cache" in runtime
+    assert "chown -R ci:ci /opt/pre-commit-cache" in runtime
+    assert "chmod -R a+rwX /opt/pre-commit-cache" in runtime
+    assert "/root/.cache/pre-commit" not in runtime
+    assert "/home/ci/.cache/pre-commit" not in runtime
+
+
+def test_direct_build_context_contains_only_containerfile_inputs() -> None:
+    """Direct image builds must exclude volatile and private workspace files."""
+    patterns = [
+        line
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+
+    assert patterns == [
+        "**",
+        "!.pre-commit-config.yaml",
+        "!README.md",
+        "!pyproject.toml",
+        "!uv.lock",
+        "!ci/",
+        "ci/*",
+        "!ci/Containerfile",
+        "!hephaestus/",
+        "!hephaestus/**",
+    ]
+    candidates = {
+        ".pre-commit-config.yaml",
+        "README.md",
+        "build/private.env",
+        "ci/Containerfile",
+        "ci/private.env",
+        "hephaestus/__init__.py",
+        "pyproject.toml",
+        "uv.lock",
+    }
+    ignore_spec = GitIgnoreSpec.from_lines(patterns)
+
+    included = {path for path in candidates if not ignore_spec.match_file(path)}
+
+    assert included == {
+        ".pre-commit-config.yaml",
+        "README.md",
+        "ci/Containerfile",
+        "hephaestus/__init__.py",
+        "pyproject.toml",
+        "uv.lock",
+    }
 
 
 def test_runtime_tools_follow_the_requested_build_architecture() -> None:

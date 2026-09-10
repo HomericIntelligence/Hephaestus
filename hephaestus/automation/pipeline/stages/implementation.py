@@ -2921,6 +2921,13 @@ class ImplementationStage(Stage):
         item.payload.pop("test_output", None)
         item.payload.pop("test_receipt", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
+        if (
+            run_hephaestus_pre_pr_checks
+            and getattr(ctx.config, "podman_machine_preflight_failed", False)
+            and sys.platform == "darwin"
+        ):
+            item.payload["pre_pr_runner_mode"] = "native"
+            item.payload["pre_pr_fallback_reason"] = "container-engine-unavailable"
         runner_mode = item.payload.get("pre_pr_runner_mode")
         native_fallback_authorized = _native_pre_pr_fallback_is_authorized(item)
         if runner_mode == "native" and not native_fallback_authorized:

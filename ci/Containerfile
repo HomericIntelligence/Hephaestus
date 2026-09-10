@@ -86,6 +86,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     # Copy (not hardlink) from the cache so the venv is self-contained for the
     # runtime-stage COPY --from=builder.
     UV_LINK_MODE=copy \
+    # Keep the absolute repository paths in the pre-commit database valid when
+    # the runtime stage copies the cache.
+    PRE_COMMIT_HOME=/opt/pre-commit-cache \
     PATH="/opt/hephaestus-venv/bin:$PATH"
 
 # Install build dependencies + git (required by pre-commit hooks) from the
@@ -147,6 +150,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv \
     UV_LINK_MODE=copy \
+    PRE_COMMIT_HOME=/opt/pre-commit-cache \
     PATH="/opt/hephaestus-venv/bin:$PATH"
 
 # Runtime-only system packages (no build tools), resolved from the same
@@ -196,17 +200,17 @@ COPY --from=node /usr/local/ /usr/local/
 COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 COPY --from=builder /opt/hephaestus-venv /opt/hephaestus-venv
 
-# Copy pre-commit hook cache from builder (baked-in hook envs)
-COPY --from=builder /root/.cache/pre-commit /root/.cache/pre-commit
-
 # Create non-root user for rootless Podman compatibility
 # UID 1000 is the default first user on most Linux systems, matching typical
 # developer UIDs for smooth volume mount permissions without --userns=keep-id
 RUN groupadd -r ci && useradd -r -g ci -u 1000 -m -s /bin/bash ci
 
-# Copy pre-commit cache to ci user's home (pre-commit uses $HOME/.cache)
-RUN cp -r /root/.cache/pre-commit /home/ci/.cache/ 2>/dev/null || true && \
-    chown -R ci:ci /home/ci/.cache
+# Keep the cache at the same absolute path that the builder database records.
+# Docker can use the host user ID, so all runtime users must be able to lock
+# and update this disposable hook cache.
+COPY --from=builder /opt/pre-commit-cache /opt/pre-commit-cache
+RUN chown -R ci:ci /opt/pre-commit-cache && \
+    chmod -R a+rwX /opt/pre-commit-cache
 
 # Podman maps the ci user through keep-id and may refresh the editable install.
 # Docker's arbitrary host UID uses the baked environment without syncing and

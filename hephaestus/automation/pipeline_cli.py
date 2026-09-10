@@ -28,6 +28,11 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
 )
 from hephaestus.automation.pipeline.routing import ROUTES, PipelineScope, StageName
+from hephaestus.automation.podman_machine_supervisor import (
+    PodmanMachineError,
+    prepare_podman_machine,
+    validate_podman_machine_name,
+)
 from hephaestus.automation.role_selection import resolve_role_agents
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
@@ -104,6 +109,15 @@ def _parse_non_negative_int(value: str) -> int:
     if number < 0:
         raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {number}")
     return number
+
+
+def _parse_podman_machine_name(value: str) -> str:
+    """Parse one valid Podman machine name."""
+    try:
+        validate_podman_machine_name(value)
+    except PodmanMachineError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return value
 
 
 def _parse_positive_int_list(value: str, label: str) -> list[int]:
@@ -400,6 +414,12 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
     )
     parser.allow_abbrev = False
     parser.set_defaults(profile=profile, stages=stages, force=False)
+    parser.set_defaults(
+        podman_machine=None,
+        podman_machine_preflight_failed=False,
+        podman_start_timeout=120,
+        podman_health_timeout=60,
+    )
     add_role_agent_args(parser)
     add_host_verification_pyxis_image_arg(parser)
     if profile == "full":
@@ -407,6 +427,29 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
             "--stages",
             type=_parse_stages,
             help="Comma-separated main stage names in queue order: " + ",".join(MAIN_STAGES),
+        )
+        parser.add_argument(
+            "--podman-machine",
+            type=_parse_podman_machine_name,
+            metavar="NAME",
+            help=(
+                "Start and verify one AppleHV Podman machine in this host process before "
+                "pipeline dispatch. The loop never stops, removes, or recreates the machine."
+            ),
+        )
+        parser.add_argument(
+            "--podman-start-timeout",
+            type=_parse_positive_int,
+            default=120,
+            metavar="SECONDS",
+            help="Maximum Podman machine start time (default: 120).",
+        )
+        parser.add_argument(
+            "--podman-health-timeout",
+            type=_parse_positive_int,
+            default=60,
+            metavar="SECONDS",
+            help="Maximum named-connection health-check time (default: 60).",
         )
     if profile in {"full", "planning"}:
         parser.add_argument("--force", action="store_true", help="Plan the selected issues again.")
@@ -639,6 +682,8 @@ def build_config(
         "host_verification_pyxis_sha256",
         "host_verification_pyxis_authority",
         "host_verification_pyxis_quota_root",
+        "podman_machine",
+        "podman_machine_preflight_failed",
     )
     options = {name: getattr(args, name) for name in common_fields}
     agent = args.agent or "claude"
@@ -683,28 +728,52 @@ def build_config(
     )
 
 
-def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
-    """Admit the selected roles and run the queue with one configuration."""
-    args = parse_args(argv, profile=profile)
-    configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose, args.log_format, quiet=args.quiet, log_file=args.log_file)
-    from hephaestus.automation.runtime_diagnostics import (
-        require_virtual_environment,
-        runtime_identity,
-    )
-
-    identity = runtime_identity()
-    LOG.info("Runtime identity: %s", identity, extra={"runtime_identity": identity})
+def _prepare_host_runtime(args: argparse.Namespace) -> int | None:
+    """Check the selected host runtime before queue dispatch."""
+    if args.podman_machine and not args.dry_run:
+        try:
+            prepare_podman_machine(
+                args.podman_machine,
+                start_timeout_s=args.podman_start_timeout,
+                health_timeout_s=args.podman_health_timeout,
+            )
+        except PodmanMachineError as exc:
+            LOG.warning(
+                "Podman machine preflight failed. The queue will continue without the "
+                "selected connection. The macOS implementation stage will use its native "
+                "pre-PR check: %s",
+                exc,
+            )
+            args.podman_machine = None
+            args.podman_machine_preflight_failed = True
     selected = set(args.stages)
     if (
         not args.dry_run
         and sys.platform == "darwin"
         and selected.intersection({StageName.IMPLEMENTATION, StageName.MERGE_WAIT})
     ):
+        from hephaestus.automation.runtime_diagnostics import require_virtual_environment
+
         try:
             require_virtual_environment(Path(sys.prefix))
         except RuntimeError as exc:
             return _error_exit(args, str(exc))
+    return None
+
+
+def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
+    """Admit the selected roles and run the queue with one configuration."""
+    args = parse_args(argv, profile=profile)
+    configure_github_throttle_from_args(args)
+    _setup_logging(args.verbose, args.log_format, quiet=args.quiet, log_file=args.log_file)
+    from hephaestus.automation.runtime_diagnostics import runtime_identity
+
+    identity = runtime_identity()
+    LOG.info("Runtime identity: %s", identity, extra={"runtime_identity": identity})
+    preflight_exit = _prepare_host_runtime(args)
+    if preflight_exit is not None:
+        return preflight_exit
+    selected = set(args.stages)
     active_roles = tuple(
         role
         for role, needed in (

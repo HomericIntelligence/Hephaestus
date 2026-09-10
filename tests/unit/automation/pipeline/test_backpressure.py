@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from typing import Any, cast
@@ -36,6 +37,7 @@ class _RecordingWorkerPool(FakeWorkerPool):
         host_verification_pyxis_sha256: str | None = None,
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
+        podman_machine: str | None = None,
     ) -> None:
         super().__init__(size=size, shutdown=shutdown, completion_q=completion_q)
         del lock_dir
@@ -51,6 +53,7 @@ class _RecordingWorkerPool(FakeWorkerPool):
         self.host_verification_pyxis_sha256 = host_verification_pyxis_sha256
         self.host_verification_pyxis_authority = host_verification_pyxis_authority
         self.host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
+        self.podman_machine = podman_machine
 
 
 def _config(
@@ -103,6 +106,7 @@ def test_coordinator_uses_independent_main_and_learning_capacities(
     assert coordinator.pool.host_verification_pyxis_sha256 is None
     assert coordinator.pool.host_verification_pyxis_authority is None
     assert coordinator.pool.host_verification_pyxis_quota_root is None
+    assert coordinator.pool.podman_machine is None
 
 
 def test_coordinator_passes_extra_gh_root_to_worker_pool(
@@ -118,6 +122,20 @@ def test_coordinator_passes_extra_gh_root_to_worker_pool(
 
     assert isinstance(coordinator.pool, _RecordingWorkerPool)
     assert coordinator.pool.gh_extra_path_root == tmp_path
+
+
+@pytest.mark.parametrize("machine", [None, "hephaestus-ci"])
+def test_coordinator_passes_selected_podman_machine_to_worker_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine: str | None
+) -> None:
+    """The explicit connection reaches the worker without a default override."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_mod
+
+    monkeypatch.setattr(worker_pool_mod, "WorkerPool", _RecordingWorkerPool)
+    config = replace(_config(tmp_path), podman_machine=machine)
+    coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
+    assert isinstance(coordinator.pool, _RecordingWorkerPool)
+    assert coordinator.pool.podman_machine == machine
 
 
 def test_coordinator_passes_bound_rebase_policy_selector_to_recording_pool(
