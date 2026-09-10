@@ -33,13 +33,13 @@ jobs:
         run: |
           sudo xcode-select --switch /Library/Developer/CommandLineTools
           test "$(xcode-select --print-path)" = /Library/Developer/CommandLineTools
+      - name: Install an admitted Python runtime
+        run: |
+          brew install python@3.13
+          echo "UV_PYTHON=$(brew --prefix python@3.13)/bin/python3.13" >> "$GITHUB_ENV"
       - name: Install the locked project environment
-        env:
-          UV_PYTHON: /opt/homebrew/opt/python@3.13/bin/python3.13
         run: uv sync --all-groups --all-extras --locked
       - name: Run the focused macOS acceptance tests
-        env:
-          UV_PYTHON: /opt/homebrew/opt/python@3.13/bin/python3.13
         run: >-
           uv run pytest -o addopts=
           tests/unit/automation/pipeline/test_worker_pool.py::TestHostVerificationGitExecPath
