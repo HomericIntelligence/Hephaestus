@@ -1781,9 +1781,7 @@ class TestHostVerificationGitExecPath:
         assert '  (subpath "/Applications/Xcode.app/Contents/Developer")' not in profile
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
-    def test_immutable_git_reads_validated_system_config(
-        self, pool: WorkerPool
-    ) -> None:
+    def test_immutable_git_reads_validated_system_config(self, pool: WorkerPool) -> None:
         """Git can read its validated system configuration in the sandbox."""
         checkout = Path.cwd().resolve()
         head = _git(checkout, "rev-parse", "HEAD")

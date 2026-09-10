@@ -4302,6 +4302,13 @@ class TestTestsAndFix:
         item.worktree = str(repo)
         item.payload["_impl_source_revision"] = trusted_revision
         stage = ImplementationStage()
+        host_git = shutil.which("git")
+        host_bash = shutil.which("bash", path=os.defpath)
+        assert host_git is not None
+        assert host_bash is not None
+
+        def host_executable(name: str) -> str:
+            return host_git if name == "git" else host_bash
 
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
@@ -4312,7 +4319,11 @@ class TestTestsAndFix:
             lock_dir=tmp_path / "locks",
         )
         try:
-            result = pool._run(request.job)
+            with patch(
+                "hephaestus.automation.verified_runner._trusted_host_executable",
+                side_effect=host_executable,
+            ):
+                result = pool._run(request.job)
         finally:
             pool.shutdown(mark_interrupted=False)
 
