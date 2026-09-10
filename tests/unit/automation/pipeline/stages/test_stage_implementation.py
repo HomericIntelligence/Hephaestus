@@ -7056,7 +7056,7 @@ class TestWriterPublicationRefresh:
 
     @staticmethod
     def receipt(state: str, *, phase: str | None = None, head: str = "b" * 40) -> dict[str, Any]:
-        """Build a complete worker publication result."""
+        """Build publication facts without their source ownership metadata."""
         return {
             "publication_state": state,
             "head_sha": head,
@@ -7065,6 +7065,81 @@ class TestWriterPublicationRefresh:
             "pushed": state in {"published", "remote_at_source"},
             "refresh_phase": phase,
         }
+
+    @pytest.mark.parametrize("state", ["published", "remote_at_source", "remote_changed"])
+    def test_complete_worker_result_preserves_publication_and_source_identity(
+        self, make_ctx: Any, make_work_item: Any, state: str
+    ) -> None:
+        """Completion accepts source metadata before the coordinator changes state."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.branch = "9-auto-impl"
+        item.worktree = "/tmp/wt"
+        _prepared_writer(item)
+        binding = _writer_binding(item, revision="b" * 40)
+        source_receipt = _writer_receipt(item, binding)
+        value = {
+            **self.receipt(state),
+            "source_workspace": binding.to_dict(),
+            "source_receipt": source_receipt.to_dict(),
+        }
+
+        stage.on_job_done(item, JobResult(ok=state != "remote_changed", value=value), ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        if state == "remote_changed":
+            assert outcome.disposition is Disposition.RETRY
+            request = stage.step(item, ctx)
+            assert isinstance(request, JobRequest)
+            assert isinstance(request.job, GitJob)
+            assert request.job.workspace == binding
+            assert request.job.kwargs["writer_refresh"] == {
+                "phase": "rebase",
+                "source_sha": "b" * 40,
+                "expected_remote_sha": "c" * 40,
+            }
+            assert ctx.github.mutation_log == []
+        else:
+            assert outcome.disposition is Disposition.ADVANCE
+            assert item.pr == 1001
+        assert item.payload["_impl_source_revision"] == "b" * 40
+        assert item.payload["_impl_source_receipt"] == source_receipt
+        assert item.payload["_impl_source_workspace"] == binding.to_dict()
+        assert "source_workspace" in value
+        assert "source_receipt" in value
+
+    @pytest.mark.parametrize("invalid", ["source_receipt", "publication_field"])
+    def test_complete_worker_result_rejects_invalid_ownership_or_publication(
+        self, make_ctx: Any, make_work_item: Any, invalid: str
+    ) -> None:
+        """Source metadata cannot hide invalid ownership or extra publication fields."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.branch = "9-auto-impl"
+        item.worktree = "/tmp/wt"
+        _prepared_writer(item)
+        binding = _writer_binding(item, revision="b" * 40)
+        value = {
+            **self.receipt("published"),
+            "source_workspace": binding.to_dict(),
+            "source_receipt": _writer_receipt(item, binding).to_dict(),
+        }
+        if invalid == "source_receipt":
+            value["source_receipt"]["revision"] = "c" * 40
+        else:
+            value["unexpected"] = True
+
+        stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "commit_push_refresh_invalid"
+        )
+        assert ctx.github.mutation_log == []
 
     def test_first_remote_change_schedules_exact_writer_refresh(
         self, make_ctx: Any, make_work_item: Any
