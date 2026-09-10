@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
 from hephaestus.automation.mnemosyne_learning_preparation import MnemosynePluginValidator
 from hephaestus.automation.mnemosyne_validator_dependencies import (
     _digests,
@@ -60,6 +61,11 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
         "[tool.uv.sources]\nlocked-fixture = "
         '{ path = "wheels/locked_fixture-1.0-py3-none-any.whl" }\n'
     )
+    (source / ".markdownlint.yaml").write_text("{}\n")
+    skills = source / "skills"
+    skills.mkdir()
+    lesson = skills / "lesson.md"
+    lesson.write_text("# Lesson\n")
     scripts = source / "scripts"
     scripts.mkdir()
     with socket.socket() as listener:
@@ -137,17 +143,19 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
 
         def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             commands.append(argv)
-            final = argv[0] == "/usr/bin/sandbox-exec" and argv[-1] != "/usr/bin/true"
             environment = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
+            validator_argv = [str(environment / "bin/python"), "scripts/validate_plugins.py"]
+            validator_run = argv[0] == "/usr/bin/sandbox-exec" and argv[3:] == validator_argv
             artifacts = (
-                _digests(environment.parent, Path(sys.base_prefix).resolve()) if final else ()
+                _digests(environment.parent, Path(sys.base_prefix).resolve())
+                if validator_run
+                else ()
             )
             result = run_learning_subprocess(argv, **kwargs)
-            if final and result.returncode:
+            if validator_run and result.returncode:
                 assert not (Path(kwargs["env"]["TMPDIR"]) / "validator-sentinel").exists()
             assert result.returncode == 0, result.stderr
-            if final:
-                assert argv[3:] == [str(environment / "bin/python"), "scripts/validate_plugins.py"]
+            if validator_run:
                 sentinel = Path(kwargs["env"]["TMPDIR"]) / "validator-sentinel"
                 assert json.loads(sentinel.read_text()) == {"wheel": 42, "prefix": str(environment)}
                 assert _digests(environment.parent, Path(sys.base_prefix).resolve()) == artifacts
@@ -155,7 +163,16 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
             return result
 
         evidence = MnemosynePluginValidator(runner=runner).validate(source)
-        assert evidence == (" ".join(commands[-1][3:]),)
+        assert evidence == (
+            " ".join(commands[-2][3:]),
+            " ".join(commands[-1][3:]),
+        )
+        lesson.write_text("This text has no heading.\n")
+        try:
+            with pytest.raises(LearnDeliveryError, match="learning markdownlint failed"):
+                MnemosynePluginValidator().validate(source)
+        finally:
+            lesson.write_text("# Lesson\n")
         assert subprocess.check_output(["git", "status", "--porcelain"], cwd=source) == b""
         with pytest.raises(TimeoutError):
             listener.accept()
