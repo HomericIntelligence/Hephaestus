@@ -210,10 +210,16 @@ CI. Nightly CI runs the remaining functional, package, shell, and coverage
 tests.
 
 If you manually rebase a branch or resolve a conflict, run each affected test
-again before you push. The test result must apply to the final pushed head. If
-you run the full locked local suite, run it after the last rebase. Run it again
-only if the branch head changes. The checks in [Your first day](#your-first-day)
-verify the development environment. They do not verify a later branch change.
+again before you push. The test result must apply to the final pushed head. Run
+the full locked local suite after the last rebase and before you push:
+
+```bash
+uv run --locked pytest tests/unit tests/integration --override-ini="addopts=" -v --strict-markers -m "not performance and not contract and not artifact and not codex_release_artifact"
+```
+
+Run this suite again only if the branch head changes. The checks in
+[Your first day](#your-first-day) verify the development environment. They do
+not verify a later branch change.
 
 ### Test environment requirements
 
