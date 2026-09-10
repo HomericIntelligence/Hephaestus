@@ -1616,11 +1616,17 @@ def _git_exec_path_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     developer_git.parent.mkdir()
     developer_git.write_text("#!/bin/sh\n", encoding="utf-8")
     developer_git.chmod(0o755)
+    system_config = toolchain / "usr" / "share" / "git-core" / "gitconfig"
+    system_config.parent.mkdir(parents=True)
+    system_config.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
+    system_config.chmod(0o644)
     for directory in (
         toolchain,
         toolchain / "usr",
         toolchain / "usr" / "libexec",
         git_exec_path,
+        toolchain / "usr" / "share",
+        system_config.parent,
     ):
         directory.chmod(0o755)
     return system_git, toolchain, git_exec_path, developer_git
@@ -1715,9 +1721,13 @@ class TestHostVerificationGitExecPath:
             ),
             patch(f"{_WP}._run_bounded_git_output", return_value=bounded) as probe,
         ):
-            selected_git, selected_exec_path = _validated_git_exec_path()
+            selected_git, selected_exec_path, selected_system_config = _validated_git_exec_path()
 
-        assert (selected_git, selected_exec_path) == (str(developer_git), git_exec_path)
+        assert (selected_git, selected_exec_path, selected_system_config) == (
+            str(developer_git),
+            git_exec_path,
+            toolchain / "usr" / "share" / "git-core" / "gitconfig",
+        )
         resolver.assert_called_once_with("git", path=os.defpath)
         probe.assert_called_once_with(
             (str(system_git), "--exec-path"),
@@ -1739,6 +1749,7 @@ class TestHostVerificationGitExecPath:
         scratch = tmp_path / "scratch"
         runtime = tmp_path / "runtime"
         pi_smoke_logs = source / "pi-smoke-logs"
+        system_config = toolchain / "usr" / "share" / "git-core" / "gitconfig"
 
         profile = _host_verification_profile(
             source=source,
@@ -1749,19 +1760,163 @@ class TestHostVerificationGitExecPath:
             executable=Path("/usr/bin/uv"),
             git_executable=developer_git,
             git_exec_path=git_exec_path,
+            git_system_config=system_config,
         )
 
         exact_read = f'  (subpath "{git_exec_path.resolve()}")'
         root_read = f'  (subpath "{toolchain.resolve()}")'
         metadata = f'(allow file-read-metadata (path-ancestors "{git_exec_path.resolve()}"))'
+        config_metadata = f'(allow file-read-metadata (path-ancestors "{system_config.resolve()}"))'
         assert exact_read in profile
         assert f'  (literal "{developer_git.resolve()}")' in profile
+        assert f'  (literal "{system_config.resolve()}")' in profile
+        share_path = (toolchain / "usr" / "share").resolve()
+        assert f'  (subpath "{share_path}")' not in profile
         assert root_read not in profile
         assert metadata in profile
+        assert config_metadata in profile
         assert '  (subpath "/Library")' not in profile
         assert '  (subpath "/Applications")' not in profile
         assert '  (subpath "/Library/Developer/CommandLineTools")' not in profile
         assert '  (subpath "/Applications/Xcode.app/Contents/Developer")' not in profile
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
+    def test_immutable_git_reads_validated_system_config(self, pool: WorkerPool) -> None:
+        """Git can read its validated system configuration in the sandbox."""
+        checkout = Path.cwd().resolve()
+        head = _git(checkout, "rev-parse", "HEAD")
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        program = (
+            "import os, subprocess; from pathlib import Path; "
+            "target = Path(os.environ['TMPDIR']) / 'git-config-probe'; "
+            "target.mkdir(); "
+            "subprocess.run(('git', 'init', '-q'), cwd=target, check=True)"
+        )
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=("uv", "run", "python", "-I", "-c", program),
+            timeout_s=60,
+            expected_head_sha=head,
+            immutable_source=True,
+        )
+
+        result = pool._run_build_test(job)
+
+        assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
+        assert result.value["head_sha"] == head
+        assert result.value["immutable_source"] is True
+        assert _immutable_runner_checkout_state(checkout) == checkout_before
+
+    def test_active_sandbox_git_reads_validated_system_config(self, tmp_path: Path) -> None:
+        """Git can initialize a repository in the active host sandbox."""
+        target = tmp_path / "git-config-probe"
+        target.mkdir()
+
+        subprocess.run(("git", "init", "-q"), cwd=target, check=True)
+
+        assert (target / ".git").is_dir()
+
+    def test_missing_system_git_config_is_stably_unavailable(
+        self, safe_git_exec_tmp_path: Path
+    ) -> None:
+        """A missing exact system Git configuration stops host verification."""
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
+        (toolchain / "usr" / "share" / "git-core" / "gitconfig").unlink()
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unavailable$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    def test_symlinked_system_git_config_is_rejected(self, safe_git_exec_tmp_path: Path) -> None:
+        """The exact system Git configuration cannot be a symbolic link."""
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
+        system_config = toolchain / "usr" / "share" / "git-core" / "gitconfig"
+        target = safe_git_exec_tmp_path / "gitconfig-target"
+        target.write_text("[core]\n", encoding="utf-8")
+        system_config.unlink()
+        system_config.symlink_to(target)
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    @pytest.mark.parametrize("writable_part", ("file", "parent"))
+    def test_writable_system_git_config_path_is_rejected(
+        self, safe_git_exec_tmp_path: Path, writable_part: str
+    ) -> None:
+        """The configuration file and its parents must not be broadly writable."""
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
+        system_config = toolchain / "usr" / "share" / "git-core" / "gitconfig"
+        unsafe_path = system_config if writable_part == "file" else system_config.parent
+        unsafe_path.chmod(0o777)
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
+
+    def test_non_file_system_git_config_is_rejected(self, safe_git_exec_tmp_path: Path) -> None:
+        """The system Git configuration must be a regular file."""
+        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
+            safe_git_exec_tmp_path
+        )
+        system_config = toolchain / "usr" / "share" / "git-core" / "gitconfig"
+        system_config.unlink()
+        system_config.mkdir()
+        bounded = _BoundedGitOutput(
+            text=f"{git_exec_path}\n",
+            sha256="0" * 64,
+            byte_count=len(str(git_exec_path)) + 1,
+        )
+        with (
+            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
+            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ),
+        ):
+            _validated_git_exec_path()
 
     @pytest.mark.parametrize(
         "probe_error",
@@ -3020,7 +3175,11 @@ class TestWorkerPoolSubmitComplete:
             patch(f"{_WP}.sys.platform", "darwin"),
             patch(
                 f"{_WP}._validated_git_exec_path",
-                return_value=("/usr/bin/git", tmp_path / "git-core"),
+                return_value=(
+                    "/usr/bin/git",
+                    tmp_path / "git-core",
+                    tmp_path / "gitconfig",
+                ),
             ),
             patch(
                 f"{_WP}._verifier_owned_runtime_environment",
@@ -3029,7 +3188,7 @@ class TestWorkerPoolSubmitComplete:
             patch(
                 f"{_WP}._host_verification_command",
                 side_effect=lambda **kwargs: kwargs["argv"],
-            ),
+            ) as host_command,
             patch(f"{_WP}._quota_backed_scratch", side_effect=disposable_scratch),
             patch(
                 f"{_WP}._quota_backed_pi_smoke_logs",
@@ -3046,6 +3205,7 @@ class TestWorkerPoolSubmitComplete:
             "platform": "darwin",
             "status": "passed",
         }
+        assert host_command.call_args.kwargs["git_system_config"] == (tmp_path / "gitconfig")
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
     def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
@@ -3374,6 +3534,7 @@ class TestWorkerPoolSubmitComplete:
             executable=Path("/usr/bin/uv"),
             git_executable=Path("/usr/bin/git"),
             git_exec_path=tmp_path / "git-core",
+            git_system_config=tmp_path / "gitconfig",
         )
 
         source_entry = f'(subpath "{source.resolve()}")'
@@ -3513,6 +3674,7 @@ class TestWorkerPoolSubmitComplete:
                 pi_smoke_logs=pi_smoke_logs,
                 git_executable=Path("/usr/bin/git"),
                 git_exec_path=tmp_path / "git-core",
+                git_system_config=tmp_path / "gitconfig",
             )
 
         assert "limit -f 131072" in command[2]

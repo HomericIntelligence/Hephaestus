@@ -2106,6 +2106,23 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
+                "review_worker_pool_git_exec_path",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    (
+                        "tests/unit/automation/pipeline/test_worker_pool.py::"
+                        "TestHostVerificationGitExecPath::"
+                        "test_active_sandbox_git_reads_validated_system_config"
+                    ),
+                    "-q",
+                    "--tb=short",
+                ),
+            ),
+            (
                 "review_stalled_consumer_verification",
                 (
                     "uv",
@@ -2328,6 +2345,30 @@ class TestPrReviewStageStep:
         assert kept_path in changed_pytest_specs[0].argv
         assert deleted_path not in changed_pytest_specs[0].argv
 
+    def test_changed_worker_pool_runs_host_git_boundary(self) -> None:
+        """A worker-pool change runs the fixed Git boundary regression."""
+        path = "tests/unit/automation/pipeline/test_worker_pool.py"
+        specs = _host_verification_specs(
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        )
+
+        spec = next(spec for spec in specs if spec.descr == "review_worker_pool_git_exec_path")
+
+        assert spec.changed_path == path
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                f"{path}::TestHostVerificationGitExecPath::"
+                "test_active_sandbox_git_reads_validated_system_config"
+            ),
+            "-q",
+            "--tb=short",
+        )
+
     def test_changed_conftest_verifies_containing_directory_once(self) -> None:
         """A support-only conftest change must not be a no-tests pytest target."""
         directory = "tests/unit/automation/pipeline/stages"
@@ -2519,6 +2560,7 @@ class TestPrReviewStageStep:
             pi_smoke_logs: Path,
             git_executable: Path,
             git_exec_path: Path,
+            git_system_config: Path,
         ) -> tuple[str, ...]:
             del (
                 source,
@@ -2528,6 +2570,7 @@ class TestPrReviewStageStep:
                 pi_smoke_logs,
                 git_executable,
                 git_exec_path,
+                git_system_config,
             )
             assert argv == (sys.executable, *spec.argv[1:])
             return (sys.executable, "-m", "pytest", *spec.argv[3:])
@@ -2559,7 +2602,11 @@ class TestPrReviewStageStep:
                 patch(f"{module}._trusted_uv_executable", return_value=sys.executable),
                 patch(
                     f"{module}._validated_git_exec_path",
-                    return_value=(sys.executable, tmp_path / "git-core"),
+                    return_value=(
+                        sys.executable,
+                        tmp_path / "git-core",
+                        tmp_path / "gitconfig",
+                    ),
                 ),
                 patch(f"{module}._trusted_git_executable", return_value=sys.executable),
                 patch(
