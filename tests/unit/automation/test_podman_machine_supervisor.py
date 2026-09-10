@@ -16,7 +16,10 @@ from hephaestus.automation.podman_machine_supervisor import (
 
 
 def _inspect(
-    *, state: str, provider: str = "applehv", last_up: str = "2026-09-07T01:02:03Z"
+    *,
+    state: str,
+    provider: str = "applehv",
+    last_up: str | None = "2026-09-07T01:02:03Z",
 ) -> str:
     """Return one representative Podman machine inspection document."""
     return json.dumps(
@@ -239,11 +242,16 @@ def test_start_failure_captures_serial_log_and_stops(tmp_path: Path) -> None:
     assert [command for command, _timeout in runner.calls] == [inspect_command, start_command]
 
 
-def test_rejects_running_machine_without_last_up(tmp_path: Path) -> None:
-    """A running state without LastUp is not sufficient readiness evidence."""
+@pytest.mark.parametrize("last_up", ["", None])
+def test_rejects_running_machine_without_last_up(tmp_path: Path, last_up: str | None) -> None:
+    """A running state needs a nonempty string LastUp value."""
     inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
     runner = CommandHarness(
-        {inspect_command: [_result(inspect_command, stdout=_inspect(state="running", last_up=""))]}
+        {
+            inspect_command: [
+                _result(inspect_command, stdout=_inspect(state="running", last_up=last_up))
+            ]
+        }
     )
 
     with pytest.raises(PodmanMachineError, match="LastUp"):

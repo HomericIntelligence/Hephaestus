@@ -333,7 +333,8 @@ def prepare_podman_machine(
         )
 
     state = str(document.get("State", "")).lower()
-    last_up = str(document.get("LastUp", "")).strip()
+    raw_last_up = document.get("LastUp")
+    last_up = raw_last_up.strip() if isinstance(raw_last_up, str) else ""
     if state != "running" or last_up in _EMPTY_LAST_UP:
         evidence = _failure_evidence(
             document,
