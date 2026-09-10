@@ -30,6 +30,7 @@ from hephaestus.agents.workspace import (
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
     operation_deadline,
+    operation_file_lock,
     remaining_operation_timeout,
 )
 from hephaestus.automation.implementation_writer import (
@@ -1916,7 +1917,7 @@ class SourceWorkspaceManager:
         new = _git(self.repo_root, "rev-parse", f"{revision}^{{commit}}").stdout.strip()
         ref = f"refs/heads/{self.guard_branch(item_number)}"
         old = expected or ("0" * 40)
-        with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+        with operation_file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
             result = _git(self.repo_root, "update-ref", ref, new, old, check=False)
         if result.returncode:
             raise SourceWorkspaceError("guard branch compare-and-swap failed")
@@ -1936,7 +1937,11 @@ class SourceWorkspaceManager:
         if deadline is not None:
             lock_options = {"blocking": False, "require_exclusive": True}
         try:
-            metadata_lock = file_lock(lock_path, **lock_options)
+            metadata_lock = (
+                file_lock(lock_path, **lock_options)
+                if deadline is not None
+                else operation_file_lock(lock_path)
+            )
             with metadata_lock:
                 self._replace_worktree_locked(
                     path,
@@ -2449,7 +2454,7 @@ class SourceWorkspaceManager:
         self, item_number: int, *, finalize_exact_successor: bool
     ) -> None:
         """Recover one pending transition before or after a writer handoff."""
-        with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+        with operation_file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
             self._reconcile_writer_transition_locked(
                 item_number,
                 finalize_exact_successor=finalize_exact_successor,
@@ -2548,7 +2553,7 @@ class SourceWorkspaceManager:
         self, journal: _ImplementationWriterTransitionJournal
     ) -> None:
         """Restore the exact predecessor after an incomplete replacement."""
-        with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
+        with operation_file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
             self._restore_transition_predecessor_locked(journal)
 
     def _restore_transition_predecessor_locked(

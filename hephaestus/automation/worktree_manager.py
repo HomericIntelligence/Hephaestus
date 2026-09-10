@@ -35,8 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.git_runtime import operation_file_lock, remaining_operation_timeout
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
-from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.worktree_identity import source_worktree_name
 
@@ -423,7 +423,7 @@ class WorktreeManager:
         if self._base_branch_override_source == "loop_trunk":
             self._base_branch_override = None
             self._base_branch_override_source = None
-        with file_lock(self._git_metadata_lock_path()):
+        with operation_file_lock(self._git_metadata_lock_path()):
             try:
                 run(
                     ["git", *self._remote_git_config, "fetch", "origin"],
@@ -627,7 +627,7 @@ class WorktreeManager:
                 # The worker owns the source-lane lock for the complete
                 # handoff. Do not acquire it here: nested flock calls can
                 # release the worker's lock when this scope exits.
-                with file_lock(self._git_metadata_lock_path()):
+                with operation_file_lock(self._git_metadata_lock_path()):
                     direct_predecessor = False
                     direct_target_ref_revision: str | None = None
                     if source_lane == "impl" and not adopting_implementation_writer:
@@ -859,8 +859,10 @@ class WorktreeManager:
 
             except (
                 BranchWorktreeOwnedError,
+                InterruptedError,
                 RemoteGitRefreshError,
                 WorktreeCreationReceiptError,
+                subprocess.TimeoutExpired,
             ):
                 raise
             except Exception as e:
@@ -880,7 +882,7 @@ class WorktreeManager:
         key = source_worktree_name(issue_number, "review")
         path = self.base_dir / key
         try:
-            with file_lock(self._git_metadata_lock_path()):
+            with operation_file_lock(self._git_metadata_lock_path()):
                 if path.exists():
                     if not is_clean_working_tree(path):
                         raise RuntimeError(f"deterministic review worktree is dirty: {path}")
@@ -888,6 +890,8 @@ class WorktreeManager:
                 self._add_isolated_worktree_for_branch(path, branch_name, timeout=timeout)
             self.worktrees[key] = path
             return path
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as exc:
             raise RuntimeError(f"Failed to create worktree: {exc}") from exc
 
@@ -945,7 +949,7 @@ class WorktreeManager:
         if refresh_base:
             self.refresh_base_branch(timeout=timeout)
         try:
-            with file_lock(self._git_metadata_lock_path()):
+            with operation_file_lock(self._git_metadata_lock_path()):
                 worktree_key, worktree_path = self._next_isolated_worktree_slot(
                     issue_number, isolated_generation, timeout=timeout
                 )
@@ -961,6 +965,8 @@ class WorktreeManager:
                 worktree_path,
             )
             return worktree_path
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as e:
             # Do not remove this path on failure. Another coordinator may have
             # created it while we waited for the metadata lock, or an
@@ -1484,30 +1490,34 @@ class WorktreeManager:
                 check=False,
                 **_timeout_kw(timeout),
             )
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as e:
             logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
 
-        try:
-            # Fallback to direct directory removal.
-            if worktree_path.exists():
-                try:
-                    shutil.rmtree(worktree_path)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to remove worktree directory %s directly: %s",
-                        worktree_path,
-                        e,
-                    )
-        finally:
+        remaining_operation_timeout(None)
+        if worktree_path.exists():
             try:
-                run(
-                    ["git", "worktree", "prune"],
-                    cwd=self.repo_root,
-                    check=False,
-                    **_timeout_kw(timeout),
-                )
+                shutil.rmtree(worktree_path)
+            except (InterruptedError, subprocess.TimeoutExpired):
+                raise
             except Exception as e:
-                logger.debug("git worktree prune failed: %s", e)
+                logger.warning(
+                    "Failed to remove worktree directory %s directly: %s",
+                    worktree_path,
+                    e,
+                )
+        try:
+            run(
+                ["git", "worktree", "prune"],
+                cwd=self.repo_root,
+                check=False,
+                **_timeout_kw(timeout),
+            )
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
+        except Exception as e:
+            logger.debug("git worktree prune failed: %s", e)
 
     def _add_authenticated_adopted_implementation_writer(  # noqa: C901
         self,
@@ -2075,12 +2085,14 @@ class WorktreeManager:
                 if force:
                     cmd.append("--force")
 
-                with file_lock(self._git_metadata_lock_path()):
+                with operation_file_lock(self._git_metadata_lock_path()):
                     run(cmd, cwd=self.repo_root, **_timeout_kw(timeout))
 
                 del self.worktrees[issue_number]
                 logger.info("Removed worktree for issue #%s", issue_number)
 
+            except (InterruptedError, subprocess.TimeoutExpired):
+                raise
             except Exception as e:
                 raise RuntimeError(f"Failed to remove worktree: {e}") from e
 
