@@ -209,6 +209,12 @@ Use the paths for your changed tests. `just test` runs the fast selection used b
 CI. Nightly CI runs the remaining functional, package, shell, and coverage
 tests.
 
+If you manually rebase a branch or resolve a conflict, run each affected test
+again before you push. The test result must apply to the final pushed head. If
+you run the full locked local suite, run it after the last rebase. Run it again
+only if the branch head changes. The checks in [Your first day](#your-first-day)
+verify the development environment. They do not verify a later branch change.
+
 ### Test environment requirements
 
 The unit-test suite executes a small number of real subprocesses and therefore

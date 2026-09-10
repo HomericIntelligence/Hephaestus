@@ -486,6 +486,12 @@ The command MUST collect those tests and report success. Do not require a full
 local pytest suite before PR creation. Required CI/CD runs the full unit and
 integration suites and applies the coverage gate.
 
+If a manual rebase or conflict resolution changes a file, run each affected
+test again before the push. Test evidence must apply to the final pushed head.
+If you use a full locked local suite, run it after the last rebase. Run it again
+only if the branch head changes. Keep environment setup checks separate from
+change verification.
+
 ```bash
 # Run all unit tests
 uv run pytest tests/unit -v
