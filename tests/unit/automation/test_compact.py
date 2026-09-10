@@ -17,7 +17,7 @@ class TestCompactSession:
     def _stable_checkout_identity(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "hephaestus.automation.agent_config._checkout_identity",
-            lambda _cwd: "test-checkout",
+            lambda _cwd, *, remaining_timeout=None: "test-checkout",
         )
 
     def test_compact_session_sends_command_via_stdin(self, tmp_path: Path) -> None:
