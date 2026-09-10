@@ -134,6 +134,7 @@ def test_coordinator_passes_selected_podman_machine_to_worker_pool(
     monkeypatch.setattr(worker_pool_mod, "WorkerPool", _RecordingWorkerPool)
     config = replace(_config(tmp_path), podman_machine=machine)
     coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
+    assert isinstance(coordinator.pool, _RecordingWorkerPool)
     assert coordinator.pool.podman_machine == machine
 
 

@@ -1,7 +1,6 @@
 """The selected Podman connection reaches only the verified local CI runner."""
 
 import queue
-import subprocess
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -31,10 +30,16 @@ def test_explicit_connection_reaches_only_verified_runner(
         verified_runner_source_revision="a" * 40 if verified else None,
     )
     try:
-        with patch(
-            "hephaestus.automation.pipeline.worker_pool.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 0, "ok", ""),
-        ) as run:
+        with (
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.build_verified_runner_argv",
+                return_value=job.argv,
+            ),
+            patch("hephaestus.automation.pipeline.worker_pool.run_subprocess") as run,
+        ):
+            run.return_value.returncode = 0
+            run.return_value.stdout = "ok"
+            run.return_value.stderr = ""
             result = pool._run_build_test(job)
         assert result.ok
         env = run.call_args.kwargs["env"]

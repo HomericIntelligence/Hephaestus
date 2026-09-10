@@ -752,7 +752,12 @@ class TestSubmitEdges:
         coordinator = _coordinator(tmp_path, monkeypatch, rate_guard_enabled=True)
         pool = coordinator.pool
         assert isinstance(pool, FakeWorkerPool)
-        job = GitJob(repo="repo-a", op="clone", timeout_s=5, kwargs={"repo": "o/r", "dest": "d"})
+        job = GitJob(
+            repo="repo-a",
+            op="clone",
+            timeout_s=5,
+            kwargs={"repo": "o/r", "dest": str(tmp_path / "clone")},
+        )
 
         coordinator._submit(
             claim_test_item(coordinator, _item()), JobRequest(job, on_done_state="D")

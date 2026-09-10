@@ -715,18 +715,8 @@ def build_config(
     )
 
 
-def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
-    """Admit the selected roles and run the queue with one configuration."""
-    args = parse_args(argv, profile=profile)
-    configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose, args.log_format, quiet=args.quiet, log_file=args.log_file)
-    from hephaestus.automation.runtime_diagnostics import (
-        require_virtual_environment,
-        runtime_identity,
-    )
-
-    identity = runtime_identity()
-    LOG.info("Runtime identity: %s", identity, extra={"runtime_identity": identity})
+def _prepare_host_runtime(args: argparse.Namespace) -> int | None:
+    """Check the selected host runtime before queue dispatch."""
     if args.podman_machine:
         try:
             prepare_podman_machine(
@@ -742,10 +732,28 @@ def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
         and sys.platform == "darwin"
         and selected.intersection({StageName.IMPLEMENTATION, StageName.MERGE_WAIT})
     ):
+        from hephaestus.automation.runtime_diagnostics import require_virtual_environment
+
         try:
             require_virtual_environment(Path(sys.prefix))
         except RuntimeError as exc:
             return _error_exit(args, str(exc))
+    return None
+
+
+def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
+    """Admit the selected roles and run the queue with one configuration."""
+    args = parse_args(argv, profile=profile)
+    configure_github_throttle_from_args(args)
+    _setup_logging(args.verbose, args.log_format, quiet=args.quiet, log_file=args.log_file)
+    from hephaestus.automation.runtime_diagnostics import runtime_identity
+
+    identity = runtime_identity()
+    LOG.info("Runtime identity: %s", identity, extra={"runtime_identity": identity})
+    preflight_exit = _prepare_host_runtime(args)
+    if preflight_exit is not None:
+        return preflight_exit
+    selected = set(args.stages)
     active_roles = tuple(
         role
         for role, needed in (
