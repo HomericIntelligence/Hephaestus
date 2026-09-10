@@ -53,6 +53,7 @@ import os
 import re
 import subprocess
 import uuid
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 
@@ -337,9 +338,10 @@ def session_name(repo: str, issue: int | str, agent: str, model: str | None = No
     return f"{base}_{model_token}" if model_token else base
 
 
-def _checkout_identity(cwd: Path) -> str:
+def _checkout_identity(cwd: Path, *, remaining_timeout: Callable[[], int] | None = None) -> str:
     """Return a collision-resistant identity shared by one Git worktree family."""
     resolved_cwd = cwd.resolve()
+    timeout = min(5, remaining_timeout()) if remaining_timeout is not None else 5
     try:
         result = subprocess.run(
             [
@@ -354,11 +356,14 @@ def _checkout_identity(cwd: Path) -> str:
             capture_output=True,
             env=_repo_scoped_git_env(),
             text=True,
-            timeout=5,
+            timeout=timeout,
         )
         identity_path = Path(result.stdout.strip()).resolve()
     except (OSError, subprocess.SubprocessError):
         identity_path = resolved_cwd
+    finally:
+        if remaining_timeout is not None:
+            remaining_timeout()
     return sha256(os.fsencode(identity_path)).hexdigest()
 
 
@@ -369,6 +374,7 @@ def session_uuid(
     model: str | None = None,
     *,
     cwd: Path | None = None,
+    remaining_timeout: Callable[[], int] | None = None,
 ) -> str:
     """Return the deterministic UUIDv5 session ID for one artifact and checkout.
 
@@ -381,10 +387,14 @@ def session_uuid(
     and therefore keep one resumable session lineage. When callers omit
     ``cwd``, the process working directory supplies the checkout identity;
     session IDs are never unscoped by accident.
+
+    The optional callback checks the operation deadline and cancellation
+    before and after Git discovery. Independent callers use a five-second
+    Git timeout.
     """
     name = session_name(repo, issue, agent, model)
     checkout_cwd = cwd if cwd is not None else Path.cwd()
-    name = f"{name}@{_checkout_identity(checkout_cwd)}"
+    name = f"{name}@{_checkout_identity(checkout_cwd, remaining_timeout=remaining_timeout)}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
 
@@ -417,7 +427,9 @@ def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"
 
 
-def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
+def _registered_worktree_roots(
+    cwd: Path, *, remaining_timeout: Callable[[], int] | None = None
+) -> tuple[Path, ...]:
     """Return worktree roots registered to cwd's exact Git repository.
 
     The explicit invocation path is authoritative. Ambient Git repository
@@ -426,6 +438,7 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
     """
     resolved_cwd = cwd.resolve()
     roots = {resolved_cwd}
+    timeout = min(5, remaining_timeout()) if remaining_timeout is not None else 5
     try:
         result = subprocess.run(
             [
@@ -441,10 +454,13 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
             capture_output=True,
             env=_repo_scoped_git_env(),
             text=True,
-            timeout=5,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return (resolved_cwd,)
+    finally:
+        if remaining_timeout is not None:
+            remaining_timeout()
 
     for field in result.stdout.split("\0"):
         if field.startswith("worktree "):
@@ -452,19 +468,28 @@ def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
     return tuple(sorted(roots, key=str))
 
 
-def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
+def resolve_session_jsonl_path(
+    uuid_str: str, cwd: Path, *, remaining_timeout: Callable[[], int] | None = None
+) -> Path:
     """Resolve an existing transcript within cwd's registered worktree family.
 
     The exact cwd path remains the create location when no transcript exists.
     Existing transcripts are selected only from worktrees registered to the
     same Git repository, with lexical ordering making historical duplicates
     deterministic.
+
+    The optional callback checks the operation deadline and cancellation
+    before and after Git discovery. Independent callers use a five-second
+    Git timeout.
     """
     # ``uuid_str`` is checkout-scoped by session_uuid. This matters before any
     # registered-worktree lookup: Claude's lossy cwd encoding can make the
     # expected parent directory belong to more than one unrelated checkout.
     expected = session_jsonl_path(uuid_str, cwd)
-    candidates = {session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)}
+    candidates = {
+        session_jsonl_path(uuid_str, root)
+        for root in _registered_worktree_roots(cwd, remaining_timeout=remaining_timeout)
+    }
     existing = sorted(
         (candidate for candidate in candidates if candidate.is_file()),
         key=str,

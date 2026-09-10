@@ -19,7 +19,11 @@ def test_registered_worktree_resolves_repo_root_transcript(
     repo_root = tmp_path / "owner-a" / "Hephaestus"
     worktree = repo_root / "build" / ".worktrees" / "issue-2284"
     worktree.mkdir(parents=True)
-    monkeypatch.setattr(agent_config, "_checkout_identity", lambda _cwd: "checkout-family")
+    monkeypatch.setattr(
+        agent_config,
+        "_checkout_identity",
+        lambda _cwd, *, remaining_timeout=None: "checkout-family",
+    )
     sid = session_uuid("Hephaestus", 2284, "plan-reviewer", "fable", cwd=repo_root)
 
     transcript = session_jsonl_path(sid, repo_root)

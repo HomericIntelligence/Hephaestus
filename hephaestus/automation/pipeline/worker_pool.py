@@ -382,10 +382,15 @@ def _invoke_claude_commit_message(
     pi_dir: Path | None,
 ) -> str:
     """Run a commit-message request from the approved worker adapter."""
-    remaining_s = cast(float, git_utils.remaining_operation_timeout(timeout))
-    if remaining_s < 1:
-        raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
-    timeout = min(timeout, int(remaining_s))
+
+    def remaining_timeout() -> int:
+        """Check the active Git operation before session or provider work."""
+        remaining_s = cast(float, git_utils.remaining_operation_timeout(timeout))
+        if remaining_s < 1:
+            raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
+        return min(timeout, int(remaining_s))
+
+    timeout = remaining_timeout()
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
             agent,
@@ -411,6 +416,7 @@ def _invoke_claude_commit_message(
         model=model,
         cwd=worktree_path,
         timeout=timeout,
+        remaining_timeout=remaining_timeout,
         output_format="text",
         allowed_tools="Read,Glob,Grep",
     )
@@ -4958,6 +4964,7 @@ class WorkerPool:
                     require_new_session=job.require_new_session,
                     cwd=cwd,
                     timeout=remaining_timeout(),
+                    remaining_timeout=remaining_timeout,
                     output_format=job.output_format,
                     allowed_tools=scope.allowed_tools,
                     permission_mode=scope.permission_mode,
