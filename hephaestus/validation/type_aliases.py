@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, format_output
@@ -59,18 +60,48 @@ def _update_string_state(
     return in_string, string_delimiter
 
 
+@dataclass
+class _ScanResult:
+    """Keep findings and read failures separate."""
+
+    violations: list[tuple[int, str, str, str]]
+    read_errors: list[str]
+
+
+@dataclass
+class _BatchResult:
+    """Collect diagnostics for all selected files."""
+
+    violations: list[str]
+    read_errors: list[str]
+
+    @property
+    def exit_code(self) -> int:
+        return int(bool(self.violations or self.read_errors))
+
+
 def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
     """Find type alias shadowing violations in a Python file.
 
     Args:
-        file_path: Path to Python file to check.
+        file_path: Path to the Python file to check.
 
     Returns:
-        List of tuples ``(line_number, line_content, alias, target)`` for each
-        violation.
+        Tuples of line number, line content, alias, and target. A read failure
+        prints a warning and returns findings collected before the failure.
+        A missing file returns an empty list.
 
     """
+    result = _scan_file(file_path)
+    for error in result.read_errors:
+        print(f"Warning: {error}", file=sys.stderr)
+    return result.violations
+
+
+def _scan_file(file_path: Path) -> _ScanResult:
+    """Scan one file and retain findings if a read fails."""
     violations: list[tuple[int, str, str, str]] = []
+    read_errors: list[str] = []
     pattern = re.compile(r"^([A-Z][a-zA-Z0-9_]*)\s*=\s*([A-Z][a-zA-Z0-9_]*)\s*(?:#.*)?$")
 
     try:
@@ -98,9 +129,9 @@ def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
                         violations.append((line_num, stripped, alias, target))
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
+        read_errors.append(f"Could not read {file_path}: {e}")
 
-    return violations
+    return _ScanResult(violations, read_errors)
 
 
 def format_error(file_path: Path, line_num: int, line: str, alias: str, target: str) -> str:
@@ -132,34 +163,44 @@ def check_files(file_paths: list[Path]) -> tuple[int, list[str]]:
         file_paths: List of file or directory paths to check.
 
     Returns:
-        Tuple of ``(exit_code, error_messages)``.
+        Tuple of ``(exit_code, error_messages)``. Exit code 1 means that a
+        violation or read failure occurred. Diagnostics include both kinds.
 
     """
-    all_violations: list[str] = []
+    result = _check_files(file_paths)
+    return result.exit_code, result.violations + result.read_errors
+
+
+def _check_files(file_paths: list[Path]) -> _BatchResult:
+    """Scan each selected file once and collect all diagnostics."""
+    result = _BatchResult([], [])
 
     files_to_check: list[Path] = []
     for path in file_paths:
-        if path.is_dir():
-            files_to_check.extend(path.rglob("*.py"))
-        elif path.suffix == ".py":
-            files_to_check.append(path)
+        try:
+            if path.is_dir():
+                files_to_check.extend(path.rglob("*.py"))
+            elif path.suffix == ".py":
+                files_to_check.append(path)
+        except OSError as error:
+            result.read_errors.append(f"Could not read {path}: {error}")
 
     for file_path in files_to_check:
-        violations = detect_shadowing(file_path)
-        for line_num, line, alias, target in violations:
+        scan = _scan_file(file_path)
+        result.read_errors.extend(scan.read_errors)
+        for line_num, line, alias, target in scan.violations:
             error_msg = format_error(file_path, line_num, line, alias, target)
-            all_violations.append(error_msg)
+            result.violations.append(error_msg)
 
-    if all_violations:
-        return 1, all_violations
-    return 0, []
+    return result
 
 
 def main() -> int:
     """CLI entry point for type alias shadowing detection.
 
     Returns:
-        Exit code (0 if clean, 1 if violations found).
+        Exit code 0 for a complete scan without violations, or 1 for a
+        violation or read failure.
 
     """
     parser = create_validation_parser(
@@ -185,13 +226,18 @@ def main() -> int:
     if args.verbose and not args.json:
         print(f"Checking {len(args.paths)} path(s) for type alias shadowing...")
 
-    exit_code, errors = check_files(args.paths)
+    result = _check_files(args.paths)
+    exit_code = result.exit_code
+    errors = result.violations
 
     if args.json:
         report = {
             "paths": [str(p) for p in args.paths],
             "violations": errors,
             "violation_count": len(errors),
+            "read_errors": result.read_errors,
+            "read_error_count": len(result.read_errors),
+            "scan_complete": not result.read_errors,
             "exit_code": exit_code,
             "passed": exit_code == 0,
         }
@@ -201,6 +247,10 @@ def main() -> int:
     if errors:
         print("\n".join(errors), file=sys.stderr)
         print(f"\nFound {len(errors)} type alias shadowing violation(s)", file=sys.stderr)
+
+    if result.read_errors:
+        print("\n".join(result.read_errors), file=sys.stderr)
+        print(f"Scan incomplete: {len(result.read_errors)} read error(s)", file=sys.stderr)
 
     return exit_code
 
