@@ -316,6 +316,7 @@ REBASE_WAIT = "REBASE_WAIT"
 REBASE_AGENT_WAIT = "REBASE_AGENT_WAIT"
 REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
+_REBASE_AGENT_INFLIGHT = "rebase_agent_inflight"
 ADOPTED = "ADOPTED"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
@@ -2373,6 +2374,7 @@ class ImplementationStage(Stage):
             workspace = _existing_impl_workspace(item)
         except (KeyError, TypeError, ValueError):
             return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
+        item.payload[_REBASE_AGENT_INFLIGHT] = True
         return JobRequest(
             AgentJob(
                 repo=item.repo,
@@ -3425,7 +3427,7 @@ class ImplementationStage(Stage):
                 }
             return
 
-        if item.state == REBASE_AGENT_WAIT:
+        if item.payload.pop(_REBASE_AGENT_INFLIGHT, False):
             item.payload["rebase_agent_started"] = result.ok
             return
 
