@@ -79,6 +79,23 @@ def test_baked_console_scripts_do_not_depend_on_builder_source_tree() -> None:
     )
 
 
+def test_pre_commit_cache_keeps_one_absolute_path_between_stages() -> None:
+    """The runtime must use the absolute cache paths from the builder database."""
+    source = CONTAINERFILE.read_text(encoding="utf-8")
+    builder = source.split("FROM python-snapshot AS builder", maxsplit=1)[1].split(
+        "FROM python-snapshot", maxsplit=1
+    )[0]
+    runtime = source.rsplit("FROM python-snapshot", maxsplit=1)[1]
+
+    assert "PRE_COMMIT_HOME=/opt/pre-commit-cache" in builder
+    assert "PRE_COMMIT_HOME=/opt/pre-commit-cache" in runtime
+    assert "COPY --from=builder /opt/pre-commit-cache /opt/pre-commit-cache" in runtime
+    assert "chown -R ci:ci /opt/pre-commit-cache" in runtime
+    assert "chmod -R a+rwX /opt/pre-commit-cache" in runtime
+    assert "/root/.cache/pre-commit" not in runtime
+    assert "/home/ci/.cache/pre-commit" not in runtime
+
+
 def test_runtime_tools_follow_the_requested_build_architecture() -> None:
     """The image must select its executable artifacts for the build platform."""
     source = CONTAINERFILE.read_text(encoding="utf-8")
