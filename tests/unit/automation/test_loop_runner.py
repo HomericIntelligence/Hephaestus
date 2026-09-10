@@ -1225,10 +1225,10 @@ def test_update_plan_rejects_missing_issue_or_planning_scope(
 
 
 def test_selected_podman_machine_reaches_pipeline_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The successful preflight selection survives the configuration handoff."""
+    """A preview keeps the selection without changing the host machine state."""
     preflight = Mock()
     monkeypatch.setattr(loop_runner, "prepare_podman_machine", preflight)
     cfg = _capture_config(["--podman-machine", "hephaestus-ci", "--dry-run"], monkeypatch)
     assert isinstance(cfg, PipelineConfig)
     assert cfg.podman_machine == "hephaestus-ci"
-    preflight.assert_called_once_with("hephaestus-ci", start_timeout_s=120, health_timeout_s=60)
+    preflight.assert_not_called()

@@ -717,7 +717,7 @@ def build_config(
 
 def _prepare_host_runtime(args: argparse.Namespace) -> int | None:
     """Check the selected host runtime before queue dispatch."""
-    if args.podman_machine:
+    if args.podman_machine and not args.dry_run:
         try:
             prepare_podman_machine(
                 args.podman_machine,

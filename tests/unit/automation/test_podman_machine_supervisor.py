@@ -131,6 +131,41 @@ def test_rejects_non_applehv_machine_without_starting_it(tmp_path: Path) -> None
     assert [command for command, _timeout in runner.calls] == [inspect_command]
 
 
+def test_rejects_provider_change_while_stopped_machine_starts(tmp_path: Path) -> None:
+    """The supervisor must reject a replacement machine after startup."""
+    inspect_command = ("podman", "machine", "inspect", "hephaestus-ci")
+    start_command = ("podman", "machine", "start", "hephaestus-ci")
+    connection_command = ("podman", "system", "connection", "list", "--format", "json")
+    health_command = ("podman", "--connection", "hephaestus-ci", "info")
+    runner = CommandHarness(
+        {
+            inspect_command: [
+                _result(inspect_command, stdout=_inspect(state="stopped", last_up="")),
+                _result(
+                    inspect_command,
+                    stdout=_inspect(state="running", provider="qemu"),
+                ),
+            ],
+            start_command: [_result(start_command)],
+            connection_command: [_result(connection_command, stdout=_connections())],
+            health_command: [_result(health_command, stdout="{}")],
+        }
+    )
+
+    with pytest.raises(PodmanMachineError, match="must use AppleHV"):
+        prepare_podman_machine(
+            "hephaestus-ci",
+            command_runner=runner,
+            data_home=tmp_path / "data",
+        )
+
+    assert [command for command, _timeout in runner.calls] == [
+        inspect_command,
+        start_command,
+        inspect_command,
+    ]
+
+
 @pytest.mark.parametrize("name", ["", "../other", "name with spaces"])
 def test_rejects_invalid_machine_name_before_any_command(name: str) -> None:
     """An invalid name cannot change command scope."""

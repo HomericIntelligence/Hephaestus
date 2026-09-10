@@ -223,6 +223,29 @@ def _failure_evidence(
     return "\n\n".join(evidence)
 
 
+def _require_applehv(
+    document: dict[str, Any],
+    name: str,
+    *,
+    command_runner: CommandRunner,
+    data_home: Path | None,
+) -> None:
+    """Reject an inspection document that does not select AppleHV."""
+    provider = _provider(document)
+    if provider == "applehv":
+        return
+    evidence = _failure_evidence(
+        document,
+        name,
+        command_runner=command_runner,
+        data_home=data_home,
+    )
+    raise PodmanMachineError(
+        f"Podman machine {name!r} must use AppleHV; inspection reported "
+        f"{provider or 'unknown'}.\n{evidence}".rstrip()
+    )
+
+
 def prepare_podman_machine(
     name: str,
     *,
@@ -255,18 +278,12 @@ def prepare_podman_machine(
             data_home=data_home,
         )
         raise PodmanMachineError(f"{exc}\n{evidence}".rstrip()) from exc
-    provider = _provider(document)
-    if provider != "applehv":
-        evidence = _failure_evidence(
-            document,
-            name,
-            command_runner=command_runner,
-            data_home=data_home,
-        )
-        raise PodmanMachineError(
-            f"Podman machine {name!r} must use AppleHV; inspection reported "
-            f"{provider or 'unknown'}.\n{evidence}".rstrip()
-        )
+    _require_applehv(
+        document,
+        name,
+        command_runner=command_runner,
+        data_home=data_home,
+    )
 
     state = str(document.get("State", "")).lower()
     if state != "running":
@@ -308,6 +325,12 @@ def prepare_podman_machine(
                 data_home=data_home,
             )
             raise PodmanMachineError(f"{exc}\n{evidence}".rstrip()) from exc
+        _require_applehv(
+            document,
+            name,
+            command_runner=command_runner,
+            data_home=data_home,
+        )
 
     state = str(document.get("State", "")).lower()
     last_up = str(document.get("LastUp", "")).strip()
