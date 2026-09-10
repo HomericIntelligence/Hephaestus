@@ -360,6 +360,19 @@ def test_full_queue_parser_accepts_bounded_podman_machine_options() -> None:
     assert args.podman_health_timeout == 10
 
 
+def test_full_queue_parser_rejects_invalid_podman_machine_in_preview(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A preview rejects an invalid machine name before queue dispatch."""
+    from hephaestus.automation import pipeline_cli
+
+    with pytest.raises(SystemExit) as excinfo:
+        pipeline_cli.parse_args(["--dry-run", "--podman-machine", "bad/name"])
+
+    assert excinfo.value.code == 2
+    assert "Invalid Podman machine name." in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "content",
     [b"old data\n" * 20000 + b"LATEST", b"x" * 200000 + b"LATEST", b"\xff" * 200000 + b"LATEST"],

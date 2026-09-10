@@ -31,6 +31,7 @@ from hephaestus.automation.pipeline.routing import ROUTES, PipelineScope, StageN
 from hephaestus.automation.podman_machine_supervisor import (
     PodmanMachineError,
     prepare_podman_machine,
+    validate_podman_machine_name,
 )
 from hephaestus.automation.role_selection import resolve_role_agents
 from hephaestus.cli.utils import (
@@ -108,6 +109,15 @@ def _parse_non_negative_int(value: str) -> int:
     if number < 0:
         raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {number}")
     return number
+
+
+def _parse_podman_machine_name(value: str) -> str:
+    """Parse one valid Podman machine name."""
+    try:
+        validate_podman_machine_name(value)
+    except PodmanMachineError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return value
 
 
 def _parse_positive_int_list(value: str, label: str) -> list[int]:
@@ -420,6 +430,7 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         )
         parser.add_argument(
             "--podman-machine",
+            type=_parse_podman_machine_name,
             metavar="NAME",
             help=(
                 "Start and verify one AppleHV Podman machine in this host process before "
