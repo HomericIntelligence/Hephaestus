@@ -317,6 +317,27 @@ concise failure evidence, the affected tests or checks, and a first-stage
 root-cause analysis. The subagent must not fix a failure unless it receives a
 separate direction to do so.
 
+For a manual contribution, use this final-rebase sequence:
+
+1. Use a test-only subagent to run focused tests during implementation.
+2. Run
+   `git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main`, and
+   then rebase on `origin/main`.
+3. If the rebase or conflict resolution changes a file, use a test-only
+   subagent to run each affected test again.
+4. After the final rebase, use a test-only subagent to run
+   `uv run --locked pytest --override-ini="addopts=" -v --strict-markers`.
+   Record the command, branch head, result, and test
+   summary.
+5. If the branch changes after this verification, use a test-only subagent to
+   run the full locked suite again.
+
+A pre-push hook can supply step 4 only when it runs the exact locked command on
+the final rebased head and records the result. A hook that does not run this
+command does not supply full-suite evidence. The current pre-push hook does not
+run the Python suite and cannot supply this evidence. Keep the test-only and
+no-edit requirements for all delegated runs.
+
 ### Skill Catalog
 
 Invoke an Athena skill with `Skill(skill: "athena:<name>", args: "<argument>")`, or
@@ -481,18 +502,12 @@ All utility functions must include comprehensive test coverage:
 3. **Edge Cases**: Test boundary conditions and error scenarios
 4. **Cross-platform**: Ensure compatibility across supported environments
 
-Before an agent creates a pull request, it MUST run each new or changed test.
-The command MUST collect those tests and report success.
+Before an agent creates a pull request, it MUST follow the final-rebase sequence
+in [Delegated Verification](#delegated-verification). The environment setup
+commands below prepare a new environment. They do not supply change-verification
+evidence. Required CI/CD supplies separate head-bound evidence.
 
-For a manual contribution, finish the implementation and rebase the branch on
-the current `origin/main`. If the rebase or conflict resolution changes a file,
-run each affected test again. Run the full locked local suite after this final
-rebase and before the push. Test evidence must apply to the final pushed head.
-Run the suite again only if the branch head changes. Keep environment setup
-checks separate from change verification. Required CI/CD supplies separate
-head-bound evidence.
-
-The automation loop uses the rebase policy in ADR-0047. It prepares the branch
+The automation loop uses the rebase policy in ADR-0048. It prepares the branch
 before implementation and does not do a routine final rebase. An operator can
 request the explicit `--rebase` path.
 
@@ -506,8 +521,8 @@ uv run pytest tests/unit/utils/test_general_utils.py -v
 # Run with coverage
 uv run pytest tests/unit --cov=hephaestus --cov-report=html
 
-# Run the full locked local suite after the last rebase
-uv run --locked pytest tests/unit tests/integration --override-ini="addopts=" -v --strict-markers -m "not performance and not contract and not artifact and not codex_release_artifact"
+# Run the full locked local suite after the final rebase
+uv run --locked pytest --override-ini="addopts=" -v --strict-markers
 ```
 
 ## Environment Setup
@@ -552,9 +567,10 @@ uv run mypy hephaestus/ scripts/ tests/
 
 ### Pre-commit Hooks
 
-Pre-commit hooks automatically check code quality. They MUST NOT run pytest.
-Run the required full locked local suite separately after the last rebase.
-Required CI/CD supplies separate test evidence for the pushed head.
+Pre-commit hooks automatically check code quality and run the shared fast test
+selection. They do not supply the required full locked suite evidence. Use the
+delegated final-rebase sequence to produce that evidence. Required CI/CD
+supplies separate test evidence for the pushed head.
 
 ```bash
 # Install pre-commit hooks (one-time setup)

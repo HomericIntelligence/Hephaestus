@@ -15,7 +15,8 @@ links to the full section below.
    uv, then `just bootstrap` (one command: deps + editable install + pre-commit
    hooks).
 2. **Confirm the toolchain works** — run `just check` (lint + format-check +
-   typecheck) and `just test`. Green here means your machine is ready.
+   typecheck) and `just test`. Green here means your machine is ready. It is
+   not evidence for a later branch change.
 3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
    GitHub issue, then branch as `<issue-number>-description`.
 4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
@@ -209,21 +210,37 @@ Use the paths for your changed tests. `just test` runs the fast selection used b
 CI. Nightly CI runs the remaining functional, package, shell, and coverage
 tests.
 
-For a manual contribution, finish the implementation and rebase the branch on
-the current `origin/main`. If the rebase or conflict resolution changes a file,
-run each affected test again. Run the full locked local suite after this final
-rebase and before you push:
+### Change verification
 
-```bash
-uv run --locked pytest tests/unit tests/integration --override-ini="addopts=" -v --strict-markers -m "not performance and not contract and not artifact and not codex_release_artifact"
-```
+For a manual contribution, use this sequence:
 
-The test result must apply to the final pushed head. Run this suite again only
-if the branch head changes. The checks in [Your first day](#your-first-day)
-verify the development environment. They do not verify a later branch change.
+1. Run focused tests during implementation.
+2. Fetch the current `main` branch and rebase on it:
+
+   ```bash
+   git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+   git rebase origin/main
+   ```
+
+3. If the rebase or conflict resolution changes a file, run each affected test
+   again.
+4. After the final rebase, run the full locked suite:
+
+   ```bash
+   uv run --locked pytest --override-ini="addopts=" -v --strict-markers
+   ```
+
+5. If the branch changes after this run, run the full locked suite again.
+
+Record the command, branch head, result, and test summary. A pre-push hook can
+supply step 4 only when it runs the exact locked command on the final rebased
+head and records the result. A hook that does not run this command does not
+supply full-suite evidence. The checks in [Your first day](#your-first-day)
+verify a new development environment. They do not verify a later branch
+change.
 
 The automation loop uses the rebase policy in
-[ADR-0047](docs/adr/0047-automation-rebase-triggers.md). It prepares the branch
+[ADR-0048](docs/adr/0048-automation-rebase-triggers.md). It prepares the branch
 before implementation and does not do a routine final rebase. An operator can
 request the explicit `--rebase` path.
 
@@ -343,11 +360,11 @@ collect CI/CD evidence as context, but the loop does not change CI/CD. Required
 CI/CD checks are the merge contract and do not independently authorize the
 loop-owned approval transition.
 
-Before you create the PR, run each new or changed test and verify that pytest
-collects it and reports success. Keep commits to logical units with
+Before you create the PR, complete the [change-verification sequence](#change-verification).
+Keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages. Never
-bypass pre-commit hooks with `--no-verify`. The pre-commit suite does not run
-pytest; required CI/CD runs the full test suites.
+bypass pre-commit hooks with `--no-verify`. Pre-commit runs the shared fast
+test selection. It does not supply the required full locked suite evidence.
 
 ## Developer Certificate of Origin (DCO)
 
