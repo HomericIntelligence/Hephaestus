@@ -114,7 +114,7 @@ def test_writer_metadata_lock_observes_operation_stop(
                 assert proceed.wait(5.0)
                 with source.implementation_writer_handoff(42, deadline=deadline):
                     effects.append("entered")
-        except BaseException as exc:
+        except (Exception, KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
             failures.append(exc)
         finally:
             complete.set()
@@ -190,13 +190,10 @@ def test_operation_lock_does_not_repeat_body_failure(tmp_path: Path, bounded: bo
     failure = LockUnavailableError("A different resource is unavailable.")
     calls: list[str] = []
     deadline = time.monotonic() + 5.0 if bounded else None
-    with (
-        git_runtime.operation_deadline(deadline),
-        pytest.raises(LockUnavailableError) as raised,
-        git_runtime.operation_file_lock(path),
-    ):
-        calls.append("body")
-        raise failure
+    with pytest.raises(LockUnavailableError) as raised:
+        with git_runtime.operation_deadline(deadline), git_runtime.operation_file_lock(path):
+            calls.append("body")
+            raise failure
     assert raised.value is failure
     assert calls == ["body"]
     with file_lock(path, blocking=False, require_exclusive=True):

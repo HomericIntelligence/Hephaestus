@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -75,9 +76,7 @@ def _coordinator(repo_root: Path, host: AthenaSkillExecutor) -> Coordinator:
         ),
         github=FakeStageGitHub(),
         pool_factory=FakeWorkerPool().factory,
-        auxiliary_pool_factory=lambda **kwargs: AuxiliaryWorkerPool(
-            **kwargs, athena_skill_executor=host
-        ),
+        auxiliary_pool_factory=partial(AuxiliaryWorkerPool, athena_skill_executor=host),
         install_signals=False,
     )
 
@@ -307,15 +306,13 @@ def test_fatal_shared_host_cancellation_preserves_unknown_learning_claim(
             budget_overrides={"learn": 3},
         ),
         github=FakeStageGitHub(),
-        pool_factory=lambda **kwargs: WorkerPool(
-            **kwargs,
+        pool_factory=partial(
+            WorkerPool,
             lock_dir=tmp_path / "worker-locks",
             github_job_runner=MainRunner(),
             athena_skill_executor=host,
         ),
-        auxiliary_pool_factory=lambda **kwargs: AuxiliaryWorkerPool(
-            **kwargs, athena_skill_executor=host
-        ),
+        auxiliary_pool_factory=partial(AuxiliaryWorkerPool, athena_skill_executor=host),
         install_signals=False,
     )
     intent = LearningIntent.post_merge(repo="repo", issue=1, pr=2)
@@ -330,7 +327,7 @@ def test_fatal_shared_host_cancellation_preserves_unknown_learning_claim(
     def teardown() -> None:
         try:
             coordinator._shutdown_pool()
-        except BaseException as error:
+        except (Exception, KeyboardInterrupt, SystemExit, GeneratorExit) as error:
             errors.append(error)
 
     thread = threading.Thread(target=teardown)
