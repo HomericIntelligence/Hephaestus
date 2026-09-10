@@ -145,7 +145,7 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
             commands.append(argv)
             environment = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
             validator_argv = [str(environment / "bin/python"), "scripts/validate_plugins.py"]
-            validator_run = argv[0] == "/usr/bin/sandbox-exec" and argv[3:] == validator_argv
+            validator_run = argv[0] == "/usr/bin/sandbox-exec" and argv[3] == validator_argv[0]
             artifacts = (
                 _digests(environment.parent, Path(sys.base_prefix).resolve())
                 if validator_run
@@ -156,6 +156,7 @@ def test_locked_wheel_and_descendant_network_denial(tmp_path: Path, parent_proje
                 assert not (Path(kwargs["env"]["TMPDIR"]) / "validator-sentinel").exists()
             assert result.returncode == 0, result.stderr
             if validator_run:
+                assert argv[3:] == validator_argv
                 sentinel = Path(kwargs["env"]["TMPDIR"]) / "validator-sentinel"
                 assert json.loads(sentinel.read_text()) == {"wheel": 42, "prefix": str(environment)}
                 assert _digests(environment.parent, Path(sys.base_prefix).resolve()) == artifacts
