@@ -484,12 +484,17 @@ All utility functions must include comprehensive test coverage:
 Before an agent creates a pull request, it MUST run each new or changed test.
 The command MUST collect those tests and report success.
 
-If a manual rebase or conflict resolution changes a file, run each affected
-test again before the push. Test evidence must apply to the final pushed head.
-Run the full locked local suite after the last rebase and before the push. Run
-it again only if the branch head changes. Keep environment setup checks
-separate from change verification. Required CI/CD supplies separate head-bound
-evidence.
+For a manual contribution, finish the implementation and rebase the branch on
+the current `origin/main`. If the rebase or conflict resolution changes a file,
+run each affected test again. Run the full locked local suite after this final
+rebase and before the push. Test evidence must apply to the final pushed head.
+Run the suite again only if the branch head changes. Keep environment setup
+checks separate from change verification. Required CI/CD supplies separate
+head-bound evidence.
+
+The automation loop uses the rebase policy in ADR-0047. It prepares the branch
+before implementation and does not do a routine final rebase. An operator can
+request the explicit `--rebase` path.
 
 ```bash
 # Run all unit tests

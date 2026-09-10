@@ -35,7 +35,7 @@ A piece of work is **done** when every item below is true.
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 | 23 | New or revised English technical prose follows the [ASD-STE100 writing standard](asd-ste100.md); principle declarations and specialized principle statements do not change only to satisfy the standard | Author and PR reviewer |
 | 24 | Each `required-checks-gate` dependency succeeds on pull-request and merge-group events; only `pr-policy` can skip on a push event | CI gate `required-checks-gate` + structural unit guard |
-| 25 | Before PR creation, pytest collects and passes each new or changed test on the final pushed head. If a manual rebase or conflict resolution changes a file, rerun each affected test. Run the full locked local suite after the last rebase and before the push. Run it again only if the branch head changes. Pre-commit and required PR checks run the shared fast selection. Nightly CI runs full coverage and the functional complement. | Author and PR reviewer; fast tests in `lint`, full suites in nightly CI |
+| 25 | For a manual contribution, finish the implementation and rebase the branch on the current `origin/main`. Rerun each affected test after a rebase or conflict resolution changes a file. Run the full locked local suite after this final rebase and before the push. Run it again only if the branch head changes. The automation loop uses the separate ADR-0047 rebase policy. Pre-commit and required PR checks run the shared fast selection. Nightly CI runs full coverage and the functional complement. | Author and PR reviewer; fast tests in `lint`, full suites in nightly CI |
 
 ### Conventional Commit history boundary
 
