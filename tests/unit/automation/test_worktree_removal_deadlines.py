@@ -19,6 +19,7 @@ from hephaestus.automation import git_runtime, worktree_manager
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
+    SourceWorkspaceTerminalError,
     _PreparationDeadline,
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
@@ -266,6 +267,95 @@ def test_worktree_removal_stop_before_staging_preserves_predecessor(
     assert worktree_path.stat().st_ino == inode_before
     assert (worktree_path / "tracked.txt").read_bytes() == contents_before
     assert _git(repo, "worktree", "list", "--porcelain") == registration_before
+
+
+def test_partial_staged_deletion_failure_stops_then_restores_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed staged deletion must defer exact predecessor recovery."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    _git(repo, "init", "--bare", str(remote))
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "origin", f"{second}:refs/heads/adopted-writer")
+    source = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source.prepare(42, SourceLane.IMPLEMENTATION, first)
+    manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source.base_dir,
+        remote_git_env=build_git_child_env(),
+        remote_git_config=("-c", "protocol.file.allow=always"),
+    )
+    registration_before = _git(repo, "worktree", "list", "--porcelain")
+    journal_path = source._transition_path(42)
+    commands: list[list[str]] = []
+    fallback_targets: list[Path] = []
+    deletion_failures: list[subprocess.CalledProcessError] = []
+    real_run = git_runtime.run
+
+    def fake_git_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="removal failed")
+        return real_run(cmd, **kwargs)
+
+    def partially_delete_then_fail(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        target = Path(cmd[-1])
+        fallback_targets.append(target)
+        (target / "tracked.txt").unlink()
+        failure = subprocess.CalledProcessError(1, cmd, stderr="directory deletion failed")
+        deletion_failures.append(failure)
+        raise failure
+
+    monkeypatch.setattr(worktree_manager, "run", fake_git_run)
+    monkeypatch.setattr(
+        worktree_manager, "run_subprocess", partially_delete_then_fail, raising=False
+    )
+
+    with pytest.raises(SourceWorkspaceTerminalError) as raised:
+        with source.implementation_writer_handoff(42) as handoff:
+            source.authorize_adopted_implementation_writer_transition(
+                42, branch="adopted-writer", expected_head=second, handoff=handoff
+            )
+            manager.create_worktree(
+                42,
+                "adopted-writer",
+                source_lane="impl",
+                implementation_adoption_head=second,
+                implementation_writer_handoff=handoff,
+            )
+
+    assert len(fallback_targets) == 1
+    assert len(deletion_failures) == 1
+    creation_failure = raised.value.__cause__
+    assert type(creation_failure) is RuntimeError
+    assert creation_failure.__cause__ is deletion_failures[0]
+    assert deletion_failures[0].cmd[-1] == str(fallback_targets[0])
+    assert deletion_failures[0].stderr == "directory deletion failed"
+    assert raised.value.terminal_reference is not None
+    assert fallback_targets[0] != predecessor.cwd
+    assert fallback_targets[0].is_dir()
+    assert not (fallback_targets[0] / "tracked.txt").exists()
+    assert not predecessor.cwd.exists()
+    assert str(predecessor.cwd) not in _git(repo, "worktree", "list", "--porcelain")
+    assert json.loads(journal_path.read_bytes())["phase"] == "predecessor_removing"
+    assert ["git", "worktree", "prune", "--expire", "now"] in commands
+    assert not any(
+        "worktree" in command and "add" in command and "adopted-writer" in command
+        for command in commands
+    )
+
+    with source.implementation_writer_handoff(42):
+        pass
+
+    assert predecessor.cwd.is_dir()
+    assert (predecessor.cwd / "tracked.txt").read_text(encoding="utf-8") == "first\n"
+    assert _git(predecessor.cwd, "rev-parse", "HEAD") == first
+    assert _git(repo, "worktree", "list", "--porcelain") == registration_before
+    assert not journal_path.exists()
 
 
 def test_worktree_removal_partial_fallback_keeps_predecessor_recoverable(

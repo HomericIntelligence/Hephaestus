@@ -1483,8 +1483,8 @@ class WorktreeManager:
                 **_timeout_kw(timeout),
             )
 
-    def _prune_stopped_worktree_registration(self) -> None:
-        """Prune a registration after a staged removal stops."""
+    def _prune_incomplete_worktree_registration(self) -> None:
+        """Prune a stale registration after a staged removal does not complete."""
         try:
             with operation_deadline(None, shutdown=threading.Event()):
                 run(
@@ -1495,9 +1495,26 @@ class WorktreeManager:
                 )
         except Exception as cleanup_error:
             logger.debug(
-                "Could not prune the removed worktree metadata after stop: %s",
+                "Could not prune the removed worktree metadata after incomplete removal: %s",
                 cleanup_error,
             )
+
+    def _handle_worktree_path_removal_failure(
+        self,
+        worktree_path: Path,
+        staged_path: Path | None,
+        error: Exception,
+    ) -> None:
+        """Log a removal failure and preserve staged recovery state."""
+        logger.warning(
+            "Failed to remove worktree directory %s directly: %s",
+            worktree_path,
+            error,
+        )
+        if staged_path is None:
+            return
+        self._prune_incomplete_worktree_registration()
+        raise error
 
     def _remove_worktree_path_forcefully(
         self,
@@ -1559,14 +1576,10 @@ class WorktreeManager:
                     )
             except (InterruptedError, subprocess.TimeoutExpired):
                 if staged_path is not None:
-                    self._prune_stopped_worktree_registration()
+                    self._prune_incomplete_worktree_registration()
                 raise
             except Exception as e:
-                logger.warning(
-                    "Failed to remove worktree directory %s directly: %s",
-                    worktree_path,
-                    e,
-                )
+                self._handle_worktree_path_removal_failure(worktree_path, staged_path, e)
         try:
             run(
                 ["git", "worktree", "prune"],
