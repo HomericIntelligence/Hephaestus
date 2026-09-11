@@ -16,21 +16,17 @@ _MAX_CHECK_SUITES = 1_000
 _MAX_CHECK_RUNS = 2_000
 
 
-def canonical_json_field(record: dict[str, object], field: str) -> tuple[bool, str] | None:
-    """Return a stable JSON value that keeps field presence distinct."""
-    if field not in record:
-        return False, ""
-    try:
-        encoded = json.dumps(
-            record[field],
-            allow_nan=False,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    except (TypeError, ValueError):
+def _nullable_app_id(record: dict[str, object]) -> int | None:
+    """Return one explicit nullable App ID or reject malformed input."""
+    if "app" not in record:
+        raise ValueError("GitHub App field is missing")
+    app = record["app"]
+    if app is None:
         return None
-    return True, encoded
+    app_id = app.get("id") if isinstance(app, dict) else None
+    if not isinstance(app_id, int) or isinstance(app_id, bool) or app_id <= 0:
+        raise ValueError("GitHub App identity is malformed")
+    return app_id
 
 
 def _collection_page(payload: object, key: str) -> tuple[int, list[object]] | None:
@@ -82,15 +78,15 @@ def check_suite_ids_for_head(
     *,
     deadline_s: float,
     cancellation: Event,
-) -> tuple[int, ...] | None:
-    """Return every validated Check Suite ID for one exact commit."""
+) -> tuple[tuple[int, int | None], ...] | None:
+    """Return every validated Check Suite and nullable App ID for one commit."""
     owner, name = host._owner_name()
     endpoint = f"/repos/{owner}/{name}/commits/{head_sha}/check-suites?per_page={_PAGE_SIZE}"
-    suite_ids: list[int] = []
+    suite_inventory: list[tuple[int, int | None]] = []
     seen_ids: set[int] = set()
     expected_count: int | None = None
     page = 1
-    while expected_count is None or len(suite_ids) < expected_count:
+    while expected_count is None or len(suite_inventory) < expected_count:
         page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
         parsed = _collection_page(
             _read_page(
@@ -118,6 +114,11 @@ def check_suite_ids_for_head(
                 logger.warning("Check Suite page has invalid identity for %s", head_sha)
                 return None
             suite_id = suite.get("id")
+            try:
+                suite_app_id = _nullable_app_id(suite)
+            except ValueError:
+                logger.warning("Check Suite page has invalid App identity for %s", head_sha)
+                return None
             if (
                 not isinstance(suite_id, int)
                 or isinstance(suite_id, bool)
@@ -128,18 +129,20 @@ def check_suite_ids_for_head(
                 logger.warning("Check Suite page has invalid identity for %s", head_sha)
                 return None
             seen_ids.add(suite_id)
-            suite_ids.append(suite_id)
-        if len(suite_ids) > expected_count or (not suites and len(suite_ids) < expected_count):
+            suite_inventory.append((suite_id, suite_app_id))
+        if len(suite_inventory) > expected_count or (
+            not suites and len(suite_inventory) < expected_count
+        ):
             logger.warning("Check Suite pages are incomplete for %s", head_sha)
             return None
         page += 1
-    return tuple(sorted(suite_ids))
+    return tuple(sorted(suite_inventory))
 
 
 def check_runs_for_head(
     host: _PipelineGitHubHost,
     head_sha: str,
-    suite_ids: tuple[int, ...],
+    suite_inventory: tuple[tuple[int, int | None], ...],
     *,
     deadline_s: float,
     cancellation: Event,
@@ -151,7 +154,7 @@ def check_runs_for_head(
     )
     check_runs: list[object] = []
     check_run_ids: set[int] = set()
-    known_suite_ids = frozenset(suite_ids)
+    known_suite_apps = dict(suite_inventory)
     expected_count: int | None = None
     page = 1
     while expected_count is None or len(check_runs) < expected_count:
@@ -188,6 +191,11 @@ def check_runs_for_head(
             check_run_id = check_run.get("id")
             check_suite = check_run.get("check_suite")
             check_suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
+            try:
+                _nullable_app_id(check_run)
+            except ValueError:
+                logger.warning("Check Run inventory has invalid App identity for %s", head_sha)
+                return None
             if (
                 not isinstance(check_run_id, int)
                 or isinstance(check_run_id, bool)
@@ -197,7 +205,7 @@ def check_runs_for_head(
                 or not isinstance(check_suite_id, int)
                 or isinstance(check_suite_id, bool)
                 or check_suite_id <= 0
-                or check_suite_id not in known_suite_ids
+                or check_suite_id not in known_suite_apps
             ):
                 logger.warning("Check Run inventory has invalid identity for %s", head_sha)
                 return None

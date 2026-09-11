@@ -42,17 +42,17 @@ def command_runner() -> MagicMock:
 def stable_check_suite_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep policy tests focused on required Check Run evaluation."""
 
-    def suite_ids(
+    def suite_inventory(
         _adapter: object,
         _head_sha: str,
         *,
         deadline_s: float,
         cancellation: threading.Event,
-    ) -> tuple[int, ...]:
+    ) -> tuple[tuple[int, int], ...]:
         del deadline_s, cancellation
-        return (1,)
+        return ((1, 15368),)
 
-    monkeypatch.setattr(pg.PipelineGitHub, "_check_suite_ids_for_head", suite_ids)
+    monkeypatch.setattr(pg.PipelineGitHub, "_check_suite_ids_for_head", suite_inventory)
 
 
 def _response(payload: object) -> subprocess.CompletedProcess[str]:
@@ -1356,7 +1356,7 @@ def test_check_runs_reject_missing_or_malformed_application_identity(
 def test_optional_check_run_with_null_app_does_not_revoke_required_evidence(
     command_runner: MagicMock,
 ) -> None:
-    """A schema-valid optional run with no app cannot change merge authority."""
+    """An optional run with a null App cannot change merge authority."""
     adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
     head = "a" * 40
     policy = EffectiveMergePolicy(
@@ -1389,6 +1389,7 @@ def test_optional_check_run_with_null_app_does_not_revoke_required_evidence(
         deadline_s=time.monotonic() + 30.0,
         cancellation=threading.Event(),
     )
+    assert command_runner.call_count == 4
 
 
 def test_check_traversal_honors_cancellation_between_pages(

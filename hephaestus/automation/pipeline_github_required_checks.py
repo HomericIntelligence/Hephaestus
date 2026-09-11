@@ -10,7 +10,7 @@ from threading import Event
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_check_run_inventory import (
-    canonical_json_field,
+    _nullable_app_id,
     check_runs_for_head,
     check_suite_ids_for_head,
 )
@@ -134,9 +134,13 @@ def _validated_check_run(
 def _check_run_snapshot(
     check_runs: list[object],
     head_sha: str,
+    required_checks: frozenset[_RequiredCheck],
+    suite_inventory: tuple[tuple[int, int | None], ...],
 ) -> tuple[object, ...] | None:
-    """Return canonical identity and status data for all returned Check Runs."""
+    """Return global identity plus required-context result data."""
     snapshot: list[tuple[object, ...]] = []
+    required_contexts = {context for context, _app_id in required_checks}
+    suite_apps = dict(suite_inventory)
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
@@ -145,6 +149,11 @@ def _check_run_snapshot(
         check_suite = check_run.get("check_suite")
         check_suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
         name = check_run.get("name")
+        try:
+            check_run_app_id = _nullable_app_id(check_run)
+        except ValueError:
+            logger.warning("Check Run for %s has malformed snapshot App identity", head_sha)
+            return None
         if (
             not isinstance(check_run_id, int)
             or isinstance(check_run_id, bool)
@@ -158,20 +167,33 @@ def _check_run_snapshot(
         ):
             logger.warning("Check Run for %s has malformed snapshot identity", head_sha)
             return None
-        raw_fields = tuple(
-            canonical_json_field(check_run, field)
-            for field in ("app", "status", "conclusion", "completed_at")
-        )
-        if any(value is None for value in raw_fields):
-            logger.warning("Check Run for %s has a non-JSON snapshot field", head_sha)
+        required_result: tuple[int, str, str, str] | None = None
+        if name in required_contexts:
+            suite_app_id = suite_apps.get(check_suite_id)
+            if (
+                not isinstance(check_run_app_id, int)
+                or not isinstance(suite_app_id, int)
+                or check_run_app_id != suite_app_id
+            ):
+                logger.warning("Required Check Run for %s has no matching suite App", head_sha)
+                return None
+        matches = _check_run_required_matches(check_run, required_checks, head_sha)
+        if matches is None:
             return None
+        if matches:
+            validated = _validated_check_run(check_run, head_sha)
+            if validated is None:
+                return None
+            _run_id, app_id, status, conclusion, completed_at, _completion_utc = validated
+            required_result = app_id, status, conclusion, completed_at
         snapshot.append(
             (
                 check_suite_id,
                 check_run_id,
                 head_sha,
                 name,
-                *raw_fields,
+                check_run_app_id,
+                required_result,
             )
         )
     return tuple(sorted(snapshot))
@@ -274,14 +296,14 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             required_checks = frozenset(
                 (check.context, check.app_id) for check in policy.required_checks
             )
-            suite_ids = self._check_suite_ids_for_head(
+            suite_inventory = self._check_suite_ids_for_head(
                 head_sha, deadline_s=deadline_s, cancellation=cancellation
             )
-            if suite_ids is None:
+            if suite_inventory is None:
                 return False
             first = self._check_runs_for_head(
                 head_sha,
-                suite_ids,
+                suite_inventory,
                 deadline_s=deadline_s,
                 cancellation=cancellation,
             )
@@ -297,17 +319,17 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if not required_checks or first is None:
             return False
-        first_snapshot = _check_run_snapshot(first, head_sha)
+        first_snapshot = _check_run_snapshot(first, head_sha, required_checks, suite_inventory)
         if first_snapshot is None:
             return False
         try:
             second = self._check_runs_for_head(
                 head_sha,
-                suite_ids,
+                suite_inventory,
                 deadline_s=deadline_s,
                 cancellation=cancellation,
             )
-            final_suite_ids = self._check_suite_ids_for_head(
+            final_suite_inventory = self._check_suite_ids_for_head(
                 head_sha, deadline_s=deadline_s, cancellation=cancellation
             )
         except (
@@ -322,8 +344,9 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if (
             second is None
-            or final_suite_ids != suite_ids
-            or _check_run_snapshot(second, head_sha) != first_snapshot
+            or final_suite_inventory != suite_inventory
+            or _check_run_snapshot(second, head_sha, required_checks, suite_inventory)
+            != first_snapshot
         ):
             logger.warning("Check Suite or Check Run inventory changed for %s", head_sha)
             return False
@@ -362,7 +385,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
     def _check_runs_for_head(
         self,
         head_sha: str,
-        suite_ids: tuple[int, ...],
+        suite_inventory: tuple[tuple[int, int | None], ...],
         *,
         deadline_s: float,
         cancellation: Event,
@@ -371,7 +394,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         return check_runs_for_head(
             self,
             head_sha,
-            suite_ids,
+            suite_inventory,
             deadline_s=deadline_s,
             cancellation=cancellation,
         )
@@ -382,8 +405,8 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         *,
         deadline_s: float,
         cancellation: Event,
-    ) -> tuple[int, ...] | None:
-        """Read all Check Suite identities for one exact commit."""
+    ) -> tuple[tuple[int, int | None], ...] | None:
+        """Read all Check Suite and nullable App identities for one commit."""
         return check_suite_ids_for_head(
             self,
             head_sha,

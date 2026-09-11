@@ -3525,15 +3525,27 @@ class TestExactHeadChecks:
         adapter: PipelineGitHub,
         head: str,
         policy: EffectiveMergePolicy,
+        *,
+        suite_inventory: tuple[tuple[int, int | None], ...] | None = None,
     ) -> bool:
         """Run the exact-head gate with its required bounded inputs."""
+        if suite_inventory is None:
+            pinned_apps = {
+                check.app_id for check in policy.required_checks if check.app_id is not None
+            }
+            default_app_id = next(iter(pinned_apps)) if len(pinned_apps) == 1 else 1
+            suite_inventory = ((1, default_app_id),)
         with (
             patch.object(
                 required_checks_mod,
                 "_status_evidence_now_utc",
                 return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
             ),
-            patch.object(adapter, "_check_suite_ids_for_head", return_value=(1,)),
+            patch.object(
+                adapter,
+                "_check_suite_ids_for_head",
+                return_value=suite_inventory,
+            ),
         ):
             return adapter.required_checks_pass_for_head(
                 head,
@@ -3550,7 +3562,7 @@ class TestExactHeadChecks:
         name: str = "required-ci",
         status: str = "completed",
         conclusion: object = "success",
-        app_id: int = 1,
+        app_id: int | None = 1,
         completed_at: object = "2026-09-05T12:00:00Z",
         check_suite_id: object = 1,
     ) -> dict[str, object]:
@@ -3564,13 +3576,14 @@ class TestExactHeadChecks:
             "completed_at": completed_at,
             "check_suite": {"id": check_suite_id},
         }
-        check_run["app"] = {"id": app_id}
+        check_run["app"] = None if app_id is None else {"id": app_id}
         return check_run
 
     @staticmethod
-    def _check_suite(head_sha: str, suite_id: int) -> dict[str, object]:
+    def _check_suite(head_sha: str, suite_id: int, *, app_id: object = 1) -> dict[str, object]:
         """Build one exact-head Check Suite response entry."""
-        return {"id": suite_id, "head_sha": head_sha}
+        app = None if app_id is None else {"id": app_id}
+        return {"id": suite_id, "head_sha": head_sha, "app": app}
 
     @staticmethod
     def _commit_status(
@@ -3692,6 +3705,94 @@ class TestExactHeadChecks:
         )
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is True
+
+    def test_zero_suites_allows_stable_commit_status_only_evidence(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A stable commit status can satisfy a context when no suites exist."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        empty_suites = self._json_response({"total_count": 0, "check_suites": []})
+        empty_runs = self._json_response({"total_count": 0, "check_runs": []})
+        status = self._json_response(
+            {
+                "sha": head,
+                "total_count": 1,
+                "statuses": [self._commit_status(head)],
+            }
+        )
+        command_runner.side_effect = [
+            empty_suites,
+            empty_runs,
+            empty_runs,
+            empty_suites,
+            status,
+            status,
+        ]
+
+        with patch.object(
+            required_checks_mod,
+            "_status_evidence_now_utc",
+            return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+        ):
+            result = adapter.required_checks_pass_for_head(
+                head,
+                self._policy("required-ci", app_id=None),
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+
+        assert result is True
+        assert command_runner.call_count == 6
+
+    def test_optional_null_suite_and_run_apps_do_not_revoke_status_evidence(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """Stable optional null App fields do not change merge authority."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        suites = self._json_response(
+            {
+                "total_count": 1,
+                "check_suites": [self._check_suite(head, 1, app_id=None)],
+            }
+        )
+        runs = self._json_response(
+            {
+                "total_count": 1,
+                "check_runs": [
+                    self._check_run(
+                        head,
+                        check_run_id=2,
+                        name="optional-ci",
+                        app_id=None,
+                    )
+                ],
+            }
+        )
+        status = self._json_response(
+            {
+                "sha": head,
+                "total_count": 1,
+                "statuses": [self._commit_status(head)],
+            }
+        )
+        command_runner.side_effect = [suites, runs, runs, suites, status, status]
+
+        with patch.object(
+            required_checks_mod,
+            "_status_evidence_now_utc",
+            return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+        ):
+            result = adapter.required_checks_pass_for_head(
+                head,
+                self._policy("required-ci", app_id=None),
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+
+        assert result is True
+        assert command_runner.call_count == 6
 
     def test_commit_status_entry_must_bind_to_the_reviewed_head(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -3998,7 +4099,7 @@ class TestExactHeadChecks:
                 return self._json_response(
                     {
                         "total_count": 1,
-                        "check_suites": [self._check_suite(head, 1)],
+                        "check_suites": [self._check_suite(head, 1, app_id=18)],
                     }
                 )
             if "/check-runs?" in endpoint:
@@ -4097,7 +4198,12 @@ class TestExactHeadChecks:
                 "total_count": 2,
                 "check_runs": [
                     self._check_run(head, check_run_id=41, app_id=17),
-                    self._check_run(head, check_run_id=42, app_id=18),
+                    self._check_run(
+                        head,
+                        check_run_id=42,
+                        app_id=18,
+                        check_suite_id=2,
+                    ),
                 ],
             }
         )
@@ -4110,7 +4216,15 @@ class TestExactHeadChecks:
             ]
         )
 
-        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+        assert (
+            self._passes(
+                adapter,
+                head,
+                self._policy("required-ci", app_id=None),
+                suite_inventory=((1, 17), (2, 18)),
+            )
+            is False
+        )
 
     def test_pinned_required_context_ignores_same_name_run_from_another_app(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -4123,7 +4237,13 @@ class TestExactHeadChecks:
                 "total_count": 2,
                 "check_runs": [
                     self._check_run(head, check_run_id=41, app_id=17),
-                    self._check_run(head, check_run_id=42, app_id=18, conclusion="failure"),
+                    self._check_run(
+                        head,
+                        check_run_id=42,
+                        app_id=18,
+                        conclusion="failure",
+                        check_suite_id=2,
+                    ),
                 ],
             }
         )
@@ -4136,7 +4256,57 @@ class TestExactHeadChecks:
             ]
         )
 
-        assert self._passes(adapter, head, self._policy("required-ci", app_id=17)) is True
+        assert (
+            self._passes(
+                adapter,
+                head,
+                self._policy("required-ci", app_id=17),
+                suite_inventory=((1, 17), (2, 18)),
+            )
+            is True
+        )
+
+    def test_pinned_required_context_ignores_active_run_from_another_app(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """An active run from another App cannot block an App-bound requirement."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    self._check_run(head, check_run_id=41, app_id=17),
+                    self._check_run(
+                        head,
+                        check_run_id=42,
+                        app_id=18,
+                        status="queued",
+                        conclusion=None,
+                        completed_at=None,
+                        check_suite_id=2,
+                    ),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert (
+            self._passes(
+                adapter,
+                head,
+                self._policy("required-ci", app_id=17),
+                suite_inventory=((1, 17), (2, 18)),
+            )
+            is True
+        )
 
     def test_optional_failed_run_does_not_block_successful_required_run(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -4173,13 +4343,15 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
 
+    @pytest.mark.parametrize("conclusion", ["failure", "cancelled"])
     @pytest.mark.parametrize("reverse", [False, True], ids=("ordered", "reversed"))
-    def test_current_failure_with_lower_id_supersedes_older_success(
+    def test_current_nonpassing_run_with_lower_id_supersedes_older_success(
         self,
         adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         command_runner: MagicMock,
         reverse: bool,
+        conclusion: str,
     ) -> None:
         """Completion time, not ID or response order, selects the current run."""
         adapter.repo = "repo"
@@ -4193,7 +4365,7 @@ class TestExactHeadChecks:
             self._check_run(
                 head,
                 check_run_id=41,
-                conclusion="failure",
+                conclusion=conclusion,
                 completed_at="2026-09-05T12:00:00Z",
             ),
         ]
@@ -4334,14 +4506,14 @@ class TestExactHeadChecks:
         assert self._passes(adapter, head, self._policy("required-ci")) is False
 
     @pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending"])
-    def test_documented_active_required_run_never_passes(
+    def test_documented_active_required_run_fails_during_first_snapshot(
         self,
         adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         command_runner: MagicMock,
         status: str,
     ) -> None:
-        """A documented active run cannot supply passing required evidence."""
+        """A required active run fails during the first snapshot."""
         adapter.repo = "repo"
         head = "a" * 40
         response = self._json_response(
@@ -4369,7 +4541,7 @@ class TestExactHeadChecks:
         )
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 2
+        assert command_runner.call_count == 1
 
     def test_equal_completion_instants_are_ambiguous(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -4789,8 +4961,19 @@ class TestExactHeadChecks:
         )
         moved_cancelled = {**newer_cancelled, "check_suite": {"id": 1}}
 
-        first = required_checks_mod._check_run_snapshot([older_success, newer_cancelled], head)
-        second = required_checks_mod._check_run_snapshot([older_success, moved_cancelled], head)
+        required_checks = frozenset({("required-ci", 1)})
+        first = required_checks_mod._check_run_snapshot(
+            [older_success, newer_cancelled],
+            head,
+            required_checks,
+            ((1, 1), (2, 1)),
+        )
+        second = required_checks_mod._check_run_snapshot(
+            [older_success, moved_cancelled],
+            head,
+            required_checks,
+            ((1, 1), (2, 1)),
+        )
 
         assert first is not None
         assert second is not None
@@ -4832,7 +5015,6 @@ class TestExactHeadChecks:
     @pytest.mark.parametrize(
         ("field", "value"),
         [
-            ("app", {"id": "malformed"}),
             ("status", ["completed"]),
             ("conclusion", {"value": "success"}),
             ("completed_at", ["2026-09-05T12:00:00Z"]),
@@ -4866,20 +5048,21 @@ class TestExactHeadChecks:
     @pytest.mark.parametrize(
         ("field", "value"),
         [
+            ("app", None),
             ("app", {"id": "malformed"}),
             ("status", ["completed"]),
             ("conclusion", {"value": "success"}),
             ("completed_at", ["2026-09-05T12:00:00Z"]),
         ],
     )
-    def test_malformed_matching_result_fields_fail_after_stable_snapshot(
+    def test_malformed_matching_result_fields_fail_during_first_read(
         self,
         adapter: PipelineGitHub,
         command_runner: MagicMock,
         field: str,
         value: object,
     ) -> None:
-        """Malformed result fields fail when their run matches a requirement."""
+        """Malformed required result fields fail during the first read."""
         adapter.repo = "repo"
         head = "a" * 40
         check_run = self._check_run(head)
@@ -4888,42 +5071,54 @@ class TestExactHeadChecks:
         command_runner.side_effect = [runs, runs]
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 2
+        assert command_runner.call_count == 1
 
-    def test_optional_missing_and_null_app_have_distinct_snapshots(
-        self, adapter: PipelineGitHub, command_runner: MagicMock
+    @pytest.mark.parametrize(
+        ("case", "app"),
+        [
+            ("missing", None),
+            ("malformed", "not-an-object"),
+            ("boolean", {"id": True}),
+            ("nonpositive", {"id": 0}),
+        ],
+    )
+    def test_optional_invalid_app_fails_suite_binding(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        case: str,
+        app: object,
     ) -> None:
-        """A missing optional field differs from a present null field."""
+        """Each optional Check Run must identify its Check Suite App."""
         adapter.repo = "repo"
         head = "a" * 40
-        first_optional = self._check_run(head, check_run_id=2, name="optional-ci")
-        first_optional.pop("app")
-        second_optional = {**first_optional, "app": None}
+        optional = self._check_run(head, check_run_id=2, name="optional-ci")
+        if case == "missing":
+            optional.pop("app")
+        else:
+            optional["app"] = app
         command_runner.side_effect = [
             self._json_response(
-                {"total_count": 2, "check_runs": [self._check_run(head), first_optional]}
-            ),
-            self._json_response(
-                {"total_count": 2, "check_runs": [self._check_run(head), second_optional]}
+                {"total_count": 2, "check_runs": [self._check_run(head), optional]}
             ),
         ]
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 2
+        assert command_runner.call_count == 1
 
     @pytest.mark.parametrize(
         ("field", "first_value", "second_value"),
         [
-            ("status", True, 1),
+            ("status", "queued", "in_progress"),
             (
                 "app",
-                {"id": "malformed", "metadata": {"value": 1}},
-                {"id": "malformed", "metadata": {"value": 2}},
+                {"id": 1, "metadata": {"value": 1}},
+                {"id": 1, "metadata": {"value": 2}},
             ),
             ("conclusion", ["a", "b"], ["b", "a"]),
         ],
     )
-    def test_optional_raw_field_change_invalidates_snapshot(
+    def test_optional_result_field_change_does_not_change_required_snapshot(
         self,
         adapter: PipelineGitHub,
         command_runner: MagicMock,
@@ -4931,7 +5126,7 @@ class TestExactHeadChecks:
         first_value: object,
         second_value: object,
     ) -> None:
-        """Canonical optional fields retain JSON type and ordered arrays."""
+        """Optional result changes do not change required evidence."""
         adapter.repo = "repo"
         head = "a" * 40
         first_optional = self._check_run(head, check_run_id=2, name="optional-ci")
@@ -4945,21 +5140,23 @@ class TestExactHeadChecks:
             self._json_response(
                 {"total_count": 2, "check_runs": [self._check_run(head), second_optional]}
             ),
+            self._empty_status_response(head),
+            self._empty_status_response(head),
         ]
 
-        assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 2
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+        assert command_runner.call_count == 4
 
-    def test_optional_object_key_order_is_stable(
+    def test_optional_app_object_order_does_not_change_required_snapshot(
         self, adapter: PipelineGitHub, command_runner: MagicMock
     ) -> None:
-        """Object key order does not change the canonical raw snapshot."""
+        """Optional App object order does not change required evidence."""
         adapter.repo = "repo"
         head = "a" * 40
         first_optional = self._check_run(head, check_run_id=2, name="optional-ci")
         second_optional = self._check_run(head, check_run_id=2, name="optional-ci")
-        first_optional["app"] = {"id": "malformed", "metadata": {"a": 1, "b": 2}}
-        second_optional["app"] = {"metadata": {"b": 2, "a": 1}, "id": "malformed"}
+        first_optional["app"] = {"id": 1, "metadata": {"a": 1, "b": 2}}
+        second_optional["app"] = {"metadata": {"b": 2, "a": 1}, "id": 1}
         first = self._json_response(
             {"total_count": 2, "check_runs": [self._check_run(head), first_optional]}
         )
@@ -4975,10 +5172,10 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
 
-    def test_unrelated_check_run_change_invalidates_snapshot(
+    def test_unrelated_check_run_transition_does_not_block_success(
         self, adapter: PipelineGitHub, command_runner: MagicMock
     ) -> None:
-        """A nonmatching Check Run change invalidates the stable inventory."""
+        """An optional queued-to-active transition does not block required evidence."""
         adapter.repo = "repo"
         head = "a" * 40
         required = self._check_run(head)
@@ -4998,13 +5195,13 @@ class TestExactHeadChecks:
             self._empty_status_response(head),
         ]
 
-        assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 2
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+        assert command_runner.call_count == 4
 
     def test_unknown_required_check_run_status_fails_closed(
         self, adapter: PipelineGitHub, command_runner: MagicMock
     ) -> None:
-        """An undocumented status cannot supply required evidence."""
+        """An unknown required status fails during the first snapshot."""
         adapter.repo = "repo"
         head = "a" * 40
         runs = {
@@ -5026,7 +5223,7 @@ class TestExactHeadChecks:
         ]
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 2
+        assert command_runner.call_count == 1
 
     def test_rejects_truncated_check_suite_inventory(
         self, adapter: PipelineGitHub, command_runner: MagicMock
@@ -5088,11 +5285,53 @@ class TestExactHeadChecks:
         )
         assert suite_reads == 2
 
+    def test_rejects_changed_check_suite_app_mapping(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A changed Check Suite App mapping cannot prove stable evidence."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        suite_reads = 0
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            nonlocal suite_reads
+            endpoint = args[1]
+            if "/commits/" in endpoint and "/check-suites?" in endpoint:
+                suite_reads += 1
+                return self._json_response(
+                    {
+                        "total_count": 1,
+                        "check_suites": [self._check_suite(head, 1, app_id=suite_reads)],
+                    }
+                )
+            if f"/commits/{head}/check-runs?" in endpoint:
+                return self._json_response(
+                    {"total_count": 1, "check_runs": [self._check_run(head)]}
+                )
+            raise AssertionError(endpoint)
+
+        command_runner.side_effect = gh_call
+
+        assert (
+            adapter.required_checks_pass_for_head(
+                head,
+                self._policy("required-ci"),
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+            is False
+        )
+        assert suite_reads == 2
+
     @pytest.mark.parametrize(
         "suite",
         [
             {"id": True, "head_sha": "a" * 40},
             {"id": 1, "head_sha": "b" * 40},
+            {"id": 1, "head_sha": "a" * 40},
+            {"id": 1, "head_sha": "a" * 40, "app": "not-an-object"},
+            {"id": 1, "head_sha": "a" * 40, "app": {"id": True}},
+            {"id": 1, "head_sha": "a" * 40, "app": {"id": 0}},
             "not-an-object",
         ],
     )
@@ -5102,7 +5341,7 @@ class TestExactHeadChecks:
         command_runner: MagicMock,
         suite: object,
     ) -> None:
-        """Each Check Suite must have a positive ID for the exact head."""
+        """Each Check Suite must have exact-head and App identities."""
         adapter.repo = "repo"
         head = "a" * 40
         command_runner.side_effect = lambda *_args, **_kwargs: self._json_response(
@@ -5139,6 +5378,40 @@ class TestExactHeadChecks:
             is False
         )
         command_runner.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("run_app_id", "suite_app_id"),
+        [(18, 17), (1, None)],
+        ids=("mismatched", "null-suite-app"),
+    )
+    def test_rejects_required_run_without_matching_suite_app(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        run_app_id: int,
+        suite_app_id: int | None,
+    ) -> None:
+        """A required Check Run must have the same positive App as its suite."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 1,
+                "check_runs": [self._check_run(head, app_id=run_app_id)],
+            }
+        )
+        command_runner.side_effect = [response]
+
+        assert (
+            self._passes(
+                adapter,
+                head,
+                self._policy("required-ci", app_id=run_app_id),
+                suite_inventory=((1, suite_app_id),),
+            )
+            is False
+        )
+        assert command_runner.call_count == 1
 
     @pytest.mark.parametrize(
         ("case", "check_suite"),
