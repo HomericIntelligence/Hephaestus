@@ -593,6 +593,44 @@ def test_selection_error_diagnostics_consistency(
         assert "violation(s)" not in text_output.err
 
 
+@pytest.mark.parametrize("kind", ["missing_path", "dangling_directory_link"])
+def test_missing_explicit_input_text_and_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    """Report a missing explicit input and continue with a later file."""
+    missing = tmp_path / "missing-src"
+    if kind == "dangling_directory_link":
+        missing = tmp_path / "directory-link"
+        missing.symlink_to(tmp_path / "missing-directory", target_is_directory=True)
+    later = tmp_path / "later.py"
+    later.write_text("Result = DomainResult\n", encoding="utf-8")
+    paths = [missing, later]
+
+    monkeypatch.setattr("sys.argv", ["check-type-aliases", *map(str, paths)])
+    assert main() == 1
+    text_output = capsys.readouterr()
+    monkeypatch.setattr("sys.argv", ["check-type-aliases", "--json", *map(str, paths)])
+    assert main() == 1
+    json_output = capsys.readouterr()
+    payload = json.loads(json_output.out)
+
+    assert text_output.out == json_output.err == ""
+    assert f"Could not read {missing}:" in text_output.err
+    assert str(later) in text_output.err
+    assert "DomainResult" in text_output.err
+    assert payload["passed"] is False
+    assert payload["scan_complete"] is False
+    assert payload["exit_code"] == 1
+    assert payload["read_error_count"] == 1
+    assert payload["violation_count"] == 1
+    assert f"Could not read {missing}:" in payload["read_errors"][0]
+    assert str(later) in payload["violations"][0]
+    assert "DomainResult" in payload["violations"][0]
+
+
 @pytest.mark.parametrize(
     "error",
     [PermissionError("read denied"), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")],

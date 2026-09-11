@@ -219,14 +219,22 @@ def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
     return files
 
 
+def _select_missing_path(path: Path, result: _BatchResult, error: FileNotFoundError) -> list[Path]:
+    """Select a missing Python path or record an incomplete explicit input."""
+    if path.suffix == ".py":
+        return [path]
+    _record_read_error(result, path, error)
+    return []
+
+
 def _select_path(path: Path, result: _BatchResult) -> list[Path]:
     """Select Python files from one explicit input path."""
     try:
         if path.is_junction():
             return _collect_python_files(path, result)
         mode = path.stat(follow_symlinks=False).st_mode
-    except FileNotFoundError:
-        return [path] if path.suffix == ".py" else []
+    except FileNotFoundError as error:
+        return _select_missing_path(path, result, error)
     except OSError as error:
         _record_read_error(result, path, error)
         return []
@@ -240,8 +248,8 @@ def _select_path(path: Path, result: _BatchResult) -> list[Path]:
 
     try:
         target_mode = path.stat().st_mode
-    except FileNotFoundError:
-        return [path] if path.suffix == ".py" else []
+    except FileNotFoundError as error:
+        return _select_missing_path(path, result, error)
     except OSError as error:
         _record_read_error(result, path, error)
         return []
