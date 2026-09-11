@@ -3527,10 +3527,13 @@ class TestExactHeadChecks:
         policy: EffectiveMergePolicy,
     ) -> bool:
         """Run the exact-head gate with its required bounded inputs."""
-        with patch.object(
-            required_checks_mod,
-            "_status_evidence_now_utc",
-            return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+        with (
+            patch.object(
+                required_checks_mod,
+                "_status_evidence_now_utc",
+                return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+            ),
+            patch.object(adapter, "_check_suite_ids_for_head", return_value=(1,)),
         ):
             return adapter.required_checks_pass_for_head(
                 head,
@@ -3561,6 +3564,11 @@ class TestExactHeadChecks:
         }
         check_run["app"] = {"id": app_id}
         return check_run
+
+    @staticmethod
+    def _check_suite(head_sha: str, suite_id: int) -> dict[str, object]:
+        """Build one exact-head Check Suite response entry."""
+        return {"id": suite_id, "head_sha": head_sha}
 
     @staticmethod
     def _commit_status(
@@ -4370,11 +4378,11 @@ class TestExactHeadChecks:
         assert [entry.args[0] for entry in call_mock.call_args_list] == [
             [
                 "api",
-                f"/repos/org/repo/commits/{head}/check-runs?filter=latest&per_page=100",
+                "/repos/org/repo/check-suites/1/check-runs?filter=all&per_page=100",
             ],
             [
                 "api",
-                f"/repos/org/repo/commits/{head}/check-runs?filter=latest&per_page=100",
+                "/repos/org/repo/check-suites/1/check-runs?filter=all&per_page=100",
             ],
             [
                 "api",
@@ -4677,6 +4685,164 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
         assert call_mock.call_count == 6
+
+    def test_enumerates_check_runs_beyond_one_thousand_suites(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A required run in suite 1,001 remains visible to the merge gate."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        calls: list[str] = []
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            endpoint = args[1]
+            calls.append(endpoint)
+            if f"/commits/{head}/check-suites?" in endpoint:
+                page = int(endpoint.rsplit("page=", 1)[1]) if "&page=" in endpoint else 1
+                first_id = (page - 1) * 100 + 1
+                suites = [
+                    self._check_suite(head, suite_id)
+                    for suite_id in range(first_id, min(first_id + 100, 1002))
+                ]
+                return self._json_response({"total_count": 1001, "check_suites": suites})
+            if "/check-suites/" in endpoint and "/check-runs?" in endpoint:
+                suite_id = int(endpoint.split("/check-suites/", 1)[1].split("/", 1)[0])
+                runs = [self._check_run(head)] if suite_id == 1001 else []
+                return self._json_response({"total_count": len(runs), "check_runs": runs})
+            if f"/commits/{head}/status?" in endpoint:
+                return self._empty_status_response(head)
+            raise AssertionError(endpoint)
+
+        command_runner.side_effect = gh_call
+
+        with patch.object(
+            required_checks_mod,
+            "_status_evidence_now_utc",
+            return_value=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+        ):
+            assert (
+                adapter.required_checks_pass_for_head(
+                    head,
+                    self._policy("required-ci"),
+                    deadline_s=time.monotonic() + 30.0,
+                    cancellation=threading.Event(),
+                )
+                is True
+            )
+        assert sum("/commits/" in call and "/check-suites?" in call for call in calls) == 22
+        assert sum("/check-suites/" in call and "/check-runs?" in call for call in calls) == 2002
+
+    def test_rejects_truncated_check_suite_inventory(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A short final Check Suite page cannot prove a complete inventory."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_page = [self._check_suite(head, suite_id) for suite_id in range(1, 101)]
+        command_runner.side_effect = [
+            self._json_response({"total_count": 101, "check_suites": first_page}),
+            self._json_response({"total_count": 101, "check_suites": []}),
+        ]
+
+        assert (
+            adapter.required_checks_pass_for_head(
+                head,
+                self._policy("required-ci"),
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+            is False
+        )
+
+    def test_rejects_changed_check_suite_inventory(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """The Check Suite inventory must remain stable around both run reads."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        suite_reads = 0
+
+        def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            nonlocal suite_reads
+            endpoint = args[1]
+            if "/commits/" in endpoint and "/check-suites?" in endpoint:
+                suite_reads += 1
+                return self._json_response(
+                    {
+                        "total_count": 1,
+                        "check_suites": [self._check_suite(head, suite_reads)],
+                    }
+                )
+            if "/check-suites/1/check-runs?" in endpoint:
+                return self._json_response(
+                    {"total_count": 1, "check_runs": [self._check_run(head)]}
+                )
+            raise AssertionError(endpoint)
+
+        command_runner.side_effect = gh_call
+
+        assert (
+            adapter.required_checks_pass_for_head(
+                head,
+                self._policy("required-ci"),
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+            is False
+        )
+        assert suite_reads == 2
+
+    @pytest.mark.parametrize(
+        "suite",
+        [
+            {"id": True, "head_sha": "a" * 40},
+            {"id": 1, "head_sha": "b" * 40},
+            "not-an-object",
+        ],
+    )
+    def test_rejects_malformed_check_suite_identity(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        suite: object,
+    ) -> None:
+        """Each Check Suite must have a positive ID for the exact head."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        command_runner.side_effect = lambda *_args, **_kwargs: self._json_response(
+            {"total_count": 1, "check_suites": [suite]}
+        )
+
+        assert (
+            adapter.required_checks_pass_for_head(
+                head,
+                self._policy("required-ci"),
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+            is False
+        )
+
+    def test_rejects_check_suite_totals_above_the_safety_ceiling(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """An oversized Check Suite inventory must fail on its first page."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        command_runner.side_effect = lambda *_args, **_kwargs: self._json_response(
+            {"total_count": 2001, "check_suites": []}
+        )
+
+        assert (
+            adapter.required_checks_pass_for_head(
+                head,
+                self._policy("required-ci"),
+                deadline_s=time.monotonic() + 30.0,
+                cancellation=threading.Event(),
+            )
+            is False
+        )
+        command_runner.assert_called_once()
 
     def test_rejects_check_run_totals_above_the_safety_ceiling(
         self,

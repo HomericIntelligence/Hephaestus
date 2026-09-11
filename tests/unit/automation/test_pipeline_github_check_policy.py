@@ -38,6 +38,23 @@ def command_runner() -> MagicMock:
     return MagicMock(side_effect=unexpected_command)
 
 
+@pytest.fixture(autouse=True)
+def stable_check_suite_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep policy tests focused on required Check Run evaluation."""
+
+    def suite_ids(
+        _adapter: object,
+        _head_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> tuple[int, ...]:
+        del deadline_s, cancellation
+        return (1,)
+
+    monkeypatch.setattr(pg.PipelineGitHub, "_check_suite_ids_for_head", suite_ids)
+
+
 def _response(payload: object) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], stderr="", returncode=0, stdout=json.dumps(payload))
 
