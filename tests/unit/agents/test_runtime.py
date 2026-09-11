@@ -781,7 +781,7 @@ def test_codex_delta_scan_does_not_read_unchanged_sparse_file(
     _profile, protected = _sealed_codex_profile(request)
     sparse = Path(request.worktree_path) / "large-existing-object"
     with sparse.open("wb") as stream:
-        stream.truncate(1460 * 1024 * 1024)
+        stream.truncate(2 * 1024 * 1024)
     baseline = agent_runtime._capture_codex_preserved_state(request)
     original_pread = os.pread
     sparse_reads = 0
