@@ -16,11 +16,20 @@ Examples of allowed patterns::
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, format_output
+
+_HANDLED_PYTHON_FILE_TYPES = (
+    stat.S_IFDIR,
+    stat.S_IFREG,
+    stat.S_IFLNK,
+)
 
 
 def is_shadowing_pattern(alias: str, target: str) -> bool:
@@ -59,18 +68,48 @@ def _update_string_state(
     return in_string, string_delimiter
 
 
+@dataclass
+class _ScanResult:
+    """Keep findings and read failures separate."""
+
+    violations: list[tuple[int, str, str, str]]
+    read_errors: list[str]
+
+
+@dataclass
+class _BatchResult:
+    """Collect diagnostics for all selected files."""
+
+    violations: list[str]
+    read_errors: list[str]
+
+    @property
+    def exit_code(self) -> int:
+        return int(bool(self.violations or self.read_errors))
+
+
 def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
     """Find type alias shadowing violations in a Python file.
 
     Args:
-        file_path: Path to Python file to check.
+        file_path: Path to the Python file to check.
 
     Returns:
-        List of tuples ``(line_number, line_content, alias, target)`` for each
-        violation.
+        Tuples of line number, line content, alias, and target. A read failure
+        prints a warning and returns findings collected before the failure.
+        A missing file returns an empty list.
 
     """
+    result = _scan_file(file_path)
+    for error in result.read_errors:
+        print(f"Warning: {error}", file=sys.stderr)
+    return result.violations
+
+
+def _scan_file(file_path: Path) -> _ScanResult:
+    """Scan one file and retain findings if a read fails."""
     violations: list[tuple[int, str, str, str]] = []
+    read_errors: list[str] = []
     pattern = re.compile(r"^([A-Z][a-zA-Z0-9_]*)\s*=\s*([A-Z][a-zA-Z0-9_]*)\s*(?:#.*)?$")
 
     try:
@@ -98,9 +137,9 @@ def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
                         violations.append((line_num, stripped, alias, target))
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
+        read_errors.append(f"Could not read {file_path}: {e}")
 
-    return violations
+    return _ScanResult(violations, read_errors)
 
 
 def format_error(file_path: Path, line_num: int, line: str, alias: str, target: str) -> str:
@@ -132,34 +171,154 @@ def check_files(file_paths: list[Path]) -> tuple[int, list[str]]:
         file_paths: List of file or directory paths to check.
 
     Returns:
-        Tuple of ``(exit_code, error_messages)``.
+        Tuple of ``(exit_code, error_messages)``. Exit code 1 means that a
+        violation or read failure occurred. Diagnostics include both kinds.
 
     """
-    all_violations: list[str] = []
+    result = _check_files(file_paths)
+    return result.exit_code, result.violations + result.read_errors
+
+
+def _record_read_error(result: _BatchResult, path: Path, error: OSError) -> None:
+    """Record one filesystem access failure."""
+    result.read_errors.append(f"Could not read {path}: {error}")
+
+
+def _record_unsupported_python_mode(
+    result: _BatchResult, path: Path, mode: int, *, python_suffix: bool
+) -> None:
+    """Record an unsupported node that has a Python suffix."""
+    if python_suffix and stat.S_IFMT(mode) not in _HANDLED_PYTHON_FILE_TYPES:
+        result.read_errors.append(f"Could not read {path}: Unsupported Python input type")
+
+
+def _has_python_suffix(name: str) -> bool:
+    """Use platform case rules to identify a Python file name."""
+    return os.path.normcase(name).endswith(os.path.normcase(".py"))
+
+
+def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
+    """Find regular Python files without following directory links."""
+    files: list[Path] = []
+    pending = [directory]
+
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    entry_path = Path(entry.path)
+                    try:
+                        if entry.is_junction():
+                            pending.append(entry_path)
+                            continue
+                        mode = entry.stat(follow_symlinks=False).st_mode
+                        if stat.S_ISDIR(mode):
+                            pending.append(entry_path)
+                        elif stat.S_ISREG(mode) and _has_python_suffix(entry.name):
+                            files.append(entry_path)
+                        elif stat.S_ISLNK(mode) and _has_python_suffix(entry.name):
+                            try:
+                                target_mode = entry.stat().st_mode
+                            except OSError as error:
+                                _record_read_error(result, entry_path, error)
+                                continue
+                            if stat.S_ISREG(target_mode):
+                                files.append(entry_path)
+                            _record_unsupported_python_mode(
+                                result,
+                                entry_path,
+                                target_mode,
+                                python_suffix=True,
+                            )
+                        _record_unsupported_python_mode(
+                            result,
+                            entry_path,
+                            mode,
+                            python_suffix=_has_python_suffix(entry.name),
+                        )
+                    except OSError as error:
+                        _record_read_error(result, entry_path, error)
+        except OSError as error:
+            _record_read_error(result, current, error)
+
+    return files
+
+
+def _select_missing_path(
+    path: Path,
+    result: _BatchResult,
+    error: FileNotFoundError,
+    *,
+    python_suffix: bool,
+) -> list[Path]:
+    """Select a missing Python path or record an incomplete explicit input."""
+    if python_suffix:
+        return [path]
+    _record_read_error(result, path, error)
+    return []
+
+
+def _select_path(path: Path, result: _BatchResult) -> list[Path]:
+    """Select Python files from one explicit input path."""
+    python_suffix = path.name.endswith(".py")
+    try:
+        if path.is_junction():
+            return _collect_python_files(path, result)
+        mode = path.stat(follow_symlinks=False).st_mode
+    except FileNotFoundError as error:
+        return _select_missing_path(path, result, error, python_suffix=python_suffix)
+    except OSError as error:
+        _record_read_error(result, path, error)
+        return []
+
+    if stat.S_ISDIR(mode):
+        return _collect_python_files(path, result)
+    if stat.S_ISREG(mode) and python_suffix:
+        return [path]
+    if not stat.S_ISLNK(mode):
+        _record_unsupported_python_mode(result, path, mode, python_suffix=python_suffix)
+        return []
+
+    try:
+        target_mode = path.stat().st_mode
+    except FileNotFoundError as error:
+        return _select_missing_path(path, result, error, python_suffix=python_suffix)
+    except OSError as error:
+        _record_read_error(result, path, error)
+        return []
+    if stat.S_ISDIR(target_mode):
+        return _collect_python_files(path, result)
+    if stat.S_ISREG(target_mode) and python_suffix:
+        return [path]
+    _record_unsupported_python_mode(result, path, target_mode, python_suffix=python_suffix)
+    return []
+
+
+def _check_files(file_paths: list[Path]) -> _BatchResult:
+    """Scan each selected file once and collect all diagnostics."""
+    result = _BatchResult([], [])
 
     files_to_check: list[Path] = []
     for path in file_paths:
-        if path.is_dir():
-            files_to_check.extend(path.rglob("*.py"))
-        elif path.suffix == ".py":
-            files_to_check.append(path)
+        files_to_check.extend(_select_path(path, result))
 
     for file_path in files_to_check:
-        violations = detect_shadowing(file_path)
-        for line_num, line, alias, target in violations:
+        scan = _scan_file(file_path)
+        result.read_errors.extend(scan.read_errors)
+        for line_num, line, alias, target in scan.violations:
             error_msg = format_error(file_path, line_num, line, alias, target)
-            all_violations.append(error_msg)
+            result.violations.append(error_msg)
 
-    if all_violations:
-        return 1, all_violations
-    return 0, []
+    return result
 
 
 def main() -> int:
     """CLI entry point for type alias shadowing detection.
 
     Returns:
-        Exit code (0 if clean, 1 if violations found).
+        Exit code 0 for a complete scan without violations, or 1 for a
+        violation or read failure.
 
     """
     parser = create_validation_parser(
@@ -185,13 +344,18 @@ def main() -> int:
     if args.verbose and not args.json:
         print(f"Checking {len(args.paths)} path(s) for type alias shadowing...")
 
-    exit_code, errors = check_files(args.paths)
+    result = _check_files(args.paths)
+    exit_code = result.exit_code
+    errors = result.violations
 
     if args.json:
         report = {
             "paths": [str(p) for p in args.paths],
             "violations": errors,
             "violation_count": len(errors),
+            "read_errors": result.read_errors,
+            "read_error_count": len(result.read_errors),
+            "scan_complete": not result.read_errors,
             "exit_code": exit_code,
             "passed": exit_code == 0,
         }
@@ -201,6 +365,10 @@ def main() -> int:
     if errors:
         print("\n".join(errors), file=sys.stderr)
         print(f"\nFound {len(errors)} type alias shadowing violation(s)", file=sys.stderr)
+
+    if result.read_errors:
+        print("\n".join(result.read_errors), file=sys.stderr)
+        print(f"Scan incomplete: {len(result.read_errors)} read error(s)", file=sys.stderr)
 
     return exit_code
 
