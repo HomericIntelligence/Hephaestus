@@ -317,3 +317,37 @@ def test_explicit_scope_sync_failure_blocks_labels_sources_and_agents(
     assert not any(isinstance(handle.job, AgentJob) for handle in pool.submitted)
     assert len(coordinator.ledger) == 1
     assert "clone exhausted" in coordinator.ledger[0].reason
+
+
+def test_malformed_intake_receipt_blocks_labels_sources_and_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed successful receipt cannot enter the scoped pipeline."""
+    checkout = tmp_path / "repo-a"
+    checkout.mkdir()
+    classifications: list[int] = []
+    pool = FakeWorkerPool()
+    pool.script(JobResult(ok=True, value={"revision": "a" * 40}))
+    github = FakeStageGitHub(labels=["state:needs-plan"])
+
+    def classify(issue: int, github_arg: Any) -> IssueFacts:
+        del github_arg
+        classifications.append(issue)
+        return _facts(issue)
+
+    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo-a"], issues=[101], projects_dir=tmp_path),
+        github=github,
+        pool=pool,
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
+
+    assert coordinator.run() == 1
+    assert classifications == []
+    assert github.mutation_log == []
+    assert not any(isinstance(handle.job, AgentJob) for handle in pool.submitted)
+    assert len(coordinator.ledger) == 1
+    assert "repository-intake receipt invalid" in coordinator.ledger[0].reason

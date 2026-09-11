@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -91,6 +92,17 @@ def _advance_remote(tmp_path: Path, remote: Path) -> None:
     _run_git(updater, "push", "origin", "master")
 
 
+def _caller_state(caller: Path) -> tuple[str, str, str, str, str]:
+    """Return the caller identity, index, worktree, and status state."""
+    return (
+        _run_git(caller, "rev-parse", "HEAD").stdout,
+        _run_git(caller, "symbolic-ref", "--quiet", "--short", "HEAD").stdout,
+        _run_git(caller, "diff", "--cached").stdout,
+        _run_git(caller, "diff").stdout,
+        _run_git(caller, "status", "--porcelain", "--untracked-files=all").stdout,
+    )
+
+
 def test_isolated_intake_preserves_primary_head_index_and_status(tmp_path: Path) -> None:
     """A tracked and untracked caller stays unchanged while intake syncs."""
     caller, remote = _make_repository(tmp_path)
@@ -158,6 +170,23 @@ def test_direct_scope_from_detached_linked_worktree_prepares_isolated_intake(
     )
 
 
+def test_attached_non_default_linked_caller_preserves_all_caller_state(tmp_path: Path) -> None:
+    """An attached feature worktree stays byte-for-byte unchanged."""
+    caller, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-caller"
+    _run_git(caller, "worktree", "add", "-b", "feature", str(linked), "HEAD")
+    (linked / "tracked.txt").write_text("staged\n", encoding="utf-8")
+    _run_git(linked, "add", "tracked.txt")
+    (linked / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+    (linked / "untracked.txt").write_text("keep\n", encoding="utf-8")
+    before = _caller_state(linked)
+
+    receipt = _manager(linked, remote).prepare()
+
+    assert receipt.path != linked
+    assert _caller_state(linked) == before
+
+
 def test_default_branch_already_checked_out_does_not_create_branch_conflict(
     tmp_path: Path,
 ) -> None:
@@ -220,6 +249,63 @@ def test_symlinked_intake_state_is_preserved_and_fails_closed(tmp_path: Path) ->
     assert marker.read_text(encoding="utf-8") == "preserve\n"
 
 
+def test_intake_state_inside_registered_worktree_fails_before_write(tmp_path: Path) -> None:
+    """Intake cannot put state inside any registered worktree."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    _run_git(caller, "worktree", "add", "--detach", str(manager.state_parent), "HEAD")
+    manager.state_parent.chmod(0o700)
+    before = _run_git(manager.state_parent, "status", "--porcelain").stdout
+
+    with pytest.raises(RepoIntakeError, match="overlaps a registered worktree"):
+        manager.prepare()
+
+    assert not manager.state_dir.exists()
+    assert _run_git(manager.state_parent, "status", "--porcelain").stdout == before
+
+
+def test_mismatched_receipt_is_preserved_and_fails_closed(tmp_path: Path) -> None:
+    """A receipt with foreign ownership cannot be reused or replaced."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    receipt = manager.prepare()
+    payload = json.loads(manager.receipt_path.read_text(encoding="utf-8"))
+    payload["ownership_key"] = "foreign:owner"
+    changed = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    manager.receipt_path.write_text(changed, encoding="utf-8")
+
+    with pytest.raises(RepoIntakeError, match="receipt ownership does not match"):
+        manager.prepare()
+
+    assert manager.receipt_path.read_text(encoding="utf-8") == changed
+    assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
+
+
+def test_fetch_failure_preserves_attached_caller_state(tmp_path: Path) -> None:
+    """A fetch failure does not change the caller branch, index, or files."""
+    caller, remote = _make_repository(tmp_path)
+    _run_git(caller, "switch", "-c", "feature")
+    (caller / "tracked.txt").write_text("staged\n", encoding="utf-8")
+    _run_git(caller, "add", "tracked.txt")
+    (caller / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+    (caller / "untracked.txt").write_text("keep\n", encoding="utf-8")
+    before = _caller_state(caller)
+    manager = _manager(caller, remote)
+    run_command = manager._run_command
+
+    def fail_fetch(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "fetch" in command:
+            raise subprocess.CalledProcessError(1, command, stderr="fetch failed")
+        return run_command(command, **kwargs)
+
+    manager._run_command = fail_fetch
+
+    with pytest.raises(RepoIntakeError, match="fetch failed"):
+        manager.prepare()
+
+    assert _caller_state(caller) == before
+
+
 def test_concurrent_intake_preparation_reuses_one_owned_path(tmp_path: Path) -> None:
     """Concurrent preparations produce one path and one initial generation."""
     caller, remote = _make_repository(tmp_path)
@@ -229,6 +315,25 @@ def test_concurrent_intake_preparation_reuses_one_owned_path(tmp_path: Path) -> 
             executor.map(
                 lambda _index: _manager(caller, remote).prepare(),
                 range(2),
+            )
+        )
+
+    assert receipts[0].path == receipts[1].path
+    assert receipts[0].revision == receipts[1].revision
+    assert receipts[0].generation == receipts[1].generation == 1
+
+
+def test_linked_callers_share_one_concurrent_intake(tmp_path: Path) -> None:
+    """Linked callers serialize intake through their shared common directory."""
+    caller, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-caller"
+    _run_git(caller, "worktree", "add", "--detach", str(linked), "HEAD")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        receipts = list(
+            executor.map(
+                lambda root: _manager(root, remote).prepare(),
+                (caller, linked),
             )
         )
 
