@@ -24,6 +24,41 @@ def modules():
     return fleet_worker
 
 
+@pytest.mark.parametrize(
+    "field,value", [("workerId", "another-worker"), ("generation", 2), ("schema", "other")]
+)
+def test_rejected_command_cannot_complete_an_older_intent(worker, field, value):
+    """Rejected ownership must not replace an uncertain durable execution outcome."""
+    original = command("input", number=91, payload={"text": "synthetic input"})
+    assert worker.journal.begin(original) is None
+    path = worker.journal.directory / "receipts.jsonl"
+    before = path.read_bytes()
+    rejected = worker.handle({**original, field: value})
+    assert rejected["status"] == "failed"
+    assert path.read_bytes() == before
+    assert "result" not in worker.journal.commands[original["idempotencyKey"]]
+    replay = worker.handle(original)
+    assert replay["receipt"]["error"] == "outcome_unknown"
+    assert path.read_bytes() == before
+    assert worker.provider.request("fixture/last-request", {"method": "turn/start"}) == {}
+
+
+@pytest.mark.parametrize(
+    "field,value", [("workerId", "another-worker"), ("generation", 2), ("schema", "other")]
+)
+def test_rejected_command_preserves_a_cached_receipt(worker, field, value):
+    """A valid completed command still returns its exact retained result on replay."""
+    original = command("drain", number=92, target="worker-a")
+    original["targetKind"] = "workers"
+    completed = worker.handle(original)
+    assert completed["status"] == "completed"
+    path = worker.journal.directory / "receipts.jsonl"
+    before = path.read_bytes()
+    assert worker.handle({**original, field: value})["status"] == "failed"
+    assert worker.handle(original) == completed
+    assert path.read_bytes() == before
+
+
 def command(operation, *, target="session-1", number=1, generation=1, payload=None):
     """Return one controller command without provider configuration overrides."""
     return {

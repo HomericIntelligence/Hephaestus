@@ -153,12 +153,14 @@ class FleetWorker:
 
     def handle(self, command: dict[str, Any]) -> dict[str, Any]:
         """Apply an admitted, idempotent command and return its durable receipt."""
+        intent_created = False
         try:
             self._validate(command)
             self.poll()
             existing = self.journal.begin(command)
             if existing is not None:
                 return existing
+            intent_created = True
             result = self._execute(command)
         except ValueError as error:
             result = result_for(command, "failed", error=str(error))
@@ -166,10 +168,8 @@ class FleetWorker:
             result = result_for(command, "failed", error="provider_uncertain")
             for session in list(self.journal.sessions.values()):
                 self._activity(session, "unknown", "provider_uncertain")
-        if command.get("idempotencyKey") in self.journal.commands:
-            intent = self.journal.commands[command["idempotencyKey"]]
-            if intent["commandId"] == command.get("commandId") and "result" not in intent:
-                self.journal.complete(command, result)
+        if intent_created:
+            self.journal.complete(command, result)
         return result
 
     def _execute(self, command: dict[str, Any]) -> dict[str, Any]:
