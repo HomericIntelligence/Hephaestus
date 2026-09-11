@@ -9,9 +9,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -24,41 +22,6 @@ def modules():
     from hephaestus.automation import fleet_worker
 
     return fleet_worker
-
-
-@pytest.mark.parametrize(
-    "field,value", [("workerId", "another-worker"), ("generation", 2), ("schema", "other")]
-)
-def test_rejected_command_cannot_complete_an_older_intent(worker, field, value):
-    """Rejected ownership must not replace an uncertain durable execution outcome."""
-    original = command("input", number=91, payload={"text": "synthetic input"})
-    assert worker.journal.begin(original) is None
-    path = worker.journal.directory / "receipts.jsonl"
-    before = path.read_bytes()
-    rejected = worker.handle({**original, field: value})
-    assert rejected["status"] == "failed"
-    assert path.read_bytes() == before
-    assert "result" not in worker.journal.commands[original["idempotencyKey"]]
-    replay = worker.handle(original)
-    assert replay["receipt"]["error"] == "outcome_unknown"
-    assert path.read_bytes() == before
-    assert worker.provider.request("fixture/last-request", {"method": "turn/start"}) == {}
-
-
-@pytest.mark.parametrize(
-    "field,value", [("workerId", "another-worker"), ("generation", 2), ("schema", "other")]
-)
-def test_rejected_command_preserves_a_cached_receipt(worker, field, value):
-    """A valid completed command still returns its exact retained result on replay."""
-    original = command("drain", number=92, target="worker-a")
-    original["targetKind"] = "workers"
-    completed = worker.handle(original)
-    assert completed["status"] == "completed"
-    path = worker.journal.directory / "receipts.jsonl"
-    before = path.read_bytes()
-    assert worker.handle({**original, field: value})["status"] == "failed"
-    assert worker.handle(original) == completed
-    assert path.read_bytes() == before
 
 
 def command(operation, *, target="session-1", number=1, generation=1, payload=None):
@@ -100,7 +63,7 @@ def worker(tmp_path):
     )
     # This deterministic provider performs no real model/tool execution.
     instance.storage_guard = lambda: None
-    instance.execution_guard = lambda _session, _active: None
+    instance.execution_guard = lambda: None
     instance.start()
     yield instance
     instance.close()
@@ -162,10 +125,9 @@ def test_worker_routes_distinct_threads_and_metadata_only_events(worker):
 
 def test_worker_sends_singleton_environment_on_each_provider_start(worker):
     """Bind actual fixture RPCs to the admitted session's sole tool container."""
-    from hephaestus.automation.fleet_environments import EnvironmentRegistry
-    from tests.fixtures.fleet_environment import environment_lease
+    from hephaestus.automation.fleet_environments import EnvironmentLease, EnvironmentRegistry
 
-    item = environment_lease(
+    item = EnvironmentLease(
         worker_id="worker-a",
         session_id="session-1",
         generation=1,
@@ -173,10 +135,7 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
         container_id="1" * 64,
         image_digest="sha256:" + "a" * 64,
         workspace=worker.workspace_root / "one",
-        attachment_program=Path(sys.executable),
-        execution_id="session-1-exec",
-        socket_path=worker.journal.directory / "a.sock",
-        lease_id="1" * 32,
+        engine_program=Path("/usr/bin/podman"),
     )
     registry = EnvironmentRegistry(worker.codex_home, [item])
     registry.write_configuration()
@@ -192,16 +151,6 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
     ]
     parameters = worker.provider.request("fixture/last-request", {"method": "thread/start"})
     assert parameters.get("environments") == expected
-    assert parameters["cwd"] == "/workspace"
-    assert parameters["runtimeWorkspaceRoots"] == ["/workspace"]
-    assert parameters["config"]["permissions"]["fleet"]["filesystem"] == {
-        ":minimal": "read",
-        "/workspace": "write",
-    }
-    assert parameters["config"]["shell_environment_policy"]["set"]["HOME"] == (
-        "/workspace/.fleet-runtime/home"
-    )
-    assert str(worker.workspace_root) not in json.dumps(parameters)
     assert (
         worker.handle(command("input", number=2, payload={"text": "tool"}))["status"] == "completed"
     )
@@ -215,10 +164,9 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
 
 def test_worker_cannot_cold_resume_an_unreconciled_remote_environment(worker):
     """Do not send an unsupported selection field or infer ownership on resume."""
-    from hephaestus.automation.fleet_environments import EnvironmentRegistry
-    from tests.fixtures.fleet_environment import environment_lease
+    from hephaestus.automation.fleet_environments import EnvironmentLease, EnvironmentRegistry
 
-    item = environment_lease(
+    item = EnvironmentLease(
         worker_id="worker-a",
         session_id="session-1",
         generation=1,
@@ -226,10 +174,7 @@ def test_worker_cannot_cold_resume_an_unreconciled_remote_environment(worker):
         container_id="1" * 64,
         image_digest="sha256:" + "a" * 64,
         workspace=worker.workspace_root / "one",
-        attachment_program=Path(sys.executable),
-        execution_id="session-1-exec",
-        socket_path=worker.journal.directory / "a.sock",
-        lease_id="1" * 32,
+        engine_program=Path("/usr/bin/podman"),
     )
     registry = EnvironmentRegistry(worker.codex_home, [item])
     registry.write_configuration()
@@ -239,9 +184,7 @@ def test_worker_cannot_cold_resume_an_unreconciled_remote_environment(worker):
         worker.handle(command("input", number=2, payload={"text": "tool"}))["status"] == "completed"
     )
     assert worker.handle(command("interrupt", number=3))["status"] == "accepted"
-    session = wait_state(worker, "session-1", "unknown")
-    assert session["admissionReserved"] is True
-    assert session["providerOutcome"] == "interrupted"
+    wait_state(worker, "session-1", "idle")
     result = worker.handle(command("resume", number=4))
     assert result["status"] == "failed"
     assert result["receipt"]["error"] == "environment_resume_requires_reconciliation"
@@ -476,9 +419,7 @@ def test_cancel_waits_for_provider_completion_and_drain_blocks_input(worker):
     assert result["status"] == "accepted"
     wait_state(worker, "session-1", "idle")
     assert any(event["event"].get("outcome") == "cancelled" for event in worker.events(0)["events"])
-    drain = command("drain", target="worker-a", number=4)
-    drain["targetKind"] = "workers"
-    worker.handle(drain)
+    worker.handle(command("drain", number=4))
     assert worker.handle(command("input", number=5, payload={"text": "new"}))["status"] == "failed"
 
 
@@ -489,54 +430,6 @@ def test_provider_exit_marks_unknown_and_never_reports_success(worker):
     assert result["status"] == "failed"
     assert result["receipt"]["error"] == "provider_uncertain"
     wait_state(worker, "session-1", "unknown")
-
-
-@pytest.mark.parametrize(
-    ("operation", "provider_method"),
-    [
-        ("start", "thread/start"),
-        ("input", "turn/start"),
-        ("resume", "thread/resume"),
-    ],
-)
-def test_malformed_provider_result_completes_an_uncertain_receipt(
-    worker, operation, provider_method
-):
-    """Keep a durable receipt and reservation for an invalid provider result."""
-    if operation != "start":
-        assert start(worker)["status"] == "completed"
-    if operation == "resume":
-        worker.handle(command("input", number=2, payload={"text": "tool"}))
-        wait_state(worker, "session-1", "tool_running")
-        assert worker.handle(command("interrupt", number=3))["status"] == "accepted"
-        wait_state(worker, "session-1", "idle")
-    worker.provider.request(
-        "fixture/next-result",
-        {"method": provider_method, "result": {}},
-    )
-    number = {"start": 10, "input": 11, "resume": 12}[operation]
-    payload = {"text": "plain"} if operation == "input" else None
-    envelope = command(operation, number=number, payload=payload)
-    if operation == "start":
-        envelope["payload"] = {
-            "workspace": "one",
-            "permissions": "fleet",
-            "agentId": "session-1-agent",
-            "taskId": "task-1",
-            "executionId": "session-1-exec",
-            "stage": "implementation",
-            "issueRefs": ["HomericIntelligence/Hephaestus#1"],
-        }
-
-    result = worker.handle(envelope)
-
-    assert result["status"] == "failed"
-    assert result["receipt"]["error"] == "provider_uncertain"
-    assert worker.handle(envelope) == result
-    session = worker.journal.sessions["session-1"]
-    assert session["activity"] == "unknown"
-    assert session["admissionReserved"] is True
-    assert "result" in worker.journal.commands[envelope["idempotencyKey"]]
 
 
 def test_journal_single_writer_replay_and_uncertain_command(tmp_path):
@@ -698,256 +591,6 @@ def test_invalid_worker_command_cannot_change_existing_session(worker):
     assert worker.inventory()["sessions"][0]["activity"] == "idle"
 
 
-@pytest.mark.parametrize(
-    ("operation", "target_kind"),
-    [
-        ("drain", "sessions"),
-        ("start", "workers"),
-        ("input", "workers"),
-        ("respond", "workers"),
-        ("interrupt", "workers"),
-        ("cancel", "workers"),
-        ("resume", "workers"),
-    ],
-)
-def test_worker_rejects_each_operation_for_the_wrong_target_kind(worker, operation, target_kind):
-    """A command cannot name one authority target and mutate another target kind."""
-    envelope = command(operation, number=93)
-    envelope["targetKind"] = target_kind
-    receipt_path = worker.journal.directory / "receipts.jsonl"
-    before = receipt_path.read_bytes()
-
-    result = worker.handle(envelope)
-
-    assert result["status"] == "failed"
-    assert result["receipt"]["error"] == "wrong_target_kind"
-    assert receipt_path.read_bytes() == before
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        {"method": "turn/started", "params": []},
-        {
-            "id": [],
-            "method": "item/commandExecution/requestApproval",
-            "params": {"threadId": "thread-1", "turnId": "turn-1"},
-        },
-        {"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}},
-        {"method": "turn/completed", "params": {"threadId": "thread-1"}},
-        {
-            "method": "turn/completed",
-            "params": {
-                "threadId": "thread-1",
-                "turn": {"id": "turn-1", "status": "unknown"},
-            },
-        },
-    ],
-    ids=[
-        "lifecycle-params",
-        "server-request-id",
-        "completed-thread-id",
-        "completed-turn",
-        "completed-status",
-    ],
-)
-def test_malformed_provider_frames_fail_the_provider_without_stopping_worker_poll(worker, message):
-    """Malformed lifecycle and server-request frames become a bounded provider failure."""
-    from hephaestus.automation.fleet_provider import ProviderError
-
-    start(worker)
-    with pytest.raises(ProviderError, match="provider_protocol_failure"):
-        worker.provider.request("fixture/message", {"message": message})
-
-    worker.poll()
-
-    assert worker.provider.failed is True
-    assert worker.inventory()["sessions"][0]["activity"] == "unknown"
-
-
-def test_pending_server_requests_keep_bounded_private_request_records(
-    worker, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Approval requests keep their contract within a fixed record count."""
-    start(worker)
-    worker.handle(command("input", number=2, payload={"text": "approval"}))
-    wait_state(worker, "session-1", "waiting_approval")
-    session = worker.journal.sessions["session-1"]
-    worker.pending.clear()
-    worker._pending_sizes.clear()
-    worker._pending_bytes = 0
-    rejected: list[str | int] = []
-    monkeypatch.setattr(worker.provider, "reject", rejected.append)
-
-    for index in range(257):
-        worker._server_request(
-            {
-                "id": f"request-{index}",
-                "method": "item/commandExecution/requestApproval",
-                "params": {
-                    "threadId": "thread-1",
-                    "turnId": "turn-1",
-                    "itemId": f"item-{index}",
-                    "command": "private command " + ("x" * 4096),
-                },
-            },
-            session,
-        )
-
-    assert len(worker.pending) <= 256
-    assert rejected == ["request-256"]
-    assert all(
-        set(pending) == {"id", "method", "params", "sessionId"}
-        and pending["id"] == request_id
-        and pending["params"]["threadId"] == "thread-1"
-        and pending["params"]["turnId"] == "turn-1"
-        and pending["params"]["itemId"] == f"item-{index}"
-        and pending["params"]["command"].startswith("private command ")
-        for index, (request_id, pending) in enumerate(worker.pending.items())
-    )
-
-
-def test_pending_server_requests_have_an_aggregate_byte_limit(
-    worker, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Private request payloads cannot exceed one aggregate memory budget."""
-    start(worker)
-    worker.handle(command("input", number=2, payload={"text": "approval"}))
-    wait_state(worker, "session-1", "waiting_approval")
-    session = worker.journal.sessions["session-1"]
-    worker.pending.clear()
-    worker._pending_sizes.clear()
-    worker._pending_bytes = 0
-    rejected: list[str | int] = []
-    monkeypatch.setattr(worker.provider, "reject", rejected.append)
-
-    for index in range(32):
-        worker._server_request(
-            {
-                "id": f"large-{index}",
-                "method": "item/fileChange/requestApproval",
-                "params": {
-                    "threadId": "thread-1",
-                    "turnId": "turn-1",
-                    "itemId": f"item-{index}",
-                    "reason": "x" * (256 * 1024),
-                },
-            },
-            session,
-        )
-        if rejected:
-            break
-
-    assert rejected
-    assert len(worker.pending) < 32
-
-
-def test_real_worker_request_can_produce_file_change_evidence(
-    worker, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The real request path keeps all identities that bind private evidence."""
-    from hephaestus.automation.fleet_request_evidence import read_request_evidence
-
-    start(worker)
-    worker.handle(command("input", number=2, payload={"text": "tool"}))
-    wait_state(worker, "session-1", "tool_running")
-    worker.provider.request(
-        "fixture/message",
-        {
-            "message": {
-                "id": "file-approval-1",
-                "method": "item/fileChange/requestApproval",
-                "params": {
-                    "threadId": "thread-1",
-                    "turnId": "turn-1",
-                    "itemId": "patch-1",
-                    "reason": "private reason",
-                },
-            }
-        },
-    )
-    wait_state(worker, "session-1", "waiting_approval")
-
-    def thread_read(method: str, params: dict[str, object]) -> dict[str, object]:
-        assert method == "thread/read"
-        assert params == {"threadId": "thread-1", "includeTurns": True}
-        return {
-            "thread": {
-                "id": "thread-1",
-                "turns": [
-                    {
-                        "id": "turn-1",
-                        "status": "inProgress",
-                        "items": [
-                            {
-                                "id": "patch-1",
-                                "type": "fileChange",
-                                "status": "inProgress",
-                                "changes": [
-                                    {
-                                        "path": "/workspace/change.py",
-                                        "kind": {"type": "update"},
-                                        "diff": "-old\n+new\n",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            }
-        }
-
-    monkeypatch.setattr(worker.provider, "request", thread_read)
-
-    result = read_request_evidence(worker, "session-1", "file-approval-1")
-
-    assert result["itemId"] == "patch-1"
-    assert result["evidence"] == {
-        "changes": [
-            {
-                "path": "/workspace/change.py",
-                "kind": {"type": "update"},
-                "diff": "-old\n+new\n",
-            }
-        ]
-    }
-
-
-def test_worker_close_persists_cleanup_uncertainty_when_provider_close_raises(
-    worker, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A restart stays fenced when provider cleanup cannot return confirmation."""
-    module = modules()
-    real_close = worker.provider.close
-
-    def fail_close() -> bool:
-        raise module.ProviderError("provider_pipe_cleanup_uncertain")
-
-    monkeypatch.setattr(worker.provider, "close", fail_close)
-    with pytest.raises(module.ProviderError, match="provider_pipe_cleanup_uncertain"):
-        worker.close()
-    real_close()
-
-    restarted = module.FleetWorker(
-        state_dir=worker.journal.directory,
-        workspace_root=worker.workspace_root,
-        codex_home=worker.codex_home,
-        worker_id="worker-a",
-        pool_id="local",
-        host_id="laptop",
-        generation=1,
-        capacity=2,
-        provider_command=[sys.executable, "-u", str(FIXTURE)],
-    )
-    restarted.storage_guard = lambda: None
-    try:
-        assert restarted.journal.runtime_uncertain is True
-        with pytest.raises(RuntimeError, match="cleanup_requires_reconciliation"):
-            restarted.start()
-    finally:
-        restarted.close()
-
-
 def test_journal_limit_and_truncation_are_recovery_failures(tmp_path):
     """Stop on full or damaged durable storage without trimming uncertain facts."""
     module = modules()
@@ -973,54 +616,8 @@ def test_provider_write_deadline_applies_before_waiting_for_response(worker):
     assert time.monotonic() - started < 1
 
 
-def _check_final_cleanup_read(
-    monkeypatch: pytest.MonkeyPatch,
-    proc_stat: Path,
-    error_type: type[OSError],
-    cleanup: Callable[[], None],
-) -> None:
-    """Check a controlled read failure after real child termination."""
-    original_read_text = Path.read_text
-    injected = False
-    error = error_type("controlled final process observation")
-
-    def read_final_stat(path: Path, *args: Any, **kwargs: Any) -> str:
-        nonlocal injected
-        if path == proc_stat:
-            injected = True
-            raise error
-        return original_read_text(path, *args, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(Path, "read_text", read_final_stat)
-        try:
-            if error_type in {PermissionError, OSError}:
-                with pytest.raises(error_type) as failure:
-                    cleanup()
-                assert failure.value is error
-            else:
-                cleanup()
-        finally:
-            assert injected
-
-
-@pytest.mark.parametrize(
-    "cleanup_read_error",
-    [None, FileNotFoundError, ProcessLookupError, PermissionError, OSError],
-    ids=[
-        "normal",
-        "file-disappeared",
-        "process-disappeared",
-        "permission-denied",
-        "other-os-error",
-    ],
-)
-def test_provider_cleanup_stops_descendants_after_leader_exit(
-    worker, monkeypatch, cleanup_read_error
-):
-    """Stop child execution even when PID 1 retains its zombie process record."""
-    if cleanup_read_error is not None and sys.platform != "linux":
-        pytest.skip("The controlled stat read requires Linux procfs.")
+def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
+    """A leader exit does not establish that its process group stopped."""
     result = worker.provider.request(
         "turn/start",
         {
@@ -1029,54 +626,31 @@ def test_provider_cleanup_stops_descendants_after_leader_exit(
         },
     )
     child_pid = result["childPid"]
-    proc_stat = Path(f"/proc/{child_pid}/stat")
-    original_start = None
-    if sys.platform == "linux":
-        original_fields = proc_stat.read_text().rsplit(")", 1)[1].split()
-        assert original_fields[0] not in {"Z", "X"}
-        original_start = original_fields[19]
     worker.provider.process.wait(timeout=3)
 
-    def execution_stopped():
-        if original_start is not None:
-            try:
-                fields = proc_stat.read_text().rsplit(")", 1)[1].split()
-            except (FileNotFoundError, ProcessLookupError):
-                return True
-            # PID reuse and an unreaped zombie cannot run the original child.
-            return fields[19] != original_start or fields[0] in {"Z", "X"}
-        try:
-            os.kill(child_pid, 0)
-        except ProcessLookupError:
-            return True
-        return False
-
     def emergency_cleanup():
-        if not execution_stopped():
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(child_pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGKILL)
 
-    timer = threading.Timer(5, emergency_cleanup)
+    timer = threading.Timer(2, emergency_cleanup)
     timer.start()
-    observed_stopped = False
     try:
         started = time.monotonic()
         worker.provider.close()
         assert time.monotonic() - started < 1.5
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            if execution_stopped():
-                observed_stopped = True
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
                 break
             time.sleep(0.02)
         else:
-            pytest.fail("provider descendant can still execute after cleanup")
+            pytest.fail("provider descendant survived cleanup")
     finally:
         timer.cancel()
-        if cleanup_read_error is None or not observed_stopped:
-            emergency_cleanup()
-        else:
-            _check_final_cleanup_read(monkeypatch, proc_stat, cleanup_read_error, emergency_cleanup)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGKILL)
 
 
 def test_controller_assignment_metadata_can_be_top_level(worker):

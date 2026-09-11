@@ -12,7 +12,6 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any
 
 from hephaestus.automation.fleet_isolation import shell_environment_policy, validate_worker_storage
 from hephaestus.automation.fleet_provider import CodexAppServer
@@ -64,9 +63,6 @@ def cleanup_probe_children(nonce: str) -> None:
 def write_probe_config(home: Path, workspace: Path, state: Path) -> dict[str, object]:
     """Use the same filesystem and shell environment settings as the Fleet worker."""
     policy = shell_environment_policy(workspace)
-    environment = policy["set"]
-    if not isinstance(environment, dict):
-        raise ValueError("invalid_shell_environment")
     filesystem = {
         ":minimal": "read",
         str(workspace): "write",
@@ -74,15 +70,14 @@ def write_probe_config(home: Path, workspace: Path, state: Path) -> dict[str, ob
         str(state): "deny",
     }
     lines = ['default_permissions = "fleet"', 'cli_auth_credentials_store = "file"']
-    sections: tuple[tuple[str, dict[str, Any]], ...] = (
+    for section, values in (
         ("permissions.fleet.filesystem", filesystem),
         ("permissions.fleet.network", {"enabled": False}),
         ("features", {"shell_snapshot": False, "multi_agent": False, "multi_agent_v2": False}),
         ("agents", {"enabled": False}),
         ("shell_environment_policy", {key: value for key, value in policy.items() if key != "set"}),
-        ("shell_environment_policy.set", environment),
-    )
-    for section, values in sections:
+        ("shell_environment_policy.set", policy["set"]),
+    ):
         lines.append(f"[{section}]")
         lines.extend(f"{json.dumps(key)} = {json.dumps(value)}" for key, value in values.items())
     (home / "config.toml").write_text("\n".join(lines) + "\n")
@@ -126,7 +121,7 @@ def probe(root: Path, executable: Path) -> dict:
         try:
             provider.start()
             with tempfile.TemporaryDirectory(prefix="fleet-peer-", dir="/tmp") as scratch:
-                arguments: list[str] = []
+                arguments = []
                 for name, directory in (
                     ("workspace", workspace),
                     ("sibling", sibling),
@@ -137,12 +132,7 @@ def probe(root: Path, executable: Path) -> dict:
                     marker = directory / "synthetic-marker"
                     marker.write_text("synthetic marker only\n")
                     arguments.extend((name, str(marker)))
-                environment = policy["set"]
-                if not isinstance(environment, dict) or not isinstance(
-                    environment.get("HOME"), str
-                ):
-                    raise ValueError("invalid_shell_environment")
-                result = command(provider, workspace, _FILES, environment["HOME"], *arguments)
+                result = command(provider, workspace, _FILES, policy["set"]["HOME"], *arguments)
                 if result.get("exitCode") != 0:
                     raise ProbeError("synthetic_file_probe_failed", result)
                 observed.update(

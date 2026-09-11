@@ -4,11 +4,10 @@ The Fleet worker owns one Codex 0.153.4 app-server process. It accepts admitted
 commands through a private Unix socket. Agamemnon owns task admission. Keystone
 supplies the authenticated transport. The worker does not discover issues, assign
 tasks, change state labels, or run another task queue.
-The CLI supports contained runtime startup and inspection. One fresh Linux
-session can execute through its matching supervisor-owned boundary at worker
-capacity one. Native macOS, Linux without that boundary, higher capacity, and
-cold resume remain unsupported. The deployment must separately validate the
-pinned provider's restricted startup and ordinary model/tool route.
+The current CLI supports provider startup and inspection. Session admission is
+disabled on macOS and Linux until an enforced execution boundary is available.
+The deployment steps below describe that later enabled mode; they do not bypass
+the current gate.
 
 ## Start and attachment
 
@@ -27,26 +26,23 @@ pinned provider's restricted startup and ordinary model/tool route.
 
    ```sh
    hephaestus-fleet-worker serve \
-     --state-dir /srv/fleet/state \
-     --workspace-root /srv/fleet/workspaces \
-     --codex-home /srv/fleet/codex \
+     --state-dir /private/fleet/state \
+     --workspace-root /private/fleet/workspaces \
+     --codex-home /private/fleet/codex \
      --worker-id laptop-1 --pool-id laptop --host-id laptop \
-     --generation 1 --capacity 1 \
-     --contained-config /srv/fleet/control/runtime.json
+     --generation 1 --capacity 12
    ```
 
 5. Attach the authenticated allocation transport to this command:
 
    ```sh
-   hephaestus-fleet-worker attach --state-dir /srv/fleet/state
+   hephaestus-fleet-worker attach --state-dir /private/fleet/state
    ```
 
 `attach` exchanges one JSON request and one JSON response per line. Each request
 uses a new local socket connection. The socket is `state-dir/worker.sock`, with
 mode `0600`. It is never exposed as a TCP listener. Commands run serially; Codex
 turns continue concurrently in their separate conversations.
-Use short private state paths: Unix socket addresses have a platform length
-limit. The same constraint applies to the supervisor's attachment socket paths.
 Use `--codex-bin /absolute/path/to/codex` when the pinned executable is outside
 the fixed runtime search path. Wrapper scripts must have their interpreter on
 that registered search path; the worker does not inherit the operator's `PATH`.
@@ -55,116 +51,9 @@ that registered search path; the worker does not inherit the operator's `PATH`.
 `events --state-dir PATH --after N` returns at most 500 metadata events. Its cursor
 is local to one retained worker journal. It is not a global event sequence.
 
-## Contained runtime configuration
-
-Use `serve --contained-config /srv/fleet/control/runtime.json` to construct the
-supervisor, fixed environment registry, and attachment servers. Keep the existing
-worker arguments. The configuration file must be a private regular file owned
-by the worker user. Its parent and all declared private roots must have mode
-`0700`; the file must have mode `0600`. Create the directories before startup.
-
-The following example prepares one session. Replace the paths, identities, and
-zero image digest with the deployment's verified values. Use the engine socket
-on the same Linux host as the worker. The attachment program must be the trusted
-Python executable in which Hephaestus is installed.
-The runtime retains the configured invocation path so a virtual environment
-keeps its installed packages. It validates the executable target separately.
-
-```json
-{
-  "schema": "hi/fleet/contained-runtime/v1",
-  "supervisorState": "/srv/fleet/supervisor",
-  "engine": {
-    "executable": "/usr/bin/podman",
-    "socket": "/run/user/1000/podman/podman.sock",
-    "home": "/srv/fleet/engine"
-  },
-  "attachmentProgram": "/opt/fleet/.venv/bin/python",
-  "authorityRoots": {
-    "controller": "/srv/fleet/control",
-    "gateway": "/srv/fleet/gateway",
-    "spool": "/srv/fleet/spool"
-  },
-  "environments": [
-    {
-      "environmentId": "environment-1",
-      "spec": {
-        "workerId": "laptop-1",
-        "sessionId": "session-1",
-        "executionId": "execution-1",
-        "generation": 1,
-        "workspace": "/srv/fleet/workspaces/issue-1",
-        "imageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "cpus": 2,
-        "memoryBytes": 8589934592,
-        "pidsLimit": 256
-      }
-    }
-  ]
-}
-```
-
-The configuration accepts 1–24 entries within the declared worker capacity.
-Execution currently requires capacity one and its single entry. Each entry needs separate
-session, execution, environment, and workspace identities. The worker and
-generation must match the CLI arguments. Workspaces must be below the worker
-workspace root. No workspace can contain or overlap another workspace or a
-protected authority root. The runtime includes authentication, worker and
-supervisor state, engine context, and both the attachment invocation path and
-its resolved target in this check.
-The operator must supply the complete deployed controller, gateway, and spool
-root inventory. This configuration is a local resource description. It does
-not create an Agamemnon claim or authorize a task.
-
-Startup checks retained worker ownership before preparing containers. It starts
-the attachment server loops before the one shared app-server. The exact
-remote-only registry is written before provider startup. Each attachment must
-still complete its binding handshake and supervisor checks before it can
-forward bytes. Neither listener readiness nor provider initialization qualifies
-a deployment for execution.
-
-A complete inventory of unchanged, unstarted leases can be reused with the same
-registry. Partial, active, uncertain, or changed inventories require explicit
-reconciliation. Startup never repeats an uncertain create, start, or remove.
-
-For a fresh `start` command, the worker checks assignment ownership and the
-registry's exact retained bytes. It compares the immutable binding to the
-supervisor's lease and observes the valid stopped container in phase `created`.
-The attachment then activates that lease during `thread/start`; the worker
-does not hold the supervisor lock across this RPC. The reply's thread identity
-is journaled before the worker observes the active container and kernel boundary.
-Only a confirmed active boundary permits idle readiness. No model turn starts
-until a separate admitted `input` command arrives.
-
-Input, steering, and approval responses each recheck the active boundary before
-the provider effect. Checks include the engine, image and container policy,
-protected roots, and retained boot, container, and cgroup identities. Missing,
-stopped, changed, disposed, or uncertain boundaries fail the command. Receipts
-retain the specific cause, such as `environment_binding_mismatch`,
-`container_phase_not_ready`, or `container_observation_unavailable`.
-An existing session becomes `unknown`; its known thread and reservation remain
-durable. Repeating the same command returns its retained receipt. Observation
-does not retry thread creation, attachment, or disposal.
-
-These checks retain the restricted filesystem profile, disabled tool network,
-native worker authentication, and disabled local fallback. They do not replace
-the deployment measurement of ordinary model/tool routing. Cold resume returns
-`environment_resume_requires_reconciliation`; higher worker capacity returns
-`contained_execution_requires_capacity_one`.
-Cold session resume and dynamic registry updates remain unsupported.
-
-Shutdown stops the provider, closes attachment connections, and joins serving
-threads with one 45-second deadline. Local engine attachment cleanup uses
-bounded process waits and attempts each owned attachment. A failed cleanup does
-not prevent cleanup of the remaining local resources. A live serving thread or
-uncertain engine cleanup keeps the supervisor journal writer owned for a later
-close attempt or process termination. Uncertain provider cleanup remains in the
-worker journal. Shutdown retains containers, leases, and workspaces. It does
-not mean cancellation, disposal, released capacity, or completed issue work.
-
 ## Command contract
 
-Every admitted control command has these fields:
+Every mutating command has these fields:
 
 ```json
 {
@@ -204,96 +93,11 @@ the assigned issue. Interrupt and cancel return `accepted` until an actual
 `turn/completed` notification supplies the outcome. An idle cancellation first
 reads the provider thread and requires an actual `idle` status. Both stop paths
 then clean and inspect background terminals. Only a confirmed empty inventory
-permits a noncontained session to release its reservation and emit a correlated
-stop fact. A contained cancellation additionally requires matching supervisor
-disposal, as described below. An idle cancellation returns `completed` only after
-the applicable cleanup is confirmed.
+permits release and a correlated stop fact. An idle cancellation then returns
+`completed`.
 
 Assignment fields can also appear in `payload` for an attached client. Duplicate
 fields must agree with the controller envelope. Conflicts fail before dispatch.
-
-### Private terminal job results
-
-The private attachment accepts `associate-job` and `job-result` with schema
-`hi/fleet/job/v1`. This interface associates one existing admitted session with
-one future input. It does not start a session, submit input, or grant a claim.
-The association requires the session's current registry lease and containment
-supervisor. Interactive sessions without this association keep their existing
-completion behavior.
-
-An association request has these fields:
-
-```json
-{
-  "operation": "associate-job",
-  "schema": "hi/fleet/job/v1",
-  "jobId": "job-1",
-  "targetId": "session-1",
-  "generation": 1,
-  "bindingDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inputCommandId": "command-2",
-  "inputIdempotencyKey": "input-2",
-  "inputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-}
-```
-
-The digest values above are examples. The trusted caller supplies its upstream
-binding digest and the SHA-256 digest of the exact UTF-8 input text. The upstream
-digest is a correlation reference. It does not prove admission or source approval.
-The worker retains its existing assignment identity, stage, workspace, provider
-thread, and immutable containment lease. An identical association can be read
-again. Changed ownership or a replacement lease cannot reuse it.
-
-The ordinary admitted `input` command must match all three input fields. The
-worker checks the lease again before dispatch. Each association permits one turn;
-it cannot steer a running turn or authorize another turn after completion.
-These private fields are not additions to the public Keystone control envelope.
-
-A `job-result` request supplies the same schema, job ID, target ID, generation,
-and binding digest. It omits the three input fields. The reply has `status` and
-`result`. An input acknowledgment leaves the job `pending`, with no result.
-Only the matching final provider item can supply the answer. Codex 0.153.4
-defines an `agentMessage` with `phase: final_answer` and null `delivery` for this
-path. Deltas, commentary, and asynchronous messages cannot supply this answer.
-See the pinned [ThreadItem source][fleet-job-thread-item] and
-[TurnError source][fleet-job-turn-error].
-
-After a matching completed or failed turn, the worker confirms provider idle
-state, clears owned pending requests, cleans background terminals, and disposes
-the bound container through the existing supervisor. A successful result needs
-the final answer and the confirmed input receipt. A failed result can have a
-null answer, but must retain the actual provider error. Missing or invalid output
-still permits cleanup after confirmed provider termination. It leaves the job
-`unknown`, with no readable result and no permission to retry.
-
-A ready result uses schema `hi/fleet/job-result/v1`. It contains the job and
-binding references, existing owner identity, input receipt references, provider
-turn ID, actual outcome, private answer or error, disposal reference, and a
-SHA-256 digest of the other result fields. The answer limit is 64 KiB of UTF-8.
-Error details have a 64 KiB encoded JSON limit. A complete job journal record has
-a 768 KiB limit, below the existing 1 MiB journal and private socket frame limits.
-Prompts, answers, and native error details do not enter public activity events.
-
-The worker retains the original result through replay. Identical terminal or
-final-item replay has no effect. Conflicting evidence withholds the result and
-reports `unknown`; it cannot replace the retained result. Provider disconnect
-and unfinished journal replay also report `unknown`. A failed journal write can
-stop the worker. Restart retains unfinished work for reconciliation. A rejected
-change to an immutable result fails before writing its bytes.
-
-Normal job completion keeps the local reservation and workspace ownership.
-It emits no stop command ID and does not release Agamemnon's canonical claim.
-Explicit interruption and cancellation retain their existing semantics. A
-terminal result proves a provider outcome and cleanup, not completion of a
-GitHub issue. The adapter from admitted Fleet work to the existing `AgentJob`,
-`JobResult`, test, review, and publication stages remains separate implementation
-work. No live provider or cluster execution is established by the synthetic unit
-tests for this interface.
-
-[fleet-job-thread-item]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
-[fleet-job-turn-error]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/app-server-protocol/schema/typescript/v2/TurnError.ts
-
-### Other private attachment operations
 
 The private attachment also accepts `inventory`, `events` with `after`, and
 `requests` with `targetId`. Request details can contain private command or question
@@ -325,8 +129,7 @@ stage, provider IDs, `observedAt`, `activity`, and `waitingReason`.
 The observed activities are `model_working`, `tool_running`, `waiting_approval`,
 `waiting_input`, `idle`, `disconnected`, and `unknown`. An idle turn can have a
 `completed`, `failed`, `interrupted`, or `cancelled` outcome. None releases the
-canonical issue claim. For the noncontained protocol path, a confirmed interrupt
-releases active execution capacity
+canonical issue claim. A confirmed interrupt releases active execution capacity
 and retains workspace ownership. Resume reacquires capacity before it loads the
 same conversation. It does not submit a prompt or start a turn. A confirmed
 cancellation makes that session terminal and releases its local workspace and
@@ -340,140 +143,11 @@ stopped turn are removed; an old approval cannot reactivate it.
 Resume and each new input invalidate previous cleanup evidence before provider
 dispatch. Natural completed/failed turns inspect the current background inventory
 without terminating interactive services. Only a fresh empty inventory reports
-`confirmed_empty` for that noncontained provider turn; nonempty or unavailable
-inventory
+`confirmed_empty` for that provider turn; nonempty or unavailable inventory
 reports `unconfirmed` and blocks manual task resolution. These observations do
 not themselves release the task claim or conversation reservation.
-
-For a contained session, provider cleanup is insufficient. The worker records
-`providerBackgroundCleanup` privately and keeps the shared `backgroundCleanup`
-marker unconfirmed until disposal succeeds. This rule applies to natural turn
-completion as well as cancellation. Before each new turn, the worker invalidates
-both observations. Provider-only cleanup and interruption outcomes do not appear
-in activity events.
-An explicitly associated terminal job uses the disposal path described above.
-Other natural turns retain their interactive container.
-
-Contained cancellation requires an injected `ContainedExecSupervisor` that owns
-the registry's exact lease. The worker rechecks configuration, assignment, and
-the immutable lease digest before disposal. It then checks the confirmed disposal
-document and its digest. The supervisor retains the complete receipt; the worker
-records its lease ID and digest before releasing the session. A missing
-supervisor, changed binding, or uncertain disposal leaves activity `unknown`,
-reason `container_disposal_unconfirmed`, and reservations intact. A later stop
-observation reconciles an uncertain removal without issuing another removal.
-Duplicate command delivery still returns its retained command receipt.
-
-Contained interruption retains the container and reservation. The worker keeps
-the provider's interrupted outcome privately and reports `unknown` with reason
-`contained_interrupt_requires_reconciliation`. It does not publish a terminal
-interrupted event with incomplete cleanup: the controller would reject that
-event and block replay at its cursor. The controller therefore keeps this stop
-pending and blocks new controls. Resume and explicit recovery remain deployment
-gates. Closing an attachment or worker does not substitute for cancellation or
-prove contained disposal. The optional contained configuration constructs the
-supervisor and fixed registry. Only the capacity-one fresh Linux path can pass
-the current execution checks.
-
 Prompt text, model output, shell command text, and credential values are excluded
 from activity facts and command receipts.
-
-### Retained command output
-
-The worker stores valid `item/completed` command notifications on private
-storage under `state-dir/session-output/`. Capture requires the current worker,
-generation, allocation, session, task, execution, agent, provider thread, and
-turn. A missing identity makes capture unavailable. A completed item does not
-prove that the task passed tests or received independent approval.
-
-The stored output is the exact `aggregatedOutput` supplied by Codex 0.153.4,
-or its bounded UTF-8 prefix. It combines stdout and stderr. This provider field
-does not establish output completeness or provider truncation. A null aggregate
-means output is unavailable or empty in the provider record. It does not mean
-exit zero. An actual empty string remains distinct from null.
-
-Each immutable item has a digest bound to its retained owner. The capture
-manifest records unique valid observed item identities, retained and omitted
-items, and limits. Exact repeats do not change the counts. Conflicting content
-for the same turn and item blocks export. An incomplete storage update or a
-capture failure also blocks export; activity facts can still report progress.
-The safe `outputCaptureUnavailable` flag is durable in the worker journal.
-Raw commands and output do not enter that journal or shared events.
-
-The limits per retained session and generation are:
-
-- 64 retained items and 1 MiB of encoded item records;
-- 64 KiB of UTF-8 output per item, cut only at a scalar boundary;
-- 16 KiB of command text, 4 KiB of working-directory text, and 1024 bytes per
-  identity string;
-- 4096 unique observed item identities; exceeding this count blocks export;
-- 2 MiB for the encoded export bundle.
-
-Oversized command or working-directory metadata is omitted, not shortened.
-The manifest preserves the omission count. A missing or malformed provider
-notification is outside these counts. Capture always reports `complete: false`.
-It is a partial set of completed command records, not a complete terminal log.
-
-To export already retained output:
-
-1. Wait for worker facts to be acknowledged and for contained execution disposal.
-   Stop the worker with the normal shutdown procedure. Export requires the
-   existing journal writer lock to be free and holds that lock until export ends.
-   A live worker causes an immediate refusal without a capture-state change.
-2. Select the exact worker state directory, session ID, and generation from
-   retained execution records. Keep the state directory outside agent-writeable
-   workspaces. Do not delete it when the worker is disposed.
-3. Select a new absolute file path in an existing owner-only directory. Keep
-   this export outside all agent-writeable workspaces. Do not reuse an old file.
-4. Run the existing registered CLI. This operation does not start a provider or
-   connect to a worker socket:
-
-   ```bash
-   just --command uv run --locked hephaestus-fleet-worker export-output \
-     --state-dir /private/fleet/state --session-id session-1 \
-     --generation 1 --output /private/fleet/exports/session-1.json
-   ```
-
-5. Retain the emitted receipt and exported file. The receipt contains the exact
-   file SHA-256 as `receiptDigest`, its byte count, and the complete owner.
-   The file uses `hi/fleet/session-output/v1`. A storage or validation failure
-   returns a nonzero status and `session_output_unavailable`.
-6. Use an already admitted transport to collect the private file and receipt.
-   Register those exact bytes and expected owner with Odysseus. Collection is
-   a separate operation; this CLI does not establish a transport or authority.
-
-Export remains available after worker disposal. Capture and export files have
-mode `0600` and their directories have mode `0700`. Reads reject symbolic links, multiple file
-links, nonprivate ownership, oversized files, and changed bytes or metadata.
-The complete file digest also binds the capture counts and limits. Each export
-is an immutable snapshot. A later snapshot requires a new file and explicit
-dashboard registration. The dashboard's live metadata stream remains separate.
-
-The versioned bundle has exactly five top-level fields: `schema`, `identity`,
-`provider`, `capture`, and `items`. The identity contains `workerId`, positive
-integer `generation`, `allocationId`, `sessionId`, `executionId`, `taskId`,
-`agentId`, and `providerThreadId`. The provider is exactly
-`{"name":"codex","version":"0.153.4"}`. The capture object contains
-`profile: "completed_command_items"`, `complete: false`,
-`observedCompletedItems`, `retainedItems`, `omittedItems`, and `retentionLimited`.
-Observed items equal retained plus omitted items. The limit flag is true if
-an item was omitted or retained text was shortened by the collector.
-
-Each item contains `turnId`, `itemId`, `completedAtMs`, `command`, `cwd`,
-`status`, `exitCode`, `durationMs`, `output`, and `recordDigest`. The terminal
-status is `completed`, `failed`, or `declined`. Completion time and duration
-are provider-reported milliseconds. Exit code and duration can be null. The
-output object contains `kind: "provider_aggregate"`, `text`, `byteCount`,
-`sha256`, `providerTruncated: null`, and Boolean `captureTruncated`.
-Null output has null text, byte count, and digest. Otherwise the byte count and
-digest apply to the retained UTF-8 bytes.
-
-The item digest is SHA-256 of `{"identity": identity, "item": item}` with the
-`recordDigest` field removed from the item. Use sorted keys, compact JSON,
-UTF-8 without ASCII substitution, no nonfinite numbers, and no final newline.
-Consumers must reject extra fields, duplicate JSON keys, duplicate item
-identities, invalid scalar types, digest mismatches, and exceeded resource limits.
-The detached `receiptDigest` applies to the complete exported file bytes.
 
 Recognized text, reasoning, tool-output, and usage notifications refresh active
 observations at most once per five seconds per session. The thread and turn IDs
@@ -493,11 +167,6 @@ requires explicit recovery. The worker does not trim unresolved history.
 A retained provider PID blocks restart while that process might still exist.
 An authentication-owner lock also covers the provider process. A different
 generation or an uncertain process-group cleanup requires explicit reconciliation.
-Before it starts the provider, the worker records an unresolved runtime attempt.
-A recorded provider PID or confirmed cleanup resolves this startup marker.
-If initialization or PID recording fails, uncertain cleanup keeps the marker and
-blocks restart. A rejected startup preflight does not replace retained runtime
-evidence.
 The journal stores execution facts;
 it is not another orchestration database.
 
@@ -522,9 +191,7 @@ The pinned macOS process sandbox adds shared temporary-directory access when
 The worker therefore rejects native macOS session admission with
 `native_macos_requires_isolated_linux_worker`. A laptop Linux VM or container
 boundary must separately demonstrate its filesystem and resource isolation.
-Linux without an owned contained registry also rejects admission with
-`linux_execution_requires_verified_boundary`. The capacity-one contained path
-checks the actual boundary before startup and again before each execution effect.
+Linux also rejects admission with `linux_execution_requires_verified_boundary`.
 The platform name and a test report cannot enable execution. A shared container
 around 24 conversations does not establish separate tool boundaries.
 The worker does not expose a CLI bypass. See the pinned
@@ -558,47 +225,13 @@ process boundary. Runtime credentials and container-control sockets must remain
 outside those containers. The current selection adapter does not create these
 containers or claim that their process boundaries are enforced.
 
-`EnvironmentLease` binds worker, session, execution, generation, environment ID,
-complete container ID, image digest, host workspace, and an absolute Python
-attachment program. It also binds the private supervisor socket, lease ID, and
-immutable lease digest. `EnvironmentLease.from_endpoint` derives these fields
-from the live `AttachmentEndpoint` and the installed Python interpreter.
-The immutable canonical lease document accompanies the registration. Before
-writing configuration, the registry recomputes its endpoint digest and compares
-every declared worker, session, execution, generation, workspace, image,
-container, and lease identity against that document. Reusing one endpoint's
-digest with another assignment fails with `environment_binding_mismatch`.
+`EnvironmentLease` binds worker, session, generation, environment ID, complete
+container ID, image digest, workspace, and an absolute Podman launcher path.
 `EnvironmentRegistry` rejects overlapping workspaces and repeated container or
 environment IDs. It writes private `environments.toml` once and checks a digest
 of all lease fields on reconstruction. An existing configuration change requires
-reconciliation. A missing supervisor binding fails with
-`supervised_attachment_required`; the registry does not launch the engine.
-
-The program transport invokes `python -m hephaestus.automation.fleet_attachment`
-with `--socket`, `--lease-id`, and `--binding-digest`. The endpoint validates the
-current assignment and completes supervisor engine and kernel checks before
-exposing streams. A connection cannot supply an engine command. Stream content
-is not recorded. Closing the connection does not dispose its container or
-release the reservation.
-Handshake reads use one monotonic deadline on each side. Endpoint close
-interrupts its owned accepted socket, including an incomplete handshake. Relay
-cleanup restores descriptor flags before closing an owned writer and does not
-touch its released descriptor number afterward.
-When the remote stream ends, the client drains received output and exits even
-if the provider keeps its input pipe open. On the server side, client input EOF
-still permits the remaining process output to drain. Stream completion does not
-prove container disposal.
-
-The host workspace maps to `/workspace`. Thread cwd, roots, filesystem grants,
-and tool HOME/XDG values use that contained path; the worker's journal keeps the
-canonical host path. The host prepares the workspace directories before thread
-startup. The registry checks every attachment socket directory against all
-configured workspaces. Before creating leases, the supervisor owner must supply
-all private runtime, authentication, and spool roots in `protected_roots`.
-The supervisor persists those exclusions, checks every new workspace and every
-unresolved lease at restart, and retains exclusions omitted from later
-configuration. Engine home and socket separation remain the engine adapter's
-responsibility.
+reconciliation. The fixed attachment command is `podman start --attach
+--interactive --sig-proxy=false CONTAINER_ID`.
 
 The registry sets `include_local=false` and `default="none"`. The worker sends an
 explicit singleton `environments` array on every `thread/start` and `turn/start`.
@@ -638,8 +271,7 @@ synthetic nonce, process start time, session, and cgroup. The wrapper removed
 that exact container without first signaling the child. The child and parent
 PIDs, container cgroup, and enclosing scope were absent before the child's
 45-second self-limit. This demonstrates causal disposal in the tested engine.
-That run predates the production supervisor below. The supervisor requires its
-own execution evidence; the earlier wrapper result cannot substitute for it.
+The production Fleet supervisor does not yet implement that lifecycle.
 
 Raw results and wrapper observations are retained in the private artifact
 directory `image-build-20260911/exec-server-pair-01`. Its source manifest states
@@ -653,10 +285,9 @@ file and zero sessions. Those captures bind the frozen source manifest
 Later source edits require another explicit freeze before image validation.
 Fleet execution acceptance still requires the enforced adapter.
 
-Before admission, validate this attachment through restricted provider thread
-startup and normal tool routing. The supervisor creates and inspects each
-immutable boundary and observes its complete cgroup after disposal. Missing or
-uncertain disposal evidence must retain the
+Before admission, deliver a container supervisor that creates and inspects each
+immutable boundary, verifies the selected environment, and observes its complete
+cgroup after disposal. Missing or uncertain disposal evidence must retain the
 workspace and execution reservation. Codex's tracked-terminal list is not this
 evidence. Normal model tool calls can also require bubblewrap inside the tool
 container; the direct exec-server probe cannot establish that compatibility.
@@ -686,7 +317,7 @@ The separate installed-binary metadata canary verifies the effective profile,
 workspace roots, and approval policy with a new empty private `CODEX_HOME`.
 It permits only `initialize` and `thread/start`; it cannot submit a model turn.
 Codex 0.153.4 accepted an equivalent generated profile in that host canary.
-This separate native metadata-canary example uses `/private/fleet` paths.
+This example uses the paths from the launch command above:
 
 ```toml
 [permissions.fleet.filesystem]
@@ -725,130 +356,3 @@ The current adapter slice does not connect the existing Hephaestus issue-stage
 callbacks, heavy-build MCP recipes, or private terminal history. Add those through
 their owning interfaces before claiming the full Fleet workflows are complete.
 Keep existing `exec` integrations and label/publication rules in effect.
-
-## Private approval evidence
-
-The private worker socket accepts
-`{"operation":"request-evidence","targetId":"SESSION","requestId":"REQUEST"}`.
-Keep the request ID's integer or string type. The reply binds the current worker,
-generation, session, provider thread, turn, item, and request fingerprint. For a
-current file-change approval, `evidence.changes` contains only bounded paths,
-change kinds, and diffs from that item. The helper reads the current provider
-thread and checks ownership and the pending request again after the read.
-
-Missing or incomplete evidence returns `evidence_unavailable`. Changed ownership
-rejects the request. Neither result grants approval. The web backend must compare
-the complete binding and fingerprint before it displays an acceptance action.
-Keep these details on the private attachment. Do not add them to GitHub records,
-Keystone observations, or dashboard snapshots. Approval responses still use the
-admitted command path and a private immutable response reference.
-
-## Contained exec-server supervisor
-
-`fleet_containment.ContainedExecSupervisor` owns a private single-writer journal.
-It records creation and removal intent before it calls the engine. Each lease
-binds a worker, session, execution, generation, immutable image ID, workspace, and
-resource budget. Restart reconciliation observes retained state; it does not
-repeat creation, attachment, or removal automatically.
-
-`fleet_podman.PodmanEngine` requires an absolute executable, an explicit owned
-Unix socket, and private engine configuration. It suppresses image environment
-inheritance and proxy injection. The tool container has one workspace bind,
-64 MiB of private scratch, no network, no added capabilities, a read-only root,
-and fixed CPU, memory, and process limits. Rootless `keep-id` maps the engine
-owner to tool UID/GID 1000 without changing source ownership. Inspection must
-confirm the requested settings before attachment. Podman can report `keep-id`
-as a private user namespace plus its exact annotation and UID/GID maps. A
-created or running container can lack effective capability data in that response.
-Missing data validates only the declared capability-drop policy; it does not
-prove enforcement. Active attachment always requires kernel capability and
-namespace checks before the supervisor returns the endpoint to its caller.
-An engine home or control
-socket must not overlap the workspace.
-The hostname and its environment variable are fixed explicitly because Podman
-can add the variable when a container starts. The exclusive workspace bind uses
-private SELinux relabeling; SELinux enforcement remains enabled. The supervisor
-does not relabel its authority directories or another session's workspace.
-
-On an enforcing SELinux host, the engine selects the maintained
-`container_userns_t` process domain for Codex's nested filesystem sandbox. It
-records that choice in the existing engine identity. Hosts without the SELinux
-enforcement interface retain the existing non-SELinux path. A present interface
-must report enforcement; permissive, unreadable, or malformed state fails closed.
-An unavailable process domain fails container creation without a fallback.
-
-Container inspection must show exactly the selected security options and a
-`system_u:system_r:container_userns_t` process label. Its private two-category MCS
-level must match the `system_u:object_r:container_file_t` mount label. Shared
-`s0`, fixed-level overrides, malformed labels, extra security options, and another
-domain are rejected. The kernel observer checks every observed process context
-and the workspace's actual `security.selinux` attribute against those labels.
-It rechecks global enforcement before returning its private observation. Labels
-alone do not authorize admission or replace the other containment checks. An old
-SELinux lease without the selected-domain identity requires reconciliation.
-
-The maintained domain permits more SELinux operations than `container_t`,
-including namespace filesystem mounts and generic PTY access. Its capability
-rules permit checks; they do not assign Linux capabilities. Child user namespaces
-can acquire namespace-local capabilities. The existing capability drop,
-no-new-privileges, private namespaces, read-only root, network denial, resource
-limits, and private workspace remain required. The domain retains MCS constraints;
-private workspace categories do not establish isolation of generic PTY objects.
-See the [pinned domain policy](https://github.com/containers/container-selinux/blob/9715eb09108e9fabb0fbaeee9044636b349370eb/container.te#L1286)
-and [label initialization](https://github.com/podman-container-tools/podman/blob/8303f2e25b675ea7f82099d615c60969aec15870/vendor/github.com/opencontainers/selinux/go-selinux/label/label_linux.go#L22).
-No custom host policy or policy installation belongs to the worker.
-
-`LinuxKernel` must run on the engine's Linux host. It checks cgroup budgets,
-process identities, namespace separation, capabilities, and `NoNewPrivs`.
-Disposal retains the original and current process identities. A receipt requires
-an explicit absent-container result, the same host boot, a missing owned cgroup,
-and absence of every recorded process identity. A stopped stream, a missing
-observation, or an engine error cannot release ownership. If an endpoint no
-longer exposes a complete inventory, disposal stays uncertain for reconciliation.
-
-The bounded no-auth probe uses the production supervisor and direct exec-server
-RPCs. It creates synthetic workspace, sibling, and authority markers, observes
-a live detached child, and requests disposal of that exact container:
-
-```sh
-just fleet-supervisor-probe /private/new-probe-root /usr/bin/podman \
-  /run/user/506/podman/podman.sock sha256:IMMUTABLE_IMAGE_ID
-```
-
-Run this command through the designated engine operator on the Linux guest.
-The parent of the new probe root must exist and be private. The wrapper must
-limit the whole run and retain actual output and any unresolved lease. It may
-remove only containers that the probe created. This command does not start a
-Fleet conversation, authenticate a provider, or call a model.
-
-An independent Linux run on September 11, 2026 used the production supervisor,
-Podman 6.1.1, the pinned exec-server image, and one CPU with 1 GiB of memory.
-The endpoint read its workspace marker and could not read existing sibling and
-authority markers. The supervisor observed a live detached child, removed the
-exact container, and confirmed absence of the retained process identities and
-owned cgroup. Its journal reached `disposed` with a causal receipt. The outer
-operator did not remove a container to obtain this result. The run used a frozen
-source manifest and retained raw output outside the repository. It measured
-direct exec-server operations; it did not measure normal provider tool routing
-or enable session admission.
-
-The private attachment connects provider program transport to the supervisor;
-it does not connect or authorize Fleet admission. Socket and scripted-provider
-tests do not replace a measured provider startup or model-tool route. Pinned
-Codex thread startup can require a nested platform sandbox when it reads
-`AGENTS.md` under the restricted profile, before the external turn policy is
-available. The next no-model startup probe must use a fresh empty authority home,
-permit only initialization, environment status, and restricted thread startup,
-and observe the exact active lease and causal disposal. It must reject account,
-turn, and direct tool RPCs and retain a failed or uncertain result.
-The SELinux domain selection needs this fresh qualification on the actual host;
-unit fixtures do not prove startup compatibility. Keep a finite outer deadline,
-retain actual output and cleanup receipts, and verify that the VM stops afterward.
-New denials do not authorize additional permissions or sandbox changes.
-
-Restricted startup, normal model-tool routing, and complete deployment private-root
-configuration still need evidence from the actual deployment. The default CLI
-does not provision contained environments; use the fixed contained configuration
-for the capacity-one fresh Linux path. Cold resume and higher capacity remain
-unsupported. Retain the Codex 0.153.4 pin, existing sandbox policy, disabled
-nested subagents, and disabled local fallback.

@@ -16,8 +16,6 @@ import time
 import uuid
 from pathlib import Path
 
-from hephaestus.automation.fleet_provider import read_provider_version
-
 
 class ProbeConnection:
     """Exchange bounded JSON lines with one contained exec-server process."""
@@ -36,13 +34,8 @@ class ProbeConnection:
                 bufsize=0,
             )
             resources.callback(self._stop_process)
-            stdin, stdout = self.process.stdin, self.process.stdout
-            if stdin is None or stdout is None:
-                raise RuntimeError("exec_server_pipes_unavailable")
-            self.stdin = stdin
-            self.stdout = stdout
             self.selector = resources.enter_context(selectors.DefaultSelector())
-            self.selector.register(self.stdout, selectors.EVENT_READ)
+            self.selector.register(self.process.stdout, selectors.EVENT_READ)
             self.resources = resources.pop_all()
         self.buffer = b""
         self.sequence = 0
@@ -58,13 +51,13 @@ class ProbeConnection:
         """Wait at most four seconds for a matching response."""
         self.sequence += 1
         message = {"id": self.sequence, "method": method, "params": params}
-        self.stdin.write((json.dumps(message) + "\n").encode())
+        self.process.stdin.write((json.dumps(message) + "\n").encode())
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
             if b"\n" not in self.buffer:
                 if not self.selector.select(max(0, deadline - time.monotonic())):
                     break
-                part = os.read(self.stdout.fileno(), 8192)
+                part = os.read(self.process.stdout.fileno(), 8192)
                 if not part:
                     raise RuntimeError("exec_server_eof")
                 self.buffer += part
@@ -82,7 +75,7 @@ class ProbeConnection:
 
     def close(self) -> bool:
         """Observe stdio shutdown; force cleanup of the server group if required."""
-        self.stdin.close()
+        self.process.stdin.close()
         try:
             self.process.wait(timeout=2)
             return self.process.returncode == 0
@@ -93,7 +86,7 @@ class ProbeConnection:
             return False
         finally:
             try:
-                self.stdout.close()
+                self.process.stdout.close()
                 self.errors.seek(0)
                 self.diagnostics = self.errors.read(2048).decode(errors="replace")
             finally:
@@ -188,7 +181,7 @@ def run_probe(executable: Path, workspace: Path, forbidden: list[Path]) -> dict:
                 "resumeSessionId": None,
             },
         )
-        connection.stdin.write(b'{"method":"initialized","params":{}}\n')
+        connection.process.stdin.write(b'{"method":"initialized","params":{}}\n')
         observations["execSessionId"] = initialized["sessionId"]
         data = connection.request("fs/readFile", {"path": marker.as_uri(), "sandbox": None})
         observations["ownMarkerRead"] = base64.b64decode(data["dataBase64"]).decode() == nonce
@@ -255,10 +248,16 @@ def run_probe(executable: Path, workspace: Path, forbidden: list[Path]) -> dict:
             "serverStderr": connection.diagnostics,
             "authorizesAdmission": False,
         }
-    version = read_provider_version(
-        (str(executable),),
-        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
-        timeout=5,
+    version = (
+        subprocess.run(
+            [str(executable), "--version"],
+            capture_output=True,
+            timeout=5,
+            check=True,
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        )
+        .stdout.decode()
+        .strip()
     )
     return {
         "schema": "hi/fleet/exec-server-probe/v1",

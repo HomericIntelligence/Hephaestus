@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import sys
 import time
@@ -12,19 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.fleet_attachment import binding_digest
-from hephaestus.automation.fleet_containment import TOOL_ENVIRONMENT, ContainedExecSupervisor
 from hephaestus.automation.fleet_environments import EnvironmentRegistry
 from hephaestus.automation.fleet_isolation import (
     require_execution_platform,
     shell_environment_policy,
     validate_worker_storage,
-)
-from hephaestus.automation.fleet_job_results import (
-    FleetJobResults,
-    digest,
-    owner_identity,
-    validate_request,
 )
 from hephaestus.automation.fleet_journal import WorkerJournal as WorkerJournal, result_for
 from hephaestus.automation.fleet_provider import (
@@ -32,7 +22,6 @@ from hephaestus.automation.fleet_provider import (
     CodexAppServer,
     ProviderError,
 )
-from hephaestus.automation.fleet_session_output import retain_command
 
 _REQUESTS = {
     "item/commandExecution/requestApproval": "waiting_approval",
@@ -41,9 +30,6 @@ _REQUESTS = {
 }
 _TOOLS = {"commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch"}
 _ACTIVITY_REFRESH_SECONDS = 5.0
-_PENDING_REQUEST_MAX_RECORDS = 256
-_PENDING_REQUEST_MAX_BYTES = 4 * 1024 * 1024
-_SESSION_OPERATIONS = frozenset({"start", "input", "respond", "interrupt", "cancel", "resume"})
 
 
 def _text(value: Any) -> str:
@@ -94,7 +80,6 @@ class FleetWorker:
         allocation_id: str | None = None,
         provider_command: list[str] | None = None,
         environment_registry: EnvironmentRegistry | None = None,
-        containment_supervisor: ContainedExecSupervisor | None = None,
     ) -> None:
         """Open private receipts without starting a provider or admitting work."""
         if type(generation) is not int or generation < 1 or not 1 <= capacity <= 24:
@@ -103,6 +88,7 @@ class FleetWorker:
         self.codex_home = codex_home.resolve(strict=True)
         if codex_home.is_symlink() or self.codex_home.stat().st_mode & 0o077:
             raise ValueError("codex_home_must_be_private")
+        self.journal = WorkerJournal(state_dir)
         self.generation = generation
         self.capacity = capacity
         self.identity = {
@@ -114,105 +100,18 @@ class FleetWorker:
         }
         self.provider = CodexAppServer(provider_command or ["codex"], self.codex_home)
         self.environment_registry = environment_registry
-        self.containment_supervisor = containment_supervisor
         self.pending: dict[str | int, dict[str, Any]] = {}
-        self._pending_bytes = 0
-        self._pending_sizes: dict[str | int, int] = {}
         self.activity_clock: Callable[[], float] = time.monotonic
         self.storage_guard: Callable[[], None] = lambda: validate_worker_storage(
             self.codex_home, self.journal.directory, self.workspace_root
         )
-        self.execution_guard: Callable[[dict[str, Any], bool], None] = self._require_execution
+        self.execution_guard: Callable[[], None] = lambda: require_execution_platform(sys.platform)
         self._activity_emitted: dict[str, float] = {}
         self._closed = False
-        self._provider_attempted = False
-        self.journal = WorkerJournal(state_dir)
-        self.jobs = FleetJobResults(self.journal)
+        self._started = False
 
-    def _job_lease(self, session: dict[str, Any]) -> dict[str, Any]:
-        """Require a current contained lease for private pipeline association."""
-        registry, owner = self.environment_registry, self.containment_supervisor
-        if registry is None or owner is None:
-            raise ValueError("pipeline_containment_required")
-        lease = registry.lease_for(session)
-        if lease.lease_id is None:
-            raise ValueError("pipeline_containment_required")
-        with owner.operation_lock:
-            retained = owner.inspect(lease.lease_id)
-            if binding_digest(retained) != lease.binding_digest:
-                raise ValueError("environment_binding_mismatch")
-        return {"leaseId": lease.lease_id, "bindingDigest": lease.binding_digest}
-
-    def associate_job(self, message: dict[str, Any]) -> dict[str, Any]:
-        """Associate one already admitted session without dispatching work."""
-        validate_request(message, "associate-job")
-        session = self.journal.sessions.get(message["targetId"])
-        if session is None or self.journal.draining:
-            raise ValueError("job_session_not_ready")
-        return self.jobs.associate(message, session, self._job_lease(session))
-
-    def _complete_job(self, session: dict[str, Any], turn: dict[str, Any]) -> bool:
-        """Return a private terminal result after the owned container is disposed."""
-        job = self.jobs.for_session(session["sessionId"])
-        if job is None:
-            return False
-        if job["phase"] == "associated" and job["providerTurnId"] is None:
-            return True
-        if job["result"] is not None:
-            if job["terminalSha256"] != digest(turn):
-                self.jobs.unknown(job, "job_terminal_conflict")
-                session["outcome"] = None
-                self._activity(session, "unknown", "job_terminal_conflict")
-            return True
-        if turn.get("status") == "interrupted":
-            self.jobs.unknown(job, "job_interrupted")
-            return False
-        reason = "job_terminal_unconfirmed"
-        try:
-            if (
-                job["owner"] != owner_identity(session)
-                or job["providerTurnId"] != turn.get("id")
-                or job["lease"] != self._job_lease(session)
-            ):
-                raise ValueError("job_owner_mismatch")
-            if turn.get("status") not in {"completed", "failed"}:
-                raise ValueError("job_terminal_unconfirmed")
-            self._confirm_job_disposal(session)
-            self.jobs.complete(job, session["containmentDisposal"], turn)
-            current = self.journal.jobs[job["jobId"]]
-            if current["result"] is not None:
-                session["outcome"] = turn["status"]
-                self._activity(session, "idle", "pipeline_result_ready", outcome=turn["status"])
-                return True
-            reason = current.get("error", reason)
-        except ValueError as error:
-            reason = str(error)
-        except ProviderError:
-            reason = "provider_terminal_unconfirmed"
-        except (KeyError, TypeError):
-            reason = "job_owner_mismatch"
-        self.jobs.unknown(self.journal.jobs[job["jobId"]], reason)
-        session["outcome"] = None
-        self._activity(session, "unknown", reason)
-        return True
-
-    def _confirm_job_disposal(self, session: dict[str, Any]) -> None:
-        """Confirm provider idle state before cleanup and contained disposal."""
-        observed = self.provider.request(
-            "thread/read", {"threadId": session["providerThreadId"], "includeTurns": False}
-        ).get("thread", {})
-        if (
-            observed.get("id") != session["providerThreadId"]
-            or observed.get("status", {}).get("type") != "idle"
-        ):
-            raise ValueError("provider_not_confirmed_idle")
-        if not self._clean_background_terminals(session):
-            raise ValueError("background_cleanup_unconfirmed")
-        if not self._confirm_contained_disposal(session):
-            raise ValueError("container_disposal_unconfirmed")
-
-    def preflight(self) -> None:
-        """Check retained ownership before creating runtime resources."""
+    def start(self) -> None:
+        """Fence prior processes before acquiring a new provider runtime."""
         self.storage_guard()
         if self.journal.generation not in {0, self.generation}:
             raise RuntimeError("generation_change_requires_reconciliation")
@@ -225,20 +124,15 @@ class FleetWorker:
                 pass
             else:
                 raise RuntimeError("prior_provider_may_be_running")
-
-    def start(self) -> None:
-        """Fence prior processes before acquiring a new provider runtime."""
-        self.preflight()
         self.journal.append("generation", {"generation": self.generation})
         if self.environment_registry is not None:
             self.environment_registry.write_configuration()
-        self.journal.append("runtime", {"pid": None, "uncertain": True})
-        self._provider_attempted = True
         self.provider.start()
         process = self.provider.process
         if process is None:
             raise ProviderError("provider_not_started")
         self.journal.append("runtime", {"pid": process.pid})
+        self._started = True
         for session in list(self.journal.sessions.values()):
             if not session.get("released", False):
                 self._activity(session, "disconnected", "restart_requires_resume")
@@ -254,24 +148,17 @@ class FleetWorker:
             raise ValueError("stale_generation")
         if command.get("targetKind") not in {"sessions", "workers"}:
             raise ValueError("unsupported_target_kind")
-        operation = command.get("operation")
-        if (operation == "drain" and command["targetKind"] != "workers") or (
-            operation in _SESSION_OPERATIONS and command["targetKind"] != "sessions"
-        ):
-            raise ValueError("wrong_target_kind")
         if not isinstance(command.get("payload"), dict):
             raise ValueError("invalid_payload")
 
     def handle(self, command: dict[str, Any]) -> dict[str, Any]:
         """Apply an admitted, idempotent command and return its durable receipt."""
-        intent_created = False
         try:
             self._validate(command)
             self.poll()
             existing = self.journal.begin(command)
             if existing is not None:
                 return existing
-            intent_created = True
             result = self._execute(command)
         except ValueError as error:
             result = result_for(command, "failed", error=str(error))
@@ -279,8 +166,10 @@ class FleetWorker:
             result = result_for(command, "failed", error="provider_uncertain")
             for session in list(self.journal.sessions.values()):
                 self._activity(session, "unknown", "provider_uncertain")
-        if intent_created:
-            self.journal.complete(command, result)
+        if command.get("idempotencyKey") in self.journal.commands:
+            intent = self.journal.commands[command["idempotencyKey"]]
+            if intent["commandId"] == command.get("commandId") and "result" not in intent:
+                self.journal.complete(command, result)
         return result
 
     def _execute(self, command: dict[str, Any]) -> dict[str, Any]:
@@ -306,7 +195,7 @@ class FleetWorker:
         raise ValueError("unsupported_operation")
 
     def _resume(self, command: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
-        self.execution_guard(session, True)
+        self.execution_guard()
         if self.environment_registry is not None:
             self.environment_registry.parameters(session, "thread/resume")
         if session.get("backgroundCleanup") == "unconfirmed":
@@ -321,7 +210,6 @@ class FleetWorker:
                 raise ValueError("worker_capacity")
             session["admissionReserved"] = True
         session.pop("backgroundCleanup", None)
-        session.pop("providerBackgroundCleanup", None)
         self.journal.append("session", session)
         result = self.provider.request(
             "thread/resume",
@@ -341,24 +229,17 @@ class FleetWorker:
 
     def _thread_parameters(self, session: dict[str, Any]) -> dict[str, Any]:
         workspace = session["workspace"]
-        selection = self._environment_parameters(session, "thread/start")
-        tool_environment = shell_environment_policy(Path(workspace))
-        filesystem = {
-            ":minimal": "read",
-            workspace: "write",
-            str(self.codex_home): "deny",
-            str(self.journal.directory.resolve()): "deny",
-        }
-        if selection:
-            workspace = selection["environments"][0]["cwd"]
-            filesystem = {":minimal": "read", workspace: "write"}
-            tool_environment = {**tool_environment, "set": dict(TOOL_ENVIRONMENT)}
         profile = {
-            "filesystem": filesystem,
+            "filesystem": {
+                ":minimal": "read",
+                workspace: "write",
+                str(self.codex_home): "deny",
+                str(self.journal.directory.resolve()): "deny",
+            },
             "network": {"enabled": False},
         }
         return {
-            **selection,
+            **self._environment_parameters(session, "thread/start"),
             "cwd": workspace,
             "runtimeWorkspaceRoots": [workspace],
             "permissions": "fleet",
@@ -372,7 +253,7 @@ class FleetWorker:
                     "multi_agent_v2": False,
                     "shell_snapshot": False,
                 },
-                "shell_environment_policy": tool_environment,
+                "shell_environment_policy": shell_environment_policy(Path(workspace)),
             },
         }
 
@@ -381,34 +262,8 @@ class FleetWorker:
             return {}
         return self.environment_registry.parameters(session, operation)
 
-    def _require_execution(self, session: dict[str, Any], active: bool) -> None:
-        """Require the selected assignment's current supervisor-owned boundary."""
-        try:
-            if sys.platform != "linux" or self.environment_registry is None:
-                require_execution_platform(sys.platform)
-            if self.capacity != 1:
-                raise ValueError("contained_execution_requires_capacity_one")
-            registry = self.environment_registry
-            owner = self.containment_supervisor
-            if registry is None or owner is None:
-                raise ValueError("containment_supervisor_required")
-            lease = registry.lease_for(session)
-            if lease.lease_id is None:
-                raise ValueError("containment_supervisor_required")
-            with owner.operation_lock:
-                if binding_digest(owner.inspect(lease.lease_id)) != lease.binding_digest:
-                    raise ValueError("environment_binding_mismatch")
-                owner.observe_execution(lease.lease_id, active=active)
-        except (KeyError, TypeError, OSError, RuntimeError) as error:
-            if session.get("sessionId") in self.journal.sessions:
-                self._activity(session, "unknown", "container_observation_unavailable")
-            raise ValueError("container_observation_unavailable") from error
-        except ValueError as error:
-            if session.get("sessionId") in self.journal.sessions:
-                self._activity(session, "unknown", str(error))
-            raise
-
     def _start_session(self, command: dict[str, Any]) -> dict[str, Any]:
+        self.execution_guard()
         if self.journal.draining:
             raise ValueError("worker_draining")
         if command["targetId"] in self.journal.sessions:
@@ -450,15 +305,12 @@ class FleetWorker:
             "admissionReserved": True,
             "outcome": None,
         }
-        self.execution_guard(session, False)
         # A workspace reservation must survive a lost thread/start response.
         self.journal.append("session", session)
         result = self.provider.request(
             "thread/start", {**self._thread_parameters(session), "ephemeral": False}
         )
         session["providerThreadId"] = _text(result["thread"]["id"])
-        self.journal.append("session", session)
-        self.execution_guard(session, True)
         self._activity(session, "idle")
         return result_for(
             command,
@@ -468,6 +320,7 @@ class FleetWorker:
         )
 
     def _input(self, command: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+        self.execution_guard()
         if self.journal.draining:
             raise ValueError("worker_draining")
         if not _reserved(session):
@@ -481,12 +334,7 @@ class FleetWorker:
             "threadId": session["providerThreadId"],
             "input": [{"type": "text", "text": text}],
         }
-        self.execution_guard(session, True)
         selection = self._environment_parameters(session, "turn/start")
-        job = self.jobs.for_session(session["sessionId"])
-        if job is not None and job["lease"] != self._job_lease(session):
-            raise ValueError("job_lease_mismatch")
-        self.jobs.before_input(command, session)
         method = "turn/start"
         if session["activity"] != "idle":
             method = "turn/steer"
@@ -495,7 +343,6 @@ class FleetWorker:
             params.update(selection)
         # Persist invalidation before a provider call can admit another turn.
         session.pop("backgroundCleanup", None)
-        session.pop("providerBackgroundCleanup", None)
         self.journal.append("session", session)
         result = self.provider.request(method, params)
         if method == "turn/start":
@@ -503,11 +350,11 @@ class FleetWorker:
             session.pop("stopOperation", None)
             session["outcome"] = None
             session["providerTurnId"] = _text(result["turn"]["id"])
-            self.jobs.started(session)
         self._activity(session, "model_working")
         return result_for(command, "completed", providerTurnId=session["providerTurnId"])
 
     def _respond(self, command: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+        self.execution_guard()
         request_id = command["payload"].get("requestId")
         if not isinstance(request_id, (str, int)):
             raise ValueError("invalid_request_id")
@@ -528,9 +375,8 @@ class FleetWorker:
                 raise ValueError("unsupported_approval_decision")
         elif not isinstance(response.get("answers"), dict):
             raise ValueError("invalid_answers")
-        self.execution_guard(session, True)
         self.provider.respond(request_id, response)
-        self._drop_pending(request_id)
+        del self.pending[request_id]
         self._activity(session, "model_working")
         return result_for(command, "completed", requestId=request_id)
 
@@ -571,71 +417,11 @@ class FleetWorker:
         self.journal.append("session", session)
         if not self._clean_background_terminals(session):
             raise ValueError("background_cleanup_unconfirmed")
-        if not self._confirm_contained_disposal(session):
-            raise ValueError("container_disposal_unconfirmed")
-        job = self.jobs.for_session(session["sessionId"])
-        if job is not None and job["result"] is None:
-            self.jobs.unknown(job, "job_cancelled")
         session["released"] = True
         session["admissionReserved"] = False
         session["outcome"] = "cancelled"
         self._activity(session, "idle", commandId=command["commandId"])
         return result_for(command, "completed", sessionId=session["sessionId"])
-
-    def _confirm_contained_disposal(self, session: dict[str, Any]) -> bool:
-        """Retain ownership until the selected supervisor records matching disposal."""
-        if self.environment_registry is None:
-            return True
-        try:
-            lease = self.environment_registry.lease_for(session)
-            owner = self.containment_supervisor
-            if owner is None or lease.lease_id is None:
-                raise ValueError("containment_supervisor_required")
-            with owner.operation_lock:
-                retained = owner.inspect(lease.lease_id)
-                if binding_digest(retained) != lease.binding_digest:
-                    raise ValueError("environment_binding_mismatch")
-                if retained["phase"] in {"created", "active"}:
-                    result = owner.dispose(lease.lease_id)
-                else:
-                    # An uncertain remove is observed, never submitted again.
-                    result = owner.reconcile(lease.lease_id)
-                disposal = dict(result.get("disposal", {}))
-                digest = disposal.pop("digest", None)
-                expected_digest = hashlib.sha256(
-                    json.dumps(disposal, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
-                if (
-                    result["phase"] != "disposed"
-                    or binding_digest(result) != lease.binding_digest
-                    or disposal.get("confirmed") is not True
-                    or disposal.get("leaseId") != lease.lease_id
-                    or disposal.get("containerId") != lease.container_id
-                    or disposal.get("spec") != result["spec"]
-                    or not disposal.get("before")
-                    or disposal["before"] != result.get("disposalBefore")
-                    or not disposal.get("observedAt")
-                    or digest != expected_digest
-                ):
-                    raise ValueError("container_disposal_unconfirmed")
-        except (KeyError, TypeError, OSError, ValueError, RuntimeError):
-            session["backgroundCleanup"] = "unconfirmed"
-            session["outcome"] = None
-            self._activity(session, "unknown", "container_disposal_unconfirmed")
-            return False
-        session["containmentDisposal"] = {"leaseId": lease.lease_id, "digest": digest}
-        session["backgroundCleanup"] = "confirmed_empty"
-        self.journal.append("session", session)
-        return True
-
-    def _record_provider_cleanup(self, session: dict[str, Any], confirmed: bool) -> None:
-        """Separate provider terminal absence from complete contained cleanup."""
-        status = "confirmed_empty" if confirmed else "unconfirmed"
-        if self.environment_registry is None:
-            session["backgroundCleanup"] = status
-        else:
-            session["providerBackgroundCleanup"] = status
-            session["backgroundCleanup"] = "unconfirmed"
 
     def _clean_background_terminals(self, session: dict[str, Any]) -> bool:
         params = {"threadId": session["providerThreadId"]}
@@ -651,18 +437,18 @@ class FleetWorker:
                     "thread/backgroundTerminals/list", params, timeout=remaining
                 )
                 if inventory.get("data") == [] and not inventory.get("nextCursor"):
-                    self._record_provider_cleanup(session, True)
+                    session["backgroundCleanup"] = "confirmed_empty"
                     return True
                 time.sleep(0.02)
         except ProviderError:
             pass
-        self._record_provider_cleanup(session, False)
+        session["backgroundCleanup"] = "unconfirmed"
         session["outcome"] = None
         self._activity(session, "unknown", "background_cleanup_unconfirmed")
         return False
 
     def _observe_background_inventory(self, session: dict[str, Any]) -> str | None:
-        self._record_provider_cleanup(session, False)
+        session["backgroundCleanup"] = "unconfirmed"
         try:
             inventory = self.provider.request(
                 "thread/backgroundTerminals/list",
@@ -670,12 +456,8 @@ class FleetWorker:
                 timeout=1.0,
             )
             if inventory.get("data") == [] and not inventory.get("nextCursor"):
-                self._record_provider_cleanup(session, True)
-                return (
-                    "container_cleanup_unconfirmed"
-                    if self.environment_registry is not None
-                    else None
-                )
+                session["backgroundCleanup"] = "confirmed_empty"
+                return None
         except ProviderError:
             pass
         return "background_cleanup_unconfirmed"
@@ -694,15 +476,7 @@ class FleetWorker:
         fact = {
             key: value
             for key, value in session.items()
-            if key
-            not in {
-                "workspace",
-                "stopOperation",
-                "providerBackgroundCleanup",
-                "providerOutcome",
-                "containmentDisposal",
-                "outputCaptureUnavailable",
-            }
+            if key not in {"workspace", "stopOperation"}
         }
         fact.update(details)
         sequence = len(self.journal.events) + 1
@@ -728,9 +502,6 @@ class FleetWorker:
             self._notification(message)
         if self.provider.failed:
             for session in list(self.journal.sessions.values()):
-                job = self.jobs.for_session(session["sessionId"])
-                if job is not None and job["phase"] in {"associated", "dispatching", "running"}:
-                    self.jobs.unknown(job, "provider_disconnected")
                 if session["activity"] != "unknown" and not session.get("released", False):
                     self._activity(session, "unknown", "provider_disconnected")
 
@@ -770,22 +541,9 @@ class FleetWorker:
             self._refresh_activity(session, params)
 
     def _item_activity(self, session: dict[str, Any], method: str, params: dict[str, Any]) -> None:
-        conflict = self.jobs.capture(session, params) if method == "item/completed" else None
-        if conflict is not None:
-            session["outcome"] = None
-            self._activity(session, "unknown", conflict)
-            return
         if not _current_turn(session, params.get("turnId")):
             return
         item = params.get("item", {})
-        if method == "item/completed" and not session.get("outputCaptureUnavailable", False):
-            try:
-                if any(session.get(key) != value for key, value in self.identity.items()):
-                    raise ValueError("output_owner_mismatch")
-                retain_command(self.journal.directory, session, params)
-            except (OSError, ValueError):
-                # A retained failure flag prevents export of stale capture counts.
-                session["outputCaptureUnavailable"] = True
         activity = (
             "tool_running"
             if item.get("type") in _TOOLS and method == "item/started"
@@ -804,63 +562,25 @@ class FleetWorker:
 
     def _server_request(self, message: dict[str, Any], session: dict[str, Any]) -> None:
         method = message["method"]
-        request_id = message["id"]
-        params = message["params"]
         if (
             method not in _REQUESTS
-            or not _current_turn(session, params.get("turnId"))
+            or not _current_turn(session, message.get("params", {}).get("turnId"))
             or session.get("stopCommandId")
         ):
-            self.provider.reject(request_id)
+            self.provider.reject(message["id"])
             return
-        retained = {
-            "id": request_id,
-            "method": method,
-            "params": params,
-            "sessionId": session["sessionId"],
-        }
-        try:
-            request_bytes = len(
-                json.dumps(
-                    retained,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ).encode("utf-8")
-            )
-        except (TypeError, ValueError):
-            self.provider.reject(request_id)
-            self._activity(session, "unknown", "provider_request_invalid")
-            return
-        if (
-            request_id in self.pending
-            or len(self.pending) >= _PENDING_REQUEST_MAX_RECORDS
-            or self._pending_bytes + request_bytes > _PENDING_REQUEST_MAX_BYTES
-        ):
-            self.provider.reject(request_id)
-            self._activity(session, "unknown", "provider_request_limit")
-            return
-        self.pending[request_id] = retained
-        self._pending_sizes[request_id] = request_bytes
-        self._pending_bytes += request_bytes
-        self._activity(session, _REQUESTS[method], method, requestId=request_id)
-
-    def _drop_pending(self, request_id: str | int) -> None:
-        """Remove one pending request and release its memory-budget receipt."""
-        del self.pending[request_id]
-        self._pending_bytes -= self._pending_sizes.pop(request_id)
+        self.pending[message["id"]] = {**message, "sessionId": session["sessionId"]}
+        self._activity(session, _REQUESTS[method], method, requestId=message["id"])
 
     def _turn_completed(self, session: dict[str, Any], params: dict[str, Any]) -> None:
         turn = params["turn"]
         if turn.get("id") != session.get("providerTurnId"):
             return
-        for request_id, pending in list(self.pending.items()):
-            if pending["sessionId"] == session["sessionId"]:
-                self._drop_pending(request_id)
-        if self._complete_job(session, turn):
-            return
         status = turn.get("status")
         outcome = status if status in {"completed", "failed", "interrupted"} else "unknown"
+        for request_id, pending in list(self.pending.items()):
+            if pending["sessionId"] == session["sessionId"]:
+                del self.pending[request_id]
         if (
             status == "interrupted"
             and session.get("stopCommandId")
@@ -868,19 +588,8 @@ class FleetWorker:
         ):
             return
         if status == "interrupted" and session.get("stopOperation") == "cancel":
-            if not self._confirm_contained_disposal(session):
-                return
             outcome = "cancelled"
             session["released"] = True
-        elif (
-            status == "interrupted"
-            and session.get("stopCommandId")
-            and self.environment_registry is not None
-        ):
-            session["providerOutcome"] = "interrupted"
-            session["outcome"] = None
-            self._activity(session, "unknown", "contained_interrupt_requires_reconciliation")
-            return
         if status == "interrupted" and session.get("stopCommandId"):
             session["admissionReserved"] = False
         session["outcome"] = outcome
@@ -923,13 +632,17 @@ class FleetWorker:
         """Stop the owned provider before releasing its journal writer."""
         if self._closed:
             return
-        confirmed = False
         try:
-            try:
-                confirmed = self.provider.close()
-            finally:
-                if self._provider_attempted:
-                    self.journal.append("runtime", {"pid": None, "uncertain": not confirmed})
+            confirmed = self.provider.close()
+            if self._started:
+                self.journal.append("runtime", {"pid": None, "uncertain": not confirmed})
         finally:
             self.journal.close()
             self._closed = True
+
+
+def main() -> int:
+    """Run the Fleet worker command line."""
+    from hephaestus.automation.fleet_worker_cli import main as cli_main
+
+    return cli_main()
