@@ -246,9 +246,15 @@ def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
     return files
 
 
-def _select_missing_path(path: Path, result: _BatchResult, error: FileNotFoundError) -> list[Path]:
+def _select_missing_path(
+    path: Path,
+    result: _BatchResult,
+    error: FileNotFoundError,
+    *,
+    python_suffix: bool,
+) -> list[Path]:
     """Select a missing Python path or record an incomplete explicit input."""
-    if path.suffix == ".py":
+    if python_suffix:
         return [path]
     _record_read_error(result, path, error)
     return []
@@ -256,36 +262,37 @@ def _select_missing_path(path: Path, result: _BatchResult, error: FileNotFoundEr
 
 def _select_path(path: Path, result: _BatchResult) -> list[Path]:
     """Select Python files from one explicit input path."""
+    python_suffix = path.name.endswith(".py")
     try:
         if path.is_junction():
             return _collect_python_files(path, result)
         mode = path.stat(follow_symlinks=False).st_mode
     except FileNotFoundError as error:
-        return _select_missing_path(path, result, error)
+        return _select_missing_path(path, result, error, python_suffix=python_suffix)
     except OSError as error:
         _record_read_error(result, path, error)
         return []
 
     if stat.S_ISDIR(mode):
         return _collect_python_files(path, result)
-    if stat.S_ISREG(mode) and path.suffix == ".py":
+    if stat.S_ISREG(mode) and python_suffix:
         return [path]
     if not stat.S_ISLNK(mode):
-        _record_unsupported_python_mode(result, path, mode, python_suffix=path.suffix == ".py")
+        _record_unsupported_python_mode(result, path, mode, python_suffix=python_suffix)
         return []
 
     try:
         target_mode = path.stat().st_mode
     except FileNotFoundError as error:
-        return _select_missing_path(path, result, error)
+        return _select_missing_path(path, result, error, python_suffix=python_suffix)
     except OSError as error:
         _record_read_error(result, path, error)
         return []
     if stat.S_ISDIR(target_mode):
         return _collect_python_files(path, result)
-    if stat.S_ISREG(target_mode) and path.suffix == ".py":
+    if stat.S_ISREG(target_mode) and python_suffix:
         return [path]
-    _record_unsupported_python_mode(result, path, target_mode, python_suffix=path.suffix == ".py")
+    _record_unsupported_python_mode(result, path, target_mode, python_suffix=python_suffix)
     return []
 
 

@@ -188,6 +188,56 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
 
+    def test_explicit_dot_py_regular_file_is_scanned(self, tmp_path: Path) -> None:
+        """Scan a regular file whose name is exactly .py."""
+        candidate = tmp_path / ".py"
+        candidate.write_text("Result = DomainResult\n", encoding="utf-8")
+
+        exit_code, errors = check_files([candidate])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(candidate) in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
+
+    @pytest.mark.parametrize("kind", ["read_error", "decode_error"])
+    def test_explicit_dot_py_read_failure(self, tmp_path: Path, kind: str) -> None:
+        """Report a read or decode failure for a file named exactly .py."""
+        candidate = tmp_path / ".py"
+        if kind == "decode_error":
+            candidate.write_bytes(b"\xff")
+        else:
+            candidate.write_text("x = 1\n", encoding="utf-8")
+
+        with (
+            patch("builtins.open", side_effect=PermissionError("read denied"))
+            if kind == "read_error"
+            else nullcontext()
+        ):
+            exit_code, errors = check_files([candidate])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert f"Could not read {candidate}:" in errors[0]
+        expected_cause = "read denied" if kind == "read_error" else "utf-8"
+        assert expected_cause in errors[0]
+
+    def test_explicit_dot_py_regular_file_link_is_scanned(self, tmp_path: Path) -> None:
+        """Scan a regular file link whose name is exactly .py."""
+        target = tmp_path / "target.py"
+        target.write_text("Result = DomainResult\n", encoding="utf-8")
+        candidate = tmp_path / ".py"
+        candidate.symlink_to(target)
+
+        exit_code, errors = check_files([candidate])
+
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(candidate) in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
+
     @pytest.mark.parametrize(
         "mode",
         [
@@ -198,14 +248,16 @@ class TestCheckFiles:
         ],
     )
     @pytest.mark.parametrize("through_link", [False, True], ids=("direct", "link"))
+    @pytest.mark.parametrize("candidate_name", ["input.py", ".py"])
     def test_explicit_python_special_node_is_not_opened(
         self,
         tmp_path: Path,
         mode: int,
         through_link: bool,
+        candidate_name: str,
     ) -> None:
         """Report an explicit unsupported Python input without opening it."""
-        candidate = tmp_path / "input.py"
+        candidate = tmp_path / candidate_name
         path_status = MagicMock()
         path_status.st_mode = stat.S_IFLNK if through_link else mode
         target_status = MagicMock()
