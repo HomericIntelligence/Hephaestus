@@ -164,3 +164,64 @@ def test_worktree_removal_preserves_prune_stop(
         ["git", "worktree", "remove", "--force", str(path)],
         ["git", "worktree", "prune"],
     ]
+
+
+def test_worktree_removal_fallback_stops_during_directory_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancellation during fallback deletion preserves the worktree path."""
+    repo = tmp_path / "repository"
+    repo.mkdir()
+    worktree_path = repo / "build" / ".worktrees" / "writer"
+    worktree_path.mkdir(parents=True)
+    (worktree_path / "tracked.txt").write_text("preserve\n", encoding="utf-8")
+    manager = WorktreeManager(repo_root=repo)
+    shutdown = threading.Event()
+    git_commands: list[list[str]] = []
+    fallback_calls: list[tuple[list[str], dict[str, Any]]] = []
+    fallback_started = threading.Event()
+    fallback_released = threading.Event()
+
+    def fake_git_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        git_commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="failed")
+
+    def stop_fallback(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        fallback_calls.append((cmd, kwargs))
+        fallback_started.set()
+        if not fallback_released.wait(timeout=5.0):
+            raise AssertionError("fallback deletion did not receive the stop request")
+        if not shutdown.is_set():
+            raise AssertionError("fallback deletion was released without cancellation")
+        raise InterruptedError("directory deletion cancelled")
+
+    monkeypatch.setattr(worktree_manager, "run", fake_git_run)
+    monkeypatch.setattr(worktree_manager, "run_subprocess", stop_fallback, raising=False)
+
+    def request_shutdown() -> None:
+        if not fallback_started.wait(timeout=5.0):
+            raise AssertionError("fallback deletion did not start")
+        shutdown.set()
+        fallback_released.set()
+
+    stop_thread = threading.Thread(target=request_shutdown)
+    stop_thread.start()
+    try:
+        with git_runtime.operation_deadline(time.monotonic() + 60.0, shutdown=shutdown):
+            with pytest.raises(InterruptedError, match="directory deletion cancelled"):
+                manager._remove_worktree_path_forcefully(worktree_path)
+    finally:
+        fallback_released.set()
+        stop_thread.join(timeout=5.0)
+    assert not stop_thread.is_alive()
+
+    assert git_commands == [["git", "worktree", "remove", "--force", str(worktree_path)]]
+    assert len(fallback_calls) == 1
+    command, options = fallback_calls[0]
+    assert command[0:2] == [worktree_manager.sys.executable, "-c"]
+    assert command[-1] == str(worktree_path)
+    assert options["track_process_group"] is True
+    assert options["shutdown"] is shutdown
+    assert callable(options["remaining_timeout"])
+    assert worktree_path.exists()
+    assert (worktree_path / "tracked.txt").read_text(encoding="utf-8") == "preserve\n"

@@ -84,6 +84,7 @@ def compact_session(
             log_on_error=False,
             track_process_group=True,
             shutdown=shutdown,
+            remaining_timeout=remaining_timeout,
         )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr or ""

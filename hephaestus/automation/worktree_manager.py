@@ -29,15 +29,22 @@ import logging
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.git_runtime import operation_file_lock, remaining_operation_timeout
+from hephaestus.automation.git_runtime import (
+    current_operation_shutdown,
+    operation_file_lock,
+    remaining_operation_timeout,
+)
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.utils.git import _is_full_commit_sha
+from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 from .git_utils import get_repo_root, is_clean_working_tree, run
@@ -1495,10 +1502,35 @@ class WorktreeManager:
         except Exception as e:
             logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
 
-        remaining_operation_timeout(None)
+        operation_timeout = remaining_operation_timeout(timeout)
+        shutdown = current_operation_shutdown()
         if worktree_path.exists():
             try:
-                shutil.rmtree(worktree_path)
+                if operation_timeout is None and shutdown is None:
+                    shutil.rmtree(worktree_path)
+                else:
+                    def _remaining_timeout() -> int | float:
+                        remaining = remaining_operation_timeout(timeout)
+                        if remaining is None:
+                            raise RuntimeError("bounded worktree removal timeout is unavailable")
+                        return remaining
+
+                    run_subprocess(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import shutil, sys; shutil.rmtree(sys.argv[1])",
+                            str(worktree_path),
+                        ],
+                        cwd=self.repo_root,
+                        env=build_python_phase_env(self.repo_root),
+                        timeout=timeout,
+                        check=True,
+                        log_on_error=False,
+                        track_process_group=True,
+                        shutdown=shutdown,
+                        remaining_timeout=_remaining_timeout,
+                    )
             except (InterruptedError, subprocess.TimeoutExpired):
                 raise
             except Exception as e:

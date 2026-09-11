@@ -2,7 +2,7 @@
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -37,6 +37,60 @@ class TestCompactSession:
         assert mock_run.call_args.kwargs["track_process_group"] is True
         assert mock_run.call_args.kwargs["check"] is True
         assert mock_run.call_args.kwargs["shutdown"] is None
+
+    def test_compact_session_stops_before_process_start_when_budget_expires(
+        self, tmp_path: Path
+    ) -> None:
+        """An expired operation budget prevents the provider process."""
+        budget = MagicMock(
+            side_effect=[60, 60, subprocess.TimeoutExpired("compact operation deadline", 0)]
+        )
+        with (
+            patch("hephaestus.automation.learn.session_uuid", return_value="session"),
+            patch("subprocess.Popen") as popen,
+        ):
+            result = compact_session(
+                "test-repo",
+                42,
+                AGENT_PLAN_REVIEWER,
+                tmp_path,
+                remaining_timeout=budget,
+            )
+
+        assert result is False
+        popen.assert_not_called()
+
+    def test_compact_session_reaps_process_when_budget_expires_during_start(
+        self, tmp_path: Path
+    ) -> None:
+        """A deadline race after process start stops and reaps the provider."""
+        budget = MagicMock(
+            side_effect=[
+                60,
+                60,
+                60,
+                subprocess.TimeoutExpired("compact operation deadline", 0),
+            ]
+        )
+        process = MagicMock(pid=123)
+        with (
+            patch("hephaestus.automation.learn.session_uuid", return_value="session"),
+            patch("hephaestus.utils.subprocess_registry.supported", return_value=True),
+            patch("subprocess.Popen", return_value=process),
+            patch("hephaestus.utils.subprocess_registry.track_process_group"),
+            patch("hephaestus.utils.helpers._stop_process_group", return_value=("", "")) as stop,
+        ):
+            result = compact_session(
+                "test-repo",
+                42,
+                AGENT_PLAN_REVIEWER,
+                tmp_path,
+                remaining_timeout=budget,
+            )
+
+        assert result is False
+        stop.assert_called_once_with(process)
+        process.communicate.assert_not_called()
 
     def test_compact_session_uses_deterministic_uuid(self, tmp_path: Path) -> None:
         """Verify compact_session uses the deterministic session_uuid."""
