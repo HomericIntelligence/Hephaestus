@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -218,7 +219,7 @@ def test_worktree_removal_fallback_stops_during_directory_deletion(
     assert git_commands == [["git", "worktree", "remove", "--force", str(worktree_path)]]
     assert len(fallback_calls) == 1
     command, options = fallback_calls[0]
-    assert command[0:2] == [worktree_manager.sys.executable, "-c"]
+    assert command[0:2] == [sys.executable, "-c"]
     assert command[-1] == str(worktree_path)
     assert options["track_process_group"] is True
     assert options["shutdown"] is shutdown

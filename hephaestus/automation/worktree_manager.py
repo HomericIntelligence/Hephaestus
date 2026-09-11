@@ -1509,6 +1509,7 @@ class WorktreeManager:
                 if operation_timeout is None and shutdown is None:
                     shutil.rmtree(worktree_path)
                 else:
+
                     def _remaining_timeout() -> int | float:
                         remaining = remaining_operation_timeout(timeout)
                         if remaining is None:
