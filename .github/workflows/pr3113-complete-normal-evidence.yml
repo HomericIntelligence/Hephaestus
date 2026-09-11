@@ -1,0 +1,96 @@
+name: PR 3113 Complete-Normal Evidence
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: pr3113-complete-normal-evidence-${{ github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-exact-head:
+    name: Complete-normal receipt at 569e5ae3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: 569e5ae3fe3b531d277475c39998cd958a9f2328
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install the locked environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Run the exact complete-normal selection
+        timeout-minutes: 60
+        env:
+          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_EVIDENCE_BRANCH: 3111-full-suite-evidence
+          EXPECTED_HEAD: 569e5ae3fe3b531d277475c39998cd958a9f2328
+          GH_TOKEN: ${{ github.token }}
+          TARGET_PR: "3113"
+          EXACT_COMMAND: >-
+            uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers
+            -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
+        run: |
+          receipt=pr3113-complete-normal-569e5ae3.txt
+          {
+            echo "workflow: $GITHUB_WORKFLOW"
+            echo "workflow_ref: $GITHUB_WORKFLOW_REF"
+            echo "workflow_sha: $GITHUB_WORKFLOW_SHA"
+            echo "workflow_run: $GITHUB_RUN_ID"
+            echo "evidence_pr: $EVENT_PR_NUMBER"
+            echo "evidence_branch: $EVENT_HEAD_REF"
+            echo "evidence_head: $EVENT_HEAD_SHA"
+            echo "evidence_base_branch: $EVENT_BASE_REF"
+            echo "evidence_base: $EVENT_BASE_SHA"
+            echo "target_pr: $TARGET_PR"
+          } | tee "$receipt"
+          test "$EVENT_HEAD_REF" = "$EXPECTED_EVIDENCE_BRANCH"
+          test "$EVENT_BASE_REF" = "main"
+          live_head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${TARGET_PR}" --jq .head.sha)
+          {
+            echo "target_live_head: $live_head"
+            echo "head_before: $(git rev-parse HEAD)"
+            echo "status_before:"
+            echo "exact_command: $EXACT_COMMAND"
+          } | tee -a "$receipt"
+          test "$live_head" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          set +e
+          set -o pipefail
+          uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
+            -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis" \
+            2>&1 | tee -a "$receipt"
+          status=${PIPESTATUS[0]}
+          set +o pipefail
+          set -e
+          {
+            echo "exit_status: $status"
+            echo "head_after: $(git rev-parse HEAD)"
+            echo "status_after: $(git status --porcelain=v1 --untracked-files=all)"
+          } | tee -a "$receipt"
+          test "$status" -eq 0
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Upload the exact-head receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pr3113-complete-normal-569e5ae3
+          path: pr3113-complete-normal-569e5ae3.txt
+          if-no-files-found: error
+          retention-days: 14
