@@ -3549,7 +3549,7 @@ class TestExactHeadChecks:
         check_run_id: int = 1,
         name: str = "required-ci",
         status: str = "completed",
-        conclusion: str = "success",
+        conclusion: object = "success",
         app_id: int = 1,
         completed_at: object = "2026-09-05T12:00:00Z",
         check_suite_id: object = 1,
@@ -3867,6 +3867,13 @@ class TestExactHeadChecks:
         def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(args)
             endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if f"/commits/{head}/check-suites?" in endpoint:
+                return self._json_response(
+                    {
+                        "total_count": 1,
+                        "check_suites": [self._check_suite(head, 1)],
+                    }
+                )
             if "/check-runs?" in endpoint:
                 return SimpleNamespace(
                     returncode=0,
@@ -3920,6 +3927,22 @@ class TestExactHeadChecks:
         )
 
         assert receipt.outcome == "required_checks_not_green"
+        assert (
+            sum(
+                f"/commits/{head}/check-suites?" in call_args[1]
+                for call_args in calls
+                if len(call_args) > 1
+            )
+            == 2
+        )
+        assert (
+            sum(
+                f"/commits/{head}/check-runs?filter=all" in call_args[1]
+                for call_args in calls
+                if len(call_args) > 1
+            )
+            == 2
+        )
         assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
 
     def test_wrong_required_app_id_blocks_merge_request(
@@ -3971,6 +3994,13 @@ class TestExactHeadChecks:
         def gh_call(args: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(args)
             endpoint = args[3] if args[1:3] == ["--method", "GET"] else args[1]
+            if f"/commits/{head}/check-suites?" in endpoint:
+                return self._json_response(
+                    {
+                        "total_count": 1,
+                        "check_suites": [self._check_suite(head, 1)],
+                    }
+                )
             if "/check-runs?" in endpoint:
                 return SimpleNamespace(
                     returncode=0,
@@ -3981,6 +4011,8 @@ class TestExactHeadChecks:
                         }
                     ),
                 )
+            if f"/commits/{head}/status?" in endpoint:
+                return self._empty_status_response(head)
             if args[1:3] == ["--method", "PUT"]:
                 return SimpleNamespace(
                     returncode=0,
@@ -4003,6 +4035,22 @@ class TestExactHeadChecks:
         )
 
         assert receipt.outcome == "required_checks_not_green"
+        assert (
+            sum(
+                f"/commits/{head}/check-suites?" in call_args[1]
+                for call_args in calls
+                if len(call_args) > 1
+            )
+            == 2
+        )
+        assert (
+            sum(
+                f"/commits/{head}/check-runs?filter=all" in call_args[1]
+                for call_args in calls
+                if len(call_args) > 1
+            )
+            == 2
+        )
         assert not any(call_args[1:3] == ["--method", "PUT"] for call_args in calls)
 
     def test_matching_required_app_id_satisfies_check_context(
@@ -4380,11 +4428,11 @@ class TestExactHeadChecks:
         assert [entry.args[0] for entry in call_mock.call_args_list] == [
             [
                 "api",
-                "/repos/org/repo/check-suites/1/check-runs?filter=all&per_page=100",
+                f"/repos/org/repo/commits/{head}/check-runs?filter=all&per_page=100",
             ],
             [
                 "api",
-                "/repos/org/repo/check-suites/1/check-runs?filter=all&per_page=100",
+                f"/repos/org/repo/commits/{head}/check-runs?filter=all&per_page=100",
             ],
             [
                 "api",
@@ -4688,10 +4736,10 @@ class TestExactHeadChecks:
         assert self._passes(adapter, head, self._policy("required-ci")) is True
         assert call_mock.call_count == 6
 
-    def test_enumerates_check_runs_beyond_one_thousand_suites(
+    def test_rejects_more_than_one_thousand_suites_without_run_requests(
         self, adapter: PipelineGitHub, command_runner: MagicMock
     ) -> None:
-        """A required run in suite 1,001 remains visible to the merge gate."""
+        """An oversized suite set fails before Check Run request fan-out."""
         adapter.repo = "repo"
         head = "a" * 40
         calls: list[str] = []
@@ -4700,19 +4748,8 @@ class TestExactHeadChecks:
             endpoint = args[1]
             calls.append(endpoint)
             if f"/commits/{head}/check-suites?" in endpoint:
-                page = int(endpoint.rsplit("page=", 1)[1]) if "&page=" in endpoint else 1
-                first_id = (page - 1) * 100 + 1
-                suites = [
-                    self._check_suite(head, suite_id)
-                    for suite_id in range(first_id, min(first_id + 100, 1002))
-                ]
+                suites = [self._check_suite(head, suite_id) for suite_id in range(1, 101)]
                 return self._json_response({"total_count": 1001, "check_suites": suites})
-            if "/check-suites/" in endpoint and "/check-runs?" in endpoint:
-                suite_id = int(endpoint.split("/check-suites/", 1)[1].split("/", 1)[0])
-                runs = [self._check_run(head, check_suite_id=1001)] if suite_id == 1001 else []
-                return self._json_response({"total_count": len(runs), "check_runs": runs})
-            if f"/commits/{head}/status?" in endpoint:
-                return self._empty_status_response(head)
             raise AssertionError(endpoint)
 
         command_runner.side_effect = gh_call
@@ -4729,10 +4766,119 @@ class TestExactHeadChecks:
                     deadline_s=time.monotonic() + 30.0,
                     cancellation=threading.Event(),
                 )
-                is True
+                is False
             )
-        assert sum("/commits/" in call and "/check-suites?" in call for call in calls) == 22
-        assert sum("/check-suites/" in call and "/check-runs?" in call for call in calls) == 2002
+        assert sum("/commits/" in call and "/check-suites?" in call for call in calls) == 1
+        assert not any("/check-runs?" in call for call in calls)
+
+    def test_all_run_snapshot_detects_required_run_suite_movement(self) -> None:
+        """The stable snapshot includes suite movement for every required candidate."""
+        head = "a" * 40
+        older_success = self._check_run(
+            head,
+            check_run_id=1,
+            completed_at="2026-09-05T11:00:00Z",
+            check_suite_id=1,
+        )
+        newer_cancelled = self._check_run(
+            head,
+            check_run_id=2,
+            conclusion="cancelled",
+            check_suite_id=2,
+        )
+        moved_cancelled = {**newer_cancelled, "check_suite": {"id": 1}}
+
+        first = required_checks_mod._check_run_snapshot([older_success, newer_cancelled], head)
+        second = required_checks_mod._check_run_snapshot([older_success, moved_cancelled], head)
+
+        assert first is not None
+        assert second is not None
+        assert first != second
+
+    def test_stable_unrelated_in_progress_run_does_not_block_success(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A stable unrelated active run remains valid snapshot evidence."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {
+            "total_count": 2,
+            "check_runs": [
+                self._check_run(head),
+                self._check_run(
+                    head,
+                    check_run_id=2,
+                    name="optional-ci",
+                    status="in_progress",
+                    conclusion=None,
+                    completed_at=None,
+                ),
+            ],
+        }
+        command_runner.side_effect = [
+            self._json_response(runs),
+            self._json_response(runs),
+            self._empty_status_response(head),
+            self._empty_status_response(head),
+        ]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
+    def test_unrelated_check_run_change_invalidates_snapshot(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A nonmatching Check Run change invalidates the stable inventory."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        required = self._check_run(head)
+        queued = self._check_run(
+            head,
+            check_run_id=2,
+            name="optional-ci",
+            status="queued",
+            conclusion=None,
+            completed_at=None,
+        )
+        in_progress = {**queued, "status": "in_progress"}
+        command_runner.side_effect = [
+            self._json_response({"total_count": 2, "check_runs": [required, queued]}),
+            self._json_response({"total_count": 2, "check_runs": [required, in_progress]}),
+            self._empty_status_response(head),
+            self._empty_status_response(head),
+        ]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert command_runner.call_count == 2
+
+    def test_unknown_unrelated_check_run_status_fails_closed(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """An undocumented Check Run status invalidates the full snapshot."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = {
+            "total_count": 2,
+            "check_runs": [
+                self._check_run(head),
+                self._check_run(
+                    head,
+                    check_run_id=2,
+                    name="optional-ci",
+                    status="waiting",
+                    conclusion=None,
+                    completed_at=None,
+                ),
+            ],
+        }
+        command_runner.side_effect = [
+            self._json_response(runs),
+            self._json_response(runs),
+            self._empty_status_response(head),
+            self._empty_status_response(head),
+        ]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert command_runner.call_count == 1
 
     def test_rejects_truncated_check_suite_inventory(
         self, adapter: PipelineGitHub, command_runner: MagicMock
@@ -4775,7 +4921,7 @@ class TestExactHeadChecks:
                         "check_suites": [self._check_suite(head, suite_reads)],
                     }
                 )
-            if "/check-suites/1/check-runs?" in endpoint:
+            if f"/commits/{head}/check-runs?" in endpoint:
                 return self._json_response(
                     {"total_count": 1, "check_runs": [self._check_run(head)]}
                 )

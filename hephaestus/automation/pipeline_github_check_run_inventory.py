@@ -12,7 +12,7 @@ from .pipeline_github_contract import _PipelineGitHubHost
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 100
-_MAX_CHECK_SUITES = 2_000
+_MAX_CHECK_SUITES = 1_000
 _MAX_CHECK_RUNS = 2_000
 
 
@@ -119,21 +119,22 @@ def check_suite_ids_for_head(
     return tuple(sorted(suite_ids))
 
 
-def _check_runs_for_suite(
+def check_runs_for_head(
     host: _PipelineGitHubHost,
-    suite_id: int,
     head_sha: str,
+    suite_ids: tuple[int, ...],
     *,
-    capacity: int,
     deadline_s: float,
     cancellation: Event,
 ) -> list[object] | None:
-    """Return every Check Run in one suite within the aggregate ceiling."""
+    """Return all Check Runs when the suite inventory proves completeness."""
     owner, name = host._owner_name()
     endpoint = (
-        f"/repos/{owner}/{name}/check-suites/{suite_id}/check-runs?filter=all&per_page={_PAGE_SIZE}"
+        f"/repos/{owner}/{name}/commits/{head_sha}/check-runs?filter=all&per_page={_PAGE_SIZE}"
     )
     check_runs: list[object] = []
+    check_run_ids: set[int] = set()
+    known_suite_ids = frozenset(suite_ids)
     expected_count: int | None = None
     page = 1
     while expected_count is None or len(check_runs) < expected_count:
@@ -148,12 +149,12 @@ def _check_runs_for_suite(
             "check_runs",
         )
         if parsed is None:
-            logger.warning("Check Run page is malformed for suite %d", suite_id)
+            logger.warning("Check Run page is malformed for %s", head_sha)
             return None
         total_count, page_runs = parsed
         if expected_count is None:
             expected_count = total_count
-            if expected_count > capacity:
+            if expected_count > _MAX_CHECK_RUNS:
                 logger.warning(
                     "Check Runs response exceeds the %d-run safety ceiling for %s",
                     _MAX_CHECK_RUNS,
@@ -161,39 +162,9 @@ def _check_runs_for_suite(
                 )
                 return None
         elif total_count != expected_count:
-            logger.warning("Check Run count changed for suite %d", suite_id)
+            logger.warning("Check Run count changed for %s", head_sha)
             return None
-        check_runs.extend(page_runs)
-        if len(check_runs) > expected_count or (not page_runs and len(check_runs) < expected_count):
-            logger.warning("Check Run pages are incomplete for suite %d", suite_id)
-            return None
-        page += 1
-    return check_runs
-
-
-def check_runs_for_suites(
-    host: _PipelineGitHubHost,
-    suite_ids: tuple[int, ...],
-    head_sha: str,
-    *,
-    deadline_s: float,
-    cancellation: Event,
-) -> list[object] | None:
-    """Return a complete bounded Check Run inventory for validated suites."""
-    check_runs: list[object] = []
-    check_run_ids: set[int] = set()
-    for suite_id in suite_ids:
-        suite_runs = _check_runs_for_suite(
-            host,
-            suite_id,
-            head_sha,
-            capacity=_MAX_CHECK_RUNS - len(check_runs),
-            deadline_s=deadline_s,
-            cancellation=cancellation,
-        )
-        if suite_runs is None:
-            return None
-        for check_run in suite_runs:
+        for check_run in page_runs:
             if not isinstance(check_run, dict):
                 logger.warning("Check Run inventory has invalid identity for %s", head_sha)
                 return None
@@ -209,10 +180,14 @@ def check_runs_for_suites(
                 or not isinstance(check_suite_id, int)
                 or isinstance(check_suite_id, bool)
                 or check_suite_id <= 0
-                or check_suite_id != suite_id
+                or check_suite_id not in known_suite_ids
             ):
                 logger.warning("Check Run inventory has invalid identity for %s", head_sha)
                 return None
             check_run_ids.add(check_run_id)
-        check_runs.extend(suite_runs)
+        check_runs.extend(page_runs)
+        if len(check_runs) > expected_count or (not page_runs and len(check_runs) < expected_count):
+            logger.warning("Check Run pages are incomplete for %s", head_sha)
+            return None
+        page += 1
     return check_runs

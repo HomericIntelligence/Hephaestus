@@ -10,7 +10,7 @@ from threading import Event
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_check_run_inventory import (
-    check_runs_for_suites,
+    check_runs_for_head,
     check_suite_ids_for_head,
 )
 from .pipeline_github_commit_statuses import (
@@ -28,8 +28,9 @@ _GITHUB_TIMESTAMP_RE = re.compile(
 )
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 _CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | frozenset(
-    {"action_required", "cancelled", "failure", "stale", "timed_out"}
+    {"action_required", "cancelled", "failure", "stale", "startup_failure", "timed_out"}
 )
+_ACTIVE_CHECK_STATUSES = frozenset({"in_progress", "queued"})
 _RequiredCheck = tuple[str, int | None]
 _CheckRunCandidate = tuple[datetime, int, dict[str, object]]
 _CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
@@ -133,37 +134,76 @@ def _validated_check_run(
 def _check_run_snapshot(
     check_runs: list[object],
     head_sha: str,
-    required_checks: frozenset[_RequiredCheck],
 ) -> tuple[object, ...] | None:
-    """Return stable identity and status data for a Check Runs traversal."""
-    snapshot: list[tuple[int, str, int, str, str, object, str, frozenset[_RequiredCheck]]] = []
+    """Return canonical identity and status data for all returned Check Runs."""
+    snapshot: list[tuple[int, int, str, str, int | None, str, str | None, str | None]] = []
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
             return None
-        matches = _check_run_required_matches(check_run, required_checks, head_sha)
-        if matches is None:
-            return None
-        if not matches:
-            continue
-        validated = _validated_check_run(check_run, head_sha)
-        if validated is None:
-            return None
-        check_run_id, app_id, status, conclusion, completed_at, _completed_at_utc = validated
+        check_run_id = check_run.get("id")
+        check_suite = check_run.get("check_suite")
+        check_suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
         name = check_run.get("name")
-        if not isinstance(name, str):
-            logger.warning("Check Run for %s has no valid name", head_sha)
+        status = check_run.get("status")
+        conclusion = check_run.get("conclusion")
+        completed_at = check_run.get("completed_at")
+        app = check_run.get("app")
+        if "app" not in check_run or (app is not None and not isinstance(app, dict)):
+            logger.warning("Check Run for %s has no valid app identity", head_sha)
+            return None
+        try:
+            app_id = None if app is None else _valid_app_id(app.get("id"))
+        except ValueError:
+            logger.warning("Check Run for %s has no valid app identity", head_sha)
+            return None
+        if app is not None and app_id is None:
+            logger.warning("Check Run for %s has no valid app identity", head_sha)
+            return None
+        if (
+            not isinstance(check_run_id, int)
+            or isinstance(check_run_id, bool)
+            or check_run_id <= 0
+            or not isinstance(check_suite_id, int)
+            or isinstance(check_suite_id, bool)
+            or check_suite_id <= 0
+            or check_run.get("head_sha") != head_sha
+            or not isinstance(name, str)
+            or not name
+            or not isinstance(status, str)
+        ):
+            logger.warning("Check Run for %s has malformed snapshot identity", head_sha)
+            return None
+        raw_completed_at: str | None
+        if status == "completed":
+            parsed_completion = _check_run_completion_time(completed_at)
+            if (
+                not isinstance(conclusion, str)
+                or conclusion not in _CHECK_CONCLUSIONS
+                or parsed_completion is None
+            ):
+                logger.warning("Check Run for %s has malformed terminal evidence", head_sha)
+                return None
+            raw_completed_at = parsed_completion[0]
+        elif status in _ACTIVE_CHECK_STATUSES:
+            if conclusion is not None or completed_at is not None:
+                logger.warning("Check Run for %s has contradictory active evidence", head_sha)
+                return None
+            conclusion = None
+            raw_completed_at = None
+        else:
+            logger.warning("Check Run for %s has an unknown status", head_sha)
             return None
         snapshot.append(
             (
+                check_suite_id,
                 check_run_id,
+                head_sha,
                 name,
                 app_id,
                 status,
                 conclusion,
-                check_run.get("head_sha"),
-                completed_at,
-                matches,
+                raw_completed_at,
             )
         )
     return tuple(sorted(snapshot))
@@ -289,7 +329,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if not required_checks or first is None:
             return False
-        first_snapshot = _check_run_snapshot(first, head_sha, required_checks)
+        first_snapshot = _check_run_snapshot(first, head_sha)
         if first_snapshot is None:
             return False
         try:
@@ -315,7 +355,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         if (
             second is None
             or final_suite_ids != suite_ids
-            or _check_run_snapshot(second, head_sha, required_checks) != first_snapshot
+            or _check_run_snapshot(second, head_sha) != first_snapshot
         ):
             logger.warning("Check Suite or Check Run inventory changed for %s", head_sha)
             return False
@@ -360,10 +400,10 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         cancellation: Event,
     ) -> list[object] | None:
         """Read all Check Runs for the validated exact-head suites."""
-        return check_runs_for_suites(
+        return check_runs_for_head(
             self,
-            suite_ids,
             head_sha,
+            suite_ids,
             deadline_s=deadline_s,
             cancellation=cancellation,
         )
