@@ -15,7 +15,8 @@ links to the full section below.
    uv, then `just bootstrap` (one command: deps + editable install + pre-commit
    hooks).
 2. **Confirm the toolchain works** — run `just check` (lint + format-check +
-   typecheck) and `just test`. Green here means your machine is ready.
+   typecheck) and `just test`. Green here means your machine is ready. It is
+   not evidence for a later branch change.
 3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
    GitHub issue, then branch as `<issue-number>-description`.
 4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
@@ -99,14 +100,33 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 
 1. Install uv: <https://uv.sh/install/>
 2. Clone your fork
-3. Bootstrap the project (installs deps, the editable package, and pre-commit
+3. Configure the canonical project repository as `upstream`. If the remote is
+   absent, run:
+
+   ```bash
+   git remote add upstream https://github.com/HomericIntelligence/Hephaestus.git
+   ```
+
+   Then verify the URL:
+
+   ```bash
+   git remote get-url upstream
+   ```
+
+   If the command returns a different URL, run:
+
+   ```bash
+   git remote set-url upstream https://github.com/HomericIntelligence/Hephaestus.git
+   ```
+
+4. Bootstrap the project (installs deps, the editable package, and pre-commit
    hooks in one step): `just bootstrap`
 
    `just bootstrap` wraps `uv sync` and `uv run pre-commit install`. If you do
    not have [`just`](https://just.systems/) installed, run those two commands
    manually instead.
-4. Run project commands through the managed environment, for example `just test`.
-5. Before pushing, run the fast quality gate: `just check`
+5. Run project commands through the managed environment, for example `just test`.
+6. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
 ### Secret-scanning failures
@@ -208,6 +228,64 @@ The override clears the default fast selection so the named tests can run.
 Use the paths for your changed tests. `just test` runs the fast selection used by pre-commit and pull-request
 CI. Nightly CI runs the remaining functional, package, shell, and coverage
 tests.
+
+### Change verification
+
+For a manual contribution, use this sequence:
+
+1. Run focused tests during implementation.
+2. Verify that `upstream` has the canonical project URL. Fetch the current
+   project `main` branch:
+
+   ```bash
+   test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/Hephaestus.git"
+   git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
+   ```
+
+   If a command fails, stop.
+3. Use Bash strict mode to rebase and sign each new commit. Then verify each
+   commit signature:
+
+   ```bash
+   set -euo pipefail
+   git rebase -S upstream/main
+   git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
+       git verify-commit "$commit" || exit 1
+   done
+   ```
+
+   Strict mode stops the sequence if the rebase, revision enumeration, or a
+   signature check fails.
+
+4. If the rebase or conflict resolution changes a file, run each affected test
+   again.
+5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
+   Record `git rev-parse HEAD`.
+6. Run the complete normal local pytest selection:
+
+   ```bash
+   uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
+     -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
+   ```
+
+7. Record `git rev-parse HEAD` again. Require the same value and an empty
+   `git status --porcelain=v1 --untracked-files=all` result.
+8. If the branch changes after this run, repeat the final-rebase sequence and
+   test run.
+
+Record the command, branch head, result, and test summary. A pre-push hook can
+supply step 6 only when it runs the exact locked command on the final rebased
+head and records the result. A hook that does not run this command does not
+supply complete normal-test evidence. The checks in
+[Your first day](#your-first-day) verify a new development environment. They
+do not verify a later branch change.
+
+This manual sequence uses
+[ADR-0051](docs/adr/0051-manual-final-rebase-verification.md). The automation
+loop uses the rebase policy in
+[ADR-0048](docs/adr/0048-automation-rebase-triggers.md). It prepares the branch
+before implementation and does not do a routine final rebase. An operator can
+request the explicit `--rebase` path.
 
 ### Test environment requirements
 
@@ -325,11 +403,11 @@ collect CI/CD evidence as context, but the loop does not change CI/CD. Required
 CI/CD checks are the merge contract and do not independently authorize the
 loop-owned approval transition.
 
-Before you create the PR, run each new or changed test and verify that pytest
-collects it and reports success. Keep commits to logical units with
+Before you create the PR, complete the [change-verification sequence](#change-verification).
+Keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages. Never
-bypass pre-commit hooks with `--no-verify`. The pre-commit suite does not run
-pytest; required CI/CD runs the full test suites.
+bypass pre-commit hooks with `--no-verify`. Pre-commit runs the shared fast
+test selection. It does not supply the required complete normal-test evidence.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -362,7 +440,7 @@ whose commits lack a valid `Signed-off-by: Name <email>` trailer, and the local
 before it is created. To re-sign existing commits run:
 
 ```bash
-git rebase --exec 'git commit --amend --no-edit -s' origin/main
+git rebase -S --exec 'git commit --amend --no-edit -S -s' upstream/main
 ```
 
 ## Questions?

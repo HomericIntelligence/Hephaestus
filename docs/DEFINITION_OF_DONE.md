@@ -35,7 +35,51 @@ A piece of work is **done** when every item below is true.
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 | 23 | New or revised English technical prose follows the [ASD-STE100 writing standard](asd-ste100.md); principle declarations and specialized principle statements do not change only to satisfy the standard | Author and PR reviewer |
 | 24 | Each `required-checks-gate` dependency succeeds on pull-request and merge-group events; only `pr-policy` can skip on a push event | CI gate `required-checks-gate` + structural unit guard |
-| 25 | Before PR creation, pytest collects and passes each new or changed test. Pre-commit and required PR checks run the shared fast selection. Nightly CI runs full coverage and the functional complement. | Author and PR reviewer; fast tests in `lint`, full suites in nightly CI |
+| 25 | For a manual contribution, verify the canonical `upstream`, fetch `upstream/main`, use a signed rebase, verify the new commit signatures, and create clean exact-head evidence for the complete normal local pytest selection. ADR-0051 defines this manual sequence. The automation loop uses the separate ADR-0048 rebase policy. Pre-commit and required PR checks run the shared fast selection. Nightly CI runs the complete validation contract. | Author and PR reviewer; fast tests in `lint`, full suites in nightly CI |
+
+### Final-rebase test evidence
+
+Complete normal-test evidence is valid only for the final rebased head. First,
+verify that `upstream` has the canonical
+`https://github.com/HomericIntelligence/Hephaestus.git` URL. Fetch
+`upstream/main` with these commands:
+
+```bash
+test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/Hephaestus.git"
+git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
+```
+
+If a command fails, stop. Use Bash strict mode to run the signed rebase. Then
+verify each new commit signature:
+
+```bash
+set -euo pipefail
+git rebase -S upstream/main
+git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
+    git verify-commit "$commit" || exit 1
+done
+```
+
+Strict mode stops the sequence if the rebase, revision enumeration, or a
+signature check fails.
+
+Require `git status --porcelain=v1 --untracked-files=all` to have no output.
+Record `git rev-parse HEAD`. Run this command:
+
+```bash
+uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
+  -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
+```
+
+Record `git rev-parse HEAD` again. Require the same value and an empty
+`git status --porcelain=v1 --untracked-files=all` result. Conflict-resolution
+edits, later commits, and other branch changes invalidate the prior evidence.
+After such a change, repeat the final-rebase sequence and test run. Record the
+command, branch head, result, and test summary.
+
+A pre-push hook result counts only when the hook runs that exact locked command
+on the applicable head and records the result. A hook that omits the command
+does not supply complete normal-test evidence. See ADR-0051.
 
 ### Conventional Commit history boundary
 

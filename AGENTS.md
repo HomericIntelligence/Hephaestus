@@ -317,6 +317,56 @@ concise failure evidence, the affected tests or checks, and a first-stage
 root-cause analysis. The subagent must not fix a failure unless it receives a
 separate direction to do so.
 
+For a manual contribution, use this final-rebase sequence:
+
+1. Use a test-only subagent to run focused tests during implementation.
+2. Configure `upstream` with the canonical
+   `https://github.com/HomericIntelligence/Hephaestus.git` URL. Verify the URL.
+   Then run these commands:
+
+   ```bash
+   test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/Hephaestus.git"
+   git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
+   ```
+
+   If a command fails, stop.
+3. Use Bash strict mode to run the signed rebase. Then verify the signature of
+   each new commit:
+
+   ```bash
+   set -euo pipefail
+   git rebase -S upstream/main
+   git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
+       git verify-commit "$commit" || exit 1
+   done
+   ```
+
+   Strict mode stops the sequence if the rebase, revision enumeration, or a
+   signature check fails.
+
+4. If the rebase or conflict resolution changes a file, use a test-only
+   subagent to run each affected test again.
+5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
+   Record `git rev-parse HEAD`.
+6. Use a test-only subagent to run this command:
+
+   ```bash
+   uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
+     -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
+   ```
+
+7. Record `git rev-parse HEAD` again. Require the same value and an empty
+   `git status --porcelain=v1 --untracked-files=all` result. Record the command,
+   result, and test summary.
+8. If the branch changes after this verification, repeat the final-rebase
+   sequence and test run.
+
+A pre-push hook can supply step 6 only when it runs the exact locked command on
+the final rebased head and records the result. A hook that does not run this
+command does not supply complete normal-test evidence. The current pre-push
+hook does not run the Python suite and cannot supply this evidence. Keep the
+test-only and no-edit requirements for all delegated runs. See ADR-0051.
+
 ### Skill Catalog
 
 Invoke an Athena skill with `Skill(skill: "athena:<name>", args: "<argument>")`, or
@@ -481,10 +531,14 @@ All utility functions must include comprehensive test coverage:
 3. **Edge Cases**: Test boundary conditions and error scenarios
 4. **Cross-platform**: Ensure compatibility across supported environments
 
-Before an agent creates a pull request, it MUST run each new or changed test.
-The command MUST collect those tests and report success. Do not require a full
-local pytest suite before PR creation. Required CI/CD runs the full unit and
-integration suites and applies the coverage gate.
+Before an agent creates a pull request, it MUST follow the final-rebase sequence
+in [Delegated Verification](#delegated-verification). The environment setup
+commands below prepare a new environment. They do not supply change-verification
+evidence. Required CI/CD supplies separate head-bound evidence.
+
+The manual sequence uses ADR-0051. The automation loop uses the rebase policy
+in ADR-0048. It prepares the branch before implementation and does not do a
+routine final rebase. An operator can request the explicit `--rebase` path.
 
 ```bash
 # Run all unit tests
@@ -495,6 +549,10 @@ uv run pytest tests/unit/utils/test_general_utils.py -v
 
 # Run with coverage
 uv run pytest tests/unit --cov=hephaestus --cov-report=html
+
+# Run the complete normal local selection after the final rebase
+uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
+  -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
 ```
 
 ## Environment Setup
@@ -539,8 +597,10 @@ uv run mypy hephaestus/ scripts/ tests/
 
 ### Pre-commit Hooks
 
-Pre-commit hooks automatically check code quality. They MUST NOT run pytest.
-Required CI/CD owns full-suite test execution.
+Pre-commit hooks automatically check code quality and run the shared fast test
+selection. They do not supply the required complete normal-test evidence. Use
+the delegated final-rebase sequence to produce that evidence. Required CI/CD
+supplies separate test evidence for the pushed head.
 
 ```bash
 # Install pre-commit hooks (one-time setup)
