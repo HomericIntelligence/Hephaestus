@@ -138,9 +138,8 @@ def test_direct_scope_uses_isolated_intake_when_primary_has_tracked_changes(
     pool = _RecordingPool(events)
     github = _RecordingGitHub(events)
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
         lambda _repo, issues: list(issues),
     )
     coordinator = Coordinator(
@@ -152,7 +151,7 @@ def test_direct_scope_uses_isolated_intake_when_primary_has_tracked_changes(
             scope=PipelineScope(frozenset({StageName.PLANNING})),
         ),
         github=github,
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
@@ -335,12 +334,11 @@ def test_malformed_intake_receipt_blocks_labels_sources_and_agents(
         classifications.append(issue)
         return _facts(issue)
 
-    monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda *_args: [])
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
     coordinator = Coordinator(
         PipelineConfig(org="org", repos=["repo-a"], issues=[101], projects_dir=tmp_path),
         github=github,
-        pool=pool,
+        **fake_worker_factories(pool, None),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()

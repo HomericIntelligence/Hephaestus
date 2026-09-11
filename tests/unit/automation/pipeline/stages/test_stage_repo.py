@@ -291,8 +291,8 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, GitJob)
-        assert request.job.op == "sync_checkout"
-        assert request.job.kwargs["dest"] == str(tmp_path)
+        assert request.job.op == "prepare_intake"
+        assert request.job.kwargs["caller_root"] == str(tmp_path)
 
 
 _WAVE_BASE = "a" * 40
