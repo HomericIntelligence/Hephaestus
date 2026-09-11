@@ -38,6 +38,23 @@ def command_runner() -> MagicMock:
     return MagicMock(side_effect=unexpected_command)
 
 
+@pytest.fixture(autouse=True)
+def stable_check_suite_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep policy tests focused on required Check Run evaluation."""
+
+    def suite_inventory(
+        _adapter: object,
+        _head_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> tuple[tuple[int, int], ...]:
+        del deadline_s, cancellation
+        return ((1, 15368),)
+
+    monkeypatch.setattr(pg.PipelineGitHub, "_check_suite_ids_for_head", suite_inventory)
+
+
 def _response(payload: object) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], stderr="", returncode=0, stdout=json.dumps(payload))
 
@@ -1104,6 +1121,7 @@ def _check_run(
     app_id: int | None,
     conclusion: str = "success",
     completed_at: object = "2026-09-05T12:00:00Z",
+    check_suite_id: object = 1,
 ) -> dict[str, object]:
     return {
         "id": run_id,
@@ -1113,6 +1131,7 @@ def _check_run(
         "conclusion": conclusion,
         "completed_at": completed_at,
         "app": None if app_id is None else {"id": app_id},
+        "check_suite": {"id": check_suite_id},
     }
 
 
@@ -1124,9 +1143,30 @@ def _check_run(
         ("2026-08-29T11:59:59Z", False),
         ("2026-09-05T12:00:01Z", False),
         ("not-a-timestamp", False),
+        ("2026-09-05Q12:00:00Z", False),
+        ("2026-09-05T24:00:00Z", False),
+        ("2026-09-05T12:60:00Z", False),
+        ("2026-09-05T12:00:60Z", False),
+        ("2026-09-05T12:00:00+24:00", False),
+        ("2026-09-05T12:00:00+00:60", False),
+        ("0001-01-01T00:00:00+23:59", False),
         (None, False),
     ],
-    ids=("inside", "boundary", "expired", "future", "malformed", "missing"),
+    ids=(
+        "inside",
+        "boundary",
+        "expired",
+        "future",
+        "malformed",
+        "separator",
+        "hour-range",
+        "minute-range",
+        "second-range",
+        "offset-hour-range",
+        "offset-minute-range",
+        "overflow",
+        "missing",
+    ),
 )
 def test_required_check_run_evidence_enforces_seven_day_freshness(
     command_runner: MagicMock,
@@ -1316,7 +1356,7 @@ def test_check_runs_reject_missing_or_malformed_application_identity(
 def test_optional_check_run_with_null_app_does_not_revoke_required_evidence(
     command_runner: MagicMock,
 ) -> None:
-    """A schema-valid optional run with no app cannot change merge authority."""
+    """An optional run with a null App cannot change merge authority."""
     adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
     head = "a" * 40
     policy = EffectiveMergePolicy(
@@ -1349,6 +1389,7 @@ def test_optional_check_run_with_null_app_does_not_revoke_required_evidence(
         deadline_s=time.monotonic() + 30.0,
         cancellation=threading.Event(),
     )
+    assert command_runner.call_count == 4
 
 
 def test_check_traversal_honors_cancellation_between_pages(

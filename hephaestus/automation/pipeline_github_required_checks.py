@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
-import time
 from datetime import UTC, datetime
 from threading import Event
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
+from .pipeline_github_check_run_inventory import (
+    _nullable_app_id,
+    check_runs_for_head,
+    check_suite_ids_for_head,
+)
 from .pipeline_github_commit_statuses import (
     _current_evidence_timestamp,
     stable_passing_commit_status_requirements,
@@ -20,11 +23,17 @@ from .pipeline_github_contract import _PipelineGitHubHost
 logger = logging.getLogger(__name__)
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
-_CHECK_RUNS_PAGE_SIZE = 100
-# Limit one exact-head traversal to 2,000 Check Runs.
-_CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
+_GITHUB_TIMESTAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"
+    r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)"
+)
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | frozenset(
+    {"action_required", "cancelled", "failure", "stale", "startup_failure", "timed_out"}
+)
 _RequiredCheck = tuple[str, int | None]
+_CheckRunCandidate = tuple[datetime, int, dict[str, object]]
+_CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
 
 
 def _status_evidence_now_utc() -> datetime:
@@ -79,68 +88,112 @@ def _check_run_app_id(check_run: dict[str, object]) -> int:
     return app_id
 
 
-def _check_run_page(payload: object, head_sha: str) -> tuple[int, list[object]] | None:
-    """Validate one exact-head Check Runs response page."""
-    if not isinstance(payload, dict):
-        logger.warning("Check Runs response for %s is not an object", head_sha)
+def _check_run_completion_time(value: object) -> tuple[str, datetime] | None:
+    """Return one raw completion time and its normalized UTC instant."""
+    if not isinstance(value, str) or _GITHUB_TIMESTAMP_RE.fullmatch(value) is None:
         return None
-    total_count = payload.get("total_count")
-    check_runs = payload.get("check_runs")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            return None
+        return value, parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _validated_check_run(
+    check_run: dict[str, object], head_sha: str
+) -> tuple[int, int, str, str, str, datetime] | None:
+    """Return validated identity and terminal evidence for one matching run."""
+    try:
+        app_id = _check_run_app_id(check_run)
+    except ValueError:
+        logger.warning("Check Run for %s has no valid app identity", head_sha)
+        return None
+    check_run_id = check_run.get("id")
+    status = check_run.get("status")
+    conclusion = check_run.get("conclusion")
+    completion_time = _check_run_completion_time(check_run.get("completed_at"))
     if (
-        not isinstance(total_count, int)
-        or isinstance(total_count, bool)
-        or total_count < 0
-        or not isinstance(check_runs, list)
+        not isinstance(check_run_id, int)
+        or isinstance(check_run_id, bool)
+        or check_run_id <= 0
+        or not isinstance(status, str)
+        or status != "completed"
+        or not isinstance(conclusion, str)
+        or conclusion not in _CHECK_CONCLUSIONS
+        or completion_time is None
+        or check_run.get("head_sha") != head_sha
     ):
-        logger.warning("Check Runs response for %s is malformed", head_sha)
+        logger.warning("Check Run for %s has malformed terminal evidence", head_sha)
         return None
-    return total_count, check_runs
+    raw_completed_at, completed_at = completion_time
+    return check_run_id, app_id, status, conclusion, raw_completed_at, completed_at
 
 
 def _check_run_snapshot(
     check_runs: list[object],
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
-    now_utc: datetime,
+    suite_inventory: tuple[tuple[int, int | None], ...],
 ) -> tuple[object, ...] | None:
-    """Return stable identity and status data for a Check Runs traversal."""
-    snapshot: list[tuple[int, str, int, str, str, object, str, frozenset[_RequiredCheck]]] = []
+    """Return global identity plus required-context result data."""
+    snapshot: list[tuple[object, ...]] = []
+    required_contexts = {context for context, _app_id in required_checks}
+    suite_apps = dict(suite_inventory)
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
             return None
+        check_run_id = check_run.get("id")
+        check_suite = check_run.get("check_suite")
+        check_suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
+        name = check_run.get("name")
+        try:
+            check_run_app_id = _nullable_app_id(check_run)
+        except ValueError:
+            logger.warning("Check Run for %s has malformed snapshot App identity", head_sha)
+            return None
+        if (
+            not isinstance(check_run_id, int)
+            or isinstance(check_run_id, bool)
+            or check_run_id <= 0
+            or not isinstance(check_suite_id, int)
+            or isinstance(check_suite_id, bool)
+            or check_suite_id <= 0
+            or check_run.get("head_sha") != head_sha
+            or not isinstance(name, str)
+            or not name
+        ):
+            logger.warning("Check Run for %s has malformed snapshot identity", head_sha)
+            return None
+        required_result: tuple[int, str, str, str] | None = None
+        if name in required_contexts:
+            suite_app_id = suite_apps.get(check_suite_id)
+            if (
+                not isinstance(check_run_app_id, int)
+                or not isinstance(suite_app_id, int)
+                or check_run_app_id != suite_app_id
+            ):
+                logger.warning("Required Check Run for %s has no matching suite App", head_sha)
+                return None
         matches = _check_run_required_matches(check_run, required_checks, head_sha)
         if matches is None:
             return None
-        if not matches:
-            continue
-        try:
-            app_id = _check_run_app_id(check_run)
-        except ValueError:
-            logger.warning("Check Run for %s has no valid app identity", head_sha)
-            return None
-        check_run_id = check_run.get("id")
-        if not isinstance(check_run_id, int) or isinstance(check_run_id, bool) or check_run_id <= 0:
-            logger.warning("Check Run for %s has no valid identity", head_sha)
-            return None
-        name = check_run.get("name")
-        if not isinstance(name, str):
-            logger.warning("Check Run for %s has no valid name", head_sha)
-            return None
-        completed_at = _current_evidence_timestamp(check_run.get("completed_at"), now_utc)
-        if completed_at is None:
-            logger.warning("Check Run for %s has no current completion time", head_sha)
-            return None
+        if matches:
+            validated = _validated_check_run(check_run, head_sha)
+            if validated is None:
+                return None
+            _run_id, app_id, status, conclusion, completed_at, _completion_utc = validated
+            required_result = app_id, status, conclusion, completed_at
         snapshot.append(
             (
+                check_suite_id,
                 check_run_id,
+                head_sha,
                 name,
-                app_id,
-                str(check_run.get("status") or "").lower(),
-                str(check_run.get("conclusion") or "").lower(),
-                check_run.get("head_sha"),
-                completed_at,
-                matches,
+                check_run_app_id,
+                required_result,
             )
         )
     return tuple(sorted(snapshot))
@@ -153,7 +206,8 @@ def _passing_check_run_requirements(
     now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return requirements proved by passing exact-head Check Runs."""
-    matched_checks: set[_RequiredCheck] = set()
+    candidate_runs: _CheckRunGroups = {}
+    seen_ids: set[int] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             return None
@@ -162,22 +216,56 @@ def _passing_check_run_requirements(
             return None
         if not matches:
             continue
-        try:
-            _check_run_app_id(check_run)
-        except ValueError:
+        validated = _validated_check_run(check_run, head_sha)
+        if validated is None:
             return None
-        if check_run.get("head_sha") != head_sha:
-            logger.warning("Check Run does not match reviewed head %s", head_sha)
+        check_run_id, app_id, _status, _conclusion, _raw_completed_at, completed_at = validated
+        if check_run_id in seen_ids:
+            logger.warning("Check Run for %s has no unambiguous identity", head_sha)
             return None
-        status = str(check_run.get("status") or "").lower()
-        conclusion = str(check_run.get("conclusion") or "").lower()
+        seen_ids.add(check_run_id)
+        for requirement in matches:
+            runs_by_app = candidate_runs.setdefault(requirement, {})
+            runs_by_app.setdefault(app_id, []).append((completed_at, check_run_id, check_run))
+
+    return _passing_current_check_runs(candidate_runs, now_utc)
+
+
+def _unique_current_check_run(
+    candidates: list[_CheckRunCandidate], context: str
+) -> dict[str, object] | None:
+    """Return the only run at the maximum completion instant."""
+    maximum_completed_at = max(completed_at for completed_at, _run_id, _run in candidates)
+    current = [candidate for candidate in candidates if candidate[0] == maximum_completed_at]
+    if len(current) != 1:
+        logger.warning("Required Check Run context %s has equal current completion times", context)
+        return None
+    return current[0][2]
+
+
+def _passing_current_check_runs(
+    current_runs: _CheckRunGroups,
+    now_utc: datetime,
+) -> frozenset[_RequiredCheck] | None:
+    """Return passing requirements from unambiguous current Check Runs."""
+    matched_checks: set[_RequiredCheck] = set()
+    for requirement, runs_by_app in current_runs.items():
+        if requirement[1] is None and len(runs_by_app) != 1:
+            logger.warning(
+                "Required Check Run context %s has multiple application identities",
+                requirement[0],
+            )
+            return None
+        check_run = _unique_current_check_run(next(iter(runs_by_app.values())), requirement[0])
+        if check_run is None:
+            return None
+        conclusion = check_run.get("conclusion")
         if (
-            status != "completed"
-            or conclusion not in _CHECK_SUCCESS_CONCLUSIONS
+            conclusion not in _CHECK_SUCCESS_CONCLUSIONS
             or _current_evidence_timestamp(check_run.get("completed_at"), now_utc) is None
         ):
             return None
-        matched_checks.update(matches)
+        matched_checks.add(requirement)
     return frozenset(matched_checks)
 
 
@@ -208,8 +296,16 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             required_checks = frozenset(
                 (check.context, check.app_id) for check in policy.required_checks
             )
-            first = self._check_runs_for_head(
+            suite_inventory = self._check_suite_ids_for_head(
                 head_sha, deadline_s=deadline_s, cancellation=cancellation
+            )
+            if suite_inventory is None:
+                return False
+            first = self._check_runs_for_head(
+                head_sha,
+                suite_inventory,
+                deadline_s=deadline_s,
+                cancellation=cancellation,
             )
         except (
             AttributeError,
@@ -223,11 +319,17 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if not required_checks or first is None:
             return False
-        first_snapshot = _check_run_snapshot(first, head_sha, required_checks, now_utc)
+        first_snapshot = _check_run_snapshot(first, head_sha, required_checks, suite_inventory)
         if first_snapshot is None:
             return False
         try:
             second = self._check_runs_for_head(
+                head_sha,
+                suite_inventory,
+                deadline_s=deadline_s,
+                cancellation=cancellation,
+            )
+            final_suite_inventory = self._check_suite_ids_for_head(
                 head_sha, deadline_s=deadline_s, cancellation=cancellation
             )
         except (
@@ -242,9 +344,11 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if (
             second is None
-            or _check_run_snapshot(second, head_sha, required_checks, now_utc) != first_snapshot
+            or final_suite_inventory != suite_inventory
+            or _check_run_snapshot(second, head_sha, required_checks, suite_inventory)
+            != first_snapshot
         ):
-            logger.warning("Check Runs changed while reading %s", head_sha)
+            logger.warning("Check Suite or Check Run inventory changed for %s", head_sha)
             return False
         run_requirements = _passing_check_run_requirements(
             second,
@@ -281,69 +385,31 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
     def _check_runs_for_head(
         self,
         head_sha: str,
+        suite_inventory: tuple[tuple[int, int | None], ...],
         *,
         deadline_s: float,
         cancellation: Event,
     ) -> list[object] | None:
-        """Read every Check Runs page for one exact commit."""
-        owner, name = self._owner_name()
-        endpoint = (
-            f"/repos/{owner}/{name}/commits/{head_sha}/check-runs?filter=latest"
-            f"&per_page={_CHECK_RUNS_PAGE_SIZE}"
+        """Read all Check Runs for the validated exact-head suites."""
+        return check_runs_for_head(
+            self,
+            head_sha,
+            suite_inventory,
+            deadline_s=deadline_s,
+            cancellation=cancellation,
         )
-        check_runs: list[object] = []
-        expected_count: int | None = None
-        check_run_ids: set[int] = set()
-        page = 1
-        while expected_count is None or len(check_runs) < expected_count:
-            if cancellation.is_set():
-                return None
-            remaining = deadline_s - time.monotonic()
-            if remaining <= 0:
-                return None
-            page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
-            result = self._deadline_gh_call(
-                ["api", page_endpoint],
-                check=False,
-                timeout=min(float(self._gh_timeout), remaining),
-                deadline_s=deadline_s,
-                shutdown=cancellation,
-            )
-            if result.returncode != 0:
-                raise RuntimeError("GitHub returned an error for Check Runs")
-            payload = json.loads(result.stdout or "null")
-            parsed = _check_run_page(payload, head_sha)
-            if parsed is None:
-                return None
-            total_count, page_runs = parsed
-            if expected_count is None:
-                expected_count = total_count
-                if expected_count > _CHECK_RUNS_MAX_TOTAL_COUNT:
-                    logger.warning(
-                        "Check Runs response exceeds the %d-run safety ceiling for %s",
-                        _CHECK_RUNS_MAX_TOTAL_COUNT,
-                        head_sha,
-                    )
-                    return None
-            elif total_count != expected_count:
-                logger.warning("Check Runs count changed for %s", head_sha)
-                return None
-            for check_run in page_runs:
-                check_run_id = check_run.get("id") if isinstance(check_run, dict) else None
-                if (
-                    not isinstance(check_run_id, int)
-                    or isinstance(check_run_id, bool)
-                    or check_run_id <= 0
-                    or check_run_id in check_run_ids
-                ):
-                    logger.warning("Check Runs page has invalid identity for %s", head_sha)
-                    return None
-                check_run_ids.add(check_run_id)
-            check_runs.extend(page_runs)
-            if len(check_runs) > expected_count or (
-                not page_runs and len(check_runs) < expected_count
-            ):
-                logger.warning("Check Runs pages are incomplete for %s", head_sha)
-                return None
-            page += 1
-        return check_runs
+
+    def _check_suite_ids_for_head(
+        self,
+        head_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: Event,
+    ) -> tuple[tuple[int, int | None], ...] | None:
+        """Read all Check Suite and nullable App identities for one commit."""
+        return check_suite_ids_for_head(
+            self,
+            head_sha,
+            deadline_s=deadline_s,
+            cancellation=cancellation,
+        )
