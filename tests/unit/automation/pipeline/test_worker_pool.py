@@ -11948,12 +11948,18 @@ class TestGitOps:
             "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
         )
 
-        result = pool._validate_rebased_tree(tmp_path)
+        result = pool._validate_rebased_tree(
+            tmp_path, policy=pool._select_rebase_policy("Hephaestus")
+        )
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "semantic_validation"},
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "hephaestus-adr-v1",
+            },
             error=(
+                "rebase policy hephaestus-adr-v1 semantic validation failed: "
                 "rebase semantic validation failed: duplicate ADR number 0027 "
                 "(0027-durable-plan-review-conversations.md, "
                 "0027-host-owned-learning-preparation.md)"
@@ -11971,13 +11977,20 @@ class TestGitOps:
         )
         (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
 
-        result = pool._validate_rebased_tree(tmp_path)
+        result = pool._validate_rebased_tree(
+            tmp_path, policy=pool._select_rebase_policy("Hephaestus")
+        )
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "semantic_validation"},
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "hephaestus-adr-v1",
+            },
             error=(
-                "rebase semantic validation failed: malformed ADR record 0001-first-decision.md"
+                "rebase policy hephaestus-adr-v1 semantic validation failed: "
+                "rebase semantic validation failed: malformed ADR record "
+                "0001-first-decision.md"
             ),
         )
 
