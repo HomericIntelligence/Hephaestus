@@ -102,7 +102,7 @@ class AuxiliaryWorkerPool:
                 if self._cleanup_runner is None:
                     raise RuntimeError("cleanup job submitted without a cleanup runner")
                 result = self._cleanup_runner(job)
-        except BaseException as exc:
+        except (Exception, KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
             result = JobResult(
                 ok=False,
                 interrupted=host_started,
